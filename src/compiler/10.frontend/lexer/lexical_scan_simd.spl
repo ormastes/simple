@@ -1,0 +1,95 @@
+use std.string_core.{char_code}
+use compiler.frontend.lexer.lexical_scan_capability.{LexicalScanProvider, LexicalScanCapabilityV1, lexical_scan_select_provider}
+
+enum LexicalScanClass:
+    Newline
+    HorizontalSpace
+    Quote
+    CommentLead
+    Delimiter
+    Other
+
+struct LexicalScanMarkV1:
+    offset: i64
+    class_: LexicalScanClass
+
+struct LexicalScanResultV1:
+    marks: [LexicalScanMarkV1]
+    used_provider: LexicalScanProvider
+    parity_verified: bool
+    divergence_fallback: bool
+
+fn lexical_scan_classify(code: i64) -> LexicalScanClass:
+    if code == 10 or code == 13:
+        return LexicalScanClass.Newline
+    if code == 9 or code == 32:
+        return LexicalScanClass.HorizontalSpace
+    if code == 34 or code == 39:
+        return LexicalScanClass.Quote
+    if code == 35 or code == 47:
+        return LexicalScanClass.CommentLead
+    if code == 40 or code == 41 or code == 44 or code == 58 or code == 91 or code == 93 or code == 123 or code == 125:
+        return LexicalScanClass.Delimiter
+    LexicalScanClass.Other
+
+fn lexical_scan_scalar_oracle(source: text) -> [LexicalScanMarkV1]:
+    var marks: [LexicalScanMarkV1] = []
+    val chars = source.chars()
+    var offset: i64 = 0
+    while offset < chars.len():
+        val class_ = lexical_scan_classify(char_code(chars[offset]))
+        if class_ != LexicalScanClass.Other:
+            marks.push(LexicalScanMarkV1(offset: offset, class_: class_))
+        offset = offset + 1
+    marks
+
+fn lexical_scan_cpu_simd_candidate(source: text) -> [LexicalScanMarkV1]:
+    # Portable 16-byte lane shape. Backend vectorization may replace these
+    # independent classifications; this function never owns lexical meaning.
+    var marks: [LexicalScanMarkV1] = []
+    val chars = source.chars()
+    var base: i64 = 0
+    while base < chars.len():
+        var lane: i64 = 0
+        while lane < 16 and base + lane < chars.len():
+            val offset = base + lane
+            val class_ = lexical_scan_classify(char_code(chars[offset]))
+            if class_ != LexicalScanClass.Other:
+                marks.push(LexicalScanMarkV1(offset: offset, class_: class_))
+            lane = lane + 1
+        base = base + 16
+    marks
+
+fn lexical_scan_marks_equal(left: [LexicalScanMarkV1], right: [LexicalScanMarkV1]) -> bool:
+    if left.len() != right.len():
+        return false
+    var index: i64 = 0
+    while index < left.len():
+        if left[index].offset != right[index].offset or left[index].class_ != right[index].class_:
+            return false
+        index = index + 1
+    true
+
+fn lexical_scan_with_capability(source: text, capability: LexicalScanCapabilityV1) -> LexicalScanResultV1:
+    val provider = lexical_scan_select_provider(capability, source.len())
+    val oracle = lexical_scan_scalar_oracle(source)
+    if provider == LexicalScanProvider.CpuSimd:
+        val candidate = lexical_scan_cpu_simd_candidate(source)
+        if lexical_scan_marks_equal(oracle, candidate):
+            return LexicalScanResultV1(marks: candidate, used_provider: provider, parity_verified: true, divergence_fallback: false)
+    # Any accelerated disagreement falls back to the scalar oracle. It can
+    # affect performance, never token semantics.
+    LexicalScanResultV1(
+        marks: oracle,
+        used_provider: LexicalScanProvider.Scalar,
+        parity_verified: true,
+        divergence_fallback: provider == LexicalScanProvider.CpuSimd)
+
+export LexicalScanClass
+export LexicalScanMarkV1
+export LexicalScanResultV1
+export lexical_scan_classify
+export lexical_scan_scalar_oracle
+export lexical_scan_cpu_simd_candidate
+export lexical_scan_marks_equal
+export lexical_scan_with_capability

@@ -243,89 +243,6 @@ _start:
     .asciz  "[BOOT] ARM64 vectors ok\r\n"
 
 /* ===================================================================
- * Blocking EL0 entry trampoline.
- *
- * AAPCS64 requires x19-x30 to survive this call. The 128-byte frame also
- * retains the kernel translation state needed when syscall 0 returns through
- * arm64_user_exit_resume. Caller-saved x0-x18 are intentionally not retained.
- *
- * x0 = user TTBR0 root, x1 = user entry, x2 = user SP,
- * x3 = user MAIR_EL1, x4 = user TCR_EL1.
- * =================================================================== */
-
-    .globl arm64_enter_user_virtual
-    .type arm64_enter_user_virtual, @function
-arm64_enter_user_virtual:
-    sub     sp, sp, #128
-    stp     x19, x20, [sp, #0]
-    stp     x21, x22, [sp, #16]
-    stp     x23, x24, [sp, #32]
-    stp     x25, x26, [sp, #48]
-    stp     x27, x28, [sp, #64]
-    stp     x29, x30, [sp, #80]
-    mrs     x9, ttbr0_el1
-    mrs     x10, sctlr_el1
-    stp     x9, x10, [sp, #96]
-    mrs     x9, tcr_el1
-    mrs     x10, mair_el1
-    stp     x9, x10, [sp, #112]
-
-    ldr     x9, [sp, #104]         /* saved SCTLR_EL1 */
-    bic     x9, x9, #1             /* disable translation before TCR changes */
-    dsb     sy
-    msr     sctlr_el1, x9
-    isb
-    msr     mair_el1, x3
-    msr     tcr_el1, x4
-    msr     ttbr0_el1, x0
-    dsb     sy
-    tlbi    vmalle1
-    dsb     sy
-    isb
-    ldr     x9, [sp, #104]         /* retain the kernel's non-M control bits */
-    orr     x9, x9, #1
-    msr     sctlr_el1, x9
-    isb
-    msr     sp_el0, x2
-    msr     elr_el1, x1
-    msr     spsr_el1, xzr
-    isb
-    eret
-
-    .size arm64_enter_user_virtual, . - arm64_enter_user_virtual
-
-    .globl arm64_user_exit_resume
-    .type arm64_user_exit_resume, @function
-arm64_user_exit_resume:
-    /* x0 is the raw user exit code returned by rt_arm64_handle_user_svc. */
-    ldp     x9, x10, [sp, #96]     /* old TTBR0_EL1, SCTLR_EL1 */
-    ldp     x11, x12, [sp, #112]   /* old TCR_EL1, MAIR_EL1 */
-    mrs     x13, sctlr_el1
-    bic     x13, x13, #1           /* disable user translation before restore */
-    dsb     sy
-    msr     sctlr_el1, x13
-    isb
-    msr     ttbr0_el1, x9
-    msr     tcr_el1, x11
-    msr     mair_el1, x12
-    dsb     sy
-    tlbi    vmalle1
-    dsb     sy
-    isb
-    msr     sctlr_el1, x10         /* restore the saved kernel state exactly */
-    isb
-    ldp     x19, x20, [sp, #0]
-    ldp     x21, x22, [sp, #16]
-    ldp     x23, x24, [sp, #32]
-    ldp     x25, x26, [sp, #48]
-    ldp     x27, x28, [sp, #64]
-    ldp     x29, x30, [sp, #80]
-    add     sp, sp, #128
-    ret
-
-    .size arm64_user_exit_resume, . - arm64_user_exit_resume
-
-/* ===================================================================
  * Exception Vector Table — 16 entries, 128 bytes each, 2KB aligned
  *
  * On any exception, prints "FAULT @ <ELR_EL1>" to PL011 serial
@@ -561,7 +478,11 @@ _alignment_handler:
     eret
 
 .Lnot_align_fault:
-    /* Restore registers and fall through to fault handler */
+    /* Restore registers, then branch to the fault printer. (This used to
+     * fall through, but arm64_enter_el0 is now laid down immediately after
+     * this block, so the fall-through re-entered arm64_enter_el0 and
+     * re-faulted forever — a non-alignment fault here became an infinite
+     * loop instead of a named FAULT report.) */
     ldp     x0,  x1,  [sp, #0]
     ldp     x2,  x3,  [sp, #16]
     ldp     x4,  x5,  [sp, #32]
@@ -579,7 +500,76 @@ _alignment_handler:
     ldp     x28, x29, [sp, #224]
     ldr     x30,       [sp, #240]
     add     sp, sp, #272
-    /* Fall through to print FAULT */
+    b       _fault_handler
+
+/* ===================================================================
+ * EL0 enter with kernel resume frame — payload ring-3 handoff (lane-C1).
+ *
+ * arm64_enter_el0(root, entry, user_sp) installs the user address space and
+ * erets into EL0, but first records the kernel resume context (SP, LR, and
+ * the callee-saved x19-x28) in arm64_resume_ctx (owned by baremetal_stubs.c).
+ * When the payload later SVCs exit(0), rt_arm64_handle_user_svc calls
+ * arm64_resume_from_el0(code), which unwinds straight back to the C caller
+ * of arm64_enter_el0 with x0 = the payload's exit code — the same longjmp
+ * savepoint shape as the x86 lane's rt_x86_exec_token_install path, and the
+ * "nested kernel resume frame" the user_entry bridge documents as required.
+ *
+ * arm64_resume_ctx layout (uint64_t[13], baremetal_stubs.c):
+ *   [0] resume_sp  [1] resume_lr  [2..11] x19..x28  [12] armed
+ * =================================================================== */
+
+    .globl arm64_enter_el0
+    .type arm64_enter_el0, @function
+arm64_enter_el0:
+    adrp    x9, arm64_resume_ctx
+    add     x9, x9, :lo12:arm64_resume_ctx
+    mov     x10, sp
+    str     x10, [x9, #0]
+    str     x30, [x9, #8]
+    stp     x19, x20, [x9, #16]
+    stp     x21, x22, [x9, #32]
+    stp     x23, x24, [x9, #48]
+    stp     x25, x26, [x9, #64]
+    stp     x27, x28, [x9, #80]
+    mov     x10, #1
+    str     x10, [x9, #96]
+    /* Install the user translation and enter EL0 (same sequence as
+     * arm64_enter_user_virtual; MAIR/TCR were programmed by the caller). */
+    msr     ttbr0_el1, x0
+    dsb     sy
+    tlbi    vmalle1
+    dsb     sy
+    isb
+    mrs     x3, sctlr_el1
+    orr     x3, x3, #1
+    msr     sctlr_el1, x3
+    isb
+    msr     sp_el0, x2
+    msr     elr_el1, x1
+    msr     spsr_el1, xzr
+    isb
+    eret
+    .size arm64_enter_el0, .-arm64_enter_el0
+
+    .globl arm64_resume_from_el0
+    .type arm64_resume_from_el0, @function
+arm64_resume_from_el0:
+    /* x0 = payload exit code; never returns to the exception frame. */
+    adrp    x9, arm64_resume_ctx
+    add     x9, x9, :lo12:arm64_resume_ctx
+    mov     x11, x0
+    ldp     x19, x20, [x9, #16]
+    ldp     x21, x22, [x9, #32]
+    ldp     x23, x24, [x9, #48]
+    ldp     x25, x26, [x9, #64]
+    ldp     x27, x28, [x9, #80]
+    ldr     x30, [x9, #8]
+    ldr     x12, [x9, #0]
+    str     xzr, [x9, #96]
+    mov     sp, x12
+    mov     x0, x11
+    ret
+    .size arm64_resume_from_el0, .-arm64_resume_from_el0
 
 /* ===================================================================
  * Lower EL AArch64 synchronous handler
@@ -616,6 +606,30 @@ _lower_el_aarch64_sync_handler:
     cmp     x9, #0x15              /* EC=0x15: SVC from AArch64 */
     b.ne    _fault_handler
 
+    /* Save the guest return context (ELR = svc+4, SPSR) in the spare frame
+     * tail BEFORE calling the C owner. An alignment-fault emulation inside
+     * the owner (e.g. the close handler's 16-byte store to the 8-aligned fd
+     * struct) re-enters through _alignment_handler, which legitimately
+     * rewrites ELR_EL1 (advance past the fault) and leaves SPSR_EL1 = EL1h.
+     * Restoring from the hardware registers at eret then returns to EL1 at a
+     * kernel text address with the guest's registers — the run-20260926
+     * "kernel jumps to user_sp" control-flow fault. */
+    mrs     x10, elr_el1
+    add     x10, x10, #4
+    str     x10, [sp, #256]
+    mrs     x11, spsr_el1
+    str     x11, [sp, #264]
+
+    /* The boot kernel has no separate translated TTBR root. Run the C syscall
+     * owner under its original identity-addressed translation mode, retaining
+     * the user SCTLR in the unused tail of this 272-byte exception frame. */
+    mrs     x10, sctlr_el1
+    str     x10, [sp, #248]
+    bic     x11, x10, #1
+    dsb     sy
+    msr     sctlr_el1, x11
+    isb
+
     mrs     x6, elr_el1
     mov     x5, x4                 /* syscall arg4 */
     mov     x4, x3                 /* syscall arg3 */
@@ -624,13 +638,27 @@ _lower_el_aarch64_sync_handler:
     mov     x1, x0                 /* syscall arg0 */
     mov     x0, x8                 /* syscall id */
     bl      rt_arm64_handle_user_svc
-    ldr     x9, [sp, #64]          /* saved user x8 / syscall id */
-    cbz     x9, .Llower_el_user_exit
     str     x0, [sp, #0]           /* syscall return value -> user x0 */
 
-    mrs     x9, elr_el1
-    add     x9, x9, #4
-    msr     elr_el1, x9
+    str     x0, [sp, #0]           /* syscall return value -> user x0 */
+
+    /* Restore the user SCTLR (saved at [sp,#248]) before the eret: the shim
+     * ran with SCTLR.M cleared so its physical/identity accesses work, but
+     * the EL0 payload resumes its virtual address space with the MMU ON.
+     * Without this the first non-exit SVC (e.g. the per-char write(60) of a
+     * version banner) returned to EL0 with the MMU off and faulted. */
+    ldr     x10, [sp, #248]
+    orr     x11, x10, #1
+    dsb     sy
+    msr     sctlr_el1, x11
+    isb
+
+    /* Restore the guest return context saved at entry (alignment-safe):
+     * ELR_EL1 = svc+4, SPSR_EL1 = the interrupted EL0 PSTATE. */
+    ldr     x11, [sp, #256]
+    msr     elr_el1, x11
+    ldr     x11, [sp, #264]
+    msr     spsr_el1, x11
     isb
 
     ldp     x0,  x1,  [sp, #0]
@@ -651,12 +679,6 @@ _lower_el_aarch64_sync_handler:
     ldr     x30,       [sp, #240]
     add     sp, sp, #272
     eret
-
-.Llower_el_user_exit:
-    /* Exit never returns to EL0. Discard the exception frame and resume the
-     * blocking kernel call through its AAPCS/system-register frame. */
-    add     sp, sp, #272
-    b       arm64_user_exit_resume
 
 /* ===================================================================
  * Fault handler — prints "FAULT @ 0x<ELR_EL1>" to PL011 then halts
@@ -743,6 +765,175 @@ _fault_handler:
     str     w0, [x1]
     mov     w0, #'\n'
     str     w0, [x1]
+
+    /* Closed lower-EL data-abort operands: faulting VA and user x19. */
+    mov     w0, #'F'
+    str     w0, [x1]
+    mov     w0, #'A'
+    str     w0, [x1]
+    mov     w0, #'R'
+    str     w0, [x1]
+    mov     w0, #'='
+    str     w0, [x1]
+    mov     w0, #'0'
+    str     w0, [x1]
+    mov     w0, #'x'
+    str     w0, [x1]
+    mrs     x2, far_el1
+    mov     x3, #60
+.Lfar_loop:
+    lsr     x4, x2, x3
+    and     x4, x4, #0xF
+    cmp     x4, #10
+    b.lt    .Lfar_digit
+    add     w4, w4, #('a' - 10)
+    b       .Lfar_emit
+.Lfar_digit:
+    add     w4, w4, #'0'
+.Lfar_emit:
+    str     w4, [x1]
+    subs    x3, x3, #4
+    b.ge    .Lfar_loop
+    mov     w0, #'\r'
+    str     w0, [x1]
+    mov     w0, #'\n'
+    str     w0, [x1]
+
+    mov     w0, #'X'
+    str     w0, [x1]
+    mov     w0, #'1'
+    str     w0, [x1]
+    mov     w0, #'9'
+    str     w0, [x1]
+    mov     w0, #'='
+    str     w0, [x1]
+    mov     w0, #'0'
+    str     w0, [x1]
+    mov     w0, #'x'
+    str     w0, [x1]
+    mov     x2, x19
+    mov     x3, #60
+.Lx19_loop:
+    lsr     x4, x2, x3
+    and     x4, x4, #0xF
+    cmp     x4, #10
+    b.lt    .Lx19_digit
+    add     w4, w4, #('a' - 10)
+    b       .Lx19_emit
+.Lx19_digit:
+    add     w4, w4, #'0'
+.Lx19_emit:
+    str     w4, [x1]
+    subs    x3, x3, #4
+    b.ge    .Lx19_loop
+    mov     w0, #'\r'
+    str     w0, [x1]
+    mov     w0, #'\n'
+    str     w0, [x1]
+
+    /* Restored user loop/syscall operands at the abort boundary. */
+    ldr     x12, [sp, #0]
+    ldr     x13, [sp, #8]
+    ldr     x14, [sp, #160]
+    mov     w0, #'X'
+    str     w0, [x1]
+    mov     w0, #'2'
+    str     w0, [x1]
+    mov     w0, #'0'
+    str     w0, [x1]
+    mov     w0, #'='
+    str     w0, [x1]
+    mov     w0, #'0'
+    str     w0, [x1]
+    mov     w0, #'x'
+    str     w0, [x1]
+    mov     x2, x14
+    mov     x3, #60
+.Lx20_loop:
+    lsr     x4, x2, x3
+    and     x4, x4, #0xF
+    cmp     x4, #10
+    b.lt    .Lx20_digit
+    add     w4, w4, #('a' - 10)
+    b       .Lx20_emit
+.Lx20_digit:
+    add     w4, w4, #'0'
+.Lx20_emit:
+    str     w4, [x1]
+    subs    x3, x3, #4
+    b.ge    .Lx20_loop
+    mov     w0, #'\r'
+    str     w0, [x1]
+    mov     w0, #'\n'
+    str     w0, [x1]
+
+    /* X0/X1 retain the post-SVC syscall result and length operand. */
+    mov     w0, #'X'
+    str     w0, [x1]
+    mov     w0, #'0'
+    str     w0, [x1]
+    mov     w0, #'='
+    str     w0, [x1]
+    mov     w0, #'0'
+    str     w0, [x1]
+    mov     w0, #'x'
+    str     w0, [x1]
+    mov     x2, x12
+    mov     x3, #60
+.Lx0_loop:
+    lsr     x4, x2, x3
+    and     x4, x4, #0xF
+    cmp     x4, #10
+    b.lt    .Lx0_digit
+    add     w4, w4, #('a' - 10)
+    b       .Lx0_emit
+.Lx0_digit:
+    add     w4, w4, #'0'
+.Lx0_emit:
+    str     w4, [x1]
+    subs    x3, x3, #4
+    b.ge    .Lx0_loop
+    mov     w0, #'\r'
+    str     w0, [x1]
+    mov     w0, #'\n'
+    str     w0, [x1]
+
+    mov     w0, #'X'
+    str     w0, [x1]
+    mov     w0, #'1'
+    str     w0, [x1]
+    mov     w0, #'='
+    str     w0, [x1]
+    mov     w0, #'0'
+    str     w0, [x1]
+    mov     w0, #'x'
+    str     w0, [x1]
+    mov     x2, x13
+    mov     x3, #60
+.Lx1_loop:
+    lsr     x4, x2, x3
+    and     x4, x4, #0xF
+    cmp     x4, #10
+    b.lt    .Lx1_digit
+    add     w4, w4, #('a' - 10)
+    b       .Lx1_emit
+.Lx1_digit:
+    add     w4, w4, #'0'
+.Lx1_emit:
+    str     w4, [x1]
+    subs    x3, x3, #4
+    b.ge    .Lx1_loop
+    mov     w0, #'\r'
+    str     w0, [x1]
+    mov     w0, #'\n'
+    str     w0, [x1]
+
+    /* Lane-C1 bring-up diagnostic: dump the C call chain below the
+     * exception frame (sync path: the frame sits at sp-272). Runs AFTER
+     * the ELR/ESR/FAR prints so the original fault's details survive even
+     * if the walk itself re-faults and cascades. */
+    sub     x0, sp, #272
+    bl      arm64_fault_stack_dump
 
 .Lfault_halt:
     wfe

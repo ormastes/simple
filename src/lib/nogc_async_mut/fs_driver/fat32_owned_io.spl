@@ -4,6 +4,7 @@ use std.fs_driver.fat32_core.{
     _fat32_saved_open_files
 }
 use std.fs_driver.types.{FileHandle}
+use std.fs_driver.fat32_dir_ops.{fat32_sync_entry_size}
 
 fn fat32_close(mut core: Fat32Core, handle: FileHandle) -> Result<(), text>:
     val idx = _fat32_handle_index(core.open_files, handle)
@@ -12,6 +13,10 @@ fn fat32_close(mut core: Fat32Core, handle: FileHandle) -> Result<(), text>:
     var of = core.open_files[idx]
     if not of.is_open:
         return Err("file handle not open")
+    # Persist the length before draining the dirty list, so the directory
+    # cluster this patches is itself covered by the flush below.
+    if not of.is_dir and of.start_cluster >= 2:
+        fat32_sync_entry_size(core, of.start_cluster, of.size)?
     var flush_i = 0
     while flush_i < core._dirty_clusters.len():
         val cluster = core._dirty_clusters[flush_i]
@@ -38,7 +43,7 @@ fn fat32_close(mut core: Fat32Core, handle: FileHandle) -> Result<(), text>:
             while ci < chain.len():
                 core.write_fat_entry(chain[ci], FAT32_FREE)?
                 ci = ci + 1
-            core.file_generations[of.file_generation_slot].pending_unlink = false
+            core._set_pending_unlink(of.file_generation_slot, false)?
     of.is_open = false
     core.open_files = _fat32_saved_open_files(core.open_files, idx, of)
     Ok(())
@@ -150,12 +155,18 @@ fn fat32_write(mut core: Fat32Core, handle: FileHandle, buf: [u8], len: i64) -> 
                 Ok(_): Err("failed to write cluster")
                 Err(err): Err(err)
     of.position = pos
+    var size_grew = false
     if pos > of.size:
         of.size = pos
+        size_grew = true
     core._chain_start = start
     core._chain_values = chain
     core._chain_valid = true
     core.open_files = _fat32_saved_open_files(core.open_files, idx, of)
+    # The on-disk entry keeps create_file's 0 unless the new length is written
+    # back; a directory scan is only worth paying for when the file actually grew.
+    if size_grew and not of.is_dir and of.start_cluster >= 2:
+        fat32_sync_entry_size(core, of.start_cluster, of.size)?
     Ok(bytes_written)
 
 fn fat32_write_4k_overwrite(mut core: Fat32Core, handle: FileHandle, buf: [u8]) -> Result<i64, text>:
@@ -194,9 +205,13 @@ fn fat32_write_4k_overwrite(mut core: Fat32Core, handle: FileHandle, buf: [u8]) 
             Ok(_): Err("failed to write cluster")
             Err(err): Err(err)
     of.position = of.position + 4096
+    var size_grew = false
     if of.position > of.size:
         of.size = of.position
+        size_grew = true
     core.open_files = _fat32_saved_open_files(core.open_files, idx, of)
+    if size_grew and of.start_cluster >= 2:
+        fat32_sync_entry_size(core, of.start_cluster, of.size)?
     Ok(4096)
 
 export fat32_close, fat32_write, fat32_write_4k_overwrite

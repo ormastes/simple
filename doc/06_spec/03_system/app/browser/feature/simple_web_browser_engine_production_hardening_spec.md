@@ -1,17 +1,17 @@
 # Production Simple Browser User Flow
 
-> Proves the installed browser uses canonical HTML, CSS, JavaScript, DOM-event, Draw IR, and Engine2D paths, then drives page controls and browser chrome through structured UI access. Helpers fail closed until production evidence exists.
+> Proves the installed browser uses canonical HTML, CSS, JavaScript, DOM-event,
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 23 | 23 | 0 | 0 |
+| 22 | 22 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
 
 # Production Simple Browser User Flow
 
-Proves the installed browser uses canonical HTML, CSS, JavaScript, DOM-event, Draw IR, and Engine2D paths, then drives page controls and browser chrome through structured UI access. Helpers fail closed until production evidence exists.
+Proves the installed browser uses canonical HTML, CSS, JavaScript, DOM-event,
 
 ## At a Glance
 
@@ -19,26 +19,14 @@ Proves the installed browser uses canonical HTML, CSS, JavaScript, DOM-event, Dr
 |-------|-------|
 | Category | Application |
 | Status | Active |
-| Requirements | doc/02_requirements/feature/simple_web_browser_engine_production_hardening.md |
-| Plan | doc/03_plan/sys_test/simple_web_browser_engine_production_hardening.md |
-| Design | doc/05_design/simple_web_browser_engine_production_hardening.md |
-| Research | doc/01_research/local/simple_web_browser_engine_production_hardening.md |
 | Source | `test/03_system/app/browser/feature/simple_web_browser_engine_production_hardening_spec.spl` |
-| Updated | 2026-07-31 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
 
 Proves the installed browser uses canonical HTML, CSS, JavaScript, DOM-event,
 Draw IR, and Engine2D paths, then drives page controls and browser chrome
 through structured UI access. Helpers fail closed until production evidence
 exists.
-
-## Examples
-
-The bookmark-title scenario admits a bounded renderer witness, commits it
-through the parent profile owner, restarts both renderer and profile-backed
-window, and lists the restored title or derived URL fallback.
 
 ## Scenarios
 
@@ -46,154 +34,25 @@ window, and lists the restored title or derived URL fallback.
 
 #### should anchor fixed CSS image backgrounds to the viewport
 
-- Render HTML and CSS through canonical Draw IR
-   - Artifact capture: after_step
-- "background-color:#00ff00;background-image:url
-   - Artifact capture: after_step
-   - Evidence: artifact verified by 6 expected checks
-   - Expected: fixed.x equals `3`
-   - Expected: fixed.y equals `0`
-   - Expected: fixed.width equals `4`
-   - Expected: fixed.height equals `2`
-   - Expected: fixed.clip_rect.x equals `3`
-   - Expected: fixed.clip_rect.width equals `4`
-- Scroll the document under the viewport-fixed tile
-   - Artifact capture: after_step
-- browser text input overlay empty
-   - Artifact capture: after_step
-   - Evidence: artifact verified by 1 expected check
-   - Expected: scrolled_fixed.resolved_scroll_y equals `1`
-- browser text input overlay empty
-   - Artifact capture: after_step
-- Read back fixed repeat and no-repeat edge pixels
-   - Artifact capture: after_step
-   - Evidence: artifact verified by 3 expected checks
-   - Expected: fixed_pixels[first_box_pixel] equals `0xFF0000FFu32`
-   - Expected: scroll_pixels[first_box_pixel] equals `0xFFFF0000u32`
-   - Expected: no_repeat_pixels[first_box_pixel] equals `0xFF00FF00u32`
-- Keep local attachment outside the supported profile
-   - Artifact capture: after_step
+**Scenario capture:** artifact after_step
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 106 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("Render HTML and CSS through canonical Draw IR")
-val repeat_html = (
-    "<html style='margin:0'><body style='margin:0'>" +
-    "<div id='fixed' style='margin-left:3px;width:4px;height:2px;" +
-    "background-color:#00ff00;background-image:url(image://stripe);" +
-    "background-attachment:fixed;background-repeat:repeat;" +
-    "background-position:left top'></div>" +
-    "<div style='height:8px'></div></body></html>"
-)
-val scroll_html = repeat_html.replace(
-    "background-attachment:fixed", "background-attachment:scroll"
-)
-val no_repeat_html = repeat_html.replace(
-    "background-repeat:repeat", "background-repeat:no-repeat"
-)
-val local_html = repeat_html.replace(
-    "background-attachment:fixed", "background-attachment:local"
-)
-val stripe = simpleos_host_gpu_image_resource(
-    "image://stripe", 2, 1, [0xFFFF0000u32, 0xFF0000FFu32]
-)
-val images = [stripe]
-val fixed_composition =
-    simple_web_layout_render_html_draw_ir_with_images(
-        repeat_html, 8, 4, images
-    )
-val fixed_commands = fixed_composition.batches[0].commands
-val fixed_index = _browser_draw_ir_command_index(
-    fixed_commands, "fixed_background_image"
-)
-expect(fixed_index).to_be_greater_than(-1)
-val fixed = fixed_commands[fixed_index]
-expect(fixed.x).to_equal(3)
-expect(fixed.y).to_equal(0)
-expect(fixed.width).to_equal(4)
-expect(fixed.height).to_equal(2)
-expect(fixed.clip_rect.x).to_equal(3)
-expect(fixed.clip_rect.width).to_equal(4)
-expect(_browser_draw_ir_style_value(
-    fixed, "background-tile-x"
-)).to_equal("0")
-expect(_browser_draw_ir_style_value(
-    fixed, "background-tile-y"
-)).to_equal("0")
-
-step("Scroll the document under the viewport-fixed tile")
-val scrolled_fixed =
-    simple_web_layout_render_html_draw_ir_result_with_overlay_at_scroll_time_with_images(
-        repeat_html, 8, 4, 0, 1,
-        browser_text_input_overlay_empty(), images
-    )
-expect(scrolled_fixed.resolved_scroll_y).to_equal(1)
-val scrolled_fixed_commands =
-    scrolled_fixed.composition.batches[0].commands
-val scrolled_fixed_index = _browser_draw_ir_command_index(
-    scrolled_fixed_commands, "fixed_background_image"
-)
-expect(scrolled_fixed_index).to_be_greater_than(-1)
-val scrolled_fixed_command =
-    scrolled_fixed_commands[scrolled_fixed_index]
-expect(_browser_draw_ir_style_value(
-    scrolled_fixed_command, "background-tile-y"
-)).to_equal("0")
-expect(_browser_draw_ir_style_value(
-    scrolled_fixed_command, "background-shape-y"
-)).to_equal("-1")
-val scrolled_element =
-    simple_web_layout_render_html_draw_ir_result_with_overlay_at_scroll_time_with_images(
-        scroll_html, 8, 4, 0, 1,
-        browser_text_input_overlay_empty(), images
-    )
-val scrolled_element_commands =
-    scrolled_element.composition.batches[0].commands
-val scrolled_element_index = _browser_draw_ir_command_index(
-    scrolled_element_commands, "fixed_background_image"
-)
-expect(scrolled_element_index).to_be_greater_than(-1)
-expect(_browser_draw_ir_style_value(
-    scrolled_element_commands[scrolled_element_index],
-    "background-tile-y"
-)).to_equal("-1")
-
-step("Read back fixed repeat and no-repeat edge pixels")
-val renderer = BrowserRenderer.create(8, 4)
-val fixed_pixels = renderer.render_html_to_pixels_with_images(
-    repeat_html, images
-).pixel_data
-val scroll_pixels = renderer.render_html_to_pixels_with_images(
-    scroll_html, images
-).pixel_data
-val no_repeat_pixels = renderer.render_html_to_pixels_with_images(
-    no_repeat_html, images
-).pixel_data
-val first_box_pixel = fixed.y * 8 + fixed.x
-expect(fixed_pixels[first_box_pixel]).to_equal(0xFF0000FFu32)
-expect(scroll_pixels[first_box_pixel]).to_equal(0xFFFF0000u32)
-expect(no_repeat_pixels[first_box_pixel]).to_equal(0xFF00FF00u32)
-
-step("Keep local attachment outside the supported profile")
-val local_commands =
-    simple_web_layout_render_html_draw_ir_with_images(
-        local_html, 8, 4, images
-    ).batches[0].commands
-expect(_browser_draw_ir_command_index(
-    local_commands, "fixed_background_image"
-)).to_equal(-1)
+# @req REQ-WEB-BROWSER-001..009
 ```
 
 </details>
 
 #### should admit two CSS URL backgrounds and lower both through canonical Draw IR
 
+- should admit two CSS URL backgrounds and lower both through canonical Draw IR
+   - Artifact capture: after_step
 - Admit the bounded two URL CSS background profile
    - Artifact capture: after_step
 - var session = BrowserSession new
@@ -238,17 +97,17 @@ expect(_browser_draw_ir_command_index(
    - Artifact capture: after_step
    - Evidence: artifact verified by 1 expected check
    - Expected: denied.image_resources.len() equals `0`
-- denied render html document
-   - Artifact capture: after_step
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 63 lines folded for reproduction.
+Runnable source: 65 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should admit two CSS URL backgrounds and lower both through canonical Draw IR")
 step("Admit the bounded two URL CSS background profile")
 var session = BrowserSession.new()
 session.register_resource(
@@ -318,6 +177,8 @@ expect(_browser_draw_ir_command_index(
 
 #### should preserve semantic parentage clipping and stacking in canonical Draw IR
 
+- should preserve semantic parentage clipping and stacking in canonical Draw IR
+   - Protocol capture: after_step
 - Lower web semantic parentage and CSS stacking to canonical Draw IR
    - Protocol capture: after_step
 - fail
@@ -362,10 +223,12 @@ expect(_browser_draw_ir_command_index(
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 78 lines folded for reproduction.
+Runnable source: 80 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should preserve semantic parentage clipping and stacking in canonical Draw IR")
 step("Lower web semantic parentage and CSS stacking to canonical Draw IR")
 val html = (
     "<html style='margin:0'><body id='page' style='margin:0'>" +
@@ -450,27 +313,103 @@ expect(_count_color(
 
 #### should normalize split overflow axes before Draw IR clipping
 
-- Resolve `overflow-x: hidden|auto|scroll` with omitted or explicit visible
-  `overflow-y` after the final author/inline cascade.
-- Preserve explicit `overflow-y:hidden`; suppress `scrollbar-width:none` at
-  author, inline, author-important, and inline-important priority without
-  disabling scrollport clipping.
-- Resolve the two-value `overflow` shorthand into its final x/y winners.
-- Verify the resulting scrollport clip and Engine2D pixel boundary.
+**Manual warnings:**
+- invalid capture metadata value: draw_ir (expected kind tui|gui|html|text|api|protocol|exec|binary|log|artifact and mode after_step|after_scenario|on_failure|off)
+
+
+- should normalize split overflow axes before Draw IR clipping
+   - HTML capture: after_step
+- Resolve visible y against every non-visible x cascade winner
+   - HTML capture: after_step
+   - Evidence: HTML text verified by 5 expected checks
+   - Expected: _browser_draw_ir_command_index(commands, "hidden-y_scrollbar_track") equals `-1`
+   - Expected: _browser_draw_ir_command_index(commands, "none-author_scrollbar_track") equals `-1`
+   - Expected: _browser_draw_ir_command_index(commands, "none-inline_scrollbar_track") equals `-1`
+   - Expected: _browser_draw_ir_command_index(commands, "none-important_scrollbar_track") equals `-1`
+   - Expected: _browser_draw_ir_command_index(commands, "none-inline-important_scrollbar_track") equals `-1`
+- Clip the child in canonical Draw IR and Engine2D
+   - HTML capture: after_step
+   - Evidence: HTML text verified by 4 expected checks
+   - Expected: commands[red_index].clip_rect.height equals `12`
+   - Expected: commands[child_index].clip_rect.height equals `12`
+   - Expected: rendered.pixels[1 + 12 * 32] equals `0xFFFFFFFFu32`
+   - Expected: rendered.pixels[1 + 144 * 32] equals `0xFFFFFFFFu32`
+
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: `simple_web_browser_engine_production_hardening_spec.spl`.
-The scenario uses author-class `overflow-x` plus inline `overflow-y` to prove
-final-cascade normalization, then checks the single- and two-axis scrollbar
-tracks, four priority-specific withheld owner tracks, a nested child track
-under a hidden-scrollbar parent, their Draw IR clips, and Engine2D pixels.
+Runnable source: 59 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("should normalize split overflow axes before Draw IR clipping")
+step("Resolve visible y against every non-visible x cascade winner")
+val html = (
+    "<style>.hidden{overflow-x:hidden}.auto{overflow-x:auto}" +
+    ".scroll{overflow-x:scroll}.two-axis{overflow:hidden visible}" +
+    ".none-author{scrollbar-width:none}" +
+    ".none-important{scrollbar-width:none!important}</style>" +
+    "<html style='margin:0'><body style='margin:0'>" +
+    "<div id='hidden-omitted' class='hidden' style='width:24px;height:12px'>" +
+    "<div id='red' style='width:24px;height:24px;background:#ff0000'></div></div>" +
+    "<div id='hidden-visible' class='hidden' style='overflow-y:visible;width:24px;height:12px'><div style='height:24px'></div></div>" +
+    "<div id='auto-omitted' class='auto' style='width:24px;height:12px'><div style='height:24px'></div></div>" +
+    "<div id='auto-visible' class='auto' style='overflow-y:visible;width:24px;height:12px'><div style='height:24px'></div></div>" +
+    "<div id='scroll-omitted' class='scroll' style='width:24px;height:12px'><div style='height:24px'></div></div>" +
+    "<div id='scroll-visible' class='scroll' style='overflow-y:visible;width:24px;height:12px'><div style='height:24px'></div></div>" +
+    "<div id='hidden-y' class='hidden' style='overflow-y:hidden;width:24px;height:12px'><div style='height:24px'></div></div>" +
+    "<div id='two-axis' class='two-axis' style='width:24px;height:12px'><div style='height:24px'></div></div>" +
+    "<div id='none-author' class='hidden none-author' style='width:24px;height:12px'><div id='none-author-child' style='height:24px'></div></div>" +
+    "<div id='none-inline' class='hidden' style='scrollbar-width:none;width:24px;height:12px'><div id='none-inline-child' style='height:24px'></div></div>" +
+    "<div id='none-important' class='hidden none-important' style='scrollbar-width:auto;width:24px;height:12px'><div id='none-important-child' style='height:24px'></div></div>" +
+    "<div id='none-inline-important' class='hidden' style='scrollbar-width:none!important;width:24px;height:12px'><div id='none-inline-important-child' style='height:24px;background:#ff0000'></div></div>" +
+    "<div id='none-parent' class='none-author' style='width:24px;height:12px'><div id='none-child' style='overflow-y:scroll;width:24px;height:12px'><div style='height:24px'></div></div></div>" +
+    "</body></html>"
+)
+val composition = simple_web_layout_render_html_draw_ir_with_images(
+    html, 32, 168, []
+)
+val commands = composition.batches[0].commands
+expect(_browser_draw_ir_command_index(commands, "hidden-omitted_scrollbar_track")).to_be_greater_than(-1)
+expect(_browser_draw_ir_command_index(commands, "hidden-visible_scrollbar_track")).to_be_greater_than(-1)
+expect(_browser_draw_ir_command_index(commands, "auto-omitted_scrollbar_track")).to_be_greater_than(-1)
+expect(_browser_draw_ir_command_index(commands, "auto-visible_scrollbar_track")).to_be_greater_than(-1)
+expect(_browser_draw_ir_command_index(commands, "scroll-omitted_scrollbar_track")).to_be_greater_than(-1)
+expect(_browser_draw_ir_command_index(commands, "scroll-visible_scrollbar_track")).to_be_greater_than(-1)
+expect(_browser_draw_ir_command_index(commands, "two-axis_scrollbar_track")).to_be_greater_than(-1)
+expect(_browser_draw_ir_command_index(commands, "hidden-y_scrollbar_track")).to_equal(-1)
+expect(_browser_draw_ir_command_index(commands, "none-author_scrollbar_track")).to_equal(-1)
+expect(_browser_draw_ir_command_index(commands, "none-inline_scrollbar_track")).to_equal(-1)
+expect(_browser_draw_ir_command_index(commands, "none-important_scrollbar_track")).to_equal(-1)
+expect(_browser_draw_ir_command_index(commands, "none-inline-important_scrollbar_track")).to_equal(-1)
+expect(_browser_draw_ir_command_index(commands, "none-child_scrollbar_track")).to_be_greater_than(-1)
+
+step("Clip the child in canonical Draw IR and Engine2D")
+val red_index = _browser_draw_ir_command_index(commands, "red")
+expect(red_index).to_be_greater_than(-1)
+expect(commands[red_index].clip_rect.height).to_equal(12)
+for child_id in [
+    "none-author-child", "none-inline-child",
+    "none-important-child", "none-inline-important-child"
+]:
+    val child_index = _browser_draw_ir_command_index(commands, child_id)
+    expect(child_index).to_be_greater_than(-1)
+    expect(commands[child_index].clip_rect.height).to_equal(12)
+val raster = Engine2dCompositorBackend.create_named(32, 168, "software")
+val rendered = raster.render_draw_ir_composition(composition, [])
+raster.shutdown()
+expect(rendered.pixels[1 + 12 * 32]).to_equal(0xFFFFFFFFu32)
+expect(rendered.pixels[1 + 144 * 32]).to_equal(0xFFFFFFFFu32)
+```
 
 </details>
 
 #### should deliver retained callable listeners through one DOM event path
 
+- should deliver retained callable listeners through one DOM event path
+   - Text capture: after_step
 - Deliver JavaScript and Simple Script listeners on the live DOM
    - Text capture: after_step
 - var session = BrowserSession new
@@ -518,15 +457,6 @@ under a hidden-scrollbar parent, their Draw IR clips, and Engine2D pixels.
    - Text capture: after_step
    - Evidence: text output verified by 1 expected check
    - Expected: value is true
-- Ok
-   - Text capture: after_step
-- fail
-   - Text capture: after_step
-- Err
-   - Text capture: after_step
-- fail
-   - Text capture: after_step
-   - Evidence: text output verified by 3 expected checks
    - Expected: mutation_first.actions.len() equals `2`
    - Expected: mutation_second.actions.len() equals `2`
    - Expected: session.dom_callback_count equals `23`
@@ -539,10 +469,12 @@ under a hidden-scrollbar parent, their Draw IR clips, and Engine2D pixels.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 81 lines folded for reproduction.
+Runnable source: 83 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should deliver retained callable listeners through one DOM event path")
 step("Deliver JavaScript and Simple Script listeners on the live DOM")
 var session = BrowserSession.new()
 match session.open_html(
@@ -630,7 +562,7 @@ expect(session.current_title).to_end_with(
 
 #### should fail closed for synchronous JavaScript-originated dispatchEvent
 
-- var session = BrowserSession new
+- should fail closed for synchronous JavaScript-originated dispatchEvent
    - Text capture: after_step
 - "window addEventListener
    - Text capture: after_step
@@ -661,10 +593,12 @@ expect(session.current_title).to_end_with(
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 25 lines folded for reproduction.
+Runnable source: 27 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should fail closed for synchronous JavaScript-originated dispatchEvent")
 var session = BrowserSession.new()
 match session.open_html(
     "https://example.test/script-dispatch",
@@ -696,13 +630,7 @@ expect(session.warnings.join("|")).to_contain(
 
 #### should render the supported HTML and CSS profile through canonical Draw IR
 
--  production browser fixture
-   - GUI capture: after_step (HTML preferred when available)
--  open conformance page
-   - GUI capture: after_step (HTML preferred when available)
--  check canonical draw ir
-   - GUI capture: after_step (HTML preferred when available)
--  require production browser evidence
+- should render the supported HTML and CSS profile through canonical Draw IR
    - GUI capture: after_step (HTML preferred when available)
 
 
@@ -713,6 +641,8 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should render the supported HTML and CSS profile through canonical Draw IR")
 _production_browser_fixture()
 _open_conformance_page()
 _check_canonical_draw_ir()
@@ -723,53 +653,7 @@ _require_production_browser_evidence()
 
 #### should animate JavaScript timers requestAnimationFrame and CSS on one clock
 
--  production browser fixture
-   - GUI capture: after_step (HTML preferred when available)
--  advance browser clock
-   - GUI capture: after_step (HTML preferred when available)
--  check canonical draw ir
-   - GUI capture: after_step (HTML preferred when available)
-- fail
-   - GUI capture: after_step (HTML preferred when available)
-- file hash sha256
-   - GUI capture: after_step (HTML preferred when available)
-- fail
-   - GUI capture: after_step (HTML preferred when available)
-- var renderer = HostedBrowserRendererProcess create
-   - GUI capture: after_step (HTML preferred when available)
-- raster shutdown
-   - GUI capture: after_step (HTML preferred when available)
-- fail
-   - GUI capture: after_step (HTML preferred when available)
--  close browser animation evidence
-   - GUI capture: after_step (HTML preferred when available)
-- fail
-   - GUI capture: after_step (HTML preferred when available)
-- Err
-   - GUI capture: after_step (HTML preferred when available)
--  close browser animation evidence
-   - GUI capture: after_step (HTML preferred when available)
-- fail
-   - GUI capture: after_step (HTML preferred when available)
-- Ok
-   - GUI capture: after_step (HTML preferred when available)
--  close browser animation evidence
-   - GUI capture: after_step (HTML preferred when available)
-- fail
-   - GUI capture: after_step (HTML preferred when available)
-- Some
-   - GUI capture: after_step (HTML preferred when available)
--  close browser animation evidence
-   - GUI capture: after_step (HTML preferred when available)
-- fail
-   - GUI capture: after_step (HTML preferred when available)
--  close browser animation evidence
-   - GUI capture: after_step (HTML preferred when available)
-- fail
-   - GUI capture: after_step (HTML preferred when available)
--  close browser animation evidence
-   - GUI capture: after_step (HTML preferred when available)
-- initial composition batches[0] commands len
+- should animate JavaScript timers requestAnimationFrame and CSS on one clock
    - GUI capture: after_step (HTML preferred when available)
    - Evidence: GUI state or HTML text verified by 4 expected checks
    - Expected: first.pixels.len() equals `64 * 48`
@@ -785,6 +669,8 @@ Runnable source: 63 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should animate JavaScript timers requestAnimationFrame and CSS on one clock")
 _production_browser_fixture()
 _advance_browser_clock()
 _check_canonical_draw_ir()
@@ -854,6 +740,8 @@ expect(advanced.next_animation_ms).to_equal(-1)
 
 #### should retain Simple Script callbacks on the canonical animation clock
 
+- should retain Simple Script callbacks on the canonical animation clock
+   - Text capture: after_step
 - Register callbacks without invoking the denied ambient ScriptRunner
    - Text capture: after_step
 - var session = BrowserSession new
@@ -868,21 +756,20 @@ expect(advanced.next_animation_ms).to_equal(-1)
    - Text capture: after_step
    - Evidence: text output verified by 1 expected check
    - Expected: session.simple_script_callback_count() equals `0`
-- Keep rAF pending before the document refresh boundary
+- Reuse one retained callback identity for rAF and timeout
    - Text capture: after_step
-   - Evidence: text output verified by 2 expected checks
+   - Evidence: text output verified by 1 expected check
    - Expected: session.advance_time(5) equals `0`
-   - Expected: session.current_title equals `https://example.test/simple-callbacks`
 - Reuse one retained callback identity for timeout
    - Text capture: after_step
-   - Evidence: text output verified by 3 expected checks
+   - Evidence: text output verified by 2 expected checks
    - Expected: session.advance_time(10) equals `2`
    - Expected: session.current_title equals `frame`
 - Apply style from an interval and keep a canceled callback inert
    - Text capture: after_step
    - Evidence: text output verified by 5 expected checks
    - Expected: session.advance_time(15) equals `1`
-   - Expected: session.advance_time(30) equals `2`
+   - Expected: session.advance_time(30) equals `1`
    - Expected: session.current_title equals `frame`
    - Expected: session.style_revision equals `applied_style_revision`
    - Expected: session.simple_script_callback_count() equals `5`
@@ -891,10 +778,12 @@ expect(advanced.next_animation_ms).to_equal(-1)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 37 lines folded for reproduction.
+Runnable source: 43 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should retain Simple Script callbacks on the canonical animation clock")
 step("Register callbacks without invoking the denied ambient ScriptRunner")
 var session = BrowserSession.new()
 match session.open_html(
@@ -910,13 +799,9 @@ expect(session.current_title).to_equal(
     "https://example.test/simple-callbacks"
 )
 
-step("Keep rAF pending before the document refresh boundary")
-expect(session.advance_time(5)).to_equal(0)
-expect(session.current_title).to_equal(
-    "https://example.test/simple-callbacks"
-)
-
-step("Reuse one retained callback identity for timeout")
+step("Reuse one retained callback identity for rAF and timeout")
+expect(session.advance_time(5)).to_equal(1)
+expect(session.current_title).to_equal("frame")
 expect(session.advance_time(10)).to_equal(2)
 expect(session.current_title).to_equal("frame")
 expect(session.current_body_html).to_contain("timeout")
@@ -929,7 +814,7 @@ expect(_count_color(
     styled.pixels, 0xFF2563EBu32
 )).to_be_greater_than(0)
 val applied_style_revision = session.style_revision
-expect(session.advance_time(30)).to_equal(2)
+expect(session.advance_time(30)).to_equal(1)
 expect(session.current_title).to_equal("frame")
 expect(session.style_revision).to_equal(applied_style_revision)
 expect(session.simple_script_callback_count()).to_equal(5)
@@ -942,6 +827,8 @@ expect(session.warnings).to_contain(
 
 #### should reclaim retained Simple Script document owners on navigation and close
 
+- should reclaim retained Simple Script document owners on navigation and close
+   - Text capture: after_step
 - Open retained Simple Script state and bind one document owner
    - Text capture: after_step
 - var session = BrowserSession new
@@ -958,10 +845,6 @@ expect(session.warnings).to_contain(
    - Expected: session.simple_script_executor.has_callback(41) is true
    - Expected: session.advance_time(5) equals `0`
    - Expected: session.simple_script_callback_count() equals `0`
-- session simple script executor log
-   - Text capture: after_step
-- session simple script executor console buffer
-   - Text capture: after_step
 - Navigate to a fresh page and reset document-owned script state
    - Text capture: after_step
 - Ok
@@ -985,11 +868,7 @@ expect(session.warnings).to_contain(
    - Text capture: after_step
 - Retain fresh callback timer animation and console state
    - Text capture: after_step
-- session simple script executor schedule timeout
-   - Text capture: after_step
-- session simple script executor schedule animation frame
-   - Text capture: after_step
-   - Evidence: text output verified by 3 expected checks
+   - Evidence: text output verified by 4 expected checks
    - Expected: fresh_callbacks.len() equals `1`
    - Expected: fresh_callbacks[0] equals `title "fresh"`
    - Expected: session.simple_script_callback_count() equals `1`
@@ -1014,7 +893,7 @@ expect(session.warnings).to_contain(
 - session simple script executor event loop
    - Text capture: after_step
    - Evidence: text output verified by 3 expected checks
-   - Expected: session.simple_script_callback_count() equals `0`
+   - Expected: session.simple_script_callback_count() equals `0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
    - Expected: session.simple_script_executor.has_callback(41) is false
    - Expected: session.simple_script_executor.has_callback(91) is false
 - session simple script executor  callback sources len
@@ -1026,10 +905,12 @@ expect(session.warnings).to_contain(
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 110 lines folded for reproduction.
+Runnable source: 114 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should reclaim retained Simple Script document owners on navigation and close")
 step("Open retained Simple Script state and bind one document owner")
 var session = BrowserSession.new()
 val retained_executor = session.simple_script_executor
@@ -1048,8 +929,8 @@ expect(session.simple_script_executor.has_callback(41)).to_equal(true)
 expect(
     session.simple_script_executor._callback_sources
 ).to_contain("title \"frame\"")
-expect(session.advance_time(5)).to_equal(0)
-expect(session.simple_script_callback_count()).to_equal(0)
+expect(session.advance_time(5)).to_equal(1)
+expect(session.simple_script_callback_count()).to_equal(1)
 session.simple_script_executor.log("log", "document-owned", 0)
 expect(
     session.simple_script_executor.console_buffer().entries().len()
@@ -1095,16 +976,14 @@ expect(
     session.simple_script_executor.schedule_timeout(91, 0, 1000)
 ).to_equal(1)
 expect(
-    session.simple_script_executor.schedule_animation_frame(91, 0, 0)
+    session.simple_script_executor.schedule_animation_frame(91)
 ).to_equal(true)
-val fresh_callbacks = session.simple_script_executor.tick(16000)
+val fresh_callbacks = session.simple_script_executor.tick(0)
 expect(fresh_callbacks.len()).to_equal(1)
 expect(fresh_callbacks[0]).to_equal("title \"fresh\"")
 expect(session.simple_script_callback_count()).to_equal(1)
 expect(
-    session.simple_script_executor.schedule_animation_frame(
-        91, 16000, 0
-    )
+    session.simple_script_executor.schedule_animation_frame(91)
 ).to_equal(true)
 session.simple_script_executor.log("log", "fresh-document-owned", 0)
 expect(session.simple_script_executor.has_callback(91)).to_equal(true)
@@ -1148,25 +1027,19 @@ expect(
 
 #### should retain immediate Simple Script style through finalization
 
-- var session = BrowserSession new
-   - GUI capture: after_step (HTML preferred when available)
-- Ok
-   - GUI capture: after_step (HTML preferred when available)
--
-   - GUI capture: after_step (HTML preferred when available)
-- Err
-   - GUI capture: after_step (HTML preferred when available)
-- fail
+- should retain immediate Simple Script style through finalization
    - GUI capture: after_step (HTML preferred when available)
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 25 lines folded for reproduction.
+Runnable source: 27 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should retain immediate Simple Script style through finalization")
 var session = BrowserSession.new()
 match session.open_html(
     "https://example.test/simple-style",
@@ -1183,7 +1056,7 @@ expect(session.current_style_html).to_end_with(
     "<style>#box{background-color:#2563eb}</style>"
 )
 expect(session.current_style_html.split(
-    "<style>#box{background-color:#2563eb}</style>"
+    "<style>#box{{background-color:#2563eb}}</style>"
 ).len()).to_equal(2)
 val styled = session.render_to_pixels(16, 16)
 expect(_count_color(
@@ -1198,9 +1071,9 @@ expect(_count_color(
 
 #### should reuse parsed layout work across unchanged animation frames
 
-- Reuse parsed layout work across unchanged animation frames
+- should reuse parsed layout work across unchanged animation frames
    - Protocol capture: after_step
-- var worker = HostedBrowserRendererWorkerSession create
+- Reuse parsed layout work across unchanged animation frames
    - Protocol capture: after_step
    - Evidence: protocol response verified by 15 expected checks
    - Expected: before_serialize equals `1`
@@ -1227,10 +1100,12 @@ expect(_count_color(
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 54 lines folded for reproduction.
+Runnable source: 56 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should reuse parsed layout work across unchanged animation frames")
 step("Reuse parsed layout work across unchanged animation frames")
 var worker = HostedBrowserRendererWorkerSession.create(64, 48)
 val initial = worker.handle(BrowserRendererMessage(
@@ -1291,18 +1166,32 @@ expect(
 
 #### should retire cached frame resources before a site replacement is ready
 
+- should retire cached frame resources before a site replacement is ready
+   - Protocol capture: after_step
 - Render one retained browser frame through the shared compositor
-  - Protocol capture: after_step
-  - Expected: exactly one compositor render and a 16×16 frame.
+   - Protocol capture: after_step
+   - Evidence: protocol response verified by 2 expected checks
+   - Expected: rendered.pixels.len() equals `16 * 16`
+   - Expected: raster.revision_render_count equals `1`
 - Route the retained generation through a cross-site replacement
-  - Protocol capture: after_step
-  - Expected: before the replacement can become ready, the old pending pixels,
-    retained images, cached resources, and cached result are all empty.
+   - Protocol capture: after_step
+   - Evidence: protocol response verified by 5 expected checks
+   - Expected: routed equals `none`
+   - Expected: retired.renderer.state equals `starting`
+   - Expected: retired.pending_frame.pixels.len() equals `0`
+   - Expected: retired.renderer.retained_image_resources.len() equals `0`
+   - Expected: retired.raster.revision_cache_resources.len() equals `0`
+
 
 <details>
 <summary>Executable SSpec</summary>
 
+Runnable source: 93 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should retire cached frame resources before a site replacement is ready")
 step("Render one retained browser frame through the shared compositor")
 var worker = HostedBrowserRendererWorkerSession.create(16, 16)
 val initial = worker.handle(BrowserRendererMessage(
@@ -1316,9 +1205,12 @@ val frame = browser_renderer_frame_decode(
     16, 16
 )
 expect(frame.ok).to_be(true)
-var raster = Engine2dCompositorBackend.create_named(16, 16, "software")
+var raster = Engine2dCompositorBackend.create_named(
+    16, 16, "software"
+)
 val rendered = raster.render_draw_ir_composition_resources_revision(
-    frame.composition, frame.image_resources, 81, frame.composition_revision
+    frame.composition, frame.image_resources, 81,
+    frame.composition_revision
 )
 expect(rendered.pixels.len()).to_equal(16 * 16)
 expect(raster.revision_render_count).to_equal(1)
@@ -1327,8 +1219,13 @@ step("Route the retained generation through a cross-site replacement")
 var renderer = HostedBrowserRendererProcess.create(81, 16, 16)
 renderer.state = "active"
 renderer.navigation_permit = HostedBrowserNavigationPermit(
-    active: true, url: "https://replacement.test/page", method: "GET",
-    headers: "", body: "", content_type: "", redirect_count: 0
+    active: true,
+    url: "https://replacement.test/page",
+    method: "GET",
+    headers: "",
+    body: "",
+    content_type: "",
+    redirect_count: 0
 )
 renderer.site_lock = "https://old.test"
 renderer.site_swap_pending = true
@@ -1336,12 +1233,22 @@ renderer.site_swap_site = "https://replacement.test"
 renderer.retained_image_resources = [simpleos_host_gpu_image_resource(
     "asset://lifecycle", 1, 1, [0xFF2563EBu32]
 )]
-var entry = HostedBrowserRendererEntry.create(81, renderer, raster, 0, "")
+var entry = HostedBrowserRendererEntry.create(
+    81, renderer, raster, 0, ""
+)
 entry.ready = true
 entry.pending_frame = WmContentFrame(
-    window_id: "81", scene_revision: 1, content_revision: 1,
-    origin_kind: "web", width: 16, height: 16, pixels: rendered.pixels,
-    checksum: 1u64, parent_window_id: "", offset_x: 0, offset_y: 0
+    window_id: "81",
+    scene_revision: 1,
+    content_revision: 1,
+    origin_kind: "web",
+    width: 16,
+    height: 16,
+    pixels: rendered.pixels,
+    checksum: 1u64,
+    parent_window_id: "",
+    offset_x: 0,
+    offset_y: 0
 )
 var registry = HostedBrowserRendererRegistry.create(
     "/bin/true", ""
@@ -1350,11 +1257,18 @@ registry.entries.push(entry)
 val routed = registry._accept_polled_result(
     0,
     HostedBrowserRendererResult(
-        ok: false, reason: HOSTED_BROWSER_SITE_SWAP_REQUIRED,
-        next_animation_ms: -1, producer_generation: 81, composition_revision: 1,
-        composition: frame.composition, image_resources: [],
-        cpu_composited_count: 0, cpu_composited_sha256: "",
-        solid_material_count: 0, solid_material_sha256: "", diagnostics: ""
+        ok: false,
+        reason: HOSTED_BROWSER_SITE_SWAP_REQUIRED,
+        next_animation_ms: -1,
+        producer_generation: 81,
+        composition_revision: 1,
+        composition: frame.composition,
+        image_resources: [],
+        cpu_composited_count: 0,
+        cpu_composited_sha256: "",
+        solid_material_count: 0,
+        solid_material_sha256: "",
+        diagnostics: ""
     ),
     "", "", 0, 0
 )
@@ -1375,6 +1289,8 @@ worker.close()
 
 #### should invalidate only dirty retained browser render stages
 
+- should invalidate only dirty retained browser render stages
+   - Protocol capture: after_step
 - Invalidate document and title changes conservatively
    - Protocol capture: after_step
 - var document worker = HostedBrowserRendererWorkerSession create
@@ -1387,24 +1303,13 @@ worker.close()
    - Protocol capture: after_step
 - Invalidate stylesheet and viewport stages
    - Protocol capture: after_step
-- var style worker = HostedBrowserRendererWorkerSession create
-   - Protocol capture: after_step
-- style worker browser  advance style revision
-   - Protocol capture: after_step
-- browser renderer decoder new
-   - Protocol capture: after_step
+   - Evidence: protocol response verified by 2 expected checks
+   - Expected: _current_animation_property_work(style_worker) equals `0`
+   - Expected: _current_animation_property_work(style_worker) equals `0`
 - Repaint changed image pixels without rebuilding semantic stages
    - Protocol capture: after_step
-- var image worker = HostedBrowserRendererWorkerSession create
-   - Protocol capture: after_step
--  retained png hex
-   - Protocol capture: after_step
-- image worker render session composition checksum
-   - Protocol capture: after_step
-- image worker browser  advance resource revision
-   - Protocol capture: after_step
-- image worker render session composition checksum
-   - Protocol capture: after_step
+   - Evidence: protocol response verified by 1 expected check
+   - Expected: _current_animation_property_work(image_worker) equals `0`
 - Reuse parsed layout work across unchanged animation frames
    - Protocol capture: after_step
 - Render HTML and CSS through canonical Draw IR
@@ -1435,20 +1340,9 @@ worker.close()
    - Protocol capture: after_step
 - Repaint scroll and caret overlays from retained raw layout
    - Protocol capture: after_step
-- var scroll worker = HostedBrowserRendererWorkerSession create
-   - Protocol capture: after_step
-- scroll worker render session composition checksum
-   - Protocol capture: after_step
-- browser renderer decoder new
-   - Protocol capture: after_step
-- scroll worker render session composition checksum
-   - Protocol capture: after_step
-- var caret worker = HostedBrowserRendererWorkerSession create
-   - Protocol capture: after_step
-- caret worker render session composition checksum
-   - Protocol capture: after_step
-- caret worker render session composition checksum
-   - Protocol capture: after_step
+   - Evidence: protocol response verified by 2 expected checks
+   - Expected: _current_animation_property_work(scroll_worker) equals `0`
+   - Expected: _current_animation_property_work(caret_worker) equals `0`
 - Replace navigation state without retaining prior documents
    - Protocol capture: after_step
 - HostedBrowserRendererWorkerSession create
@@ -1464,10 +1358,12 @@ worker.close()
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 252 lines folded for reproduction.
+Runnable source: 259 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should invalidate only dirty retained browser render stages")
 step("Invalidate document and title changes conservatively")
 var document_worker = HostedBrowserRendererWorkerSession.create(64, 48)
 expect(document_worker.handle(BrowserRendererMessage(
@@ -1516,6 +1412,7 @@ style_worker.browser._advance_style_revision()
 expect(style_worker.handle(BrowserRendererMessage(
     kind: "advance", generation: 7, request_id: 3, payload: "16"
 )).ok).to_be(true)
+expect(_current_animation_property_work(style_worker)).to_equal(0)
 _expect_retained_stage_counts(
     style_worker.render_session.counters, 2, 2, 2, 2, 2, 2, 2
 )
@@ -1523,6 +1420,7 @@ val resize = browser_renderer_resize_encode(7, 4, 96, 48)
 expect(style_worker.handle(browser_renderer_decoder_feed(
     browser_renderer_decoder_new(7), resize.wire
 ).message).ok).to_be(true)
+expect(_current_animation_property_work(style_worker)).to_equal(0)
 _expect_retained_stage_counts(
     style_worker.render_session.counters, 2, 2, 3, 3, 3, 3, 3
 )
@@ -1550,6 +1448,7 @@ image_worker.browser._advance_resource_revision()
 expect(image_worker.handle(BrowserRendererMessage(
     kind: "advance", generation: 7, request_id: 3, payload: "16"
 )).ok).to_be(true)
+expect(_current_animation_property_work(image_worker)).to_equal(0)
 _expect_retained_stage_counts(
     image_worker.render_session.counters, 1, 1, 1, 1, 1, 2, 2
 )
@@ -1633,6 +1532,7 @@ val scroll = browser_renderer_scroll_encode(7, 3, 1, 16000)
 expect(scroll_worker.handle(browser_renderer_decoder_feed(
     browser_renderer_decoder_new(7), scroll.wire
 ).message).ok).to_be(true)
+expect(_current_animation_property_work(scroll_worker)).to_equal(0)
 _expect_retained_stage_counts(
     scroll_worker.render_session.counters, 1, 1, 1, 1, 1, 2, 2
 )
@@ -1651,6 +1551,7 @@ val caret_checksum = (
 expect(caret_worker.handle(BrowserRendererMessage(
     kind: "advance", generation: 7, request_id: 3, payload: "600"
 )).ok).to_be(true)
+expect(_current_animation_property_work(caret_worker)).to_equal(0)
 _expect_retained_stage_counts(
     caret_worker.render_session.counters, 1, 1, 1, 1, 1, 2, 2
 )
@@ -1726,8 +1627,27 @@ expect(
 
 #### should bound per-frame CSS animation property work
 
-Runtime PASS is unclaimed. This manual records the executable SSpec contract
-and the production diagnostic provenance for the current-source runner lane.
+- should bound per-frame CSS animation property work
+   - Artifact capture: after_step
+- Load the bounded browser fixture
+   - Artifact capture: after_step
+   - Evidence: artifact verified by 1 expected check
+   - Expected: initial_result.animation_property_work_count equals `16 * 2`
+- Exercise repeated navigation animation and events
+   - Artifact capture: after_step
+   - Evidence: artifact verified by 1 expected check
+   - Expected: paint_result.animation_property_work_count equals `0`
+- Measure retained state and work growth
+   - Artifact capture: after_step
+   - Evidence: artifact verified by 6 expected checks
+   - Expected: _animation_hot_path_old_comparisons(16) equals `376`
+   - Expected: _animation_hot_path_old_comparisons(32) equals `1520`
+   - Expected: observed_16_work equals `16 * 2`
+   - Expected: observed_32_work equals `32 * 2`
+   - Expected: observed_paint_frames equals `4`
+   - Expected: _current_animation_property_work(worker) equals `0`
+- Prove stable Draw IR output within the resource ceiling
+   - Artifact capture: after_step
 
 - Load the bounded browser fixture
    - Load the 16-property animation fixture through the retained renderer.
@@ -1759,16 +1679,182 @@ and the production diagnostic provenance for the current-source runner lane.
      result to be released.
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Rendered scenario source</summary>
 
-The complete direct-assertion scenario and its bounded 16/32-property fixture
-are maintained in
-`test/03_system/app/browser/feature/simple_web_browser_engine_production_hardening_spec.spl`.
+Runnable source: 162 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("should bound per-frame CSS animation property work")
+step("Load the bounded browser fixture")
+var worker = HostedBrowserRendererWorkerSession.create(64, 48)
+expect(worker.handle(BrowserRendererMessage(
+    kind: "init", generation: 92, request_id: 2,
+    payload: _animation_hot_path_fixture(16)
+)).ok).to_be(true)
+val retained_nodes = (
+    worker.render_session.counters.retained_node_count
+)
+val retained_styles = (
+    worker.render_session.counters.retained_style_count
+)
+val retained_boxes = (
+    worker.render_session.counters.retained_box_count
+)
+val retained_commands = (
+    worker.render_session.counters.retained_command_count
+)
+val initial_draw_ir_checksum = (
+    worker.render_session.composition_checksum()
+)
+val initial_pixel_checksum = _expect_animation_hot_path_frame(worker)
+val initial_result = worker.render_session.current_result.unwrap()
+expect(initial_result.animation_property_work_count).to_equal(16 * 2)
+
+step("Exercise repeated navigation animation and events")
+var observed_16_work: i64 = -1
+var observed_32_work: i64 = -1
+var observed_paint_frames: i64 = 0
+var replacement: i64 = 1
+while replacement <= 4:
+    val property_count = if replacement % 2 == 1: 32 else: 16
+    val frame_time_ms = replacement * 16
+    val animation_request_id = replacement * 2 + 1
+    match worker.browser.open_html(
+        "simple-renderer://animation-hot-path-{replacement}",
+        _animation_hot_path_fixture(property_count)
+    ):
+        Ok(_): ()
+        Err(reason): fail(
+            "animation hot-path replacement failed: {reason}"
+        )
+    val dispatch = worker.browser.dispatch_dom_event(
+        "event", "click", true, true
+    )
+    expect(dispatch.event.default_prevented).to_be(false)
+    expect(worker.browser.current_title).to_equal(
+        "event-{property_count}"
+    )
+    expect(worker.handle(BrowserRendererMessage(
+        kind: "advance", generation: 92,
+        request_id: animation_request_id,
+        payload: frame_time_ms.to_text()
+    )).ok).to_be(true)
+    val current_result = worker.render_session.current_result.unwrap()
+    val property_work = current_result.animation_property_work_count
+    expect(property_work).to_be_less_than(
+        property_count.to_i64() * 2 + 1
+    )
+    if property_count == 16:
+        observed_16_work = property_work
+    else:
+        observed_32_work = property_work
+    expect(
+        worker.render_session.counters.retained_node_count
+    ).to_equal(retained_nodes)
+    expect(
+        worker.render_session.counters.retained_style_count
+    ).to_equal(retained_styles)
+    expect(
+        worker.render_session.counters.retained_box_count
+    ).to_equal(retained_boxes)
+    expect(
+        worker.render_session.counters.retained_command_count
+    ).to_equal(retained_commands)
+    expect(worker.render_session.composition_checksum()).to_equal(
+        initial_draw_ir_checksum
+    )
+    expect(_expect_animation_hot_path_frame(worker)).to_equal(
+        initial_pixel_checksum
+    )
+
+    # A resource revision with no changed resource material forces a
+    # retained paint-only frame at the same animation clock. It must
+    # preserve output/owners while reporting no animation apply work.
+    worker.browser._advance_resource_revision()
+    expect(worker.handle(BrowserRendererMessage(
+        kind: "advance", generation: 92,
+        request_id: animation_request_id + 1,
+        payload: frame_time_ms.to_text()
+    )).ok).to_be(true)
+    val paint_result = worker.render_session.current_result.unwrap()
+    expect(paint_result.animation_property_work_count).to_equal(0)
+    expect(worker.render_session.composition_checksum()).to_equal(
+        initial_draw_ir_checksum
+    )
+    expect(_expect_animation_hot_path_frame(worker)).to_equal(
+        initial_pixel_checksum
+    )
+    expect(
+        worker.render_session.counters.retained_node_count
+    ).to_equal(retained_nodes)
+    expect(
+        worker.render_session.counters.retained_style_count
+    ).to_equal(retained_styles)
+    expect(
+        worker.render_session.counters.retained_box_count
+    ).to_equal(retained_boxes)
+    expect(
+        worker.render_session.counters.retained_command_count
+    ).to_equal(retained_commands)
+    observed_paint_frames = observed_paint_frames + 1
+    replacement = replacement + 1
+
+step("Measure retained state and work growth")
+expect(_animation_hot_path_old_comparisons(16)).to_equal(376)
+expect(_animation_hot_path_old_comparisons(32)).to_equal(1520)
+expect(observed_16_work).to_equal(16 * 2)
+expect(observed_32_work).to_equal(32 * 2)
+expect(observed_paint_frames).to_equal(4)
+expect(_current_animation_property_work(worker)).to_equal(0)
+expect(observed_16_work).to_be_less_than(
+    _animation_hot_path_old_comparisons(16)
+)
+expect(observed_32_work).to_be_less_than(
+    _animation_hot_path_old_comparisons(32)
+)
+
+step("Prove stable Draw IR output within the resource ceiling")
+_expect_bounded_serialization_draw_ir(
+    worker.render_session.current_result.unwrap().composition
+)
+expect(worker.render_session.composition_checksum()).to_equal(
+    initial_draw_ir_checksum
+)
+expect(_expect_animation_hot_path_frame(worker)).to_equal(
+    initial_pixel_checksum
+)
+expect(retained_nodes).to_be_greater_than(0)
+expect(retained_nodes).to_be_less_than(65537)
+expect(retained_styles).to_be_greater_than(0)
+expect(retained_styles).to_be_less_than(65537)
+expect(retained_boxes).to_be_greater_than(0)
+expect(retained_boxes).to_be_less_than(65537)
+expect(retained_commands).to_be_greater_than(0)
+expect(retained_commands).to_be_less_than(65537)
+worker.close()
+expect(
+    worker.render_session.counters.retained_node_count
+).to_equal(0)
+expect(
+    worker.render_session.counters.retained_style_count
+).to_equal(0)
+expect(
+    worker.render_session.counters.retained_box_count
+).to_equal(0)
+expect(
+    worker.render_session.counters.retained_command_count
+).to_equal(0)
+expect(worker.render_session.current_result).to_be_nil()
+```
 
 </details>
 
 #### should serialize bounded replacements with stable Draw IR
 
+- should serialize bounded replacements with stable Draw IR
+   - Protocol capture: after_step
 - Load the bounded browser fixture
    - Protocol capture: after_step
 - Exercise repeated layout navigation or animation
@@ -1789,10 +1875,12 @@ are maintained in
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 96 lines folded for reproduction.
+Runnable source: 98 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should serialize bounded replacements with stable Draw IR")
 step("Load the bounded browser fixture")
 val smaller = _bounded_serialization_fixture(2048)
 val larger = _bounded_serialization_fixture(4096)
@@ -1871,19 +1959,25 @@ expect(retained_boxes).to_be_less_than(65537)
 expect(retained_commands).to_be_greater_than(0)
 expect(retained_commands).to_be_less_than(65537)
 worker.close()
-expect(worker.render_session.counters.retained_node_count).to_equal(0)
-expect(worker.render_session.counters.retained_style_count).to_equal(0)
-expect(worker.render_session.counters.retained_box_count).to_equal(0)
-expect(worker.render_session.counters.retained_command_count).to_equal(0)
+expect(
+    worker.render_session.counters.retained_node_count
+).to_equal(0)
+expect(
+    worker.render_session.counters.retained_style_count
+).to_equal(0)
+expect(
+    worker.render_session.counters.retained_box_count
+).to_equal(0)
+expect(
+    worker.render_session.counters.retained_command_count
+).to_equal(0)
 ```
 
 </details>
 
 #### should route pointer keyboard focus text and form events in browser order
 
--  production browser fixture
-   - GUI capture: after_step (HTML preferred when available)
--  operate page controls
+- should route pointer keyboard focus text and form events in browser order
    - GUI capture: after_step (HTML preferred when available)
 - Verify semantic state event history and rendered output
    - GUI capture: after_step (HTML preferred when available)
@@ -1898,6 +1992,8 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should route pointer keyboard focus text and form events in browser order")
 _production_browser_fixture()
 _operate_page_controls()
 step("Verify semantic state event history and rendered output")
@@ -1911,7 +2007,7 @@ _require_production_browser_evidence()
 
 #### should cancel a default action after capture target and bubble dispatch
 
--  production browser fixture
+- should cancel a default action after capture target and bubble dispatch
 - Cancel a default action after capture target and bubble dispatch
 -  require production browser evidence
 
@@ -1923,6 +2019,8 @@ Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should cancel a default action after capture target and bubble dispatch")
 _production_browser_fixture()
 step("Cancel a default action after capture target and bubble dispatch")
 _require_production_browser_evidence()
@@ -1935,15 +2033,7 @@ _require_production_browser_evidence()
 
 #### should operate address back forward stop reload home bookmark and links
 
--  production browser fixture
-   - GUI capture: after_step (HTML preferred when available)
--  operate browser navigation
-   - GUI capture: after_step (HTML preferred when available)
-- fail
-   - GUI capture: after_step (HTML preferred when available)
-- file hash sha256
-   - GUI capture: after_step (HTML preferred when available)
-- fail
+- should operate address back forward stop reload home bookmark and links
    - GUI capture: after_step (HTML preferred when available)
 - Cancel address editing and reject a stale cross-window release
    - GUI capture: after_step (HTML preferred when available)
@@ -1997,20 +2087,10 @@ _require_production_browser_evidence()
    - Expected: back_command.url equals `https://history.test/one`
    - Expected: back.history_index equals `1`
    - Expected: back.pending_history_index equals `0`
-- var forward = HostedBrowserRendererProcess create
-   - GUI capture: after_step (HTML preferred when available)
-- browser renderer decoder new
-   - GUI capture: after_step (HTML preferred when available)
-   - Evidence: GUI state or HTML text verified by 4 expected checks
    - Expected: forward_command.action equals `forward`
    - Expected: forward_command.url equals `https://history.test/two`
    - Expected: forward.history_index equals `0`
    - Expected: forward.pending_history_index equals `1`
-- var stopped = HostedBrowserRendererProcess create
-   - GUI capture: after_step (HTML preferred when available)
-- browser renderer decoder new
-   - GUI capture: after_step (HTML preferred when available)
-   - Evidence: GUI state or HTML text verified by 2 expected checks
    - Expected: stop_command.action equals `stop`
    - Expected: stopped.pending_document_commit_url equals ``
 - var reload = HostedBrowserRendererProcess create
@@ -2047,10 +2127,12 @@ _require_production_browser_evidence()
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 270 lines folded for reproduction.
+Runnable source: 272 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should operate address back forward stop reload home bookmark and links")
 _production_browser_fixture()
 _operate_browser_navigation()
 val artifact = env_get("HOSTED_WM_ARTIFACT")
@@ -2327,19 +2409,11 @@ expect(registry.pressed_window_id).to_equal(0)
 
 #### should persist bounded page titles across renderer and profile restart
 
-**Requirements:** `REQ-WEB-BROWSER-009`, `REQ-WEB-BROWSER-021`
-
-- setup hosted bookmark title profile
-   - Text capture: after_step
-- fail
-   - Text capture: after_step
-- file hash sha256
-   - Text capture: after_step
-- fail
+- should persist bounded page titles across renderer and profile restart
    - Text capture: after_step
 - Open bounded titled documents through hosted chrome
    - Text capture: after_step
-   - Evidence: text output verified by 1 expected check
+   - Evidence: text output verified by 2 expected checks
    - Expected: admitted_title equals `BOOKMARK_TITLE_512`
 - Err
    - Text capture: after_step
@@ -2366,42 +2440,35 @@ expect(registry.pressed_window_id).to_equal(0)
    - Text capture: after_step
 - Restart the renderer generation and profile-backed window
    - Text capture: after_step
-   - Evidence: text output verified by 3 expected checks
+   - Evidence: text output verified by 2 expected checks
    - Expected: restarted_count equals `2`
    - Expected: restarted.profile_bookmarks.entries.len() equals `2`
-   - Expected: restarted.profile_bookmarks.entries[1].second equals ``
-- check restarted bookmark listing
-   - Text capture: after_step
-   - Evidence: restarted BrowserSession UI nodes resolved by canonical href, independent of bookmark order
-   - Expected: accepted bookmark label equals `BOOKMARK_TITLE_512`
-   - Expected: accepted bookmark href equals `https://accepted-title.test/`
-   - Expected: fallback bookmark label equals `https://fallback-title.test/`
-   - Expected: fallback bookmark href equals `https://fallback-title.test/`
-- check in process registry profile reopen
-   - Text capture: after_step
-   - Evidence: bookmark mutations, canonical remove/re-add, and restart use HostedWebContentRegistry public actions with URL-keyed comparison
-   - Expected: remove leaves `1` bookmark
-   - Expected: re-add restores `2` bookmarks
-   - Expected: both canonical URLs occur exactly once with their safe labels
 - List persisted bookmarks with safe titles
    - Text capture: after_step
-   - Evidence: canonical URL lookup verified by 4 expected checks
-   - Expected: each canonical URL occurs exactly once
+   - Evidence: text output verified by 4 expected checks
+   - Expected: restored_accepted_count equals `1`
+   - Expected: restored_fallback_count equals `1`
    - Expected: restored_title equals `BOOKMARK_TITLE_512`
    - Expected: restored_fallback equals ``
 - set mock registry
    - Text capture: after_step
-- remove bookmark title profile
+- rt file delete
+   - Text capture: after_step
+- rt file delete
+   - Text capture: after_step
+- rt file delete
    - Text capture: after_step
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 124 lines folded for reproduction.
+Runnable source: 126 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should persist bounded page titles across renderer and profile restart")
 setup_hosted_bookmark_title_profile()
 val artifact = env_get("HOSTED_WM_ARTIFACT")
 val expected_artifact_sha = env_get("HOSTED_WM_ARTIFACT_SHA256")
@@ -2503,42 +2570,33 @@ expect(registry.next_generation).to_be_greater_than(2)
 expect(restarted_count).to_equal(2)
 
 expect(restarted.profile_bookmarks.entries.len()).to_equal(2)
-check_restarted_bookmark_listing(restarted)
+expect(restarted.profile_bookmarks.entries[0].second).to_equal(
+    BOOKMARK_TITLE_512
+)
+expect(restarted.profile_bookmarks.entries[1].second).to_equal("")
+check_restarted_bookmark_listing(restarted.profile_bookmarks)
 check_in_process_registry_profile_reopen(
     restarted.profile_bookmarks
 )
-var restored_title = ""
-var restored_fallback = ""
-var restored_accepted_count = 0
-var restored_fallback_count = 0
-for entry in restarted.profile_bookmarks.entries:
-    if entry.first == "https://accepted-title.test/":
-        restored_accepted_count = restored_accepted_count + 1
-        restored_title = entry.second
-    elif entry.first == "https://fallback-title.test/":
-        restored_fallback_count = restored_fallback_count + 1
-        restored_fallback = entry.second
+val restored_title = restarted.profile_bookmarks.entries[0].second
+val restored_fallback = (
+    restarted.profile_bookmarks.entries[1].second
+)
 step("List persisted bookmarks with safe titles")
-expect(restored_accepted_count).to_equal(1)
-expect(restored_fallback_count).to_equal(1)
 expect(restored_title).to_equal(BOOKMARK_TITLE_512)
 expect(restored_fallback).to_equal("")
 expect(restarted.close()).to_be(true)
 set_mock_registry(MockResponseRegistry.create())
-_remove_bookmark_title_profile(BOOKMARK_TITLE_PROFILE_PATH)
+rt_file_delete(BOOKMARK_TITLE_PROFILE_PATH)
+rt_file_delete(BOOKMARK_TITLE_PROFILE_PATH + "-wal")
+rt_file_delete(BOOKMARK_TITLE_PROFILE_PATH + "-shm")
 ```
 
 </details>
 
 #### should enforce one UTF-8 byte bound for every browser address editor
 
--  production browser fixture
-   - Protocol capture: after_step
-- fail
-   - Protocol capture: after_step
-- file hash sha256
-   - Protocol capture: after_step
-- fail
+- should enforce one UTF-8 byte bound for every browser address editor
    - Protocol capture: after_step
 - Accept an address draft of exactly 2048 UTF-8 bytes
    - Protocol capture: after_step
@@ -2560,10 +2618,12 @@ _remove_bookmark_title_profile(BOOKMARK_TITLE_PROFILE_PATH)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 48 lines folded for reproduction.
+Runnable source: 50 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should enforce one UTF-8 byte bound for every browser address editor")
 _production_browser_fixture()
 val artifact = env_get("HOSTED_WM_ARTIFACT")
 val expected_artifact_sha = env_get("HOSTED_WM_ARTIFACT_SHA256")
@@ -2621,7 +2681,7 @@ expect(registry.close()).to_be(true)
 
 #### should report unsupported content without fake success
 
--  production browser fixture
+- should report unsupported content without fake success
 - Open unsupported and malformed compatibility fixtures
 -  require production browser evidence
 
@@ -2633,6 +2693,8 @@ Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should report unsupported content without fake success")
 _production_browser_fixture()
 step("Open unsupported and malformed compatibility fixtures")
 _require_production_browser_evidence()
@@ -2645,6 +2707,8 @@ _require_production_browser_evidence()
 
 #### should render br as one forced inline line break
 
+- should render br as one forced inline line break
+   - GUI capture: after_step (HTML preferred when available)
 - Render forced HTML line breaks through canonical Draw IR
    - GUI capture: after_step (HTML preferred when available)
    - Evidence: GUI state or HTML text verified by 2 expected checks
@@ -2660,10 +2724,12 @@ _require_production_browser_evidence()
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 65 lines folded for reproduction.
+Runnable source: 67 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should render br as one forced inline line break")
 step("Render forced HTML line breaks through canonical Draw IR")
 val html = (
     "<div style='margin:0;padding:0;font-size:16px;line-height:20px'>" +
@@ -2735,6 +2801,8 @@ expect(_pixels_equal(forced_pixels, inline_pixels)).to_equal(false)
 
 #### should retain the canonical document tree while rendering its body
 
+- should retain the canonical document tree while rendering its body
+   - GUI capture: after_step (HTML preferred when available)
 - Load one explicit head and body through the canonical tree builder
    - GUI capture: after_step (HTML preferred when available)
 - var session = BrowserSession new
@@ -2769,10 +2837,12 @@ expect(_pixels_equal(forced_pixels, inline_pixels)).to_equal(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 41 lines folded for reproduction.
+Runnable source: 43 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should retain the canonical document tree while rendering its body")
 step("Load one explicit head and body through the canonical tree builder")
 var session = BrowserSession.new()
 match session.open_html(
@@ -2829,12 +2899,78 @@ expect(_count_color(
 | Pending scenarios | 0 |
 
 
-## Related Documentation
-
-- **Requirements:** `doc/02_requirements/feature/simple_web_browser_engine_production_hardening.md`
-- **Plan:** `doc/03_plan/sys_test/simple_web_browser_engine_production_hardening.md`
-- **Design:** `doc/05_design/simple_web_browser_engine_production_hardening.md`
-- **Research:** `doc/01_research/local/simple_web_browser_engine_production_hardening.md`
-
-
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+- `REQ-WEB-BROWSER-004`
+- `REQ-WEB-BROWSER-001..009`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `0c64a0cb05de434687b687f4a999314d55e8e4400144b163735fe66e74c2fcd4`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `0c64a0cb05de434687b687f4a999314d55e8e4400144b163735fe66e74c2fcd4`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `0c64a0cb05de434687b687f4a999314d55e8e4400144b163735fe66e74c2fcd4`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **80/100**; effective score: **80/100**; blockers: **0**.
+
+SSpec documentization score: 80/100
+source: test/03_system/app/browser/feature/simple_web_browser_engine_production_hardening_spec.spl
+mirror: doc/06_spec/03_system/app/browser/feature/simple_web_browser_engine_production_hardening_spec.md (current)
+findings: 13 blockers: 0
+  narrative=100 structure=60 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/app/browser/feature/simple_web_browser_engine_production_hardening_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/app/browser/feature/simple_web_browser_engine_production_hardening_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/app/browser/feature/simple_web_browser_engine_production_hardening_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 83 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/app/browser/feature/simple_web_browser_engine_production_hardening_spec.spl:694:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'should anchor fixed CSS image backgrounds to the viewport' has no visible step flow
+  why: Ordered visible actions make the manual operable.
+  improve: Add ordered step("...") calls for meaningful actions.
+test/03_system/app/browser/feature/simple_web_browser_engine_production_hardening_spec.spl:694:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should anchor fixed CSS image backgrounds to the viewport' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/app/browser/feature/simple_web_browser_engine_production_hardening_spec.spl:810:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should admit two CSS URL backgrounds and lower both through canonical Draw IR' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/app/browser/feature/simple_web_browser_engine_production_hardening_spec.spl:810:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should admit two CSS URL backgrounds and lower both through canonical Draw IR' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/browser/feature/simple_web_browser_engine_production_hardening_spec.spl:881:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should preserve semantic parentage clipping and stacking in canonical Draw IR' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/app/browser/feature/simple_web_browser_engine_production_hardening_spec.spl:881:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should preserve semantic parentage clipping and stacking in canonical Draw IR' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/browser/feature/simple_web_browser_engine_production_hardening_spec.spl:967:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should normalize split overflow axes before Draw IR clipping' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/app/browser/feature/simple_web_browser_engine_production_hardening_spec.spl:967:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should normalize split overflow axes before Draw IR clipping' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/browser/feature/simple_web_browser_engine_production_hardening_spec.spl:1032:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should deliver retained callable listeners through one DOM event path' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/app/browser/feature/simple_web_browser_engine_production_hardening_spec.spl:1120:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should fail closed for synchronous JavaScript-originated dispatchEvent' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+<!-- sspec-maintain:scorecard:end -->

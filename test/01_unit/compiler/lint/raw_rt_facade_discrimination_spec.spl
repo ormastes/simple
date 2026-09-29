@@ -1,0 +1,121 @@
+# Raw Runtime Facade Discrimination Specification
+#
+# GENERALIZING half of the rt_process_run migration (the reproducing half is
+# raw_rt_process_run_migration_spec.spl). The migration is only safe as a
+# general policy if the RAW-RT rule discriminates on the property that
+# actually matters — whether the call goes through a facade — rather than on
+# the particular symbol that happened to be migrated.
+#
+# Three independent axes are pinned here:
+#   1. the rule generalizes across rt_* symbols, not just rt_process_run;
+#   2. a facade-shaped call is never a finding, even when its name embeds the
+#      migrated intrinsic's name;
+#   3. the policy's terminating state is the ALLOWLIST, not a privileged
+#      tier. This axis was written asserting that src/lib/ is exempt as a
+#      tier; the assertion FAILED on first run and the spec was corrected to
+#      the measured contract — `check_raw_rt_access` has "no implicit path
+#      exemptions" and only an allowlist entry confers privilege.
+#
+# Cross-platform note: pure text analysis over string literals; no process
+# and no filesystem. Platform-independent by construction. Authored and run
+# on Windows only; no POSIX host was available.
+
+use std.spec.*
+use compiler.semantics.lint.raw_rt_access.{
+    RawRtAccessFinding,
+    check_raw_rt_access,
+    check_raw_rt_access_with_allowlist,
+    raw_rt_wrapper_replacement
+}
+
+
+describe "RAW-RT discriminates facades from raw intrinsics generally":
+    # @manual scenario evidence
+    """
+    ## The rule is about the boundary, not about one symbol
+    """
+
+    context "across rt_* symbols other than the migrated one":
+        """
+        ### Scenario: an unrelated intrinsic in product code
+
+        The finding must not depend on rt_process_run specifically.
+        """
+
+        it "flags an unrelated rt_* call in product code":
+            val source = "fn go():\n    val r = rt_env_set(\"K\", \"V\")\n"
+            val findings = check_raw_rt_access(source, "src/app/watch/runner.spl")
+            expect(findings.len()).to_equal(1)
+            expect(findings[0].code).to_equal("RAW-RT-002")
+            expect(findings[0].name).to_equal("rt_env_set")
+
+        it "names env_set as that symbol's canonical replacement":
+            expect(raw_rt_wrapper_replacement("rt_env_set")).to_equal("env_set")
+
+        it "offers no mechanical rename where none is sanctioned":
+            expect(raw_rt_wrapper_replacement("rt_dir_exists")).to_equal("")
+
+    context "when the call is facade-shaped":
+        """
+        ### Scenario: a wrapper name that embeds the intrinsic name
+
+        `process_run` is not `rt_process_run`; matching must be anchored at
+        the `rt_` prefix, not a substring search, or every migrated call site
+        would re-flag itself and the migration could never converge.
+        """
+
+        it "does not flag the facade call it migrates to":
+            val source = "fn go():\n    val r = process_run(\"jj\", [\"commit\"])\n"
+            val findings = check_raw_rt_access(source, "src/app/watch/runner.spl")
+            expect(findings.len()).to_equal(0)
+
+        it "does not flag an identifier that merely ends in an rt_ name":
+            val source = "fn go():\n    val r = wrapped_process_run(\"jj\", [])\n"
+            val findings = check_raw_rt_access(source, "src/app/watch/runner.spl")
+            expect(findings.len()).to_equal(0)
+
+    context "when the code is a facade owner":
+        """
+        ### Scenario: privilege comes from the allowlist, never from the tier
+
+        Someone has to call the intrinsic, so the policy needs a terminating
+        state. That state is NOT "src/lib/ is exempt": `check_raw_rt_access`
+        documents itself as having "no implicit path exemptions", and being
+        under src/lib/ buys nothing. The only privilege is an entry in
+        scripts/check/no_direct_rt_allowlist.txt, which the lint driver loads
+        as the canonical allowlist. These assertions pin that distinction so
+        a future change cannot quietly reintroduce a tier-wide exemption.
+
+        MEASURED FINDING (2026-09-02): the canonical facade
+        src/lib/nogc_sync_mut/io_runtime.spl is itself NOT in that allowlist
+        (grep -c of an exact-match line returns 0), so the 55 raw call sites
+        it needs in order to BE a facade are counted as product debt by
+        check-no-direct-rt.shs. Those 55 are irreducible by migration: every
+        migration target routes to this file. Recorded rather than silently
+        allowlisted — changing the allowlist changes a push-tier gate's
+        meaning and belongs to a deliberate, reviewed change.
+        """
+
+        it "still flags a raw call in src/lib/ when no allowlist is supplied":
+            val source = "fn go():\n    val r = rt_process_run(\"jj\", [])\n"
+            val findings = check_raw_rt_access(source, "src/lib/nogc_sync_mut/io_runtime.spl")
+            expect(findings.len()).to_equal(1)
+            expect(findings[0].code).to_equal("RAW-RT-002")
+
+        it "exempts that same call once the path is allowlisted":
+            val source = "fn go():\n    val r = rt_process_run(\"jj\", [])\n"
+            val allowlist = "src/lib/nogc_sync_mut/io_runtime.spl\n"
+            val findings = check_raw_rt_access_with_allowlist(source, "src/lib/nogc_sync_mut/io_runtime.spl", allowlist)
+            expect(findings.len()).to_equal(0)
+
+        it "exempts the extern declaration under a directory-prefix entry":
+            val source = "extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)\n"
+            val allowlist = "src/lib/nogc_sync_mut/\n"
+            val findings = check_raw_rt_access_with_allowlist(source, "src/lib/nogc_sync_mut/io_runtime.spl", allowlist)
+            expect(findings.len()).to_equal(0)
+
+        it "does not let an allowlist entry leak to an unrelated product path":
+            val source = "fn go():\n    val r = rt_process_run(\"jj\", [])\n"
+            val allowlist = "src/lib/nogc_sync_mut/\n"
+            val findings = check_raw_rt_access_with_allowlist(source, "src/app/jj/commit.spl", allowlist)
+            expect(findings.len()).to_equal(1)

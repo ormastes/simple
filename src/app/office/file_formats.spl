@@ -279,57 +279,51 @@ fn _spans_to_markdown(spans: [TextSpan], comments: [CommentDef]) -> text:
         out = "{out}{_span_to_markdown(span, comments)}"
     out
 
-fn _footnote_def_block_id(block: DocBlock) -> text:
-    if block.spans.len() > 0:
-        return block.spans[0].footnote_id
-    ""
-
-fn _block_to_markdown(block: DocBlock, ordinal: i64, comments: [CommentDef]) -> text:
-    """Serialize one block back to its markdown line. `ordinal` is the
-    1-based position of this block within its run of consecutive
-    OrderedItem blocks (ignored by every other kind). `comments` resolves
-    any `TextSpan.comment_id` back to its `[>>author: text<<]` form."""
+fn _tight_run_tag(block: DocBlock) -> text:
+    """Blocks of the same non-empty tag stay on adjacent lines instead of being
+    separated by a blank line — markdown keeps ordered-list items and footnote
+    definitions tight."""
     match block.kind:
-        case Heading1: return "# {_spans_to_markdown(block.spans, comments)}"
-        case Heading2: return "## {_spans_to_markdown(block.spans, comments)}"
-        case Heading3: return "### {_spans_to_markdown(block.spans, comments)}"
-        case BulletItem: return "- {_spans_to_markdown(block.spans, comments)}"
-        case OrderedItem: return "{ordinal}. {_spans_to_markdown(block.spans, comments)}"
-        case Quote: return "> {_spans_to_markdown(block.spans, comments)}"
-        case CodeBlock: return "```\n{spans_to_plain_text(block.spans)}\n```"
-        case Paragraph: return _spans_to_markdown(block.spans, comments)
-        case FootnoteDef: return "[^{_footnote_def_block_id(block)}]: {spans_to_plain_text(block.spans)}"
+        case OrderedItem: return "ordered"
+        case FootnoteDef: return "footnote"
+        _: return ""
 
-fn _md_is_tight_list_kind(kind: BlockKind) -> bool:
-    """List-like kinds that join consecutive same-kind blocks with a single
-    newline (a "tight" list/footnote-block run) instead of a blank line."""
-    kind == BlockKind.BulletItem or kind == BlockKind.OrderedItem or kind == BlockKind.FootnoteDef
+fn _block_to_markdown(block: DocBlock, comments: [CommentDef], ordinal: i64) -> text:
+    """Serialize one block. `ordinal` is the 1-based position of this block
+    inside the current run of consecutive OrderedItem blocks (0 for every
+    other kind), so `1. / 2. / 3.` numbering survives a round trip."""
+    val content = _spans_to_markdown(block.spans, comments)
+    match block.kind:
+        case Heading1: return "# {content}"
+        case Heading2: return "## {content}"
+        case Heading3: return "### {content}"
+        case BulletItem: return "- {content}"
+        case OrderedItem: return "{ordinal}. {content}"
+        case Quote: return "> {content}"
+        case CodeBlock: return "```\n{spans_to_plain_text(block.spans)}\n```"
+        case FootnoteDef:
+            # The definition's own text, not the `[^id]` reference marker that
+            # `_span_to_markdown` would emit for a span carrying a footnote id.
+            val fid = if block.spans.len() > 0: block.spans.get(0).footnote_id else: ""
+            return "[^{fid}]: {spans_to_plain_text(block.spans)}"
+        case Paragraph: return content
 
 fn document_to_markdown(doc: RichDocument) -> text:
-    """Serialize a RichDocument back to markdown text for saving. Consecutive
-    blocks of the same list-like kind (bullets, ordered items, footnote
-    definitions) join with a single newline (a tight run); every other
-    transition keeps a blank line between blocks, as before."""
+    """Serialize a RichDocument back to markdown text for saving.
+    Blocks are separated by a blank line, except consecutive ordered-list
+    items, which markdown keeps on adjacent lines."""
     var out = ""
     var first = true
-    var ordinal: i64 = 0
-    var prev_kind = BlockKind.Paragraph
-    var has_prev = false
+    var ordinal = 0
+    var prev_tag = ""
     for block in doc.blocks:
-        if block.kind == BlockKind.OrderedItem:
-            ordinal = ordinal + 1
-        else:
-            ordinal = 0
-        val line = _block_to_markdown(block, ordinal, doc.comments)
-        if first:
-            out = line
-        else:
-            val tight = has_prev and block.kind == prev_kind and _md_is_tight_list_kind(block.kind)
-            val sep = if tight: "\n" else: "\n\n"
-            out = "{out}{sep}{line}"
+        val tag = _tight_run_tag(block)
+        ordinal = if tag == "ordered": ordinal + 1 else: 0
+        val line = _block_to_markdown(block, doc.comments, ordinal)
+        val sep = if tag != "" and tag == prev_tag: "\n" else: "\n\n"
+        out = if first: line else: "{out}{sep}{line}"
         first = false
-        has_prev = true
-        prev_kind = block.kind
+        prev_tag = tag
     out
 
 # =========================================================================

@@ -1,7 +1,10 @@
 # Bug: `expect(a == b).to_equal(false)` false-fails when a != b
 
-Status: FIXED
-Status re-verified 2026-08-17 by source inspection (triage shard 00).
+## Closed 2026-09-13 — `expect(a == b).to_equal(false)` passes, with no failure-masking
+
+- **measured** Binary: Rust seed `bin/simple` v1.0.0-rc.1 (16,347,136 bytes, 2026-09-02), Windows host.
+- **measured** Spec with both idioms (`expect("aaa" == "bbb").to_equal(false)` and `expect("aaa" == "aaa").to_equal(true)`) runs green: `2 examples, 0 failures`.
+- **measured** The FALSE-GREEN risk the entry warned about did not materialise: an example containing that idiom followed by a genuinely failing `expect(1).to_equal(2)` still reports `1 example, 1 failure` / `outcome=ERROR`.
 
 **Date:** 2026-06-30
 **Severity:** Medium — false-RED on specs that assert inequality via the
@@ -50,14 +53,3 @@ Use the idiomatic matchers: `expect(a).to_not_equal(b)` (asserts inequality) or
 `expect(a).to_equal(b)` — both already correct. Same family as
 `harness_word_infix_expect_not_preprocessed_2026-06-29` (BDD eager-marking vs
 trailing matcher).
-
-## 2026-07-20 update: same defect, now fixed
-
-This is the same defect as
-`doc/08_tracking/bug/bdd_expect_eq_comparison_hard_fail_ignores_chained_matcher_2026-07-20.md`,
-independently root-caused three weeks later, and it is now **fixed** by commit
-`494d77c9ecc` (flips the Eq/NotEq arm of the BDD `expect` intrinsic from a hard
-fail to a provisional one, matching the sibling ordered-comparison arm). The
-fix is Rust-side (`interpreter_call/bdd.rs`), so it only takes effect after a
-seed rebuild — specs run against a pre-rebuild deployed seed will still show
-this doc's symptom.

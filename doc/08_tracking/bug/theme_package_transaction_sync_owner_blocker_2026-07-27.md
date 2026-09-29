@@ -1,4 +1,8 @@
 # Theme package transaction synchronization-owner blocker
+## Obsolete 2026-09-16 — referenced path(s) gone, e.g. src/**
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass. Kept for history;
+the subject is removed, superseded, or duplicated elsewhere in the ledger.
 
 **Status:** open prerequisite — re-verified against `origin/main` 2026-07-27,
 still live (`ThemePackageTransactionStore` does not exist anywhere in `src/**`)  
@@ -98,3 +102,4 @@ transaction shape. Resume only after the persistent session handoff,
 source-capture hard stop, native codec ABI evidence, and scalar consumer
 surface are independently implemented and reviewed. See
 [source-capture hard stop](theme_package_source_capture_design_hard_stop_2026-07-27.md).
+

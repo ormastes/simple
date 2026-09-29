@@ -1,0 +1,183 @@
+"""PID1 root mint can launch only trusted catalog entries."""
+
+use std.spec.{describe, it, expect}
+use os.kernel.loader.root_service_catalog.{
+    ROOT_SERVICE_VFS, ROOT_SERVICE_NET, ROOT_SERVICE_HTTP,
+    root_service_catalog_lookup, root_service_catalog_launch_from_bytes,
+    root_service_catalog_stop
+}
+use os.kernel.boot.pid1_launch.{pid1_prepare_into_scheduler_from_bytes}
+use os.kernel.scheduler.scheduler.{Scheduler}
+use os.kernel.types.task_types.{TaskId, TaskPriority, TaskState}
+use os.kernel.arch.arch_context.{Architecture}
+use os.kernel.ipc.ipc.{IpcManager}
+
+fn _push_u16(buf: [u8], value: i64) -> [u8]:
+    var out = buf
+    out.push((value & 0xFF).to_u8())
+    out.push(((value >> 8) & 0xFF).to_u8())
+    out
+
+fn _push_u32(buf: [u8], value: i64) -> [u8]:
+    var out = buf
+    out.push((value & 0xFF).to_u8())
+    out.push(((value >> 8) & 0xFF).to_u8())
+    out.push(((value >> 16) & 0xFF).to_u8())
+    out.push(((value >> 24) & 0xFF).to_u8())
+    out
+
+fn _push_u64(buf: [u8], value: i64) -> [u8]:
+    var out = buf
+    out = _push_u32(out, value & 0xFFFFFFFF)
+    out = _push_u32(out, (value >> 32) & 0xFFFFFFFF)
+    out
+
+fn _minimal_x86_64_elf() -> [u8]:
+    var bytes: [u8] = []
+    bytes.push(0x7F.to_u8())
+    bytes.push(0x45.to_u8())
+    bytes.push(0x4C.to_u8())
+    bytes.push(0x46.to_u8())
+    bytes.push(2.to_u8())
+    bytes.push(1.to_u8())
+    bytes.push(1.to_u8())
+    bytes.push(0.to_u8())
+    bytes.push(0.to_u8())
+    while bytes.len() < 16:
+        bytes.push(0.to_u8())
+    bytes = _push_u16(bytes, 2)
+    bytes = _push_u16(bytes, 62)
+    bytes = _push_u32(bytes, 1)
+    bytes = _push_u64(bytes, 0x400000)
+    bytes = _push_u64(bytes, 64)
+    bytes = _push_u64(bytes, 0)
+    bytes = _push_u32(bytes, 0)
+    bytes = _push_u16(bytes, 64)
+    bytes = _push_u16(bytes, 56)
+    bytes = _push_u16(bytes, 1)
+    bytes = _push_u16(bytes, 0)
+    bytes = _push_u16(bytes, 0)
+    bytes = _push_u16(bytes, 0)
+    bytes = _push_u32(bytes, 1)
+    bytes = _push_u32(bytes, 5)
+    bytes = _push_u64(bytes, 0x80)
+    bytes = _push_u64(bytes, 0x400000)
+    bytes = _push_u64(bytes, 0x400000)
+    bytes = _push_u64(bytes, 4)
+    bytes = _push_u64(bytes, 4)
+    bytes = _push_u64(bytes, 0x1000)
+    while bytes.len() < 0x80:
+        bytes.push(0.to_u8())
+    bytes.push(0xC3.to_u8())
+    bytes.push(0x90.to_u8())
+    bytes.push(0x90.to_u8())
+    bytes.push(0x90.to_u8())
+    bytes
+
+describe "PID1 root service catalog":
+    it "exposes only fixed service identities and paths":
+        val vfs = root_service_catalog_lookup(ROOT_SERVICE_VFS)
+        val net = root_service_catalog_lookup(ROOT_SERVICE_NET)
+        val http = root_service_catalog_lookup(ROOT_SERVICE_HTTP)
+        expect(vfs.?).to_equal(true)
+        expect(net.?).to_equal(true)
+        expect(http.?).to_equal(true)
+        if vfs != nil:
+            expect(vfs.unwrap().executable_path).to_equal("/system/services/vfs.smf")
+        expect(root_service_catalog_lookup(99u64).?).to_equal(false)
+
+    it "rejects catalog launches outside the live PID1 root mint holder":
+        val bytes = _minimal_x86_64_elf()
+        val rejected = root_service_catalog_launch_from_bytes(
+            ROOT_SERVICE_VFS, bytes, Architecture.X86_64, TaskPriority.Normal, Scheduler.new())
+        expect(rejected.pid).to_equal(-13)
+
+    it "mints an exact VFS child CSpace from the live PID1 root object":
+        val bytes = _minimal_x86_64_elf()
+        val pid1 = pid1_prepare_into_scheduler_from_bytes(bytes, Scheduler.new())
+        expect(pid1.pid).to_be_greater_than(0)
+        var scheduler = pid1.scheduler
+        scheduler.schedule()
+        val launched = root_service_catalog_launch_from_bytes(
+            ROOT_SERVICE_VFS, bytes, Architecture.X86_64, TaskPriority.High, scheduler)
+        expect(launched.pid).to_be_greater_than(0)
+        val child = launched.scheduler.get_task(TaskId(id: launched.pid as u64))
+        if child != nil:
+            expect(child.capabilities.is_pledged).to_equal(true)
+            expect(child.security.root_mint_authority).to_equal(false)
+            expect(child.security.process_limit).to_equal(8u64)
+            expect(child.security.syscall_filter_bound).to_equal(true)
+
+    it "enriches live storage and network launches through the kernel device broker":
+        val source = file_read("src/os/kernel/loader/root_service_catalog.spl")
+        expect(source).to_contain("use os.kernel.loader.root_device_broker")
+        expect(source).to_contain("root_device_broker_storage_lease()")
+        expect(source).to_contain("root_device_broker_network_lease()")
+        expect(source).to_contain("CapabilityKind.DeviceGrant(")
+        expect(source).to_contain("CapabilityKind.DeviceBarMap(")
+        expect(source).to_contain("CapabilityKind.DeviceDma(")
+
+    it "resolves the fixed image before it requests a device-policy lease":
+        val source = file_read("src/os/kernel/loader/root_service_catalog.spl")
+        val image = source.index_of("val bytes = resolve_executable_bytes(static_entry.unwrap().executable_path, arch)")
+        val lease = source.index_of("val entry = _entry_for_live_catalog_launch(catalog_id)")
+        expect(image).to_be_greater_than(0)
+        expect(lease).to_be_greater_than(image)
+
+    it "rejects an opaque service stop outside live PID1 root authority":
+        val stopped = root_service_catalog_stop(1u64, -125, Scheduler.new(), IpcManager.new())
+        expect(stopped.result).to_equal(-1)
+
+    it "stops PID1's direct service child and its job members with cleared CSpaces":
+        val bytes = _minimal_x86_64_elf()
+        val pid1 = pid1_prepare_into_scheduler_from_bytes(bytes, Scheduler.new())
+        expect(pid1.pid).to_be_greater_than(0)
+        var scheduler = pid1.scheduler
+        scheduler.schedule()
+        val launched = root_service_catalog_launch_from_bytes(
+            ROOT_SERVICE_VFS, bytes, Architecture.X86_64, TaskPriority.High, scheduler)
+        expect(launched.pid).to_be_greater_than(0)
+        var service_scheduler = launched.scheduler
+        val worker = service_scheduler.clone_task(TaskId(id: launched.pid as u64))
+        var ipc = IpcManager.new()
+        val leader_endpoint = ipc.create_port(TaskId(id: launched.pid as u64), "stopped-vfs-leader")
+        val worker_endpoint = ipc.create_port(worker, "stopped-vfs-worker")
+        expect(leader_endpoint.id).to_be_greater_than(0u64)
+        expect(worker_endpoint.id).to_be_greater_than(0u64)
+        val stopped = root_service_catalog_stop(
+            launched.pid as u64, -125, service_scheduler, ipc)
+        expect(stopped.result).to_equal(0)
+        expect(stopped.ipc.connect("stopped-vfs-leader")).to_equal(nil)
+        expect(stopped.ipc.connect("stopped-vfs-worker")).to_equal(nil)
+        val child = stopped.scheduler.get_task(TaskId(id: launched.pid as u64))
+        if child != nil:
+            expect(child.state).to_equal(TaskState.Zombie)
+            expect(child.capabilities.is_pledged).to_equal(true)
+            expect(child.capabilities.caps.len()).to_equal(0)
+        val worker_after = stopped.scheduler.get_task(worker)
+        if worker_after != nil:
+            expect(worker_after.state).to_equal(TaskState.Zombie)
+            expect(worker_after.capabilities.caps.len()).to_equal(0)
+            # The stopped service cannot reap this worker.  Adopt it to PID1
+            # so the ordinary waitpid path remains the sole collection API.
+            if worker_after.parent != nil:
+                expect(worker_after.parent.unwrap().id).to_equal(pid1.pid as u64)
+
+    it "refuses a root-mint caller's non-child and an already-zombied child":
+        val bytes = _minimal_x86_64_elf()
+        val pid1 = pid1_prepare_into_scheduler_from_bytes(bytes, Scheduler.new())
+        expect(pid1.pid).to_be_greater_than(0)
+        var scheduler = pid1.scheduler
+        scheduler.schedule()
+        val launched = root_service_catalog_launch_from_bytes(
+            ROOT_SERVICE_VFS, bytes, Architecture.X86_64, TaskPriority.High, scheduler)
+        expect(launched.pid).to_be_greater_than(0)
+        var service_scheduler = launched.scheduler
+        val unrelated = service_scheduler.clone_task(TaskId(id: launched.pid as u64))
+        val rejected = root_service_catalog_stop(unrelated.id, -125, service_scheduler, IpcManager.new())
+        expect(rejected.result).to_equal(-1)
+        service_scheduler = rejected.scheduler
+        service_scheduler.exit_task_by_id(TaskId(id: launched.pid as u64), -9)
+        val zombie = root_service_catalog_stop(
+            launched.pid as u64, -125, service_scheduler, IpcManager.new())
+        expect(zombie.result).to_equal(-10)

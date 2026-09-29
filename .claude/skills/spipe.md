@@ -65,8 +65,10 @@ stale PASS artifact.
 > is never PASS. Calibrate with deliberate-red and zero-executed fixtures, and
 > keep interpreter evidence diagnostic. Tracked:
 > `doc/08_tracking/bug/test_runner_interpreter_file_summary_greenwash_2026-07-03.md`.
-> Reuse the pure test runner or `src/app/test/font_evidence_runner.spl`; do not
-> create another result wrapper.
+> Reuse `build_interpreter_result_wrapper` for interpreter diagnostics. Native
+> font diagnostics use `src/app/test/font_evidence_runner.spl`, which calls
+> `preprocess_spipe_native_result_file`; it is not an interpreter wrapper. Do
+> not create another result wrapper.
 
 > **Test runner operational caveats.** Section/directory test runs must be SEQUENTIAL (parallel database access corrupts state); only the final `Results:` summary line is authoritative (intermediate diagnostics mislead); single-file targets use the Rust-embedded runner (reliable), directory targets use the Pure-Simple daemon (known fresh-seed hang). See `doc/07_guide/infra/testing.md` § "Runner Operational Caveats" for F1–F4 facts and remedies.
 
@@ -132,6 +134,19 @@ The SPipe dev entrypoint lives at:
 Codex routes SPipe development work through `$sp_dev`:
 
 **[.codex/skills/sp_dev/SKILL.md](../../.codex/skills/sp_dev/SKILL.md)**
+
+### MC/DC and RT/HAL evidence lane
+
+For `mcdc_rt_hal_hardening`, retain three separate evidence states: static-off
+artifact proof, bounded static-on/dynamic runtime proof, and compiler-staged
+V3 RT/HAL/environment proof. A self-hosted-runtime outage leaves every state
+**unverified**; do not change a scenario to `skip` or claim source/manual
+presence as execution. Use the 24-kind `EnvAccessPlan` receipt matrix, keep
+Pure Simple as the one effect owner, and run the matching criterion once after
+convergence. Canonical guide and plan:
+`doc/07_guide/compiler/mcdc_rt_hal.md` and
+`doc/03_plan/sys_test/mcdc_rt_hal_hardening.md`; concise expert map:
+`doc/00_llm_process/feature_expert/mcdc_rt_hal/skill.md`.
 
 ### Protected PR self-review handoff
 
@@ -347,6 +362,241 @@ sh scripts/setup/install-spipe-dev-command.shs --apply
 - [`doc/07_guide/platform/simpleos/qemu_system_tests.md`](../../doc/07_guide/platform/simpleos/qemu_system_tests.md) — **System tests over QEMU**: per-arch live-boot SSpec specs (`test/03_system/os/qemu/`), `qemu_systest_contract.spl` descriptors, pass/missing-media/boot-fail classification (fail-closed, never `skip()`), and `scripts/check/qemu-storage-audit.shs`
 - [`doc/07_guide/platform/simpleos/simpleos_baremetal_board_support.md`](../../doc/07_guide/platform/simpleos/simpleos_baremetal_board_support.md) — SimpleOS board support and the Simple compiler install-image/filesystem contract
 
+## Landing a PR here (measured 2026-09-06 — read before you push)
+
+> **Force-land (2026-09-28):** `spipe-vcs-v3-main` now carries ONE bypass
+> actor — the owner, `bypass_mode: pull_request` (canonical
+> `admin_merge_bypass: owner_pull_request_only`). Review the PR, post a
+> `--comment` review (approve is impossible, self-authored), then
+> `gh pr merge <n> --admin --merge` lands it even when `BEHIND`. Direct push to
+> `main` stays rejected (GH013). `release/*` has the same owner PR-only
+> bypass: self-review admission is a user/LLM review the owner may override. Full recipe and rules:
+> `.claude/rules/vcs.md` § "Force-landing a PR". The older 2026-09-07 note
+> that direct push succeeded via a `RepositoryRole` bypass is obsolete.
+
+`main` is ruleset-protected (`spipe-vcs-v3-main`). Two required
+checks: **`Code Idiom & Structural Ratchet Gates`** and **`SPipe Self Review
+Admission`**.
+
+**Push ONCE. Every force-push destroys an in-flight run.** Since 2026-09-27 the
+required idiom context is the one-job `required-gates.yml` ("Required Gates",
+job `fast-gates`); `repo-hygiene.yml` no longer runs on PRs, and every other
+non-required PR workflow runs only when the PR is labelled `ci:full`
+(`doc/07_guide/infra/vcs/pr_landing_timing_race.md`). `required-gates.yml`
+declares `concurrency: group: ${{ github.workflow }}-${{
+github.ref }}` with `cancel-in-progress: true`, and the repo has **0
+self-hosted runners** with **53 runs queued/in-progress** measured on
+2026-09-06 across the parallel agent sessions. So a re-push does not "retry" —
+it cancels the running gate and re-queues you behind everything else. Get the
+commit message and the rebase right BEFORE the first push; amending a message
+afterwards costs a full queue cycle.
+
+**There is a receipt fast path for the idiom gate; it works, but nothing is
+admitted yet.** `code-idiom-gates` consults a signed local-CI receipt
+(`simple.local-ci-receipt/v1`) and picks one of FOUR modes: `sanity` (measured
+~8 s — receipt verify plus the conflict-class guards), `escalate` (sanity set
+plus only the gates whose declared `inputs` intersect a rebase diff), `docs`
+(changed paths are entirely documentation; never applies to `.github/**`) or
+`full` (everything, and every undecidable case). It is fail-closed: an unset
+`skip_ids` runs every gate.
+
+Identity binds the jj `change-id` header when present, else `git patch-id
+--stable` for non-merge commits, else unbindable. That fallback matters here:
+0 of the last 40 origin/main commits and 0 of PR #380's head commits carry a
+change-id header, because the `git worktree add --detach` + `gh pr create`
+route does not write one — so a real PR binds by patch-id today.
+
+**What still stops a PR taking the fast path** is not the mechanism but the
+setup: `config/check/ci_receipt_allowed_signers` ships with ZERO keys
+(deliberate, fail-closed), and the signer has no note-emission flag, so
+attaching the receipt to `refs/notes/ci-receipts` is a manual `git notes` step.
+Until a key is added, the "push ONCE" advice above still governs.
+Full details, key onboarding and the verdict-string troubleshooting table:
+[`doc/07_guide/infra/local_ci_receipt/operator_guide.md`](../../doc/07_guide/infra/local_ci_receipt/operator_guide.md).
+
+**The admission check has two traps, and the fix for one causes the other.**
+1. `gh pr edit --body-file` with byte-identical content fires no `edited`
+   event, so no check-run is ever created and the PR sits `BLOCKED` forever.
+2. The admission workflow also cancels its own in-flight run on each new
+   event — so "fixing" trap 1 by editing repeatedly kills the very run that
+   would publish the check (3 cancelled runs before this was spotted).
+Fire ONE genuine body change, then wait. Diagnose with
+`gh api repos/<r>/actions/workflows/<id>/runs` and read `event` +
+`conclusion` — the check-runs list shows nothing while the workflow is in fact
+firing correctly, which reads as "never triggered" and is wrong.
+
+On a `pull_request` the admission job is **skipped** (its `if:` is
+`github.event_name == 'workflow_dispatch'`), and GitHub's rollup **accepts a
+skipped required check** — that is how PRs land normally. Dispatching it
+deliberately is the OWNER SELF-ATTESTATION path:
+
+```bash
+gh workflow run review-admission.yml --repo <r> \
+  -f pull_request_number=<n> -f session_id=<session> \
+  -f reviewer_model=<model> -f reviewer_effort=high -f self_attestation=PASS:0:0
+```
+
+`self_attestation` is a claim in the repo owner's name and the workflow's own
+config says it is **not** independent authentication. Never dispatch it without
+the user's explicit instruction, and only when the values are true.
+
+**No temporary bypass window any more.** The old "PUT an `always` bypass,
+merge, PUT `[]` back" recipe is retired: the permanent owner PR-only bypass
+replaces it, and an `always` bypass would also re-open direct push. Do not
+widen it; `check-github-policy-projection.shs` fails on any other bypass shape.
+
+**Lanes that are red for everyone — never attribute them to your change.**
+`Containerized Tests` (publishes `Unit Test Discovery (Podman)`, `Verify
+Resource Limits`, `render_2d Container Suite`): 12 failures and **zero**
+successes in its last 40 runs, on `main` and unrelated branches alike.
+`publish` and `aot-lane-fences`: both die with `no runnable bin/simple` on a
+fresh runner. None is ruleset-required. Diagnose by diffing your failing set
+against an unrelated open PR **and** checking whether the lane merely *queued*
+there — "fails only on mine" is usually "only ran on mine".
+
+You cannot approve your own PR (`Review Can not approve your own pull
+request`), and `required_approving_review_count` is 0, so approval never
+unblocks anything.
+
+**A pending PR is not waiting for review — diagnose before waiting (2026-09-27).**
+`spipe-vcs-v3-main` sets `required_approving_review_count: 0`, and every PR
+here is self-authored, so no provider approval will ever arrive and none is
+needed. When a PR sits `BLOCKED`, read the cause instead of waiting:
+`gh api repos/ormastes/simple/rulesets/21573643 --jq '.rules[]|select(.type=="pull_request").parameters.required_approving_review_count'`,
+`gh pr view <n> --json reviewDecision,statusCheckRollup` — a required context
+`QUEUED` means runner starvation (cancel
+in-progress runs whose PR is already merged or closed), a missing `SPipe Self Review Admission` means do the
+self review: a **higher model than the authoring session** (Fable/Opus, effort
+`high`+) reviews the exact head, posts it as `gh pr review --comment`, and on
+zero P0/P1 dispatches the admission. Never park a self-authored PR "awaiting
+review".
+
+**Resolve your own PR — the author lands it; nobody else will.** PR approval is
+impossible here (every PR is self-authored as `ormastes`; `gh pr review
+--approve` always fails) and not required (count 0). So the agent that opened a
+PR owns it until it is merged or closed:
+1. Review the exact head at high effort with a higher model than the author
+   (`claude -p --model claude-fable-5-1 "review PR #<n> ..."`); fix every P0/P1
+   on the branch; post the review with `gh pr review <n> --comment`.
+2. Draft -> `gh pr ready <n>`. Superseded/duplicate -> `gh pr close <n>
+   --comment "superseded by #<m>"`.
+3. Bring the branch up to date with `origin/main` (merge, keep both sides).
+4. Fire the admission check: `gh pr edit <n> --body-file <f>` with a body that
+   really differs (identical body = no event = no check-run).
+5. Poll `gh pr view <n> --json mergeable,mergeStateStatus` every 20 s; merge
+   with `gh pr merge <n> --merge --delete-branch` once `MERGEABLE` and
+   `CLEAN|UNSTABLE`; on "base advanced" repeat 3-5.
+6. Verify with `git ls-remote origin main`. Never end a session with your PR
+   parked "awaiting review".
+
+## Resolving a PR queue (measured 2026-09-07, ~35 PRs landed)
+
+Written after taking the queue from 31 open to 0. Every rule cost something.
+
+### Fast path — conflict check, two gates, push
+
+Full gates per PR is over-processing: `check-guard-wiring` alone costs minutes,
+and most gates check what a *clean* merge cannot have touched.
+
+```sh
+M=$(git rev-parse origin/main); S=$(git rev-parse refs/tmp/prNNN)
+git merge-tree $(git merge-base $M $S) $M $S | grep -c '^<<<<<<<\|^changed in both'
+# 0 -> merge in a detached worktree, then ONLY:
+sh scripts/check/check-tree-size-push.shs           $M..$NEW
+sh scripts/check/check-no-conflict-markers-push.shs $M..$NEW
+```
+Those two catch the real disasters (wiped/truncated tree; marker text in file
+CONTENT) in seconds. A PR landed this way in ~30 s vs minutes before. Run the
+heavy ratchets (`guard-wiring`, `rt-dual`, `runtime-source-list-parity`) ONCE at
+the end of a batch — they catch what a batch introduced, not what each clean
+merge did. Batch several PRs into one chain, push once; if one conflicts against
+the growing chain (not `main`), skip it and retest after the siblings land.
+
+### `merge-base --is-ancestor` tests SHA identity, not CONTENT identity
+
+A PR already landed under different shas (rebased/squashed elsewhere) still looks
+open. Merging adds history and changes ZERO files, and the markers gate then
+correctly says `ERROR — nothing was checked`. Measured: three PRs "landed" that
+way added 8 commits, 0 files. Discriminator:
+```sh
+git diff --name-only $M $S | wc -l    # 0 => content already in main
+```
+
+### Conflicts go to a HIGH-CAPABILITY model
+
+A small-model agent triaging 43 branches reported "all 20 conflict, none
+landable" when **7 of 43 merged cleanly** (one labelled CONFLICT merged with
+zero), then recommended discarding 12 it had never examined. Acting on it would
+have destroyed 9 commits later landed clean.
+
+| Task | Model |
+|---|---|
+| detect a conflict (`merge-tree \| grep -c`) | small — mechanical |
+| count / grep / cluster / fixed command lists | small |
+| **resolve a conflict** | **high only** |
+| **decide what to discard** | **high only** |
+| **push to `main`** | **high only** |
+
+A wrong conflict verdict is not a wasted run; it is silent data loss.
+
+### `git rerere` replays STALE resolutions that drop landed work
+
+On PR #493 rerere auto-resolved a census doc missing **192 lines present in
+`main`** — no markers left, no failing gate. Auto-resolution is not verification:
+```sh
+comm -23 <(sort -u <(git show HEAD:$F))    <(sort -u $F) | wc -l   # must be 0
+comm -23 <(sort -u <(git show $PRHEAD:$F)) <(sort -u $F) | wc -l   # must be 0
+```
+For append-only tables (census, symbol roster) the correct resolution is a UNION,
+not a side pick. #493 resolved to 800 lines = main's 754 + 46 unique rows, 0
+missing from either side.
+
+### `--generate-baseline` silently deletes the review history
+
+Both ratchet baselines carry the REASONING for every prior update; regenerating
+discards it while turning the gate green:
+
+| baseline | comments before | after regenerate |
+|---|---:|---:|
+| `runtime_source_list_parity_baseline.txt` | 59 | 16 |
+| `rt_dual_implementation_baseline.txt` | 108 | 13 |
+
+`rt_dual`'s comments live in THREE non-contiguous regions (leading header + two
+trailing blocks), so a naive `awk '/^#/{print;next}{exit}'` grab keeps only 30.
+```sh
+cp $B /tmp/before.txt
+sh scripts/check/<gate>.shs --generate-baseline
+diff /tmp/before.txt $B        # audit EVERY line
+# rebuild: leading header + new note + data + trailing comment blocks
+comm -23 <(grep '^#' /tmp/before.txt|sort -u) <(grep '^#' $B|sort -u) | wc -l  # must be 0
+```
+Audit the data diff BY CLASS. Real example: +95/-68 decomposed into 89 deliberate
+C-only trap stubs, 6 rust-only `rt_simd_*` matching 45 already baselined the same
+way, 68 rows that genuinely GAINED a second lane (verified in both
+`runtime_native.c` and `compiler_rust value/mod.rs`), and 7 merely reordered with
+identical qualifiers. Rows you cannot account for are rows you must not land.
+
+### Run gates from a CLEAN DETACHED CHECKOUT
+
+Many rows scan the working directory, not the pushed commit. Same commit:
+```
+dirty checkout : sffi-v2-authority: PASS — all 46 guard(s) passed
+clean checkout : sffi-v2-authority: FAIL — 3 of 46 guard(s) failed
+```
+`4 of 8` gates diverged in a controlled comparison. Always
+`git worktree add --detach <dir> <sha>` and run inside it.
+
+**And always confirm WHICH worktree you are editing.** A `cd` that silently
+resolved to another session's worktree modified its `spipe.md`; caught by a line
+count that did not match and reverted with `git checkout --`. Write the intended
+path to a file and read it back rather than re-deriving it.
+
+### `ERROR — nothing was checked` is CORRECT, not a broken gate
+
+Twice in one session an ERROR was nearly filed as a defect. It means there was
+nothing to scan (empty range, content-identical push). Treat it as "do not push
+on this evidence", find out why the range is empty, then decide.
+
 ## Container test runs
 
 **Never `COPY . /opt/simple` (or any whole-repo COPY) into a test-isolation
@@ -415,6 +665,195 @@ impl plan: [`doc/03_plan/sspec_modernization_plan.md`](../../doc/03_plan/sspec_m
 authoritative feature set today:
 [`doc/02_requirements/feature/sspec_scenario_manual.md`](../../doc/02_requirements/feature/sspec_scenario_manual.md).
 
+## Scoring 90+ (modern-sspec documentization score) — MEASURED recipe
+
+The scorer is `src/app/sspec_maintain/` (`source_facts.spl` extracts facts,
+`analyzer.spl` turns them into `SSDOC-*` findings, `rules.spl` fixes each
+finding's deduction, `score.spl` aggregates). It is a **structural, line-based
+heuristic**: every rule below is satisfied by a literal token in a literal
+position. This section is derived from that code (read 2026-09-05, rule
+version `ssdoc-rules/1`), and every number in it was MEASURED with the real
+scorer through the seed lane described at the end — not hand-estimated.
+
+### The arithmetic (budget before you write)
+
+```
+raw       = (narrative*15 + structure*15 + oracle*20 + traceability*15
+             + evidence*15 + coverage*10 + maintainability*10) / 100   # integer division
+effective = 49 if ANY blocker finding (ORA-001, ORA-002, TRC-002, TRC-003) and raw > 49, else raw
+```
+
+Each dimension starts at 100 and loses the finding's deduction (clamped to
+0..100). So one dimension point costs **0.15 aggregate** (narrative, structure,
+traceability, evidence), **0.20** (oracle) or **0.10** (coverage,
+maintainability). A 90 leaves you **10 aggregate points**; a blocker leaves
+you nothing. There are TWO scoring surfaces and they differ:
+
+| surface | function | who runs it | extra rules |
+|---|---|---|---|
+| **GATE** | `analyze_sspec_text` | `bin/simple test` (`src/app/test_runner_new/sspec_score_gate.spl`, default min **80**, `SIMPLE_SSPEC_MIN_SCORE` overrides, `0` disables) | none — source only |
+| **SCAN** | `analyze_sspec_pair_text` + `inspect_sspec_lifecycle_links` | `simple sspec-maintain scan <spec> [--min-score N]` | **MNT-002** (-25 mnt = **-2.5**) when `doc/06_spec/<mirror>.md` is missing/stale; **MNT-009** (-10 mnt = -1 each) per lifecycle path that does not exist; MNT-005/008, EVD-002/003 only when a mirror exists |
+
+Target the SCAN surface: a spec that scores 100 on GATE scores **97** on SCAN
+with no mirror (the mirror needs `spipe-docgen`, which cannot run on a
+bootstrap-only host). Budget accordingly — after MNT-002 you have **7.5**
+points of slack, i.e. at most FOUR of the -10 warnings below, or two EVD-001
+plus one MNT-007.
+
+### Rule-by-rule checklist (what to literally write)
+
+Facts are extracted per LINE after `.trim()`; "inside a scenario" means a line
+indented deeper than its `it "..."` line; a `"""` docstring is skipped
+line-by-line but is still visible to whole-file substring checks.
+
+| rule | costs | fires when (from `source_facts.spl`/`analyzer.spl`) | write this |
+|---|---|---|---|
+| **NAR-001** | -20 nar (-3) | the file lacks (`purpose and audience` or `## purpose`, case-insensitive) **or** has no `"""` anywhere | a top-of-file `"""` docstring whose first heading is `## Purpose and audience` |
+| **NAR-002** | -20 nar (-3) | any of `todo: describe`, `todo: author`, `description of this block`, `lorem ipsum` | never leave scaffold prose |
+| **NAR-003** | -15 nar (-2.25) | the same `#` comment line (>20 chars, containing purpose/audience/`research:`/`plan:`/`architecture:`/`design:`) appears 3+ times verbatim | one header block, not one per scenario |
+| **BEH-001** | -10 str per scenario (-1.5), cap -40 | an `it` body contains no `step("` | ≥1 `step("Imperative sentence")` inside EVERY `it` (also `slow_it`/`ignore_it`) |
+| **BEH-002** | -5 str per scenario (-0.75), cap -30 | name is `works`/`test`/`passes`/`should work`/`should pass`/`can work`/`can pass`, starts with `test `, or contains `is unresolved` | name the product outcome |
+| **ORA-001** | **blocker** | `real_assertion_count == 0` for the file, **or** any scenario has a pending STATEMENT: a line that IS `pass_todo`, `pass_do_nothing`, `pass_dn`, `pending`, `pending(`…, `fail("todo:`…, or a `skip(` call outside a string | a real `expect(...)`/`assert_*`/`check(` in the body; an in-development spec goes RED through a failing real assertion, never through a pending marker |
+| **ORA-002** | **blocker** | a scenario asserts source text (`expect(source.contains(`, `expect(file_read(`…`src/`…, the words `source text oracle`) **or** a tautology: `expect(<numeric literal>)…` or `expect(x).to_equal(<exactly the text x was bound to>)` for a `val` **or `var`** `x` that was not reassigned before the assertion (fixed 2026-09-05: `var` no longer exempts, and a trailing `# comment` no longer hides the match) | assert what the product returned, never what you just typed |
+| **ORA-003** | -10 ora per literal (-2), cap -30 | `expect(x).to_equal(<numeric literal>)` without `# oracle:` or `# explained:` on the SAME line | `expect(n).to_equal(8)  # oracle: plan §2 lists eight groups` (the marker excuses ORA-003 only; it does NOT excuse a tautology) |
+| **TRC-001** | -20 trc (-3) | no `REQ-` and no `@req` anywhere | `# @req REQ-<AREA>-<NNN>` inside each `it` body |
+| **TRC-002** | **blocker** | a line carrying a `REQ-…` id AND the word `planned` or `selected`, whose id is never bound inside an `it` | never write "planned"/"selected" on a REQ line |
+| **TRC-003** | **blocker** | any `REQ-…` token outside a `"""` block (header comments, `@req` above the `it` line, fixture strings) that is not also inside some `it` body | declare REQ ids ONLY inside `it` bodies; a header may name them only inside the `"""` docstring |
+| **EVD-001** | -10 evd per stepped scenario (-1.5), cap -30 | a scenario with a `step(` has no capture line inside its body | inside the body, immediately before the step it documents: `# @capture(<kind>): <what is retained>` (docgen attaches it to the NEXT step — see `spipe_docgen/parser.spl` `pending_capture`), or a real call: `evidence_manifest(`, `compare_evidence(`, `render_manual(`, `capture_*`, `terminal_grid`/`tui_grid`/`gui_image`/`action_trace`/`bit_table`/`binary_layout`, or a `<spec>.evidence.sdn` name. **A `#` comment counts ONLY through `@capture` or `.evidence.sdn`** (fixed 2026-09-05: `# evidence(...)` prose no longer scores) |
+| **COV-001** | -20 cov (-2) | the file says `must reject`/`shall reject`/`invalid input`/`boundary behavior`/`recovery behavior`/`unsupported behavior`/`ambiguity behavior` and NO `it` name contains negative/boundary/reject/invalid/recover/unsupported/ambigu/error | always include one adverse scenario, e.g. `it "rejects a database without a requirements table"` |
+| **MNT-001** | -15 mnt (-1.5) | >1 scenario and no `@manual_section`/`@manual`/`@fold` anywhere | `# @manual_section: <name>` once above the `describe` |
+| **MNT-003** | -10 mnt (-1) | a line starts with `@step ` (bare decorator) | `# @step: Label` |
+| **MNT-004** | -10 mnt (-1) | `@internal`, `@qa-only`, `@execution-only` anywhere | don't |
+| **MNT-006** | -10 mnt (-1) | `before_each` and `setup` both present and no `fn setup` | name the helper `fn setup_<domain>()` |
+| **MNT-007** | -10 mnt (-1) | the file lacks any of the four substrings `doc/01_research/`, `doc/03_plan/`, `doc/04_architecture/`, `doc/05_design/` | a `# Lifecycle:` comment listing one EXISTING file under each — and see MNT-009 |
+| **MNT-009** (scan) | -10 mnt (-1) per path | a `doc/01_research/…`/`03_plan`/`04_architecture`/`05_design` token does not exist on disk (trailing `.`/`,`/`;`/`:`/`)` are stripped since 2026-09-05; a bare directory is ignored) | never fabricate a path; if no research/architecture/design doc exists for the plan, accept the single -1 from MNT-007 |
+| **MNT-002** (scan) | -25 mnt (-2.5) | no current `doc/06_spec/<mirror>.md` | regenerate with `spipe-docgen` when a full CLI exists; otherwise budget for it |
+
+Acceptance-spec shape that keeps ALL of the above (this is the file measured below;
+`# @tag:in-development` stays on line 1 — it is a separate runner mechanism and
+costs nothing):
+
+```simple
+# @tag:in-development
+"""
+## Purpose and audience
+Acceptance oracles for the open remains of doc/03_plan/<plan>.md (<which checkbox>).
+Audience: the operator who closes that checkbox and needs one spec that turns
+RED-to-GREEN when the promised export lands.
+## Operator workflow
+bin/simple test test/03_system/plan_acceptance/<name>_spec.spl
+## Compatibility and limitations
+Tagged in-development: it pins the promised interface and fails until the
+plan checkbox is implemented. Unsupported: running under the Rust seed.
+## Verification guidance and troubleshooting
+The captured `.evidence.sdn` sidecar records every step; a missing
+`<promised symbol>` is the expected RED until the plan lands.
+"""
+# doc-path: doc/03_plan/<plan>.md
+# Lifecycle: doc/01_research/<existing>.md ;
+# doc/04_architecture/<existing>.md ;
+# doc/05_design/<existing>.md
+# @manual_section: plan-acceptance
+
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.io.file_ops.{file_read, file_exists}
+use std.nogc_sync_mut.test_runner.req_trace.{generate_req_trace_md}
+
+val req_trace_md_path = "doc/08_tracking/trace/req_trace.md"
+val test_db_path = "doc/08_tracking/test/test_db.sdn"
+
+fn read_or_fail(path: text) -> text:
+    match file_read(path):
+        case Ok(content): content
+        case Err(e): fail("could not read {path}: {e}")
+
+describe "sspec_modernization_plan.md — req_trace.md generation":
+
+    it "`req_trace.md` is regenerated from `test_db.sdn` on every test run":
+        # @req REQ-SSPEC-PLAN-REQTRACE-001
+        step("Read the committed test database that seeds the trace")
+        val db = read_or_fail(test_db_path)
+        step("Generate the requirement trace from it")
+        val rendered = generate_req_trace_md(db)
+        val committed = read_or_fail(req_trace_md_path)
+        # @capture: evidence_manifest("req_trace_generation") -> req_trace_generation_spec.evidence.sdn
+        step("Compare the generated trace with the committed one")
+        expect(rendered).to_equal(committed)
+
+    it "rejects a test database without a `requirements` table instead of writing an empty trace":
+        # @req REQ-SSPEC-PLAN-REQTRACE-002
+        step("Generate the trace from a database that lacks the requirements table")
+        val rendered = generate_req_trace_md("schema: test_db/v1\n")
+        # @capture: evidence_manifest("req_trace_reject_missing_table") -> req_trace_generation_spec.evidence.sdn
+        step("Verify the generator refused rather than emitting an empty document")
+        expect(rendered).to_contain("error: missing requirements table")
+```
+
+**Measured 2026-09-05** (the exact text above, file `build/nb/fixtures/worked_example_spec.spl`):
+`GATE SCORE 100 raw=100 blockers=0` and `SCAN SCORE 97 raw=97 blockers=0`
+(only finding: `SSDOC-MNT-002 -25 mirrored manual is missing`). Command:
+
+```bash
+sh scripts/check/sspec-score-seed-lane.shs build/nb/fixtures/worked_example_spec.spl
+```
+
+Calibration the same run proved (so the lane measures the REAL scorer, not a
+guess): a one-finding-per-rule fixture predicted from the source at 75
+measured **75** with every dimension matching; a four-blocker fixture measured
+**49** (`raw=68`); `var x = 7` / `expect(x).to_equal(7)` measured **49**
+(ORA-002 + ORA-001); the same `var` reassigned in a loop before the assertion
+measured **100**.
+
+### Traps that cost real points (each observed in the 2026-09-05 acceptance batch)
+
+- `# @capture` ABOVE the `it` line (the old template shape) closes the previous
+  scenario and is attributed to nothing — EVD-001 still fires. Put it INSIDE the
+  body.
+- `# @req REQ-X` above the `it` line is a DECLARATION outside any scenario —
+  TRC-003 blocker unless the same id also appears inside a body.
+- `var x = 7` + `expect(x).to_equal(7)  # oracle: ...` — the `# oracle:` marker
+  silences ORA-003 but the line is still an ORA-002 tautology (blocker). Eight
+  such pairs across three specs were written on 2026-09-05 because the scorer
+  then exempted `var` and ignored the trailing comment; both holes are closed
+  and those three specs now measure 49.
+- `# evidence(...)` prose inside the body no longer counts as a capture (specs
+  with an EVD-001 finding went from 8 to 20 of 35 when that closed).
+- A docstring sentence ending `…/plan.md.` used to be a MNT-009 stale-link
+  finding; punctuation is now stripped, but a genuinely wrong path still costs.
+- Any of these anywhere in the file, even in prose: `must reject`, `invalid input`,
+  `boundary behavior` → you now owe an adverse-named scenario (COV-001).
+- Never write a literal `"""` inside a `#` comment: until 2026-09-05 it flipped
+  the scanner's docstring state and hid every later line from the per-line
+  rules (the scaffold template scored 49 that way). Fixed, but a `"""` in a
+  code line or string still toggles it — keep fixture docstrings balanced.
+- The gate's cache (`.simple/cache/sspec-score-gate/`) keys on path + source
+  hash only; after touching `src/app/sspec_maintain/`, delete it or old scores
+  are reported.
+
+### Measuring on this host (no full CLI deployed)
+
+`simple sspec-maintain scan` needs the full pure-Simple CLI, which is not
+deployed here (`bin/simple` and `bin/local/phase2-*/simple` are the bootstrap
+CLI; `simple_seed run src/app/sspec_maintain/main.spl` dies in the seed's
+parser). The working lane is
+
+```bash
+sh scripts/check/sspec-score-seed-lane.shs <spec.spl|dir> [...]   # ~60s for 40 specs
+```
+
+It reshapes whitespace-only copies of the five scorer modules for the seed's
+older grammar, PROVES each copy equals its source modulo whitespace/comments
+(sha1 of the residue; a DIFF is exit 2), substitutes three named deltas the
+seed forces (zero-arg `split()`, `sha256_text`, `file_exists` — all via runtime
+externs, none in the rule logic), and prints per spec `GATE SCORE n` and
+`SCAN SCORE n` plus every finding with its rule id and deduction. Read the
+numbers; the script itself judges no threshold. Why the other lanes are dead
+(all measured 2026-09-05): `phase2 native-build` fails on a three-line hello
+world (`AOT compile error ... <invalid-heap:...>`, both backends) and exits 139
+after monomorphize completes on the analyzer entry; the seed's per-spec `run` lane dies on
+`variable always_inline not found` loading `file_ops` — records in
+`doc/08_tracking/bug/`.
+
 ## Typed evidence (Modern SSpec)
 
 An **observation** is what the capture recorded; an **oracle** is the typed
@@ -427,6 +866,16 @@ observation itself.
 | Text protocol | `ProtocolTrace`/`ProtocolFrame` checks: exact / full_pattern / ignore(reason) / multiset / bind+same_as |
 | Binary layout | `BinaryLayoutIR` field/bit checks (round trip, one-hot, adjacent-preservation, reserved policy) |
 | Domain profile (scene/sim/audio/perf/ML/hw) | oracle bundle over the profile's canonical evidence |
+
+For a perf profile, pair baseline and candidate cohorts on the same workload,
+host, fixture, warmup, and sample count. Record immutable binary identities,
+p50/p95 time, and peak/steady RSS for each startup, warm, or build row. First
+seek an improvement in both time and memory. If one metric regresses, accept
+the tradeoff only when `candidate_p95 / baseline_p95 +
+candidate_peak_RSS / baseline_peak_RSS < 2` beyond measurement noise and both
+independent hard budgets pass. Report both ratios and their sum. Missing or
+unmatched samples cannot pass; use `perf_joint_compare_v1` for the typed SPipe
+verdict, and keep release cohort-size gates separate.
 
 Module: `src/lib/common/spec/evidence/model.spl` (selectors, `OracleCheck`,
 `OracleSpec`), `evidence_comparator.spl` (`compare_evidence`).
@@ -2653,3 +3102,56 @@ Design/plan: `doc/05_design/infra/sspec/binary_reference_stacked_design.md`,
 line-cited semantics, domain recipes (protocol/cipher/checksum/register), and
 pitfalls (fixed 64-bit hex rendering, no endianness conversion in
 `field_extract`): `doc/07_guide/infra/sspec/binary_sspec_usage.md`.
+
+## Running spipe through a local LLM (caret + slang)
+
+A local GGUF model loaded via slang can drive the spipe flow itself through
+caret's TUI agent loop (bash/read/write tools): point `--workspace` at an
+isolated worktree, `--dangerously-allow-all` with that sandbox underneath,
+and prompt it to read this skill, run `bin/simple test <area>`, fix, and
+re-run — never to git commit. Full setup (model root, shim build, tmux
+headless recipe, prompt pattern):
+`doc/07_guide/app/llm/local_llm_slang_caret_setup.md`.
+
+## Spec-writing rules that cost a session (2026-09-27)
+
+Five process rules, each learned the expensive way during one day of Stage-2
+admission work. They extend § "Reading the verdict", § "Source-text assertions
+are not evidence" and § "Reproduce-first for bug-fix specs" — read those too.
+
+1. **`outcome=ERROR ... executed=0` is a BROKEN spec, not a passing one.** Read
+   `executed=N` and require N > 0 before believing any verdict. It happened
+   three times in one day, once to a spec that "passed" review while asserting
+   nothing: its `use core.lexer` import is unresolvable under `simple run`, so
+   no example ever executed. Every `use core.lexer` spec under
+   `test/01_unit/compiler/frontend/` (3 today:
+   `lexer_dead_stream_forward_progress_spec.spl`,
+   `lexer_indentation_eof_emits_token_spec.spl`,
+   `lexer_if_condition_leading_and_continuation_spec.spl`) is vacuous under
+   `simple run` for the same reason — the self-hosted lexer is
+   `compiler.frontend.core.lexer`.
+2. **A spec that shells out to a compiler must honour `SIMPLE_SPEC_COMPILER`
+   (and `SIMPLE_SPEC_RUNTIME_PATH` for the runtime capsule).** `bin/simple` on
+   this host is a stale 2026-09-19 seed; two correct fixes looked broken purely
+   because their specs exercised `bin/simple` instead of the freshly built
+   seed. `SIMPLE_BINARY` cannot carry the override: the runner pins it to the
+   invoking candidate's own identity (`test_runner_single.spl` ~:305-327) and
+   refuses a foreign value, which is why the spec-side selector is a separate
+   allowlisted variable (`test_runner_client.spl` `_binary_override_vars`).
+   Pattern: `compiler_binary()` in
+   `test/01_unit/compiler/backend/text_predicate_argument_shapes_native_spec.spl`.
+3. **A source-guard spec is legitimate — narrowly.** § "Source-text assertions
+   are not evidence" still holds for system specs. The exception: when the
+   behaviour lives on module-private functions a spec cannot import (a lexer
+   accessor, a parser decorator subset), assert on the source text so the
+   regression cannot come back silently, and say WHY in the spec header (which
+   private function, why it is not importable). A source guard with no stated
+   reason is the anti-pattern; one with the reason is a ratchet.
+4. **Prove red-then-green, and report both.** Revert the fix (or stash it), run
+   the spec, quote the failing values; re-apply, run, quote the pass. A spec
+   never observed failing is not known to discriminate.
+5. **Never read an exit status through a pipe.** `cmd | tail -5; echo $?`
+   yields `tail`'s status — a documented false-green source in this repo (see
+   § "Silent defaults" and the `check-c-runtime-compiles-push.shs` header).
+   Redirect verbose output to a file, capture `rc=$?` on the very next line,
+   then filter the file.

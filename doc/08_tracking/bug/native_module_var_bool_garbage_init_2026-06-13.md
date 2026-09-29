@@ -1,62 +1,14 @@
 # Native: module-level `var x = false` is garbage-truthy at startup
+## Closed 2026-09-16 — ...it_flag_value()` read-only getters. ## Fix direction (hypothesis — verify against codegen)
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Severity:** P1
 **Date:** 2026-06-13
 **Area:** native codegen (module-level var initialization)
 **Related:** baremetal module-level `val` zeroing (`feedback_baremetal_module_val_zero`), native env_get raw pointer (`native_env_get_raw_pointer_2026-06-12.md`)
-
-**Status (2026-07-16): RESOLVED (scalar bool/i64 module globals).** Pure-Simple
-scalar-global initialization fix landed 2026-07-15 and is now native-verified.
-Strict default-LLVM + explicit-Cranelift direct/getter first-read regression added to
-`scripts/check/check-native-seed-parity.shs`
-(`write_case_module_global_false_first_read`). The same regression covers
-read-then-write name resolution and interpolation of the module slot.
-
-`var s = ""` (text) module globals are NOT covered by this fix — that is a
-distinct codegen bug, filed separately (see Regression evidence below).
-
-## Regression evidence (2026-07-16, lane modvar_bool)
-
-Native-build verification of the scalar cases (bool + i64):
-
-```
-# var FLAG = false / var COUNT = 0, read at startup then mutated
-$ env -u SIMPLE_BOOTSTRAP bin/simple native-build --entry pb.spl -o pb --clean && ./pb
-FLAG false (ok)
-direct false (ok)
-count=0
-after true (ok)
-count2=7            # rc=0
-```
-
-`var FLAG = false` reads false directly and via a getter fn; `var COUNT = 0`
-reads 0; both mutate and re-read correctly. The existing parity probe
-`write_case_module_global_false_first_read` (bool first-read + read-then-write
-+ `{state}` interpolation) builds and prints `00|73|state=3` natively (rc=0),
-its expected value — the fix is confirmed.
-
-Verification caveats (see Fix direction / CONFLICT notes):
-- The seed interpreter `bin/simple run` (stale compiled-in interpreter) still
-  prints the OLD buggy `FLAG truthy (BUG)` for this repro, so it is not a valid
-  oracle here; the live-`src/compiler` native path is the correct reference and
-  emits the fixed `false` values.
-- At the target commit the seed cannot load current `src/compiler`
-  (`error: semantic: type mismatch: cannot convert dict to int`), so
-  `native-smoke-matrix.shs` and the parity harness cannot execute there
-  (`total=15 pass=0 fail=15` — all "build-failed", a seed↔source regression
-  independent of this bug). The scalar verification above was run at commit
-  `5c67273d180`, where `bootstrap_globals.spl` is byte-identical to the target
-  and native-build loads cleanly.
-
-## Third finding (2026-07-16): `var s = ""` text global → llc type mismatch
-
-Filed as `doc/08_tracking/bug/native_module_var_text_global_type_mismatch_2026-07-16.md`.
-Module-level `var NAME = ""` emits `@g_NAME = global i64 <ptr getelementptr>`,
-which `llc` rejects (`constant expression type mismatch: got type 'ptr' but
-expected 'i64'`) — the global slot type (`i64`) and the string initializer
-(`ptr`) disagree in `core_codegen.spl` around the
-`{g_name} = global {g_ty} {g_init}` emit. Distinct from the bool/i64 scalar
-fix; text globals need a runtime-handle init, not a raw char* constant.
 
 ## Repro
 
@@ -108,15 +60,8 @@ Use i64 0/1 module-level flags; keep bool-returning accessor fns
 
 ## Second finding (same session): read+write same fn → read sees nil (BOTH modes)
 
-**Resolved in source (2026-07-15):** MIR global reads and writes now route the
-resolved module binding through the shared symbol id. The strict dual-backend
-case now proves a read followed by a write in one function and a subsequent
-interpolated read of the same module slot. Runtime execution remains pending the
-fresh pure-Simple compiler binary noted above.
-
-The original failure was that a fn which both READS and ASSIGNS the same
-module-level var saw `nil` on the read — in interpreter AND native. A read-only
-getter fn in between fixed it:
+A fn that both READS and ASSIGNS the same module-level var sees `nil` on the
+read — in interpreter AND native. A read-only getter fn in between fixes it:
 
 ```simple
 var F = 0
@@ -146,3 +91,11 @@ Module-level bool initializers likely skip the global-init path that i64
 literals take (uninitialized BSS/data slot read as nonzero, or boxed-value
 slot read before init). Check where global `var` initializers are lowered in
 native entry-closure builds; bool literal may be dropped or mis-sized.
+
+## Triage 2026-09-13 — LEFT OPEN (the native lane cannot be exercised on this host)
+
+- **measured** (Rust seed `bin/simple` v1.0.0-rc.1, Windows): the repro is CLEAN on the JIT/interpreter lane — `FLAG false (ok)`, `direct false (ok)`, `count=0`. That is the lane the bug says was already correct, so it clears nothing.
+- **measured**: the reported lane cannot run here. `bin/simple native-build --entry flag.spl --output flagbin` fails before producing a binary: `error: native-build worker wrapper exited abnormally (signal or wait failure, code -1) before producing a binary; its process group has been terminated.`
+- **inferred**: the original report used `--runtime-bundle core-c-bootstrap` on Linux. With no working native-build and no self-hosted binary on this host, neither reproduction nor clearance is possible.
+- Verdict: OPEN — unverified, not disproven. Needs a Linux native-build lane.
+

@@ -1,4 +1,8 @@
 # "Native LLVM binaries produce no output" — CLOSED, measurement artifact
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-01
 **Status:** CLOSED — not a codegen defect. Two reproducible measurement
@@ -100,3 +104,4 @@ absolute-path no-op compile, nil-stub era, and a genuine codegen defect. The
 positive check is: `file` reports a statically-linked-or-PIE executable, `size`
 shows a text segment comparable to a live control, and the binary actually runs
 and prints.
+

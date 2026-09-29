@@ -1,0 +1,70 @@
+"""
+## Purpose and audience
+Generalization companion to bounded_run_classification_spec.spl. The
+reproducing spec pins the measured incident and the grace boundary; this one
+sweeps the whole ambiguous code set across the whole duration range, so the
+classifier cannot be correct for the one code that was reported and wrong for
+its three siblings.
+
+Written for whoever changes the kill-shaped code set or the grace window: both
+are easy to edit in one place and leave inconsistent in the other.
+
+## Operator workflow
+SIMPLE_EXECUTION_MODE=interpreter simple run test/01_unit/app/test_runner_new/bounded_run_classification_generalization_spec.spl
+
+## Compatibility and limitations
+Pure integer classification. No process, clock, or filesystem.
+
+## Verification guidance and troubleshooting
+If the sweep disagrees with the reproducing spec, the two disagree about the
+grace window — reconcile them against the client's `outer_timeout_ms =
+child_timeout_secs * 1000 + 30000`.
+"""
+# Lifecycle: doc/08_tracking/bug/test_runner_reports_early_child_death_as_outer_bound_timeout_2026-09-12.md
+# @manual_section: bounded-run-classification
+
+use std.spec.{describe, it, expect, step}
+use app.test_daemon.light_protocol.{bounded_run_classification}
+
+
+describe "Bounded run classification generalizes":
+    it "treats all four ambiguous codes identically at every duration":
+        # @req REQ-RUNNER-CLASS-010
+        # @capture(statistics): early/timeout verdict counts swept over the four kill-shaped codes
+        step("Sweep every kill-shaped code below and above the grace floor")
+        val codes = [-1, 124, 143, 255]
+        var early = 0
+        var late = 0
+        for c in codes:
+            if bounded_run_classification(c, 0, 930000) == "early-death":
+                early = early + 1
+            if bounded_run_classification(c, 930000, 930000) == "timeout":
+                late = late + 1
+        expect(early).to_equal(4)  # oracle: all four codes read as early at 0ms
+        expect(late).to_equal(4)  # oracle: all four codes read as timeout at the full budget
+
+    it "puts the boundary exactly 30s below the outer bound":
+        # @req REQ-RUNNER-CLASS-011
+        # @capture(statistics): verdicts either side of the grace floor
+        step("Probe one millisecond either side of the grace floor")
+        expect(bounded_run_classification(-1, 899999, 930000)).to_equal("early-death")  # oracle: below the floor
+        expect(bounded_run_classification(-1, 900000, 930000)).to_equal("timeout")  # oracle: at the floor
+
+    it "scales the boundary with a smaller budget instead of hardcoding it":
+        # @req REQ-RUNNER-CLASS-012
+        # @capture(statistics): verdicts for a 150000ms bound, whose floor is 120000ms
+        step("Repeat the boundary probe against a different outer bound")
+        expect(bounded_run_classification(-1, 119999, 150000)).to_equal("early-death")  # oracle: floor is 150000-30000
+        expect(bounded_run_classification(-1, 120000, 150000)).to_equal("timeout")
+
+    it "never reclassifies an ordinary exit code at any duration":
+        # @req REQ-RUNNER-CLASS-013
+        # @capture(statistics): verdict counts for non-kill codes across the duration range
+        step("Sweep ordinary exit codes across the whole duration range")
+        var ran = 0
+        for c in [0, 1, 2, 3, 42]:
+            if bounded_run_classification(c, 0, 930000) == "ran":
+                ran = ran + 1
+            if bounded_run_classification(c, 999999, 930000) == "ran":
+                ran = ran + 1
+        expect(ran).to_equal(10)  # oracle: 5 codes x 2 durations, every one the child's own outcome

@@ -1,4 +1,8 @@
 # Qualified `use prov` + `prov.f()` in entry module still fails codegen (GlobalLoad 'prov')
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN
 **Filed:** 2026-08-18
@@ -34,3 +38,4 @@ re-read with this in mind: the interpreter produced the V:x, not the codegen
 lane. The gate now correctly shows the defect; leave it RED per testing rules
 (a correct check that fails is a legitimate artifact) until qualified binding
 is actually implemented in the codegen lane.
+

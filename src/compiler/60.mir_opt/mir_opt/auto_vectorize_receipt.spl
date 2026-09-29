@@ -1,0 +1,126 @@
+# Auto-Vectorization Requirement Receipt
+#
+# `@must(simd)` / `@prefer(avx512)` / `@error_not(...)` / `@warn_not(...)` were
+# parsed into `OptimizationReq` (00.common/_Attributes/decl_attrs.spl:230) and
+# carried through HIR, but **nothing ever checked them**. A function tagged
+# `@must(simd)` that the auto-vectorizer silently failed to vectorize compiled
+# clean, which makes the tag decorative. The only feedback that existed was the
+# advisory text-scanning lint (35.semantics/lint/simd_opportunity_lint.spl).
+#
+# This module is the decision half: a pure function from
+# (requirement, what the pass actually achieved) to a verdict. It is
+# deliberately free of MIR, CPUID and I/O so it is directly testable.
+
+# ============================================================================
+# Verdict
+# ============================================================================
+
+enum SimdReqVerdict:
+    """Outcome of checking one function's SIMD optimization requirement."""
+    NotRequested      # no @must/@prefer/... on this function
+    Satisfied         # requirement met
+    Warn              # @prefer / @warn_not unmet — diagnostic, compilation continues
+    Error             # @must / @error_not unmet — compilation must fail
+
+struct SimdReqOutcome:
+    """Verdict plus the reason text used for the diagnostic."""
+    verdict: SimdReqVerdict
+    reason:  text
+
+# ============================================================================
+# What the pass achieved for one function
+# ============================================================================
+
+struct SimdReqEvidence:
+    """Evidence gathered by run_auto_vectorize for a single function.
+
+    vectorized:       at least one loop in the function was actually rewritten
+                      into vector form (not merely pattern-matched and logged).
+    lane_width_bits:  the vector width the rewrite used (0 when none).
+    avx512_admitted:  the resolved planning level admitted AVX-512
+                      (auto_vectorize_target.spl:auto_vectorize_avx512_admitted).
+    recognised_only:  a vectorizable pattern WAS recognised (reduction, matrix
+                      kernel) but this wave's rewriter does not emit it yet.
+                      Distinguishing this from "nothing matched" matters: the
+                      two have completely different fixes, and reporting the
+                      wrong one sends the reader hunting a pattern-matcher bug
+                      that does not exist.
+    """
+    vectorized:      bool
+    lane_width_bits: i64
+    avx512_admitted: bool
+    recognised_only: bool = false
+
+fn simd_req_evidence_none() -> SimdReqEvidence:
+    SimdReqEvidence(vectorized: false, lane_width_bits: 0, avx512_admitted: false, recognised_only: false)
+
+# ============================================================================
+# Decision
+# ============================================================================
+
+fn _backend_satisfied(backend: text, ev: SimdReqEvidence) -> bool:
+    """Does the evidence satisfy the requested backend?
+
+    "simd" is satisfied by any real vectorization. "avx512" additionally
+    requires that the admitted planning level was the AVX-512 one AND that the
+    rewrite actually used 512-bit lanes — an AVX-512-capable host that still
+    emitted 256-bit lanes has NOT satisfied `@must(avx512)`.
+    """
+    if not ev.vectorized:
+        return false
+    if backend == "avx512":
+        return ev.avx512_admitted and ev.lane_width_bits >= 512
+    if backend == "avx2":
+        return ev.lane_width_bits >= 256
+    if backend == "sse":
+        return ev.lane_width_bits >= 128
+    backend == "simd"
+
+fn check_simd_requirement(level: text, backend: text, ev: SimdReqEvidence) -> SimdReqOutcome:
+    """
+    Decide the verdict for one function.
+
+    level:   "" | "must" | "prefer" | "error_not" | "warn_not"
+    backend: "" | "simd" | "avx2" | "avx512" | "sse" | "neon" | "riscv_v" | ...
+
+    Only CPU SIMD backends are adjudicated here; a GPU backend request
+    (cuda/metal/opencl/gpu) is out of this pass's authority and reports
+    NotRequested rather than a false Error.
+    """
+    if level == "" or level == "none":
+        return SimdReqOutcome(verdict: SimdReqVerdict.NotRequested, reason: "")
+    if backend == "cuda" or backend == "metal" or backend == "opencl" or backend == "gpu":
+        return SimdReqOutcome(
+            verdict: SimdReqVerdict.NotRequested,
+            reason: "gpu-backend-not-adjudicated-by-auto-vectorize")
+    if backend == "" or backend == "unknown":
+        return SimdReqOutcome(
+            verdict: SimdReqVerdict.NotRequested,
+            reason: "unknown-backend-request")
+
+    if _backend_satisfied(backend, ev):
+        return SimdReqOutcome(
+            verdict: SimdReqVerdict.Satisfied,
+            reason: "{backend}-satisfied-at-{ev.lane_width_bits}-bit-lanes")
+
+    var why = "loop-not-vectorized"
+    if not ev.vectorized and ev.recognised_only:
+        why = "pattern-recognised-but-this-wave-emits-no-rewrite-for-it"
+    elif ev.vectorized and backend == "avx512" and not ev.avx512_admitted:
+        why = "avx512-not-admitted-by-target-receipt"
+    elif ev.vectorized:
+        why = "vectorized-at-{ev.lane_width_bits}-bit-lanes-below-{backend}-width"
+
+    if level == "must" or level == "error_not":
+        return SimdReqOutcome(
+            verdict: SimdReqVerdict.Error,
+            reason: "@{level}({backend}) unsatisfied: {why}")
+    SimdReqOutcome(
+        verdict: SimdReqVerdict.Warn,
+        reason: "@{level}({backend}) unsatisfied: {why}")
+
+fn simd_req_outcome_is_fatal(outcome: SimdReqOutcome) -> bool:
+    outcome.verdict == SimdReqVerdict.Error
+
+export SimdReqVerdict, SimdReqOutcome, SimdReqEvidence
+export simd_req_evidence_none, check_simd_requirement, simd_req_outcome_is_fatal

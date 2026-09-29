@@ -1,0 +1,76 @@
+# Root device broker — trusted PCI selection for fixed catalogue services.
+#
+# This is kernel policy, not a userspace discovery API. It returns only an
+# exact PCI identity and bounded resource policy; physical BAR addresses remain
+# private to the MapBar syscall after its CSpace check.
+
+use os.drivers.pci.pci.{pci_read_vendor, pci_read_class}
+use os.kernel.types.device_mem_types.{device_grant_iommu_domain_id}
+
+pub struct RootDeviceLease:
+    bdf_bus: u8
+    bdf_device: u8
+    bdf_func: u8
+    bar_index: u8
+    dma_max_bytes: u64
+    iommu_domain_id: u32
+
+val PCI_CLASS_MASS_STORAGE: u8 = 0x01u8
+val PCI_SUBCLASS_NVM: u8 = 0x08u8
+val PCI_CLASS_NETWORK: u8 = 0x02u8
+val PCI_VENDOR_VIRTIO: u16 = 0x1AF4u16
+val ROOT_STORAGE_DMA_MAX_BYTES: u64 = 16u64 * 1024u64 * 1024u64
+val ROOT_NETWORK_DMA_MAX_BYTES: u64 = 16u64 * 1024u64 * 1024u64
+
+fn _lease(bus: u8, device: u8, func: u8, dma_max_bytes: u64) -> RootDeviceLease:
+    RootDeviceLease(
+        bdf_bus: bus, bdf_device: device, bdf_func: func,
+        bar_index: 0u8, dma_max_bytes: dma_max_bytes,
+        iommu_domain_id: device_grant_iommu_domain_id(bus, device, func)
+    )
+
+fn _find_device(
+    class_code_want: u8,
+    subclass_want: u8,
+    vendor_want: u16,
+    dma_max_bytes: u64
+) -> RootDeviceLease?:
+    """Find the first exact trusted PCI policy match without exposing it.
+
+    A storage lease permits standard NVMe class/subclass irrespective of
+    vendor; the network service is intentionally limited to the expected
+    VirtIO vendor, avoiding accidental attachment to an arbitrary NIC before
+    a richer signed hardware policy exists.
+    """
+    var bus: u16 = 0u16
+    while bus < 256u16:
+        var device: u8 = 0u8
+        while device < 32u8:
+            var func: u8 = 0u8
+            while func < 8u8:
+                val bus8 = bus.to_u8()
+                val vendor = pci_read_vendor(bus8, device, func)
+                if vendor != 0xFFFFu16 and (vendor_want == 0u16 or vendor == vendor_want):
+                    val class_info = pci_read_class(bus8, device, func)
+                    val class_code = ((class_info >> 24) & 0xFFu32).to_u8()
+                    val subclass = ((class_info >> 16) & 0xFFu32).to_u8()
+                    if class_code == class_code_want and subclass == subclass_want:
+                        return Some(_lease(bus8, device, func, dma_max_bytes))
+                func = func + 1u8
+            device = device + 1u8
+        bus = bus + 1u16
+    nil
+
+pub fn root_device_broker_storage_lease() -> RootDeviceLease?:
+    """Select one NVMe controller for the fixed root VFS service."""
+    _find_device(
+        PCI_CLASS_MASS_STORAGE, PCI_SUBCLASS_NVM, 0u16,
+        ROOT_STORAGE_DMA_MAX_BYTES
+    )
+
+pub fn root_device_broker_network_lease() -> RootDeviceLease?:
+    """Select one VirtIO network controller for the fixed root net service."""
+    _find_device(
+        PCI_CLASS_NETWORK, 0u8, PCI_VENDOR_VIRTIO,
+        ROOT_NETWORK_DMA_MAX_BYTES
+    )

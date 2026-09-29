@@ -940,3 +940,40 @@ mod tests {
         assert_eq!(rt_bytes_u8_at(arr, 0), 0xff);
     }
 }
+
+/// Interpreter backing for the arm64 freestanding helper
+/// `rt_arm_array_len_u32(arr: [u8]) -> u32`.
+///
+/// `@cfg(arm64)` is evaluated against the HOST, so on an aarch64 host the
+/// kernel loader's `byte_utils.byte_len` routes here. The C helper validates
+/// tagged/raw arrays; interpreter arrays are already typed, so this is `len`.
+pub fn rt_arm_array_len_u32_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let len = match args.first() {
+        Some(Value::ByteArray(v)) | Some(Value::FrozenByteArray(v)) => v.len(),
+        Some(Value::Array(v)) | Some(Value::FrozenArray(v)) => v.len(),
+        _ => 0,
+    };
+    Ok(Value::Int(len as i64))
+}
+
+/// Interpreter backing for `rt_arm_array_get_byte_u32(arr: [u8], idx: u64) -> u32`.
+///
+/// Mirrors the C helper: the index is unsigned (no negative wrap-around) and
+/// an out-of-bounds read returns 0 instead of faulting.
+pub fn rt_arm_array_get_byte_u32_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let idx = match args.get(1) {
+        Some(Value::UInt { value, .. }) => usize::try_from(*value).ok(),
+        Some(v) => usize::try_from(v.as_int()?).ok(),
+        None => None,
+    };
+    let byte = match (args.first(), idx) {
+        (Some(Value::ByteArray(v)), Some(i)) | (Some(Value::FrozenByteArray(v)), Some(i)) => {
+            v.get(i).copied().map(i64::from).unwrap_or(0)
+        }
+        (Some(Value::Array(v)), Some(i)) | (Some(Value::FrozenArray(v)), Some(i)) => {
+            v.get(i).map(interpreter_byte_at).unwrap_or(0)
+        }
+        _ => 0,
+    };
+    Ok(Value::Int(byte))
+}

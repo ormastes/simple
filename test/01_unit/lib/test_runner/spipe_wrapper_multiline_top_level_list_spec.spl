@@ -1,0 +1,58 @@
+# test/01_unit/lib/test_runner/spipe_wrapper_multiline_top_level_list_spec.spl
+#
+# Regression pin for the SPipe native-result wrapper generator.
+#
+# A multi-line top-level declaration -- `val XS: [text] = [` ... `]` -- had its
+# closing `]` swept into the generated `fn main()`: the bracket sits at column
+# 0 and is not itself a declaration keyword, so the indentation-only rule that
+# ended a top-level declaration classified it as body. The module-scope list
+# literal was left unterminated and the next `val` produced
+# `parse: Unexpected token: expected RBracket, found Val`
+# (seen on test/perf/graphics_2d/no_duplication_spec.spl under --coverage).
+#
+# @cover src/lib/nogc_sync_mut/test_runner/test_runner_execute.spl
+
+"""
+## Purpose and audience
+Purpose: the wrapper keeps a multi-line top-level list literal at module scope.
+Audience: test-runner and tooling engineers.
+"""
+
+use std.spec.step
+use std.test_runner.{preprocess_spipe_file}
+use std.io.{file_write, file_read, file_delete}
+
+fn wrapper_output_for_multiline_list() -> text:
+    val src = "/tmp/spipe_rbracket_pin_spec.spl"
+    file_write(src, "val PIN_DIRS: [text] = [\n" +
+        "    \"a/\",\n" +
+        "    \"b/\"\n" +
+        "]\n" +
+        "\n" +
+        "val PIN_NAME: text = \"pinned\"\n" +
+        "\n" +
+        "describe \"pin\":\n" +
+        "    it \"has two dirs\":\n" +
+        "        expect(PIN_DIRS.len()).to_equal(2)\n")
+    val wrapped_path = preprocess_spipe_file(src)
+    val wrapped = file_read(wrapped_path) ?? ""
+    file_delete(src)
+    wrapped
+
+describe "spipe wrapper — multi-line top-level list literal":
+
+    it "keeps the closing bracket at module scope, above fn main()":
+        step("Split the wrapper output at fn main() and check the module-scope half")
+        val wrapped = wrapper_output_for_multiline_list()
+        val main_at = wrapped.index_of("fn main():")
+        expect(main_at > 0).to_equal(true)
+        val top = wrapped[0:main_at]
+        expect(top.contains("]")).to_equal(true)
+        expect(top.contains("val PIN_NAME")).to_equal(true)
+
+    it "does not leak the closing bracket into the generated main body":
+        step("The body must not contain an indented bare closing bracket")
+        val wrapped = wrapper_output_for_multiline_list()
+        val main_at = wrapped.index_of("fn main():")
+        val body = wrapped[main_at:]
+        expect(body.contains("\n    ]\n")).to_equal(false)

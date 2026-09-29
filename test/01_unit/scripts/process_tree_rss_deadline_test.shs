@@ -1,0 +1,121 @@
+#!/bin/sh
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+guard=$root/scripts/resource/process-tree-rss-watchdog.pl
+fail() { echo "FAIL: $*" >&2; exit 1; }
+sample_gap_below_limit() {
+    awk -F= '
+        /^sample_gap_max_ms=/ {
+            count++
+            if (NF != 2 || $2 !~ /^[0-9]+([.][0-9]+)?$/ || $2 >= 130) invalid = 1
+        }
+        END { exit !(count == 1 && !invalid) }
+    ' "$1"
+}
+# Reject missing, malformed, duplicated and out-of-budget cadence evidence.
+# The previous awk checks silently accepted absent and empty fields.
+for value in '' 'status=complete' 'sample_gap_max_ms=' 'sample_gap_max_ms=bad' \
+    'sample_gap_max_ms=NaN' 'sample_gap_max_ms=-1' 'sample_gap_max_ms=1=extra' \
+    'sample_gap_max_ms=130'; do
+    printf '%s\n' "$value" >"$tmp/invalid-gap.env"
+    if sample_gap_below_limit "$tmp/invalid-gap.env"; then
+        fail "accepted missing or invalid cadence: $value"
+    fi
+done
+printf 'sample_gap_max_ms=1\nsample_gap_max_ms=2\n' >"$tmp/invalid-gap.env"
+if sample_gap_below_limit "$tmp/invalid-gap.env"; then fail 'accepted duplicate cadence'; fi
+for value in 0 100 129.99; do
+    printf 'status=complete\nsample_gap_max_ms=%s\n' "$value" >"$tmp/valid-gap.env"
+    sample_gap_below_limit "$tmp/valid-gap.env" || fail "rejected valid cadence: $value"
+done
+mkdir "$tmp/bin"
+real_ps=$(command -v ps)
+cat >"$tmp/bin/ps" <<EOF
+#!/bin/sh
+sleep .04
+exec "$real_ps" "\$@"
+EOF
+chmod +x "$tmp/bin/ps"
+# macOS may spend hundreds of milliseconds admitting a new executable script.
+# Warm this artificial sampler before measuring the deliberate 40 ms delay.
+"$tmp/bin/ps" -p $$ >/dev/null
+PATH="$tmp/bin:$PATH" perl "$guard" --receipt="$tmp/cadence.env" -- sleep .65
+sample_gap_below_limit "$tmp/cadence.env" || fail 'invalid cadence receipt or sample time added to interval'
+status=0
+perl "$guard" --timeout-seconds=1 --receipt="$tmp/deadline.env" -- sleep 1.01 || status=$?
+[ "$status" -eq 124 ] || fail "late completion bypassed deadline: $status"
+status=0
+perl "$guard" --timeout-seconds=1 --term-grace-seconds=1 -- /bin/sh -c \
+    'trap '\''echo flushed >"$1"; exit 0'\'' TERM; sleep 10 & wait' sh "$tmp/flushed" || status=$?
+[ "$status" -eq 124 ] && [ -s "$tmp/flushed" ] || fail 'timeout lost TERM/grace flushing'
+cat >"$tmp/bin/ps" <<'EOF'
+#!/bin/sh
+sleep 10
+EOF
+if [ "$(uname -s)" != Darwin ]; then
+status=0
+PATH="$tmp/bin:$PATH" perl "$guard" --receipt="$tmp/stalled.env" -- \
+    /bin/sh -c 'touch "$1"' sh "$tmp/started" >"$tmp/stalled.log" 2>&1 || status=$?
+[ "$status" -eq 89 ] && [ ! -e "$tmp/started" ] || fail 'hung sampler released command'
+fi
+
+# Simulate cold executable admission independently of host load. Link the delay
+# into the real helper so its SID observations and pinned binary remain real.
+cat >"$tmp/admission-delay.c" <<'EOF'
+#define _POSIX_C_SOURCE 200809L
+#include <fcntl.h>
+#include <stdlib.h>
+#include <unistd.h>
+__attribute__((constructor)) static void delay_first_admission(void) {
+    const char *marker = getenv("RSS_GUARD_TEST_MARKER");
+    const char *delay = getenv("RSS_GUARD_TEST_DELAY");
+    if (!marker || !delay) return;
+    int fd = open(marker, O_WRONLY | O_CREAT | O_EXCL, 0600);
+    if (fd < 0) return;
+    close(fd);
+    sleep((unsigned)atoi(delay));
+}
+EOF
+cat >"$tmp/cc" <<'EOF'
+#!/bin/sh
+exec "$RSS_GUARD_TEST_CC" "$@" "$RSS_GUARD_TEST_SOURCE"
+EOF
+chmod +x "$tmp/cc"
+export RSS_GUARD_TEST_CC RSS_GUARD_TEST_SOURCE RSS_GUARD_TEST_MARKER RSS_GUARD_TEST_DELAY
+RSS_GUARD_TEST_CC=$(command -v "${CC:-cc}")
+RSS_GUARD_TEST_SOURCE=$tmp/admission-delay.c
+RSS_GUARD_TEST_MARKER=$tmp/cold-success
+RSS_GUARD_TEST_DELAY=3
+CC="$tmp/cc" perl "$guard" --receipt="$tmp/cold.env" -- /bin/sleep .25
+grep -Fxq 'status=complete' "$tmp/cold.env" || fail 'cold admission did not complete'
+grep -Fxq 'session_helper_integrity=verified' "$tmp/cold.env" || fail 'cold helper was not verified'
+sample_gap_below_limit "$tmp/cold.env" || fail 'invalid cold cadence receipt or admission entered sample clock'
+
+# A genuine ps failure after cold admission must keep its measurement receipt.
+cat >"$tmp/bin/ps" <<'EOF'
+#!/bin/sh
+exit 77
+EOF
+RSS_GUARD_TEST_MARKER=$tmp/cold-measurement
+if [ "$(uname -s)" != Darwin ]; then
+status=0
+PATH="$tmp/bin:$PATH" CC="$tmp/cc" perl "$guard" --receipt="$tmp/cold-failure.env" -- \
+    /bin/sh -c 'touch "$1"' sh "$tmp/cold-started" >"$tmp/cold-failure.log" 2>&1 || status=$?
+[ "$status" -eq 89 ] && [ ! -e "$tmp/cold-started" ] || fail 'cold measurement failure released command'
+grep -Fxq 'status=rss-measurement-failed' "$tmp/cold-failure.env" || fail 'cold admission masked measurement failure'
+fi
+
+# The larger startup budget remains bounded and never releases a stalled helper.
+RSS_GUARD_TEST_MARKER=$tmp/cold-stalled
+RSS_GUARD_TEST_DELAY=10
+begin=$(date +%s)
+status=0
+CC="$tmp/cc" perl "$guard" --receipt="$tmp/cold-stalled.env" -- \
+    /bin/sh -c 'touch "$1"' sh "$tmp/cold-stalled-started" >"$tmp/cold-stalled.log" 2>&1 || status=$?
+elapsed=$(($(date +%s) - begin))
+[ "$status" -eq 89 ] && [ ! -e "$tmp/cold-stalled-started" ] || fail 'stalled helper released command'
+[ "$elapsed" -lt 9 ] || fail "stalled helper exceeded startup bound: $elapsed seconds"
+grep -Fxq 'status=session-helper-install-failed' "$tmp/cold-stalled.env" || fail 'missing stalled helper receipt'
+echo 'PASS: sampling cadence, timeout/grace, hung sampler and bounded cold helper admission'

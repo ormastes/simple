@@ -11,6 +11,8 @@
 #   - Multiple export formats (JSON, Markdown, Text)
 
 # I/O imports
+use app.io.context_ops (context_log_summary_file)
+use std.common.text.{parse_i64}
 use app.io.context_ops (context_generate, context_stats, context_index_packs, context_query_index, context_sql_index_packs, context_sql_query_packs, context_sql_query_packs_by_source, context_args_allow_sourceless_sql_query, context_get_args, context_file_exists, context_file_write)
 use std.cli.cli_util (has_flag)
 use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
@@ -38,6 +40,9 @@ fn print_help():
     print "  --source-filter=<text>  Filter SQL query rows by stored source path"
     for line in log_options_help():
         print "  {line}"
+    print "  --log <file>    Summarize a log file with BM25 (never echoes the log)"
+    print "  --purpose <txt> What the caller needs from the log (log mode)"
+    print "  --top N         Number of ranked lines to emit (log mode, default 10)"
     print "  -h, --help      Show this help"
     print ""
     print "Examples:"
@@ -48,6 +53,7 @@ fn print_help():
     print "  context app.spl --query=handler --text"
     print "  context app.spl --sql --query=handler --db=.cache/context.db"
     print "  context --sql --query=handler --db=.cache/context.db --source-filter=app.spl"
+    print "  context --log build/test.log --purpose \"why did linking fail\" --top 5"
     print ""
     print "Features:"
     print "  - 90% reduction in LLM context tokens"
@@ -108,6 +114,54 @@ fn main() -> i64:
             return 1
         else:
             return 0
+
+    # ── Log summary mode (BM25) ───────────────────────────────────────────────
+    var log_path = ""
+    var log_purpose = ""
+    var log_query = ""
+    var log_top: i64 = 10
+    var log_i = 0
+    while log_i < args.len():
+        val larg = args[log_i]
+        if larg == "--log":
+            if log_i + 1 < args.len():
+                log_path = args[log_i + 1]
+                log_i = log_i + 1
+        elif larg.starts_with("--log="):
+            log_path = larg[6:]
+        elif larg == "--purpose":
+            if log_i + 1 < args.len():
+                log_purpose = args[log_i + 1]
+                log_i = log_i + 1
+        elif larg.starts_with("--purpose="):
+            log_purpose = larg[10:]
+        elif larg == "--query":
+            if log_i + 1 < args.len():
+                log_query = args[log_i + 1]
+                log_i = log_i + 1
+        elif larg.starts_with("--query="):
+            log_query = larg[8:]
+        elif larg == "--top":
+            if log_i + 1 < args.len():
+                log_top = parse_i64(args[log_i + 1])
+                log_i = log_i + 1
+        elif larg.starts_with("--top="):
+            log_top = parse_i64(larg[6:])
+        log_i = log_i + 1
+
+    if log_path != "":
+        if log_purpose == "" and log_query == "":
+            print "context: --log requires --purpose or --query"
+            return 1
+        if not context_file_exists(log_path):
+            print "context: cannot read {log_path}: file not found"
+            return 1
+        val summary = context_log_summary_file(log_path, log_purpose, log_query, log_top)
+        if summary == "":
+            print "context: failed to summarize {log_path}"
+            return 1
+        print summary
+        return 0
 
     # Parse arguments
     var source_path = ""

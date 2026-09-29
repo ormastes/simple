@@ -1,0 +1,48 @@
+use app.io._CliCompile.compile_targets.{_native_build_entry_closure}
+
+extern fn rt_time_now_monotonic_ms() -> i64
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_dir_create(path: text, recursive: bool) -> bool
+
+fn write_fixture(root: text, count: i64) -> bool:
+    if not rt_dir_create(root + "/fixture", true):
+        return false
+    var i: i64 = 0
+    while i < count:
+        # Simple string literals use `\n`; the former `\\n` wrote a literal
+        # backslash-n, so the closure scanner observed no import and returned
+        # only mod0.
+        val next = if i + 1 < count: "use fixture.mod{i + 1}\n" else: ""
+        # Long irrelevant comment lines exercise the allocation-free hot path.
+        val padding_line = "# fixture padding " + "x".repeat(256) + "\n"
+        val padding = padding_line.repeat(8)
+        if not rt_file_write_text(root + "/fixture/mod{i}.spl", next + padding + "fn value{i}() -> i64: {i}\n"):
+            return false
+        i = i + 1
+    true
+
+fn path_checksum(paths: [text]) -> i64:
+    var checksum: i64 = 0
+    var i: i64 = 0
+    while i < paths.len():
+        checksum = checksum + paths[i].len() * (i + 1)
+        i = i + 1
+    checksum
+
+describe "production native-build entry closure":
+    it "walks one thousand imports in deterministic order":
+        val root = "build/perf/startup/closure_actual_fixture"
+        expect(write_fixture(root, 1000)).to_be(true)
+        val start = rt_time_now_monotonic_ms()
+        val paths = _native_build_entry_closure(root + "/fixture/mod0.spl", [root])
+        val elapsed = rt_time_now_monotonic_ms() - start
+        val checksum = path_checksum(paths)
+        print "[driver-entry-closure] elapsed_ms={elapsed} files={paths.len()} checksum={checksum} first={paths[0]} middle={paths[499]} last={paths[999]}"
+        # Timing assertion: prove the measured workload, not only fixture setup,
+        # was reached before accepting this performance evidence.
+        expect(elapsed).to_be_greater_than(-1)
+        expect(paths.len()).to_equal(1000)
+        expect(paths[0]).to_equal(root + "/fixture/mod0.spl")
+        expect(paths[499]).to_equal(root + "/fixture/mod499.spl")
+        expect(paths[999]).to_equal(root + "/fixture/mod999.spl")
+        expect(checksum).to_be_greater_than(0)

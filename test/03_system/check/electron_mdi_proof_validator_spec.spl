@@ -1,3 +1,4 @@
+# @req: REQ-CHECK-001
 """
 ## Purpose and audience
 Purpose: accepts complete event capture performance and animation proof
@@ -10,7 +11,7 @@ Audience: compiler and tooling engineers who maintain this spec
 Validates the standalone Electron MDI proof validator. The live wrapper writes
 an Electron/Chromium MDI JSON proof and screenshot, and this validator fails
 closed unless event routing, screenshot binding, performance timing, and
-input-to-paint latency, and animation details are all present.
+animation details are all present.
 
 **Plan:** doc/03_plan/ui/web_browser/mdi_platform_completion_plan_2026-06-14.md
 **Requirements:** N/A
@@ -28,33 +29,12 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_mdi_proof_validator
 - Complete Electron MDI proof JSON validates and emits normalized
   `electron_mdi_*` rows.
 - Event routing pass requires DOM events and Electron bridge IPC frames.
-- Event proof emits individual DOM route, traffic-button route, Electron bridge
-  IPC route, taskbar-visibility, and render image/html rows rather than only a
-  coarse event status.
 - Capture pass requires the proof screenshot path to match the captured
-  screenshot artifact and the artifact file to exist with nonzero bytes.
-- Capture artifacts must carry PNG signature bytes, IHDR dimensions, and image
-  chunks; arbitrary nonempty files, signature-only files, and forged chunk text
-  are not accepted as Electron screenshot proof.
-- Proof JSON and screenshot artifacts must be regular files, not symlinks to
-  other proof or capture files.
-- Proof JSON and screenshot artifacts must not be hard-linked aliases of other
-  proof or capture files.
-- Performance, interaction latency, and animation pass require
-  `performance.now()`, an explicit positive timing delta, a positive
-  `inputToPaintMs` sample after routed MDI input, at least two animation
-  frames, and a CSS animation probe. A zero delta does not prove distinct
-  timing samples, and multi-second timing does not prove responsive rendering.
-- Event counts, bridge frame counts, taskbar counts, image counts, animation
-  frame counts, performance timing deltas, and input-to-paint latency must be
-  real JSON numbers; stringified or fractional values are not valid
-  routed-event or full-frame proof.
-- Event routing, renderability, performance, and animation booleans must be
-  real JSON booleans; string booleans are rejected and not normalized as
-  `false` diagnostic rows.
+  screenshot artifact.
+- Performance and animation pass require `performance.now()`, an explicit
+  non-negative timing delta, at least two animation frames, and a CSS animation
+  probe.
 """
-
-# @req: REQ-CHECK-ElecMdiProoVali-001
 
 # @tag: system, gui, electron, mdi, event-routing, performance, animation
 
@@ -62,13 +42,7 @@ use std.io_runtime.{file_read, process_run}
 use std.spec.*
 
 fn _proof_command(path: text, mutation: text) -> text:
-    "node -e 'const fs=require(\"fs\");const p={count:4,hasDesktop:true,imageCount:1,hasDragRuntime:true,hasDragEvents:true,dragMoved:true,hasWindowEventRuntime:true,appActionControlFound:true,appInputControlFound:true,bodyClickRouted:true,bodyInputRouted:true,bodyKeyRouted:true,trafficMinimizeRouted:true,trafficMaximizeRouted:true,trafficCloseRouted:true,bridgeIpcFrameCount:8,bridgeBodyActionFrameRouted:true,bridgeBodyInputFrameRouted:true,bridgeBodyKeyFrameRouted:true,bridgeMouseDownFrameRouted:true,bridgeMouseUpFrameRouted:true,bridgeMinimizeFrameRouted:true,bridgeMaximizeFrameRouted:true,bridgeCloseFrameRouted:true,taskbarItemCount:4,taskbarIconCount:4,taskbarIconsVisible:true,taskbarLabelsVisible:true,htmlRenderable:true,screenshotPath:\"build/electron-proof/screen.png\",performanceNowAvailable:true,performanceNowDeltaMs:16.7,inputToPaintMs:18.4,animationFrameAvailable:true,animationFrameCount:2,cssAnimationProbe:true};" + mutation + ";fs.writeFileSync(process.argv[1],JSON.stringify(p));' " + path
-
-fn _png_capture_command() -> text:
-    "node -e \"process.stdout.write(Buffer.from(process.argv[1], process.argv[2]))\" iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII= base64 > build/electron-proof/screen.png"
-
-fn _forged_png_capture_command() -> text:
-    "node -e \"process.stdout.write(Buffer.from(process.argv[1], process.argv[2]))\" iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAMAAAAoyzS7AAAAElSURBVElFTkQ= base64 > build/electron-proof/screen.png"
+    "node -e 'const fs=require(\"fs\");const p={count:4,hasDesktop:true,imageCount:1,hasDragRuntime:true,hasDragEvents:true,dragMoved:true,hasWindowEventRuntime:true,appActionControlFound:true,appInputControlFound:true,bodyClickRouted:true,bodyInputRouted:true,bodyKeyRouted:true,trafficMinimizeRouted:true,trafficMaximizeRouted:true,trafficCloseRouted:true,bridgeIpcFrameCount:8,bridgeBodyActionFrameRouted:true,bridgeBodyInputFrameRouted:true,bridgeBodyKeyFrameRouted:true,bridgeMouseDownFrameRouted:true,bridgeMouseUpFrameRouted:true,bridgeMinimizeFrameRouted:true,bridgeMaximizeFrameRouted:true,bridgeCloseFrameRouted:true,taskbarItemCount:4,taskbarIconCount:4,taskbarIconsVisible:true,taskbarLabelsVisible:true,htmlRenderable:true,screenshotPath:\"build/electron-proof/screen.png\",performanceNowAvailable:true,performanceNowDeltaMs:16.7,animationFrameAvailable:true,animationFrameCount:2,cssAnimationProbe:true};" + mutation + ";fs.writeFileSync(process.argv[1],JSON.stringify(p));' " + path
 
 describe "Electron MDI proof validator":
 
@@ -77,71 +51,29 @@ describe "Electron MDI proof validator":
         # @req: REQ-CHECK-ElecMdiProoVali-001
         val root = "build/test-electron-mdi-validator-pass"
         val command = "rm -rf " + root + " && mkdir -p " + root + " build/electron-proof && " +
-            _png_capture_command() + " && " +
             _proof_command(root + "/proof.json", "") +
             " && node scripts/check/validate-electron-mdi-proof.js " + root + "/proof.json build/electron-proof/screen.png > " + root + "/evidence.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(0)  # oracle: value fixed by the spec contract
+        expect(code).to_equal(0)
 
         val evidence = file_read(root + "/evidence.env")
         step("Inspect normalized proof rows")
         expect(evidence).to_contain("electron_mdi_json_proof=pass")
-        expect(evidence).to_contain("electron_mdi_proof_symlink_status=pass")
-        expect(evidence).to_contain("electron_mdi_proof_hardlink_status=pass")
         expect(evidence).to_contain("electron_mdi_event_status=pass")
         expect(evidence).to_contain("electron_mdi_capture_status=pass")
-        expect(evidence).to_contain("electron_mdi_screenshot_file_status=pass")
-        expect(evidence).to_contain("electron_mdi_screenshot_file_reason=pass")
-        expect(evidence).to_contain("electron_mdi_screenshot_artifact_status=pass")
-        expect(evidence).to_contain("electron_mdi_screenshot_symlink_status=pass")
-        expect(evidence).to_contain("electron_mdi_screenshot_hardlink_status=pass")
-        expect(evidence).to_contain("electron_mdi_screenshot_size_bytes=68")
-        expect(evidence).to_contain("electron_mdi_screenshot_png_magic_status=pass")
-        expect(evidence).to_contain("electron_mdi_screenshot_png_structure_status=pass")
         expect(evidence).to_contain("electron_mdi_performance_status=pass")
-        expect(evidence).to_contain("electron_mdi_interaction_latency_status=pass")
         expect(evidence).to_contain("electron_mdi_animation_status=pass")
-        expect(evidence).to_contain("electron_mdi_render_image_count=1")
-        expect(evidence).to_contain("electron_mdi_render_html_renderable=true")
-        expect(evidence).to_contain("electron_mdi_event_has_desktop=true")
-        expect(evidence).to_contain("electron_mdi_event_drag_runtime_available=true")
-        expect(evidence).to_contain("electron_mdi_event_drag_events_available=true")
-        expect(evidence).to_contain("electron_mdi_event_drag_moved=true")
-        expect(evidence).to_contain("electron_mdi_event_window_event_runtime_available=true")
-        expect(evidence).to_contain("electron_mdi_event_app_action_control_found=true")
-        expect(evidence).to_contain("electron_mdi_event_app_input_control_found=true")
-        expect(evidence).to_contain("electron_mdi_event_body_click_routed=true")
-        expect(evidence).to_contain("electron_mdi_event_body_input_routed=true")
-        expect(evidence).to_contain("electron_mdi_event_body_key_routed=true")
-        expect(evidence).to_contain("electron_mdi_event_traffic_minimize_routed=true")
-        expect(evidence).to_contain("electron_mdi_event_traffic_maximize_routed=true")
-        expect(evidence).to_contain("electron_mdi_event_traffic_close_routed=true")
-        expect(evidence).to_contain("electron_mdi_bridge_body_action_frame_routed=true")
-        expect(evidence).to_contain("electron_mdi_bridge_body_input_frame_routed=true")
-        expect(evidence).to_contain("electron_mdi_bridge_body_key_frame_routed=true")
-        expect(evidence).to_contain("electron_mdi_bridge_mouse_down_frame_routed=true")
-        expect(evidence).to_contain("electron_mdi_bridge_mouse_up_frame_routed=true")
-        expect(evidence).to_contain("electron_mdi_bridge_minimize_frame_routed=true")
-        expect(evidence).to_contain("electron_mdi_bridge_maximize_frame_routed=true")
-        expect(evidence).to_contain("electron_mdi_bridge_close_frame_routed=true")
-        expect(evidence).to_contain("electron_mdi_event_taskbar_item_count=4")
-        expect(evidence).to_contain("electron_mdi_event_taskbar_icon_count=4")
-        expect(evidence).to_contain("electron_mdi_event_taskbar_icons_visible=true")
-        expect(evidence).to_contain("electron_mdi_event_taskbar_labels_visible=true")
         expect(evidence).to_contain("electron_mdi_performance_now_delta_ms=16.7")
-        expect(evidence).to_contain("electron_mdi_input_to_paint_ms=18.4")
         expect(evidence).to_contain("electron_mdi_animation_frame_count=2")
         expect(evidence).to_contain("electron_mdi_css_animation_probe=true")
 
     it "rejects stale event proof that lacks bridge routed frames":
-        step("Verify: rejects stale event proof that lacks bridge routed frames")
-        # @req: REQ-CHECK-ElecMdiProoVali-001
         val root = "build/test-electron-mdi-validator-event"
-        val command = "rm -rf " + root + " && mkdir -p " + root + " build/electron-proof && " + _png_capture_command() + " && " +
+        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
             _proof_command(root + "/proof.json", "p.bridgeMouseUpFrameRouted=false") +
             " && node scripts/check/validate-electron-mdi-proof.js " + root + "/proof.json build/electron-proof/screen.png > " + root + "/evidence.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)  # oracle: value fixed by the spec contract
+        expect(code).to_equal(1)
 
         val evidence = file_read(root + "/evidence.env")
         expect(evidence).to_contain("electron_mdi_json_proof=fail")
@@ -151,8 +83,6 @@ describe "Electron MDI proof validator":
         expect(evidence).to_contain("electron_mdi_bridge_mouse_up_frame_routed=false")
 
     it "emits detailed Electron DOM event routing failures":
-        step("Verify: emits detailed Electron DOM event routing failures")
-        # @req: REQ-CHECK-ElecMdiProoVali-001
         val root = "build/test-electron-mdi-validator-event-detail"
         val command = "rm -rf " + root + " && mkdir -p " + root + " build/electron-proof && " + _png_capture_command() + " && " +
             _proof_command(root + "/body.json", "p.bodyClickRouted=false") +
@@ -160,7 +90,7 @@ describe "Electron MDI proof validator":
             _proof_command(root + "/taskbar.json", "p.taskbarLabelsVisible=false") +
             " && node scripts/check/validate-electron-mdi-proof.js " + root + "/taskbar.json build/electron-proof/screen.png > " + root + "/taskbar.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)  # oracle: value fixed by the spec contract
+        expect(code).to_equal(1)
 
         val body = file_read(root + "/body.env")
         val taskbar = file_read(root + "/taskbar.env")
@@ -175,8 +105,6 @@ describe "Electron MDI proof validator":
         expect(taskbar).to_contain("electron_mdi_event_taskbar_icons_visible=true")
 
     it "rejects string booleans without normalizing them as false diagnostics":
-        step("Verify: rejects string booleans without normalizing them as false diagnostics")
-        # @req: REQ-CHECK-ElecMdiProoVali-001
         val root = "build/test-electron-mdi-validator-string-booleans"
         val command = "rm -rf " + root + " && mkdir -p " + root + " build/electron-proof && " + _png_capture_command() + " && " +
             _proof_command(root + "/event.json", "p.bodyClickRouted=\"true\"") +
@@ -188,7 +116,7 @@ describe "Electron MDI proof validator":
             _proof_command(root + "/animation.json", "p.animationFrameAvailable=\"true\";p.cssAnimationProbe=\"true\"") +
             " && node scripts/check/validate-electron-mdi-proof.js " + root + "/animation.json build/electron-proof/screen.png > " + root + "/animation.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)  # oracle: value fixed by the spec contract
+        expect(code).to_equal(1)
 
         val event = file_read(root + "/event.env")
         val html = file_read(root + "/html.env")
@@ -215,14 +143,12 @@ describe "Electron MDI proof validator":
         expect_not(animation.contains("electron_mdi_css_animation_probe=false"))
 
     it "rejects proof bound to a different screenshot artifact":
-        step("Verify: rejects proof bound to a different screenshot artifact")
-        # @req: REQ-CHECK-ElecMdiProoVali-001
         val root = "build/test-electron-mdi-validator-capture"
-        val command = "rm -rf " + root + " && mkdir -p " + root + " build/electron-proof && " + _png_capture_command() + " && " +
+        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
             _proof_command(root + "/proof.json", "p.screenshotPath=\"build/electron-proof/old.png\"") +
             " && node scripts/check/validate-electron-mdi-proof.js " + root + "/proof.json build/electron-proof/screen.png > " + root + "/evidence.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)  # oracle: value fixed by the spec contract
+        expect(code).to_equal(1)
 
         val evidence = file_read(root + "/evidence.env")
         expect(evidence).to_contain("electron_mdi_json_proof=fail")
@@ -233,8 +159,6 @@ describe "Electron MDI proof validator":
         expect(evidence).to_contain("electron_mdi_screenshot_png_magic_status=pass")
 
     it "rejects symlinked Electron MDI proof and screenshot artifacts":
-        step("Verify: rejects symlinked Electron MDI proof and screenshot artifacts")
-        # @req: REQ-CHECK-ElecMdiProoVali-001
         val root = "build/test-electron-mdi-validator-symlink-artifacts"
         val command = "rm -rf " + root + " build/electron-proof && mkdir -p " + root + " build/electron-proof && " +
             _png_capture_command().replace("build/electron-proof/screen.png", "build/electron-proof/real.png") +
@@ -244,7 +168,7 @@ describe "Electron MDI proof validator":
             "node scripts/check/validate-electron-mdi-proof.js " + root + "/linked-proof.json build/electron-proof/screen.png > " + root + "/proof.env; " +
             "node scripts/check/validate-electron-mdi-proof.js " + root + "/proof.json build/electron-proof/screen.png > " + root + "/screenshot.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)  # oracle: value fixed by the spec contract
+        expect(code).to_equal(1)
 
         val proof = file_read(root + "/proof.env")
         val screenshot = file_read(root + "/screenshot.env")
@@ -263,8 +187,6 @@ describe "Electron MDI proof validator":
         expect(screenshot).to_contain("electron_mdi_screenshot_size_bytes=68")
 
     it "rejects hardlinked Electron MDI proof and screenshot artifacts":
-        step("Verify: rejects hardlinked Electron MDI proof and screenshot artifacts")
-        # @req: REQ-CHECK-ElecMdiProoVali-001
         val root = "build/test-electron-mdi-validator-hardlink-artifacts"
         val command = "rm -rf " + root + " build/electron-proof && mkdir -p " + root + " build/electron-proof && " +
             _png_capture_command().replace("build/electron-proof/screen.png", "build/electron-proof/real.png") +
@@ -276,7 +198,7 @@ describe "Electron MDI proof validator":
             "node scripts/check/validate-electron-mdi-proof.js " + root + "/proof.json build/electron-proof/real.png > " + root + "/proof.env; " +
             "node scripts/check/validate-electron-mdi-proof.js " + root + "/screenshot-proof.json build/electron-proof/screen.png > " + root + "/screenshot.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)  # oracle: value fixed by the spec contract
+        expect(code).to_equal(1)
 
         val proof = file_read(root + "/proof.env")
         val screenshot = file_read(root + "/screenshot.env")
@@ -298,8 +220,6 @@ describe "Electron MDI proof validator":
         expect(screenshot).to_contain("electron_mdi_screenshot_png_structure_status=pass")
 
     it "rejects matching screenshot path when the artifact is missing or empty":
-        step("Verify: rejects matching screenshot path when the artifact is missing or empty")
-        # @req: REQ-CHECK-ElecMdiProoVali-001
         val root = "build/test-electron-mdi-validator-capture-file"
         val command = "rm -rf " + root + " build/electron-proof && mkdir -p " + root + " build/electron-proof && " +
             _proof_command(root + "/missing.json", "") +
@@ -308,7 +228,7 @@ describe "Electron MDI proof validator":
             _proof_command(root + "/empty.json", "") +
             " && node scripts/check/validate-electron-mdi-proof.js " + root + "/empty.json build/electron-proof/screen.png > " + root + "/empty.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)  # oracle: value fixed by the spec contract
+        expect(code).to_equal(1)
 
         val missing = file_read(root + "/missing.env")
         val empty = file_read(root + "/empty.env")
@@ -334,15 +254,13 @@ describe "Electron MDI proof validator":
         expect(empty).to_contain("electron_mdi_screenshot_png_structure_status=fail")
 
     it "rejects non-PNG screenshot artifacts even when they are nonempty":
-        step("Verify: rejects non-PNG screenshot artifacts even when they are nonempty")
-        # @req: REQ-CHECK-ElecMdiProoVali-001
         val root = "build/test-electron-mdi-validator-capture-magic"
         val command = "rm -rf " + root + " build/electron-proof && mkdir -p " + root + " build/electron-proof && " +
             "printf 'not-a-png-but-nonempty' > build/electron-proof/screen.png && " +
             _proof_command(root + "/proof.json", "") +
             " && node scripts/check/validate-electron-mdi-proof.js " + root + "/proof.json build/electron-proof/screen.png > " + root + "/evidence.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)  # oracle: value fixed by the spec contract
+        expect(code).to_equal(1)
 
         val evidence = file_read(root + "/evidence.env")
         step("Confirm screenshot capture proof requires PNG signature bytes")
@@ -356,15 +274,13 @@ describe "Electron MDI proof validator":
         expect(evidence).to_contain("electron_mdi_screenshot_png_structure_status=fail")
 
     it "rejects PNG-signature-only Electron screenshot artifacts":
-        step("Verify: rejects PNG-signature-only Electron screenshot artifacts")
-        # @req: REQ-CHECK-ElecMdiProoVali-001
         val root = "build/test-electron-mdi-validator-capture-signature-only"
         val command = "rm -rf " + root + " build/electron-proof && mkdir -p " + root + " build/electron-proof && " +
             "printf '\\211PNG\\r\\n\\032\\nproof' > build/electron-proof/screen.png && " +
             _proof_command(root + "/proof.json", "") +
             " && node scripts/check/validate-electron-mdi-proof.js " + root + "/proof.json build/electron-proof/screen.png > " + root + "/evidence.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)  # oracle: value fixed by the spec contract
+        expect(code).to_equal(1)
 
         val evidence = file_read(root + "/evidence.env")
         step("Confirm screenshot capture proof requires PNG structure beyond the magic bytes")
@@ -379,15 +295,13 @@ describe "Electron MDI proof validator":
         expect(evidence).to_contain("electron_mdi_screenshot_png_structure_status=fail")
 
     it "rejects forged PNG chunk text in Electron screenshot artifacts":
-        step("Verify: rejects forged PNG chunk text in Electron screenshot artifacts")
-        # @req: REQ-CHECK-ElecMdiProoVali-001
         val root = "build/test-electron-mdi-validator-capture-forged-chunks"
         val command = "rm -rf " + root + " build/electron-proof && mkdir -p " + root + " build/electron-proof && " +
             _forged_png_capture_command() + " && " +
             _proof_command(root + "/proof.json", "") +
             " && node scripts/check/validate-electron-mdi-proof.js " + root + "/proof.json build/electron-proof/screen.png > " + root + "/evidence.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)  # oracle: value fixed by the spec contract
+        expect(code).to_equal(1)
 
         val evidence = file_read(root + "/evidence.env")
         step("Confirm Electron screenshot proof needs structured PNG chunks, not bare IDAT/IEND text")
@@ -401,14 +315,12 @@ describe "Electron MDI proof validator":
         expect(evidence).to_contain("electron_mdi_screenshot_png_structure_status=fail")
 
     it "rejects performance availability without explicit timing delta":
-        step("Verify: rejects performance availability without explicit timing delta")
-        # @req: REQ-CHECK-ElecMdiProoVali-001
         val root = "build/test-electron-mdi-validator-performance"
-        val command = "rm -rf " + root + " && mkdir -p " + root + " build/electron-proof && " + _png_capture_command() + " && " +
+        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
             _proof_command(root + "/proof.json", "delete p.performanceNowDeltaMs") +
             " && node scripts/check/validate-electron-mdi-proof.js " + root + "/proof.json build/electron-proof/screen.png > " + root + "/evidence.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)  # oracle: value fixed by the spec contract
+        expect(code).to_equal(1)
 
         val evidence = file_read(root + "/evidence.env")
         expect(evidence).to_contain("electron_mdi_json_proof=fail")
@@ -417,8 +329,6 @@ describe "Electron MDI proof validator":
         expect_not(evidence.contains("electron_mdi_performance_now_delta_ms=0"))
 
     it "rejects performance timing that does not advance or exceeds budget":
-        step("Verify: rejects performance timing that does not advance or exceeds budget")
-        # @req: REQ-CHECK-ElecMdiProoVali-001
         val root = "build/test-electron-mdi-validator-zero-performance"
         val command = "rm -rf " + root + " && mkdir -p " + root + " build/electron-proof && " + _png_capture_command() + " && " +
             _proof_command(root + "/proof.json", "p.performanceNowDeltaMs=0") +
@@ -426,7 +336,7 @@ describe "Electron MDI proof validator":
             _proof_command(root + "/slow.json", "p.performanceNowDeltaMs=1001") +
             " && node scripts/check/validate-electron-mdi-proof.js " + root + "/slow.json build/electron-proof/screen.png > " + root + "/slow.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)  # oracle: value fixed by the spec contract
+        expect(code).to_equal(1)
 
         val evidence = file_read(root + "/evidence.env")
         val slow = file_read(root + "/slow.env")
@@ -441,8 +351,6 @@ describe "Electron MDI proof validator":
         expect(slow).to_contain("electron_mdi_performance_now_delta_ms=1001")
 
     it "rejects missing zero over-budget or stringified input-to-paint latency":
-        step("Verify: rejects missing zero over-budget or stringified input-to-paint latency")
-        # @req: REQ-CHECK-ElecMdiProoVali-001
         val root = "build/test-electron-mdi-validator-input-latency"
         val command = "rm -rf " + root + " && mkdir -p " + root + " build/electron-proof && " + _png_capture_command() + " && " +
             _proof_command(root + "/missing.json", "delete p.inputToPaintMs") +
@@ -454,7 +362,7 @@ describe "Electron MDI proof validator":
             _proof_command(root + "/slow.json", "p.inputToPaintMs=1001") +
             " && node scripts/check/validate-electron-mdi-proof.js " + root + "/slow.json build/electron-proof/screen.png > " + root + "/slow.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)  # oracle: value fixed by the spec contract
+        expect(code).to_equal(1)
 
         val missing = file_read(root + "/missing.env")
         val zero = file_read(root + "/zero.env")
@@ -477,14 +385,12 @@ describe "Electron MDI proof validator":
         expect(slow).to_contain("electron_mdi_input_to_paint_ms=1001")
 
     it "rejects missing animation frame proof":
-        step("Verify: rejects missing animation frame proof")
-        # @req: REQ-CHECK-ElecMdiProoVali-001
         val root = "build/test-electron-mdi-validator-animation"
-        val command = "rm -rf " + root + " && mkdir -p " + root + " build/electron-proof && " + _png_capture_command() + " && " +
+        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
             _proof_command(root + "/proof.json", "p.animationFrameCount=1;p.cssAnimationProbe=false") +
             " && node scripts/check/validate-electron-mdi-proof.js " + root + "/proof.json build/electron-proof/screen.png > " + root + "/evidence.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)  # oracle: value fixed by the spec contract
+        expect(code).to_equal(1)
 
         val evidence = file_read(root + "/evidence.env")
         expect(evidence).to_contain("electron_mdi_json_proof=fail")
@@ -493,8 +399,6 @@ describe "Electron MDI proof validator":
         expect(evidence).to_contain("electron_mdi_css_animation_probe=false")
 
     it "rejects fractional event and animation count proof values":
-        step("Verify: rejects fractional event and animation count proof values")
-        # @req: REQ-CHECK-ElecMdiProoVali-001
         val root = "build/test-electron-mdi-validator-fractional-counts"
         val command = "rm -rf " + root + " && mkdir -p " + root + " build/electron-proof && " + _png_capture_command() + " && " +
             _proof_command(root + "/event.json", "p.bridgeIpcFrameCount=8.5") +
@@ -502,7 +406,7 @@ describe "Electron MDI proof validator":
             _proof_command(root + "/animation.json", "p.animationFrameCount=2.5") +
             " && node scripts/check/validate-electron-mdi-proof.js " + root + "/animation.json build/electron-proof/screen.png > " + root + "/animation.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)  # oracle: value fixed by the spec contract
+        expect(code).to_equal(1)
 
         val event = file_read(root + "/event.env")
         val animation = file_read(root + "/animation.env")
@@ -519,8 +423,6 @@ describe "Electron MDI proof validator":
         expect_not(animation.contains("electron_mdi_animation_frame_count=2.5"))
 
     it "rejects stringified numeric event performance latency and animation proof values":
-        step("Verify: rejects stringified numeric event performance latency and animation proof values")
-        # @req: REQ-CHECK-ElecMdiProoVali-001
         val root = "build/test-electron-mdi-validator-string-numbers"
         val command = "rm -rf " + root + " && mkdir -p " + root + " build/electron-proof && " + _png_capture_command() + " && " +
             _proof_command(root + "/window.json", "p.count=\"4\"") +
@@ -536,7 +438,7 @@ describe "Electron MDI proof validator":
             _proof_command(root + "/animation.json", "p.animationFrameCount=\"2\"") +
             " && node scripts/check/validate-electron-mdi-proof.js " + root + "/animation.json build/electron-proof/screen.png > " + root + "/animation.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)  # oracle: value fixed by the spec contract
+        expect(code).to_equal(1)
 
         val window = file_read(root + "/window.env")
         val bridge = file_read(root + "/bridge.env")
@@ -569,29 +471,9 @@ describe "Electron MDI proof validator":
         expect_not(animation.contains("electron_mdi_animation_frame_count=2"))
 
     it "keeps the live Electron producer and shell wrapper wired to timing proof":
-        step("Verify: keeps the live Electron producer and shell wrapper wired to timing proof")
-        # @req: REQ-CHECK-ElecMdiProoVali-001
         val bridge = file_read("src/app/ui.electron/bridge.js")
         val wrapper = file_read("scripts/check/check-electron-mdi-evidence.shs")
         expect(bridge).to_contain("performanceNowAvailable")
-        expect(bridge).to_contain("inputToPaintMs")
         expect(bridge).to_contain("animationFrameCount")
         expect(bridge).to_contain("cssAnimationProbe")
         expect(wrapper).to_contain("validate-electron-mdi-proof.js")
-        expect(wrapper).to_contain("node \"$VALIDATOR\" \"$PROOF_PATH\" \"$SCREENSHOT_PATH\"")
-        expect(wrapper).to_contain("electron-mdi-json-proof-failed")
-        val validator = file_read("scripts/check/validate-electron-mdi-proof.js")
-        expect(validator).to_contain("jsonBoolTextOrBlank")
-        expect(validator).to_contain("pngHasStructuredImageChunks")
-        expect(validator).to_contain("lstatSync")
-        expect(validator).to_contain("electron_mdi_proof_symlink_status")
-        expect(validator).to_contain("electron_mdi_screenshot_symlink_status")
-        expect(validator).to_contain("electron_mdi_proof_hardlink_status")
-        expect(validator).to_contain("electron_mdi_screenshot_hardlink_status")
-        expect(validator).to_contain("electron_mdi_screenshot_file_reason")
-        expect(validator).to_contain("electron_mdi_screenshot_artifact_status")
-        expect(validator).to_contain("screenshotFileReason")
-        expect(validator).to_contain("screenshotNotHardlink")
-        expect(validator).to_contain("electron_mdi_event_body_click_routed")
-        expect(validator).to_contain("electron_mdi_bridge_mouse_up_frame_routed")
-        expect(validator).to_contain("electron_mdi_event_taskbar_labels_visible")

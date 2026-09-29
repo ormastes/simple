@@ -1,0 +1,164 @@
+# CAS poisoning + truncation — Semantic Incremental Build v2, Agent C7
+#
+# Design: doc/05_design/compiler/semantic_incremental_build_cache_aop_formal_2026-08-09.md
+#   §21 "Storage and GC": "Same action mapped to different result manifests is
+#   detected and quarantined", "Missing or corrupt metadata is repairable by
+#   full mark-and-sweep", "Corrupt blob or manifest becomes a miss and
+#   quarantine event."
+#
+# STATUS: tests here run against `compiler.driver.cache.cas_store` (BACKED,
+# phase-1 ActionManifest — `test/01_unit/compiler/cache/cas_store_spec.spl`
+# already covers blob-digest-mismatch corruption and a mislabeled
+# action_digest field). This file adds THREE cases that file does not:
+#   1. Same ActionDigest written twice with two DIFFERENT manifests (the v1
+#      store has no CAS-level immutability check on the action path — this
+#      spec proves that gap exists today, it is a FINDING, not a pass/fail
+#      on a v2 ResultManifest type that does not exist yet).
+#   2. A manifest referencing an artifact digest that was never `cas_put`.
+#   3. A truncated write (partial file) discovered on read.
+#
+# Every negative case is proven capable of failing: each `it` first asserts
+# the BAD state is observed, then a paired "control" `it` proves the same
+# assertion is false on a well-formed fixture — so a matcher that always
+# passes would be caught by its own suite.
+#
+# **Category:** Infrastructure
+
+use std.spec.*
+use compiler.driver.cache.cas_store.{ActionManifest, cas_open, cas_put, cas_get, cas_has, cas_action_path, action_put, action_get, action_manifest_serialize}
+use std.crypto.sha256.{sha256_text}
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_getpid() -> i64
+extern fn rt_time_now_unix_micros() -> i64
+
+fn fresh_root(name: text) -> text:
+    val root = "build/tmp/cas_poisoning_spec/{name}-{rt_getpid()}-{rt_time_now_unix_micros()}"
+    cas_open(root)
+    root
+
+fn manifest_of(digest: text, artifacts: [text]) -> ActionManifest:
+    ActionManifest(action_digest: digest, artifact_digests: artifacts, schema_version: 1)
+
+fn action_digest_of(m: ActionManifest?) -> text:
+    match m:
+        case Some(v): v.action_digest
+        case nil: "<absent>"
+
+fn artifact_at(m: ActionManifest?, i: i64) -> text:
+    match m:
+        case Some(v): v.artifact_digests[i]
+        case nil: "<absent>"
+
+# ============================================================================
+# 1. Same ActionDigest, two different ResultManifests (poisoning)
+# ============================================================================
+
+describe "CAS poisoning: same action digest, two different manifests":
+    it "OBSERVED BAD STATE: a second action_put for the SAME digest silently overwrites the first (no immutability check today)":
+        val root = fresh_root("poison")
+        val artifact_a = cas_put(root, "artifact content A")
+        val artifact_b = cas_put(root, "artifact content B")
+        val action_digest = sha256_text("shared-action-key")
+
+        val first_ok = action_put(root, action_digest, manifest_of(action_digest, [artifact_a]))
+        val second_ok = action_put(root, action_digest, manifest_of(action_digest, [artifact_b]))
+
+        step("Verify both writes report success at the storage layer")
+        expect(first_ok).to_equal(true)
+        expect(second_ok).to_equal(true)
+        step("Verify the SECOND manifest silently won (proves no poisoning detection exists yet)")
+        val stored = action_get(root, action_digest)
+        expect(artifact_at(stored, 0)).to_equal(artifact_b)
+        # FINDING: this is the negative case from §21 ("same action mapped to
+        # different result manifests is detected and quarantined"). The v1
+        # cas_store has no such detection — action_put is last-write-wins.
+        # C1/C2 own adding either (a) a pre-write read-compare-reject in
+        # action_put, or (b) an explicit poisoning-detector layered above it.
+        # This spec is the reproduction fixture for that gap; re-run after
+        # the fix lands and expect second_ok == false or a quarantine event.
+
+    it "CONTROL: two action_puts with the SAME manifest content are idempotent (proves the assertion above is not vacuous)":
+        val root = fresh_root("poison_control")
+        val artifact_a = cas_put(root, "artifact content A")
+        val action_digest = sha256_text("shared-action-key-control")
+
+        action_put(root, action_digest, manifest_of(action_digest, [artifact_a]))
+        action_put(root, action_digest, manifest_of(action_digest, [artifact_a]))
+        val stored = action_get(root, action_digest)
+
+        step("Verify the identical-content double-write still reads back the same artifact")
+        expect(artifact_at(stored, 0)).to_equal(artifact_a)
+        # This control proves the harness can distinguish "changed" from
+        # "unchanged" — the bad-state case above is a real observed divergence,
+        # not a fixture that always reports the same thing.
+
+# ============================================================================
+# 2. Manifest references a missing artifact
+# ============================================================================
+
+describe "CAS poisoning: manifest references a missing artifact":
+    it "OBSERVED BAD STATE: action_get returns a manifest whose artifact digest has no blob in the store":
+        val root = fresh_root("missing_artifact")
+        val phantom_digest = sha256_text("this content was never cas_put")
+        val action_digest = sha256_text("action-with-missing-artifact")
+        action_put(root, action_digest, manifest_of(action_digest, [phantom_digest]))
+
+        val stored = action_get(root, action_digest)
+        step("Verify action_get still returns the manifest (no artifact-existence check at read time)")
+        expect(action_digest_of(stored)).to_equal(action_digest)
+        step("Verify the referenced artifact is in fact absent from the blob store")
+        expect(cas_has(root, phantom_digest)).to_equal(false)
+        step("Verify cas_get on the phantom digest returns nil, not a fabricated value")
+        expect(cas_get(root, phantom_digest)).to_be_nil()
+        # FINDING: action_get performs no closure check over artifact_digests.
+        # §21 requires "action mappings are published only after complete
+        # artifact closure" (invariant 12) — that publish-order guarantee must
+        # live in the writer (C1's promotion/publish path), since the reader
+        # here has no way to distinguish "not yet published" from "poisoned".
+
+    it "CONTROL: a manifest whose artifact WAS cas_put resolves both the manifest and the blob":
+        val root = fresh_root("missing_artifact_control")
+        val real_digest = cas_put(root, "real artifact content")
+        val action_digest = sha256_text("action-with-real-artifact")
+        action_put(root, action_digest, manifest_of(action_digest, [real_digest]))
+
+        step("Verify the artifact is present")
+        expect(cas_has(root, real_digest)).to_equal(true)
+        step("Verify cas_get returns the exact original content")
+        expect(cas_get(root, real_digest)).to_equal("real artifact content")
+
+# ============================================================================
+# 3. Truncated write
+# ============================================================================
+
+describe "CAS poisoning: truncated write":
+    it "OBSERVED BAD STATE: a blob file truncated after the fact fails digest verification and is quarantined on read":
+        val root = fresh_root("truncated")
+        val full_content = "this is a longer artifact body that will be truncated on disk"
+        val digest = cas_put(root, full_content)
+        val path = "{root}/cas/sha256/{digest.substring(0, 2)}/{digest.substring(2, digest.len())}"
+
+        step("Sanity: the untouched blob reads back intact")
+        expect(cas_get(root, digest)).to_equal(full_content)
+
+        step("Truncate the on-disk blob to simulate a partial/interrupted write")
+        val truncated = full_content.substring(0, 10)
+        rt_file_write_text(path, truncated)
+
+        step("Verify the truncated blob is now treated as a miss, not served unverified")
+        expect(cas_get(root, digest)).to_be_nil()
+        step("Verify the file was moved into quarantine, not left in the live cas/ path")
+        expect(rt_file_exists(path)).to_equal(false)
+
+    it "CONTROL: an UNTRUNCATED blob at the same path never triggers quarantine on repeated reads":
+        val root = fresh_root("truncated_control")
+        val full_content = "untouched content, read twice"
+        val digest = cas_put(root, full_content)
+
+        expect(cas_get(root, digest)).to_equal(full_content)
+        step("Second read of the same untouched blob still succeeds (proves quarantine is content-triggered, not read-count-triggered)")
+        expect(cas_get(root, digest)).to_equal(full_content)

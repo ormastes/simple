@@ -1,3 +1,11 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+
+
+use std.spec.step
+
 use std.spec.{describe, it, assert_equal, assert_true}
 use compiler.mir.mir_data.*
 use compiler.backend.native.isel_x86_64.{isel_module_with_avx2_capability, x86_plan_avx2_f32x8}
@@ -10,6 +18,7 @@ use compiler.backend.native.mach_inst.{
 }
 use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_types.{SymbolId}
+
 
 fn avx2_test_module() -> MirModule:
     val f32_type = MirType(kind: MirTypeKind.F32)
@@ -126,7 +135,7 @@ fn avx2_pressure_function() -> MirFunction:
         is_generic_template: false, specialization_of: nil, type_bindings: {})
 
 fn avx2_multiblock_function() -> MirFunction:
-    val base = avx2_test_module().functions[0]
+    val base = avx2_test_module().functions[SymbolId.new(0)]
     val second = MirBlock(
         id: BlockId.new(1), label: Some("second"), instructions: [],
         terminator: MirTerminator.Ret(nil))
@@ -154,8 +163,56 @@ fn avx2_capability():
 fn selected_module():
     isel_module_with_avx2_capability(avx2_test_module(), avx2_capability())
 
+fn concrete_add_module() -> MirModule:
+    val base = avx2_test_module()
+    val function = base.functions[SymbolId.new(0)]
+    val block = function.blocks[0]
+    val concrete = MirInst(
+        kind: MirInstKind.SimdAddF32x8(
+            LocalId(id: 5), MirOperand.copy(LocalId(id: 3)),
+            MirOperand.copy(LocalId(id: 4))), span: nil)
+    val instructions = [block.instructions[0], block.instructions[1], concrete, block.instructions[3]]
+    val replaced_block = MirBlock(
+        id: block.id, label: block.label, instructions: instructions,
+        terminator: block.terminator)
+    val replaced_function = MirFunction(
+        symbol: function.symbol, name: "concrete_add_f32x8",
+        signature: function.signature, locals: function.locals,
+        blocks: [replaced_block], entry_block: function.entry_block,
+        span: function.span, generic_params: function.generic_params,
+        is_generic_template: function.is_generic_template,
+        specialization_of: function.specialization_of,
+        type_bindings: function.type_bindings)
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[SymbolId.new(0)] = replaced_function
+    MirModule(name: "concrete_avx2_route", functions: functions,
+        statics: {}, constants: {}, types: {})
+
+fn scalar_add_f32x8(left: [f32], right: [f32]) -> [f32]:
+    [left[0] + right[0], left[1] + right[1],
+     left[2] + right[2], left[3] + right[3],
+     left[4] + right[4], left[5] + right[5],
+     left[6] + right[6], left[7] + right[7]]
+
 describe "x86 AVX2 typed MIR route":
+    it "selects concrete SimdAddF32x8 with scalar-defined lane semantics":
+        # @req REQ-SIMD-002 REQ-SIMD-004
+        step("selects concrete SimdAddF32x8 with scalar-defined lane semantics")
+        val left: [f32] = [1.0, -2.0, 3.5, 0.0, 100.0, -0.0, 7.0, -8.0]
+        val right: [f32] = [2.0, 2.0, -0.5, 0.0, -40.0, 0.0, -7.0, 10.0]
+        assert_equal(scalar_add_f32x8(left, right),
+            [3.0, 0.0, 3.0, 0.0, 60.0, 0.0, 0.0, 2.0])
+        val module = isel_module_with_avx2_capability(concrete_add_module(), avx2_capability())
+        val block = module.functions[0].blocks[1]
+        var add_count = 0
+        for inst in block.insts:
+            if inst.opcode == X86_OP_VADDPS_YMM: add_count = add_count + 1
+        assert_equal(add_count, 1)
+
+    # @manual scenario evidence
     it "reuses YMM registers for more than eight sequential destinations":
+        # @req REQ-SSPEC-UNIT
+        step("reuses YMM registers for more than eight sequential destinations")
         val module = isel_module_with_avx2_capability(avx2_reuse_module(), avx2_capability())
         val block = module.functions[0].blocks[1]
         var used: Dict<i64, bool> = {}
@@ -171,16 +228,22 @@ describe "x86 AVX2 typed MIR route":
         assert_true(used.keys().len() <= 3)
 
     it "keeps nine simultaneously live vectors fail closed":
+        # @req REQ-SSPEC-UNIT
+        step("keeps nine simultaneously live vectors fail closed")
         val plan = x86_plan_avx2_f32x8(avx2_pressure_function())
         assert_equal(plan.ok, false)
         assert_equal(plan.reason, "simd-register-pressure")
 
     it "rejects multi-block SIMD until CFG liveness is authoritative":
+        # @req REQ-SSPEC-UNIT
+        step("rejects multi-block SIMD until CFG liveness is authoritative")
         val plan = x86_plan_avx2_f32x8(avx2_multiblock_function())
         assert_equal(plan.ok, false)
         assert_equal(plan.reason, "simd-cfg-liveness-unavailable")
 
     it "selects aligned f32x8 MIR without scalar NOP substitution":
+        # @req REQ-SSPEC-UNIT
+        step("selects aligned f32x8 MIR without scalar NOP substitution")
         val module = selected_module()
         val block = module.functions[0].blocks[1]
         assert_equal(block.insts.len(), 4)
@@ -190,6 +253,8 @@ describe "x86 AVX2 typed MIR route":
         assert_equal(block.insts[3].opcode, X86_OP_VMOVAPS_STORE_YMM)
 
     it "preserves YMM classes through scalar pointer allocation":
+        # @req REQ-SSPEC-UNIT
+        step("preserves YMM classes through scalar pointer allocation")
         val module = regalloc_module(selected_module())
         val block = module.functions[0].blocks[1]
         for inst in block.insts:
@@ -202,6 +267,8 @@ describe "x86 AVX2 typed MIR route":
                         case _: assert_true(false)
 
     it "encodes the selected load add store route as AVX2 bytes":
+        # @req REQ-SSPEC-UNIT
+        step("encodes the selected load add store route as AVX2 bytes")
         val allocated = regalloc_module(selected_module())
         val encoded = encode_module(allocated)[0].code
         assert_true(contains_bytes(encoded, [0xC4, 0xE1, 0x7C, 0x28, 0x83, 0, 0, 0, 0]))
@@ -210,5 +277,7 @@ describe "x86 AVX2 typed MIR route":
         assert_true(contains_bytes(encoded, [0xC4, 0xC1, 0x7C, 0x29, 0x95, 0, 0, 0, 0]))
 
     it "carries a deterministic target capability receipt":
+        # @req REQ-SSPEC-UNIT
+        step("carries a deterministic target capability receipt")
         assert_equal(native_avx2_receipt_key(avx2_capability()),
             "native-avx2/v1|target=x86_64-unknown-linux-gnu|source=unit-injected|hash=fixture-avx2-v1|admitted=true|reason=avx2-capability-admitted")

@@ -1,0 +1,385 @@
+"""Bounded provider-neutral VFS request and result values.
+
+This module owns portable path, rights, metadata, directory, and watch shapes.
+It performs no filesystem or kernel operation. Providers may only receive a
+request after `vfs_request_prepare_v1` has normalized and validated it.
+"""
+
+pub const VFS_PATH_MAX_BYTES_V1: i64 = 4096
+pub const VFS_NAME_MAX_BYTES_V1: i64 = 255
+pub const VFS_RESULT_MAX_ITEMS_V1: i64 = 256
+pub const VFS_TEXT_MAX_BYTES_V1: i64 = 512
+
+pub const VFS_RIGHT_READ_V1: u32 = 1u32
+pub const VFS_RIGHT_WRITE_V1: u32 = 2u32
+pub const VFS_RIGHT_EXECUTE_V1: u32 = 4u32
+pub const VFS_RIGHT_STAT_V1: u32 = 8u32
+pub const VFS_RIGHT_ENUMERATE_V1: u32 = 16u32
+pub const VFS_RIGHT_WATCH_V1: u32 = 32u32
+pub const VFS_RIGHT_CREATE_V1: u32 = 64u32
+pub const VFS_RIGHT_REMOVE_V1: u32 = 128u32
+pub const VFS_RIGHT_RENAME_V1: u32 = 256u32
+pub const VFS_RIGHT_KNOWN_MASK_V1: u32 = 511u32
+
+# Matches the existing fs_driver OpenFlags wire values.
+pub const VFS_OPEN_ACCESS_MASK_V1: u32 = 3u32
+pub const VFS_OPEN_CREATE_V1: u32 = 64u32
+pub const VFS_OPEN_EXCLUSIVE_V1: u32 = 128u32
+pub const VFS_OPEN_TRUNCATE_V1: u32 = 512u32
+pub const VFS_OPEN_APPEND_V1: u32 = 1024u32
+pub const VFS_OPEN_KNOWN_MASK_V1: u32 = 1731u32
+
+pub enum VfsOperationV1:
+    Open
+    Stat
+    ReadDirectory
+    PollWatch
+
+pub enum VfsNodeKindV1:
+    Missing
+    File
+    Directory
+    Symlink
+    Device
+
+pub enum VfsWatchKindV1:
+    Created
+    Modified
+    Removed
+    Renamed
+    Overflow
+
+pub struct VfsPathV1:
+    normalized: text
+
+pub struct VfsFileRightsV1:
+    bits: u32
+
+pub struct VfsOpenFlagsV1:
+    bits: u32
+
+pub struct VfsFileIdentityV1:
+    filesystem_instance_id: u64
+    mount_id: u64
+    mount_generation: u64
+    object_id: u64
+    object_generation: u64
+
+pub struct VfsStatV1:
+    identity: VfsFileIdentityV1
+    kind: VfsNodeKindV1
+    size: u64
+    allocated_bytes: u64
+    mode: u32
+    link_count: u32
+    modified_time_ns: u64
+    change_time_ns: u64
+
+pub struct VfsDirectoryEntryV1:
+    name: text
+    identity: VfsFileIdentityV1
+    kind: VfsNodeKindV1
+
+pub struct VfsWatchEventV1:
+    sequence: u64
+    kind: VfsWatchKindV1
+    path: VfsPathV1
+    related_path: VfsPathV1
+    identity: VfsFileIdentityV1
+
+pub struct VfsRequestV1:
+    request_id: u64
+    operation: VfsOperationV1
+    path: VfsPathV1
+    open_flags: VfsOpenFlagsV1
+    requested_rights: VfsFileRightsV1
+    cursor: u64
+    max_results: i64
+
+pub struct VfsRequestCheckV1:
+    accepted: bool
+    reason: text
+    request: VfsRequestV1
+
+pub struct VfsProviderResultV1:
+    request_id: u64
+    operation: VfsOperationV1
+    accepted: bool
+    reason: text
+    identity: VfsFileIdentityV1
+    stat: VfsStatV1
+    entries: [VfsDirectoryEntryV1]
+    watch_events: [VfsWatchEventV1]
+    next_cursor: u64
+
+pub struct VfsResultCheckV1:
+    accepted: bool
+    reason: text
+
+fn _vfs_zero_identity_v1() -> VfsFileIdentityV1:
+    VfsFileIdentityV1(
+        filesystem_instance_id: 0u64, mount_id: 0u64,
+        mount_generation: 0u64, object_id: 0u64, object_generation: 0u64)
+
+fn _vfs_identity_is_zero_v1(value: VfsFileIdentityV1) -> bool:
+    (value.filesystem_instance_id == 0u64 and value.mount_id == 0u64 and
+        value.mount_generation == 0u64 and value.object_id == 0u64 and
+        value.object_generation == 0u64)
+
+pub fn vfs_file_identity_valid_v1(value: VfsFileIdentityV1) -> bool:
+    (value.filesystem_instance_id != 0u64 and value.mount_id != 0u64 and
+        value.mount_generation != 0u64 and value.object_id != 0u64 and
+        value.object_generation != 0u64)
+
+pub fn vfs_file_identity_equal_v1(
+    left: VfsFileIdentityV1, right: VfsFileIdentityV1
+) -> bool:
+    (left.filesystem_instance_id == right.filesystem_instance_id and
+        left.mount_id == right.mount_id and
+        left.mount_generation == right.mount_generation and
+        left.object_id == right.object_id and
+        left.object_generation == right.object_generation)
+
+fn _vfs_same_mount_v1(left: VfsFileIdentityV1, right: VfsFileIdentityV1) -> bool:
+    (left.filesystem_instance_id == right.filesystem_instance_id and
+        left.mount_id == right.mount_id and
+        left.mount_generation == right.mount_generation)
+
+fn _vfs_path_within_v1(path: text, root: text) -> bool:
+    if root == "/":
+        return path.starts_with("/")
+    path == root or path.starts_with(root + "/")
+
+fn _vfs_text_valid_v1(value: text, max_bytes: i64, allow_empty: bool) -> bool:
+    if value.len() > max_bytes:
+        return false
+    val bytes = value.bytes()
+    if bytes.len() as i64 > max_bytes or (not allow_empty and bytes.len() == 0):
+        return false
+    for byte in bytes:
+        if byte == 0:
+            return false
+    true
+
+pub fn vfs_path_normalize_v1(raw: text) -> Result<VfsPathV1, text>:
+    """Normalize an absolute portable path without consulting a provider."""
+    if not _vfs_text_valid_v1(raw, VFS_PATH_MAX_BYTES_V1, false):
+        return Err("path-byte-limit-or-nul")
+    if not raw.starts_with("/") or raw.contains("\\"):
+        return Err("path-not-portable-absolute")
+    var segments: [text] = []
+    for segment in raw.split("/"):
+        if segment == "" or segment == ".":
+            continue
+        if segment == "..":
+            if segments.len() == 0:
+                return Err("path-escapes-root")
+            segments.pop()
+        else:
+            if not _vfs_text_valid_v1(segment, VFS_NAME_MAX_BYTES_V1, false):
+                return Err("path-segment-invalid")
+            segments.push(segment)
+    var normalized = "/"
+    if segments.len() != 0:
+        normalized = "/" + segments.join("/")
+    val normalized_bytes = normalized.bytes()
+    if normalized_bytes.len() as i64 > VFS_PATH_MAX_BYTES_V1:
+        return Err("normalized-path-byte-limit")
+    Ok(VfsPathV1(normalized: normalized))
+
+pub fn vfs_open_flags_valid_v1(flags: VfsOpenFlagsV1) -> bool:
+    if (flags.bits & ~VFS_OPEN_KNOWN_MASK_V1) != 0u32:
+        return false
+    val access = flags.bits & VFS_OPEN_ACCESS_MASK_V1
+    if access == 3u32:
+        return false
+    val writes = access != 0u32
+    if ((flags.bits & (VFS_OPEN_CREATE_V1 | VFS_OPEN_TRUNCATE_V1 |
+        VFS_OPEN_APPEND_V1)) != 0u32 and not writes):
+        return false
+    if ((flags.bits & VFS_OPEN_EXCLUSIVE_V1) != 0u32 and
+        (flags.bits & VFS_OPEN_CREATE_V1) == 0u32):
+        return false
+    true
+
+pub fn vfs_rights_valid_v1(rights: VfsFileRightsV1) -> bool:
+    rights.bits != 0u32 and (rights.bits & ~VFS_RIGHT_KNOWN_MASK_V1) == 0u32
+
+fn _vfs_request_shape_valid_v1(request: VfsRequestV1) -> bool:
+    match request.operation:
+        case VfsOperationV1.Open:
+            if (request.max_results != 0 or request.cursor != 0u64 or
+                not vfs_open_flags_valid_v1(request.open_flags) or
+                not vfs_rights_valid_v1(request.requested_rights)):
+                return false
+            val access = request.open_flags.bits & VFS_OPEN_ACCESS_MASK_V1
+            val io_rights = (request.requested_rights.bits &
+                (VFS_RIGHT_READ_V1 | VFS_RIGHT_WRITE_V1))
+            if access == 0u32 and io_rights != VFS_RIGHT_READ_V1:
+                return false
+            if access == 1u32 and io_rights != VFS_RIGHT_WRITE_V1:
+                return false
+            if (access == 2u32 and io_rights !=
+                (VFS_RIGHT_READ_V1 | VFS_RIGHT_WRITE_V1)):
+                return false
+            if ((request.open_flags.bits & VFS_OPEN_CREATE_V1) != 0u32 and
+                (request.requested_rights.bits & VFS_RIGHT_CREATE_V1) == 0u32):
+                return false
+            true
+        case VfsOperationV1.Stat:
+            (request.max_results == 0 and request.cursor == 0u64 and
+                request.open_flags.bits == 0u32 and
+                request.requested_rights.bits == VFS_RIGHT_STAT_V1)
+        case VfsOperationV1.ReadDirectory:
+            (request.max_results > 0 and request.max_results <= VFS_RESULT_MAX_ITEMS_V1 and
+                request.open_flags.bits == 0u32 and
+                request.requested_rights.bits == VFS_RIGHT_ENUMERATE_V1)
+        case VfsOperationV1.PollWatch:
+            (request.max_results > 0 and request.max_results <= VFS_RESULT_MAX_ITEMS_V1 and
+                request.open_flags.bits == 0u32 and
+                request.requested_rights.bits == VFS_RIGHT_WATCH_V1)
+
+pub fn vfs_request_prepare_v1(request: VfsRequestV1) -> VfsRequestCheckV1:
+    if request.request_id == 0u64:
+        return VfsRequestCheckV1(false, "invalid-request-id", request)
+    val normalized = vfs_path_normalize_v1(request.path.normalized)
+    if normalized.is_err():
+        return VfsRequestCheckV1(false, normalized.unwrap_err(), request)
+    var owned = request
+    owned.path = normalized.unwrap()
+    if not _vfs_request_shape_valid_v1(owned):
+        return VfsRequestCheckV1(false, "invalid-operation-shape", owned)
+    VfsRequestCheckV1(true, "ready", owned)
+
+fn _vfs_stat_valid_v1(value: VfsStatV1) -> bool:
+    (vfs_file_identity_valid_v1(value.identity) and
+        value.kind != VfsNodeKindV1.Missing and value.link_count != 0u32)
+
+fn _vfs_entry_valid_v1(value: VfsDirectoryEntryV1) -> bool:
+    (_vfs_text_valid_v1(value.name, VFS_NAME_MAX_BYTES_V1, false) and
+        value.name != "." and value.name != ".." and not value.name.contains("/") and
+        not value.name.contains("\\") and vfs_file_identity_valid_v1(value.identity) and
+        value.kind != VfsNodeKindV1.Missing)
+
+fn _vfs_watch_valid_v1(value: VfsWatchEventV1) -> bool:
+    if value.sequence == 0u64:
+        return false
+    val path = vfs_path_normalize_v1(value.path.normalized)
+    if path.is_err() or path.unwrap().normalized != value.path.normalized:
+        return false
+    if value.kind == VfsWatchKindV1.Overflow:
+        return (value.related_path.normalized == "" and
+            _vfs_identity_is_zero_v1(value.identity))
+    if not vfs_file_identity_valid_v1(value.identity):
+        return false
+    if value.kind == VfsWatchKindV1.Renamed:
+        val related = vfs_path_normalize_v1(value.related_path.normalized)
+        return (related.is_ok() and
+            related.unwrap().normalized == value.related_path.normalized)
+    value.related_path.normalized == ""
+
+pub fn vfs_provider_result_validate_v1(
+    request: VfsRequestV1, result: VfsProviderResultV1
+) -> VfsResultCheckV1:
+    if result.request_id != request.request_id or result.operation != request.operation:
+        return VfsResultCheckV1(false, "provider-correlation-mismatch")
+    if not result.accepted:
+        return VfsResultCheckV1(false, "provider-rejected")
+    if not _vfs_text_valid_v1(result.reason, VFS_TEXT_MAX_BYTES_V1, false):
+        return VfsResultCheckV1(false, "provider-reason-invalid")
+    if (result.entries.len() as i64 > VFS_RESULT_MAX_ITEMS_V1 or
+        result.watch_events.len() as i64 > VFS_RESULT_MAX_ITEMS_V1 or
+        (result.entries.len() as i64 > request.max_results and request.max_results != 0) or
+        (result.watch_events.len() as i64 > request.max_results and request.max_results != 0)):
+        return VfsResultCheckV1(false, "provider-result-limit-exceeded")
+    if (not vfs_file_identity_valid_v1(result.identity) or
+        not _vfs_stat_valid_v1(result.stat) or
+        not vfs_file_identity_equal_v1(result.identity, result.stat.identity)):
+        return VfsResultCheckV1(false, "provider-subject-invalid")
+    match request.operation:
+        case VfsOperationV1.Open:
+            if (result.entries.len() != 0 or
+                result.watch_events.len() != 0 or result.next_cursor != 0u64):
+                return VfsResultCheckV1(false, "invalid-open-result")
+        case VfsOperationV1.Stat:
+            if (result.entries.len() != 0 or
+                result.watch_events.len() != 0 or result.next_cursor != 0u64):
+                return VfsResultCheckV1(false, "invalid-stat-result")
+        case VfsOperationV1.ReadDirectory:
+            if (result.stat.kind != VfsNodeKindV1.Directory or
+                result.watch_events.len() != 0 or result.next_cursor < request.cursor or
+                (result.entries.len() != 0 and result.next_cursor == request.cursor)):
+                return VfsResultCheckV1(false, "invalid-directory-result")
+            for entry in result.entries:
+                if (not _vfs_entry_valid_v1(entry) or
+                    not _vfs_same_mount_v1(result.identity, entry.identity)):
+                    return VfsResultCheckV1(false, "invalid-directory-entry")
+        case VfsOperationV1.PollWatch:
+            if (result.stat.kind != VfsNodeKindV1.Directory or
+                result.entries.len() != 0 or result.next_cursor < request.cursor or
+                (result.watch_events.len() != 0 and result.next_cursor == request.cursor)):
+                return VfsResultCheckV1(false, "invalid-watch-result")
+            var prior = request.cursor
+            for event in result.watch_events:
+                if (not _vfs_watch_valid_v1(event) or event.sequence <= prior or
+                    event.sequence > result.next_cursor or
+                    not _vfs_path_within_v1(event.path.normalized, request.path.normalized) or
+                    (event.kind == VfsWatchKindV1.Renamed and not _vfs_path_within_v1(
+                        event.related_path.normalized, request.path.normalized))):
+                    return VfsResultCheckV1(false, "invalid-watch-event")
+                prior = event.sequence
+            if (result.watch_events.len() != 0 and prior != result.next_cursor):
+                return VfsResultCheckV1(false, "watch-cursor-mismatch")
+    VfsResultCheckV1(true, "accepted")
+
+fn _vfs_copy_identity_v1(value: VfsFileIdentityV1) -> VfsFileIdentityV1:
+    VfsFileIdentityV1(
+        filesystem_instance_id: value.filesystem_instance_id, mount_id: value.mount_id,
+        mount_generation: value.mount_generation, object_id: value.object_id,
+        object_generation: value.object_generation)
+
+fn _vfs_copy_stat_v1(value: VfsStatV1) -> VfsStatV1:
+    VfsStatV1(
+        identity: _vfs_copy_identity_v1(value.identity), kind: value.kind,
+        size: value.size, allocated_bytes: value.allocated_bytes, mode: value.mode,
+        link_count: value.link_count, modified_time_ns: value.modified_time_ns,
+        change_time_ns: value.change_time_ns)
+
+pub fn vfs_provider_result_copy_v1(value: VfsProviderResultV1) -> VfsProviderResultV1:
+    var entries: [VfsDirectoryEntryV1] = []
+    for entry in value.entries:
+        entries.push(VfsDirectoryEntryV1(
+            name: entry.name, identity: _vfs_copy_identity_v1(entry.identity), kind: entry.kind))
+    var events: [VfsWatchEventV1] = []
+    for event in value.watch_events:
+        events.push(VfsWatchEventV1(
+            sequence: event.sequence, kind: event.kind,
+            path: VfsPathV1(normalized: event.path.normalized),
+            related_path: VfsPathV1(normalized: event.related_path.normalized),
+            identity: _vfs_copy_identity_v1(event.identity)))
+    VfsProviderResultV1(
+        request_id: value.request_id, operation: value.operation,
+        accepted: value.accepted, reason: value.reason,
+        identity: _vfs_copy_identity_v1(value.identity), stat: _vfs_copy_stat_v1(value.stat),
+        entries: entries, watch_events: events, next_cursor: value.next_cursor)
+
+pub fn vfs_provider_result_suppressed_v1(
+    request: VfsRequestV1, reason: text
+) -> VfsProviderResultV1:
+    val zero = _vfs_zero_identity_v1()
+    VfsProviderResultV1(
+        request_id: request.request_id, operation: request.operation,
+        accepted: false, reason: reason, identity: zero,
+        stat: VfsStatV1(identity: zero, kind: VfsNodeKindV1.Missing,
+            size: 0u64, allocated_bytes: 0u64, mode: 0u32, link_count: 0u32,
+            modified_time_ns: 0u64, change_time_ns: 0u64),
+        entries: [], watch_events: [], next_cursor: 0u64)
+
+export VfsOperationV1, VfsNodeKindV1, VfsWatchKindV1
+export VfsPathV1, VfsFileRightsV1, VfsOpenFlagsV1, VfsFileIdentityV1
+export VfsStatV1, VfsDirectoryEntryV1, VfsWatchEventV1, VfsRequestV1
+export VfsRequestCheckV1, VfsProviderResultV1, VfsResultCheckV1
+export vfs_file_identity_valid_v1, vfs_file_identity_equal_v1, vfs_path_normalize_v1
+export vfs_open_flags_valid_v1, vfs_rights_valid_v1, vfs_request_prepare_v1
+export vfs_provider_result_validate_v1, vfs_provider_result_copy_v1
+export vfs_provider_result_suppressed_v1

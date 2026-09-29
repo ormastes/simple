@@ -1,51 +1,109 @@
 # Revision-Driven Animation Advance
 
-> Operator scenario for REQ-WEB-BROWSER-004 and REQ-WEB-BROWSER-006.
+> Proves that a hosted CSS animation advances through canonical Draw IR and
+
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 1 | 1 | 0 | 0 |
+
+<details>
+<summary>Full Scenario Manual</summary>
+
+# Revision-Driven Animation Advance
+
+Proves that a hosted CSS animation advances through canonical Draw IR and
+
+## At a Glance
 
 | Field | Value |
-|---|---|
-| Status | Static-ready; runtime execution held pending a source-admitted pure-Simple CLI |
-| Executable source | `test/03_system/app/browser/feature/animation_revision_hot_path_spec.spl` |
-| Rendering owner | hosted registry → `HostedWebContentSession` → `BrowserSession` → canonical Draw IR → Engine2D |
-| Unsupported claims | No RSS threshold, native/GPU receipt, or general browser conformance claim |
+|-------|-------|
+| Category | Application |
+| Status | Active |
+| Source | `test/03_system/app/browser/feature/animation_revision_hot_path_spec.spl` |
+| Updated | 2026-08-26 |
+| Generator | `simple spipe-docgen` (Simple) |
 
-## Purpose
+Proves that a hosted CSS animation advances through canonical Draw IR and
+Engine2D pixels without copying the whole rendered document on every frame.
 
-The hosted animation clock already receives document, style, and resource
-revisions from `BrowserSession`. This scenario proves the frame owner uses
-those revisions rather than allocating and scanning
-`current_style_html + current_body_html` on every animation tick.
+## Scenarios
 
-## Operator flow
+### REQ-WEB-BROWSER-004/006: revision-driven animation advance
 
-1. **Open a CSS animation in the hosted BrowserSession**
-   - Load one `32x24` element with a linear red-to-blue CSS keyframe.
-   - Confirm one reconciled animation instance.
-2. **Render the exact initial Draw IR and Engine2D frame**
-   - Derive time from the session's monotonic clock.
-   - Require one HTML-AST batch and exactly one rectangular `stage` command
-     at `0,0,32,24`.
-   - Require ARGB `0xFFDC2626` in all 768 pixels with zero skipped commands.
-3. **Advance CSS and render the exact midpoint frame**
-   - Advance through the production registry; derive 500 ms elapsed time from
-     the resulting session state.
-   - Again require exactly one rectangular `stage` command.
-   - Require ARGB `0xFF804488` in all 768 pixels with zero skipped commands.
-4. **Read the published frame through the production registry cache**
-   - Call the actual registry `body_html` route.
-   - Require the hosted getter to return `published_body_html` directly.
+#### keeps document-sized text out of the frame hot path
 
-## Expected receipt
+**Scenario capture:** artifact after_step
 
-```text
-initial  0|html_ast|1|1|rect:stage:0,0,32,24:4292617766|0|768
-midpoint 500|html_ast|1|1|rect:stage:0,0,32,24:4286596232|0|768
-registry body route returns the revision-refreshed published frame
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+# @req REQ-WEB-BROWSER-004/006
 ```
 
-## Failure handling
+</details>
 
-- A pixel or Draw IR mismatch fails the executable SSpec.
-- Reintroduction of whole-document concatenation in the production body getter
-  fails the cache-route guard.
-- Do not substitute the Rust seed or bootstrap solely to run this scenario.
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 1 |
+| Active scenarios | 1 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
+
+
+</details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+- `REQ-WEB-BROWSER-004/006`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `a4d4bc796ffd6b0ac0dbb47f1057ab9a34cf45f400a501cf645d7296fd79fb5d`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `a4d4bc796ffd6b0ac0dbb47f1057ab9a34cf45f400a501cf645d7296fd79fb5d`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `a4d4bc796ffd6b0ac0dbb47f1057ab9a34cf45f400a501cf645d7296fd79fb5d`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **85/100**; effective score: **49/100**; blockers: **1**.
+
+SSpec documentization score: 49/100
+source: test/03_system/app/browser/feature/animation_revision_hot_path_spec.spl
+mirror: doc/06_spec/03_system/app/browser/feature/animation_revision_hot_path_spec.md (current)
+findings: 4 blockers: 1
+  narrative=100 structure=90 oracle=50
+  traceability=100 evidence=100 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+  raw=85; blocker cap makes effective=49
+doc/06_spec/03_system/app/browser/feature/animation_revision_hot_path_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/app/browser/feature/animation_revision_hot_path_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/app/browser/feature/animation_revision_hot_path_spec.spl:1:1: blocker SSDOC-ORA-001 [oracle] (-50): no real executed assertion or compiler oracle
+  why: A passing-looking document without an oracle is not conformance evidence.
+  improve: Replace placeholders with an observable production assertion.
+test/03_system/app/browser/feature/animation_revision_hot_path_spec.spl:103:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'keeps document-sized text out of the frame hot path' has no visible step flow
+  why: Ordered visible actions make the manual operable.
+  improve: Add ordered step("...") calls for meaningful actions.
+<!-- sspec-maintain:scorecard:end -->

@@ -1,7 +1,6 @@
 ---
 id: llvm_import_path_mangling_os_prefix_mismatch_2026-06-15
-Status: OPEN (P1)
-Status re-verified 2026-08-17 by source inspection (triage shard 02).
+status: OPEN (triage 2026-09-13: host-blocked; see Triage section below)
 severity: high
 discovered: 2026-06-15
 discovered_by: SimpleOS riscv64 LLVM build (`bin/simple os build --scenario=rv64-base`)
@@ -13,6 +12,18 @@ related: src/os/kernel/boot/tcp_baremetal_min.spl
 related: src/os/kernel/log/klog_api.spl
 related: src/os/kernel/fs/fat32.spl
 ---
+
+## Triage 2026-09-13 — STILL OPEN: host-blocked; the named `.spl` blocker is now resolved
+- **measured** — the concrete source defect this entry blames for fat32 being dropped (a
+  2-arg `dev.read_sector(root_lba + sec_idx.to_u64(), sec_buf)` against a 1-arg trait) is
+  gone: `src/os/kernel/fs/_Fat32Filesystem/mount_and_read.spl:94` and
+  `.../directory_mutation.spl:87` both call the 1-arg form now, matching
+  `c_nvme_adapter.spl:47`.
+- **measured** — every path the entry names still exists, so the "referenced paths gone"
+  stale test does not apply.
+- **inferred** — the mangling bug itself can only be re-checked by
+  `bin/simple os build --scenario=rv64-base`, a riscv64 LLVM lane that does not run from
+  this Windows triage host. Left OPEN, host-blocked.
 
 # LLVM rv64 link fails: cross-module call references `os__kernel__…` but definitions emit bare/weak names
 
@@ -142,8 +153,3 @@ the line-245 call), and is outside this mangling fix's locus.
 
 - A separate, concurrent fix addresses `rt_bytes_alloc` in
   `freestanding_runtime.c`; that symbol is unrelated to this mangling bug.
-
-
-## 2026-08-17 CORE-P1 triage: STILL PRESENT in current source
-
-Re-verified against CURRENT SOURCE during the crit_01 CORE-P1 sweep. Confirmed still present (report only -- `src/compiler_rust/compiler/src/pipeline/native_project/**` is owned by another lane this session, so no edit was made here). `imports.rs:280` and `:300` build call references as `format!("{}__{}", prefix, f.name)` from `module_prefix_from_path`, with no reconciliation for definers that emit bare or weak symbol names. Grepping the file for weak/alias/fallback logic returns only unrelated "bare type name" comments -- there is no alias emission, no weak fallback, and no second lookup under the unprefixed name. The last touches to the file (2026-08-08 and 2026-08-11) are a path-clone fix and the tree restore, both unrelated to mangling.

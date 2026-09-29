@@ -74,3 +74,7 @@ which is why triage could not confirm it). `llvm-sys` is **vendored**:
 `src/compiler_rust/vendor/**` is excluded third-party source under CLAUDE.md's
 Owned-Code Scope, so this row is not actionable from the compiler crate and is
 an environment/toolchain constraint rather than a silent-wrong-result defect.
+
+## Triage 2026-09-13 (BUGFIX-7 lane)
+
+Out of lane: Rust seed Cargo dependency pin (Cargo.toml), needs a seed rebuild/toolchain change to verify. No change made.

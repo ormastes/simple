@@ -1,4 +1,8 @@
 # Perf: pure-Simple web renderer hangs in compute_styles, independent of pixel count
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Date:** 2026-07-14
 - **Severity:** high (blocks any real-HTML-page PPM evidence/showcase render)
@@ -250,3 +254,4 @@ Everything reducible in Simple was reduced (7 fixes: split x2, FontRenderConfig,
 font cache, native sha256, glyf CastElse). The only remaining unblock is seed-compiler
 work — fix the JIT to compile the font/render modules OR redeploy compiled Stage-4
 bin/simple — both bootstrap-scoped, outside a safe pure-Simple drive-by.
+

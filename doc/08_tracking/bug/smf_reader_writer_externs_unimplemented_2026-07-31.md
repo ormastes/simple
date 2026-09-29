@@ -1,4 +1,8 @@
 # SMF reader/writer externs are unimplemented scaffolding (2026-07-31)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Found by:** link_manager Lane L1ADAPT while trying to prove the L1 adapter
 against a real on-disk `.smf` file.
@@ -31,3 +35,4 @@ plan's oracle is re-scoped to the native-build/cc route the parity harness
 already verified), SMF-level parity cannot be gated. The L1 adapter therefore
 targets the writer-side `SmfWriterSymbol` structures, which are real and
 exercised.
+

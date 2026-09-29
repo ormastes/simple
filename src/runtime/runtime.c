@@ -31,9 +31,25 @@
 
 #define SPL_LEGACY_VALUE_RUNTIME 1
 #include "runtime.h"
+
+int64_t rt_simple_abi_version(void) {
+    return (int64_t)SIMPLE_ABI_VERSION;
+}
+
+int64_t rt_simple_abi_version_deferred(void) {
+    return SIMPLE_ABI_VERSION_DEFERRED ? 1 : 0;
+}
 #include "runtime_startup_args.h"
 #include "platform/platform.h"
 #include "runtime_memtrack.h"
+#if defined(_WIN32)
+/* rt_widen_long_path_rc / rt_win_long_path_widen (shared Windows long-path
+ * helper), rt_win_long_path_rename -- included early because spl_file_exists
+ * below needs it, and every later Windows call site in this file (creat,
+ * fsync, publish) reuses the same include. This file used to carry its own
+ * byte-identical copy defined further down. */
+#include "platform/runtime_win_long_path.h"
+#endif
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -42,13 +58,50 @@
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
+#if defined(__linux__)
+#include <sys/syscall.h>
+#endif
 #include <signal.h>
 #include <stdatomic.h>
+
 #ifndef _WIN32
 #include <execinfo.h>
 #include <unistd.h>
+#else
+/* MinGW/MSVC: open/write/close and the O_* flags live in these headers
+ * (they are pulled in transitively by <unistd.h> on POSIX). */
+#include <fcntl.h>
+#include <io.h>
+#include <time.h>
+#include <sys/types.h>
+/* MSVC/clang-cl compatibility shims. Windows-only: every definition below is
+ * inside this `#else` branch of `#ifndef _WIN32`, so the POSIX build is
+ * byte-identical. Without them this TU has never compiled on Windows at all
+ * (`alloca`, `ssize_t`, `S_ISDIR`/`S_ISREG` are all absent from the MS CRT),
+ * which is why the seed's core-C list in
+ * src/compiler_rust/compiler/src/pipeline/native_project/tools.rs deliberately
+ * omits runtime.c while the pure-Simple list in
+ * src/compiler/70.backend/backend/runtime_compiler.spl includes it. */
+#include <malloc.h>
+#ifndef alloca
+#define alloca _alloca
+#endif
+#if defined(_MSC_VER) && !defined(_SSIZE_T_DEFINED)
+#define _SSIZE_T_DEFINED
+typedef long long ssize_t;
+#endif
 #endif
 #include <sys/stat.h>
+#ifdef _WIN32
+/* <sys/stat.h> on Windows defines _S_IFMT/_S_IFDIR/_S_IFREG but not the
+ * POSIX classification macros. Windows-only; POSIX already provides them. */
+#ifndef S_ISDIR
+#define S_ISDIR(m) (((m) & _S_IFMT) == _S_IFDIR)
+#endif
+#ifndef S_ISREG
+#define S_ISREG(m) (((m) & _S_IFMT) == _S_IFREG)
+#endif
+#endif
 #ifndef _WIN32
 #include <dirent.h>
 #endif
@@ -72,10 +125,10 @@ static bool spl_debug_mode_enabled = false;
 #define RT_FILE_EXISTS_PROBE_GENERATION_MAX UINT64_C(0x7fffffffffffffff)
 #define RT_FILE_EXISTS_PROBE_TOTAL_MAX    UINT64_C(0x7fffffff)
 
-static atomic_uint_fast64_t rt_file_exists_probe_state = ATOMIC_VAR_INIT(0);
-static atomic_uint_fast64_t rt_file_exists_probe_generation = ATOMIC_VAR_INIT(0);
-static atomic_uint_fast64_t rt_file_exists_probe_total = ATOMIC_VAR_INIT(0);
-static atomic_uint_fast64_t rt_file_exists_probe_failed = ATOMIC_VAR_INIT(0);
+static atomic_uint_fast64_t rt_file_exists_probe_state = 0;
+static atomic_uint_fast64_t rt_file_exists_probe_generation = 0;
+static atomic_uint_fast64_t rt_file_exists_probe_total = 0;
+static atomic_uint_fast64_t rt_file_exists_probe_failed = 0;
 
 /* Reserve one total slot. A failed slot is incremented only after this succeeds,
  * so concurrent records preserve failed <= total <= TOTAL_MAX. */
@@ -497,12 +550,12 @@ int spl_str_cmp(const char* a, const char* b) {
  * audit object is absent these resolve to NULL and the audit is simply
  * inactive, never a link failure. See runtime_simd_utf8.c for the contract. */
 #if defined(__GNUC__) || defined(__clang__)
-extern int64_t rt_text_slice_audit_level(void) __attribute__((weak));
+extern int64_t rt_text_slice_audit_level(void) SPL_WEAK;
 extern int64_t rt_text_slice_audit_note(int site_id, const char* site_name,
                                         int64_t start, int64_t end,
                                         const uint8_t* src, uint64_t src_len,
                                         const uint8_t* out, uint64_t out_len)
-    __attribute__((weak));
+    SPL_WEAK;
 #  define SPL_SLICE_AUDIT_AVAILABLE (rt_text_slice_audit_level && rt_text_slice_audit_note)
 #else
 #  define SPL_SLICE_AUDIT_AVAILABLE 0
@@ -1109,9 +1162,23 @@ int spl_file_append(const char* path, const char* content) {
 
 int spl_file_exists(const char* path) {
     if (!path) return 0;
+#if defined(_WIN32)
+    /* fopen(path, "r") answers false for a directory (and is text-mode by
+     * spelling, though the process-wide _O_BINARY default already covers
+     * that). Neither matches the POSIX/Rust `exists()` contract this API's
+     * callers assume, where a directory counts. GetFileAttributesW also
+     * gets the long-path/backslash normalization the shared helper provides,
+     * where a widened fopen() would not. */
+    wchar_t* wide_path = rt_win_long_path_widen(path);
+    if (!wide_path) return 0;
+    DWORD attributes = GetFileAttributesW(wide_path);
+    free(wide_path);
+    return attributes != INVALID_FILE_ATTRIBUTES;
+#else
     FILE* f = fopen(path, "r");
     if (f) { fclose(f); return 1; }
     return 0;
+#endif
 }
 
 /* ---------------------------------------------------------------------------
@@ -1540,7 +1607,7 @@ static SplRuntimeEnum* spl_enum_from_handle(int64_t handle) {
     return (SplRuntimeEnum*)(intptr_t)handle;
 }
 
-__attribute__((weak))
+SPL_WEAK
 int64_t rt_enum_new(int32_t enum_id, int32_t discriminant, int64_t payload) {
     SplRuntimeEnum* value = (SplRuntimeEnum*)SPL_MALLOC(sizeof(SplRuntimeEnum), "enum");
     if (!value) return 0;
@@ -1550,19 +1617,19 @@ int64_t rt_enum_new(int32_t enum_id, int32_t discriminant, int64_t payload) {
     return (int64_t)(intptr_t)value;
 }
 
-__attribute__((weak))
+SPL_WEAK
 int64_t rt_enum_id(int64_t value) {
     SplRuntimeEnum* enum_value = spl_enum_from_handle(value);
     return enum_value ? enum_value->enum_id : -1;
 }
 
-__attribute__((weak))
+SPL_WEAK
 int64_t rt_enum_discriminant(int64_t value) {
     SplRuntimeEnum* enum_value = spl_enum_from_handle(value);
     return enum_value ? enum_value->discriminant : -1;
 }
 
-__attribute__((weak))
+SPL_WEAK
 int64_t rt_enum_payload(int64_t value) {
     SplRuntimeEnum* enum_value = spl_enum_from_handle(value);
     return enum_value ? enum_value->payload : 0;
@@ -1571,6 +1638,13 @@ int64_t rt_enum_payload(int64_t value) {
 int8_t rt_enum_check_discriminant(int64_t value, int64_t expected) {
     SplRuntimeEnum* enum_value = spl_enum_from_handle(value);
     return enum_value && enum_value->discriminant == (int32_t)expected;
+}
+
+int8_t rt_enum_check_variant(int64_t value, int64_t expected_enum_id, int64_t expected_discriminant) {
+    SplRuntimeEnum* enum_value = spl_enum_from_handle(value);
+    if (!enum_value || enum_value->discriminant != (int32_t)expected_discriminant) return 0;
+    /* ID zero is the legacy untyped enum lane (including Result). */
+    return expected_enum_id == 0 || enum_value->enum_id == 0 || enum_value->enum_id == (int32_t)expected_enum_id;
 }
 
 void rt_bdd_describe_start_rv(int64_t name_rv) {
@@ -1664,9 +1738,28 @@ void spl_prefetch_start(const char* path) {
 
 void spl_prefetch_wait(void) {
     if (g_prefetch_pid > 0) {
-        int status;
-        waitpid(g_prefetch_pid, &status, 0);
+        int status = 0;
+        pid_t reaped = waitpid(g_prefetch_pid, &status, 0);
         g_prefetch_pid = 0;
+        /* Phase 3 fork() audit (doc/03_plan/infra/audit/serial_sigsegv_and_test_hardening.md):
+         * this is the one fork() reaper in this file that used to discard
+         * `status` outright, so a prefetch child killed by SIGSEGV/SIGKILL was
+         * indistinguishable from a clean warm-up. The prefetch is advisory —
+         * a dead child must NOT fail the program — but it must not be silent
+         * either, or an OOM-killed or crashing child looks like success.
+         * Every other fork() site in the runtime (runtime_fork.c,
+         * runtime_process.c, runtime_process_owned.c, runtime_legacy_core.c,
+         * counterpart_worker_runtime.c) already threads WIFSIGNALED through. */
+        if (reaped > 0 && WIFSIGNALED(status)) {
+            char buf[128];
+            int len = snprintf(buf, sizeof(buf),
+                "[simple-runtime] prefetch child killed by signal %d (page warm-up incomplete)\n",
+                WTERMSIG(status));
+            if (len > 0) {
+                ssize_t ignored = write(STDERR_FILENO, buf, (size_t)len);
+                (void)ignored;
+            }
+        }
     }
 }
 
@@ -1736,10 +1829,35 @@ int64_t rt_file_read_text(const uint8_t* path_ptr, uint64_t path_len) {
      * it cannot tell "missing" from "empty". The Rust definition returns NIL
      * for an unreadable path, and Simple callers spell `... ?? ""`, which only
      * fires on nil -- so probe openability first or the `??` arm is dead. */
-    { FILE* probe = fopen(path, "rb"); if (!probe) return rt_nil; fclose(probe); }
-    char* content = spl_file_read(path);
-    if (!content) return rt_nil;
-    int64_t result = rt_string_new((const uint8_t*)content, (uint64_t)strlen(content));
+    /* Read to EOF into a growable buffer and keep the BYTE COUNT. strlen() on
+     * spl_file_read's result stopped at the first NUL, so a binary file came
+     * back as a NON-nil short text -- an ELF object's e_ident has a NUL at
+     * offset 7, so a 1080-byte aarch64 `.o` read back as 7 bytes, and
+     * FileFingerprint.from_file's sha256 fallback (which fires only on nil)
+     * became dead code. Identical defect and fix in the runtime_native.c lane;
+     * the two are paired by the push-rt-dual-implementation ratchet and must not
+     * diverge. Do NOT size from fseek/ftell -- procfs and sysfs report 0, which
+     * is the incident spl_file_read's own comment records. */
+    FILE* f = fopen(path, "rb");
+    if (!f) return rt_nil;
+    size_t cap = 4096;
+    size_t len = 0;
+    char* content = (char*)malloc(cap);
+    if (!content) { fclose(f); return rt_nil; }
+    for (;;) {
+        if (len >= cap) {
+            size_t new_cap = cap * 2;
+            char* grown = (char*)realloc(content, new_cap);
+            if (!grown) { free(content); fclose(f); return rt_nil; }
+            content = grown;
+            cap = new_cap;
+        }
+        size_t n = fread(content + len, 1, cap - len, f);
+        len += n;
+        if (n == 0) break;
+    }
+    fclose(f);
+    int64_t result = rt_string_new((const uint8_t*)content, (uint64_t)len);
     free(content);
     return result;
 }
@@ -1747,41 +1865,69 @@ int64_t rt_file_read_text(const uint8_t* path_ptr, uint64_t path_len) {
 /* Single-handle secret/config admission: no path predicate is separated from
  * the open, classification, size bound, or read. NIL is the fail-closed
  * sentinel; an allocated empty RuntimeValue remains a valid empty file. */
+/* rt_widen_long_path_rc / rt_win_long_path_widen already included near the
+ * top of this file (needed by spl_file_exists above). */
+
+/* Why the last bounded no-follow read returned nil.
+ *
+ * The reader has a dozen indistinguishable `rt_nil` exits, and its Simple
+ * caller could only report "returned nil". That is what left the Stage 2
+ * bootstrap failure unexplainable across sessions: the AOT diagnostic was
+ * written successfully and read back as nil with nothing able to name the arm
+ * that refused it. The Rust twin in
+ * runtime/src/value/sffi/file_io/file_ops.rs carries the same code space; this
+ * copy exists because the `core-c-bootstrap` lane resolves the C reader, so a
+ * Rust-only diagnostic would leave that lane with an unresolved external.
+ *
+ * Starts at a sentinel rather than zero so a readout is never ambiguous:
+ * 77 = never called, 100 = succeeded, 1..10 name a rejected arm, and a literal
+ * 0 means this extern is itself unresolved in the lane that read it. */
+/* Thread-local, NOT a global: the bootstrap reads with 24 jobs in flight, so a
+ * concurrent successful read on another thread would overwrite the code before
+ * the failing caller could report it.
+ *
+ * Spelled `_Thread_local` to match this tree's existing TLS (runtime_native.c
+ * and runtime_timestamp.c) rather than a fresh __declspec/__thread macro: one
+ * spelling already proven on every toolchain here beats a second one that has
+ * to be re-argued. */
+static _Thread_local int64_t rt_rnf_last_failure = 77;
+
+int64_t rt_file_read_regular_no_follow_last_failure(void) {
+    return rt_rnf_last_failure;
+}
+
+#define RT_RNF_FAIL(code) (rt_rnf_last_failure = (code), rt_nil)
+
 int64_t rt_file_read_regular_no_follow_bounded(
         const uint8_t* path_ptr, uint64_t path_len, int64_t max_bytes) {
     const int64_t rt_nil = 3;
     char path[RT_TEXT_PATH_MAX];
     if (max_bytes < 0 || path_len == 0 ||
         !rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path)) ||
-        (uint64_t)max_bytes >= (uint64_t)SIZE_MAX) return rt_nil;
+        (uint64_t)max_bytes >= (uint64_t)SIZE_MAX) return RT_RNF_FAIL(2);
     size_t capacity = (size_t)max_bytes + 1;
     uint8_t* bytes = (uint8_t*)malloc(capacity);
-    if (!bytes) return rt_nil;
+    if (!bytes) return RT_RNF_FAIL(9);
     size_t total = 0;
 #if defined(_WIN32)
-    int wide_len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, NULL, 0);
-    if (wide_len <= 0) { free(bytes); return rt_nil; }
-    wchar_t* wide_path = (wchar_t*)malloc((size_t)wide_len * sizeof(wchar_t));
-    if (!wide_path || !MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
-            path, -1, wide_path, wide_len)) {
-        free(wide_path); free(bytes); return rt_nil;
-    }
+    wchar_t* wide_path = rt_widen_long_path_rc(path);
+    if (!wide_path) { free(bytes); return RT_RNF_FAIL(4); }
     HANDLE handle = CreateFileW(wide_path, GENERIC_READ, FILE_SHARE_READ, NULL,
         OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_SEQUENTIAL_SCAN, NULL);
     free(wide_path);
-    if (handle == INVALID_HANDLE_VALUE) { free(bytes); return rt_nil; }
+    if (handle == INVALID_HANDLE_VALUE) { free(bytes); return RT_RNF_FAIL(4); }
     BY_HANDLE_FILE_INFORMATION info;
     LARGE_INTEGER size;
     if (!GetFileInformationByHandle(handle, &info) || !GetFileSizeEx(handle, &size) ||
         (info.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0 ||
         size.QuadPart < 0 || (uint64_t)size.QuadPart > (uint64_t)max_bytes) {
-        CloseHandle(handle); free(bytes); return rt_nil;
+        CloseHandle(handle); free(bytes); return RT_RNF_FAIL(5);
     }
     while (total < capacity) {
         DWORD chunk = (DWORD)((capacity - total) > UINT32_MAX ? UINT32_MAX : (capacity - total));
         DWORD read_count = 0;
         if (!ReadFile(handle, bytes + total, chunk, &read_count, NULL)) {
-            CloseHandle(handle); free(bytes); return rt_nil;
+            CloseHandle(handle); free(bytes); return RT_RNF_FAIL(9);
         }
         if (read_count == 0) break;
         total += (size_t)read_count;
@@ -1790,26 +1936,27 @@ int64_t rt_file_read_regular_no_follow_bounded(
 #else
 #ifndef O_NOFOLLOW
     free(bytes);
-    return rt_nil;
+    return RT_RNF_FAIL(2);
 #else
     int fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
-    if (fd < 0) { free(bytes); return rt_nil; }
+    if (fd < 0) { free(bytes); return RT_RNF_FAIL(4); }
     struct stat st;
     if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size < 0 ||
         (uint64_t)st.st_size > (uint64_t)max_bytes) {
-        close(fd); free(bytes); return rt_nil;
+        close(fd); free(bytes); return RT_RNF_FAIL(5);
     }
     while (total < capacity) {
         ssize_t count = read(fd, bytes + total, capacity - total);
         if (count < 0 && errno == EINTR) continue;
-        if (count < 0) { close(fd); free(bytes); return rt_nil; }
+        if (count < 0) { close(fd); free(bytes); return RT_RNF_FAIL(9); }
         if (count == 0) break;
         total += (size_t)count;
     }
     close(fd);
 #endif
 #endif
-    if (total > (size_t)max_bytes) { free(bytes); return rt_nil; }
+    if (total > (size_t)max_bytes) { free(bytes); return RT_RNF_FAIL(7); }
+    rt_rnf_last_failure = 100;
     int64_t result = rt_string_new(bytes, (uint64_t)total);
     free(bytes);
     return result;
@@ -1833,7 +1980,14 @@ int         rt_dir_exists(const uint8_t* path_ptr, uint64_t path_len) {
 }
 int         rt_file_write(const char* path, const char* content) {
     if (!path) return 0;
+#if defined(_WIN32)
+    /* "w" is text mode by explicit spelling regardless of the process-wide
+     * _O_BINARY default; write "wb" explicitly so content is never
+     * LF->CRLF translated. */
+    FILE* f = fopen(path, "wb");
+#else
     FILE* f = fopen(path, "w");
+#endif
     if (!f) return 0;
     if (content) fputs(content, f);
     fclose(f);
@@ -1887,18 +2041,53 @@ int64_t     rt_file_size(const uint8_t* path_ptr, uint64_t path_len) {
 /* C-internal fsync worker: takes a genuine NUL-terminated C string. The rt_*
  * entry points below convert the compiler's (ptr, len) `text` pair into one of
  * these before calling it, so the conversion lives in exactly one place and
- * C-internal callers do not have to fake a pair. */
+ * C-internal callers do not have to fake a pair. rt_widen_long_path_rc
+ * (defined above) supplies the wide, extended-length-prefixed path. */
 static int rt_fsync_path(const char* path) {
     if (!path) return 0;
+#if defined(_WIN32)
+    /* fopen()+fflush() was doubly wrong on Windows: fopen() is an ANSI/
+     * narrow-CRT entry point capped at MAX_PATH (260 chars) -- the same bug
+     * class as rt_file_create_excl below, and a bootstrap generation path
+     * routinely exceeds it -- and fflush() only empties the CRT's userspace
+     * buffer, it gives no OS-level durability guarantee at all. Use the wide,
+     * extended-length-prefixed CreateFileW + FlushFileBuffers pair instead,
+     * exactly like rt_file_create_excl's fix; fall back to the ANSI
+     * CreateFileA + FlushFileBuffers pair only when the path cannot be
+     * widened. GENERIC_WRITE is required for FlushFileBuffers to succeed
+     * (Windows refuses it on a read-only handle with ERROR_ACCESS_DENIED).
+     * FILE_FLAG_BACKUP_SEMANTICS is required too: callers durability-sync
+     * DIRECTORIES through this same worker (native_noop_admission.spl syncs
+     * "{root}/generations" after a rename, the POSIX fsync-the-parent-dir
+     * idiom), and CreateFile refuses to open a directory handle at all
+     * without that flag (ERROR_ACCESS_DENIED). It is harmless on a regular
+     * file -- the flag only widens what CreateFile will open, it does not
+     * change file semantics. */
+    wchar_t* wide_path = rt_widen_long_path_rc(path);
+    HANDLE file = INVALID_HANDLE_VALUE;
+    if (wide_path) {
+        file = CreateFileW(wide_path, GENERIC_READ | GENERIC_WRITE,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                           NULL, OPEN_EXISTING,
+                           FILE_ATTRIBUTE_NORMAL | FILE_FLAG_BACKUP_SEMANTICS, NULL);
+        free(wide_path);
+    } else {
+        file = CreateFileA(path, GENERIC_READ | GENERIC_WRITE,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                           NULL, OPEN_EXISTING,
+                           FILE_ATTRIBUTE_NORMAL | FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    }
+    if (file == INVALID_HANDLE_VALUE) return 0;
+    int ok = FlushFileBuffers(file) != 0;
+    if (!CloseHandle(file)) ok = 0;
+    return ok ? 1 : 0;
+#else
     FILE* file = fopen(path, "rb");
     if (!file) return 0;
-#ifdef _WIN32
-    int ok = fflush(file) == 0;
-#else
     int ok = fsync(fileno(file)) == 0;
-#endif
     fclose(file);
     return ok ? 1 : 0;
+#endif
 }
 int         rt_file_fsync(const uint8_t* path_ptr, uint64_t path_len) {
     char path[RT_TEXT_PATH_MAX];
@@ -1940,7 +2129,11 @@ int         rt_file_create_excl(const char* path, int64_t path_len,
     if (!path_copy) return 0;
     memcpy(path_copy, path, (size_t)path_len);
     path_copy[path_len] = '\0';
+#if defined(_WIN32)
+    int fd = open(path_copy, O_CREAT | O_EXCL | O_WRONLY | _O_BINARY, 0644); /* no LF->CRLF */
+#else
     int fd = open(path_copy, O_CREAT | O_EXCL | O_WRONLY, 0644);
+#endif
     if (fd < 0) {
         free(path_copy);
         return 0;
@@ -1958,6 +2151,98 @@ int         rt_file_create_excl(const char* path, int64_t path_len,
     }
     free(path_copy);
     return 1;
+}
+
+static char* rt_m3_owned_path(const char* path, int64_t path_len) {
+    if (!path || path_len <= 0 || (uint64_t)path_len >= SIZE_MAX ||
+        memchr(path, '\0', (size_t)path_len) != NULL) return NULL;
+    char* owned = (char*)malloc((size_t)path_len + 1);
+    if (!owned) return NULL;
+    memcpy(owned, path, (size_t)path_len);
+    owned[path_len] = '\0';
+    return owned;
+}
+
+int rt_file_copy_create_excl_no_follow(
+        const char* source, int64_t source_len,
+        const char* destination, int64_t destination_len) {
+#if defined(_WIN32) || !defined(O_NOFOLLOW)
+    (void)source; (void)source_len; (void)destination; (void)destination_len;
+    return 0;
+#else
+    char* src = rt_m3_owned_path(source, source_len);
+    char* dst = rt_m3_owned_path(destination, destination_len);
+    if (!src || !dst) { free(src); free(dst); return 0; }
+    int input = open(src, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    struct stat source_stat;
+    if (input < 0 || fstat(input, &source_stat) != 0 ||
+            !S_ISREG(source_stat.st_mode)) {
+        if (input >= 0) close(input);
+        free(src); free(dst); return 0;
+    }
+    int output = open(dst,
+        O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+    if (output < 0) {
+        close(input); free(src); free(dst); return 0;
+    }
+    int ok = 1;
+    unsigned char buffer[65536];
+    for (;;) {
+        ssize_t count = read(input, buffer, sizeof(buffer));
+        if (count == 0) break;
+        if (count < 0) {
+            if (errno == EINTR) continue;
+            ok = 0; break;
+        }
+        ssize_t offset = 0;
+        while (offset < count) {
+            ssize_t written = write(output, buffer + offset,
+                (size_t)(count - offset));
+            if (written < 0 && errno == EINTR) continue;
+            if (written <= 0) { ok = 0; break; }
+            offset += written;
+        }
+        if (!ok) break;
+    }
+    if (ok && fsync(output) != 0) ok = 0;
+    if (close(output) != 0) ok = 0;
+    if (close(input) != 0) ok = 0;
+    if (!ok) unlink(dst);
+    free(src); free(dst);
+    return ok;
+#endif
+}
+
+int rt_file_link_create_excl_no_follow(
+        const char* source, int64_t source_len,
+        const char* destination, int64_t destination_len) {
+#if defined(_WIN32) || !defined(O_NOFOLLOW)
+    (void)source; (void)source_len; (void)destination; (void)destination_len;
+    return 0;
+#else
+    char* src = rt_m3_owned_path(source, source_len);
+    char* dst = rt_m3_owned_path(destination, destination_len);
+    if (!src || !dst) { free(src); free(dst); return 0; }
+    int input = open(src, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    struct stat source_stat;
+    if (input < 0 || fstat(input, &source_stat) != 0 ||
+            !S_ISREG(source_stat.st_mode)) {
+        if (input >= 0) close(input);
+        free(src); free(dst); return 0;
+    }
+    int ok = link(src, dst) == 0;
+    struct stat destination_stat;
+    if (ok && (lstat(dst, &destination_stat) != 0 ||
+            !S_ISREG(destination_stat.st_mode) ||
+            destination_stat.st_dev != source_stat.st_dev ||
+            destination_stat.st_ino != source_stat.st_ino)) {
+        unlink(dst);
+        ok = 0;
+    }
+    close(input);
+    free(src); free(dst);
+    return ok;
+#endif
 }
 
 #if !defined(_WIN32)
@@ -2071,6 +2356,22 @@ int rt_mem_snapshot_record(int64_t fd, int64_t seq,
     return n > 0 && (size_t)n < sizeof(line) && rt_mem_snapshot_append_flush(fd, line, n);
 }
 
+/* C twin of the Rust lane's rt_phase_profile_record (mem_snapshot.rs): one
+ * phase_profile.v1 line per call, same token escaping and the same "-" run_id
+ * fallback as the Rust arm so a dual-run compares byte-for-byte. */
+int rt_phase_profile_record(int64_t fd, int64_t seq, const char* message, int64_t message_len) {
+    char run_token[256], message_token[4096], line[8192];
+    const char* run_id = getenv("SIMPLE_EVIDENCE_RUN_ID");
+    if (!run_id || !*run_id) run_id = "-";
+    if (rt_mem_snapshot_token(run_token, sizeof(run_token), run_id, (int64_t)strlen(run_id)) < 0 ||
+        rt_mem_snapshot_token(message_token, sizeof(message_token), message, message_len) < 0) return 0;
+    int n = snprintf(line, sizeof(line),
+        "schema=simple.compiler.phase_profile.v1 run_id=%s seq=%lld pid=%lld monotonic_ms=%lld message=%s\n",
+        run_token, (long long)seq, (long long)rt_getpid(), (long long)rt_time_now_monotonic_ms(),
+        message_token);
+    return n > 0 && (size_t)n < sizeof(line) && rt_mem_snapshot_append_flush(fd, line, n);
+}
+
 int rt_mem_snapshot_close(int64_t fd) {
 #if defined(_WIN32)
     (void)fd; return 0;
@@ -2141,8 +2442,19 @@ typedef struct {
     int64_t cap;
 } rt_dir_listing;
 
-int64_t rt_readdir(const char* path) {
-    if (!path) return 0;
+/* Tagged-text ABI (2026-08-31): rt_readdir/rt_mkdir/rt_readdir_entry are
+ * absent from text_arg_indices (50.mir/text_extern_abi.spl + the Rust twin),
+ * so generated code passes `text` as ONE tagged value and reads a `text`
+ * return as a tagged value. The old `const char*` shapes never matched any
+ * generated caller. Mirrors runtime_core_exports.c (which serves the lanes
+ * that do NOT compile this file). */
+int64_t rt_readdir(int64_t path_value) {
+    int64_t plen = rt_string_len(path_value);
+    const uint8_t* pdata = rt_string_data(path_value);
+    if (plen <= 0 || plen >= 4096 || !pdata) return 0;
+    char path[4096];
+    memcpy(path, pdata, (size_t)plen);
+    path[plen] = '\0';
     DIR* d = opendir(path);
     if (!d) return 0;
     rt_dir_listing* dl = (rt_dir_listing*)calloc(1, sizeof(rt_dir_listing));
@@ -2166,11 +2478,12 @@ int64_t rt_readdir_count(int64_t handle) {
     if (!handle) return 0;
     return ((rt_dir_listing*)(uintptr_t)handle)->count;
 }
-const char* rt_readdir_entry(int64_t handle, int64_t index) {
-    if (!handle) return "";
+int64_t rt_readdir_entry(int64_t handle, int64_t index) {
+    if (!handle) return rt_string_new(NULL, 0);
     rt_dir_listing* dl = (rt_dir_listing*)(uintptr_t)handle;
-    if (index < 0 || index >= dl->count) return "";
-    return dl->entries[index];
+    if (index < 0 || index >= dl->count) return rt_string_new(NULL, 0);
+    const char* name = dl->entries[index];
+    return rt_string_new((const uint8_t*)name, (uint64_t)strlen(name));
 }
 void rt_readdir_free(int64_t handle) {
     if (!handle) return;
@@ -2180,8 +2493,13 @@ void rt_readdir_free(int64_t handle) {
     free(dl);
 }
 
-int64_t rt_mkdir(const char* path, int64_t mode) {
-    if (!path) return -1;
+int64_t rt_mkdir(int64_t path_value, int64_t mode) {
+    int64_t plen = rt_string_len(path_value);
+    const uint8_t* pdata = rt_string_data(path_value);
+    if (plen <= 0 || plen >= 4096 || !pdata) return -(int64_t)EINVAL;
+    char path[4096];
+    memcpy(path, pdata, (size_t)plen);
+    path[plen] = '\0';
     if (mode == 0) mode = 0755;
     return mkdir(path, (mode_t)mode) == 0 ? 0 : -(int64_t)errno;
 }
@@ -2195,17 +2513,74 @@ int64_t rt_remove(const char* path) {
     return unlink(path) == 0 ? 0 : -(int64_t)errno;
 }
 #else
-int64_t rt_readdir(const char* p) { (void)p; return 0; }
+/* Windows stubs keep the tagged ABI (real Windows support lives in
+ * runtime_core_exports.c, which the Windows core-C lane compiles instead). */
+int64_t rt_readdir(int64_t p) { (void)p; return 0; }
 int64_t rt_readdir_count(int64_t h) { (void)h; return 0; }
-const char* rt_readdir_entry(int64_t h, int64_t i) { (void)h; (void)i; return ""; }
+int64_t rt_readdir_entry(int64_t h, int64_t i) { (void)h; (void)i; return rt_string_new(NULL, 0); }
 void rt_readdir_free(int64_t h) { (void)h; }
-int64_t rt_mkdir(const char* p, int64_t m) { (void)p; (void)m; return -1; }
+int64_t rt_mkdir(int64_t p, int64_t m) { (void)p; (void)m; return -(int64_t)EINVAL; }
 int64_t rt_remove(const char* p) { (void)p; return -1; }
 #endif
 
-const char* rt_shell_output(const char* cmd) { return spl_shell_output(cmd); }
+/* Tagged-text ABI (see runtime.h): decode the command, delegate to
+ * spl_shell_output, box the captured stdout. Empty text on failure. */
+int64_t rt_shell_output(int64_t cmd_value) {
+    int64_t len = rt_string_len(cmd_value);
+    const uint8_t* data = rt_string_data(cmd_value);
+    if (len < 0 || (!data && len != 0)) return rt_string_new(NULL, 0);
+    char* cmd = (char*)malloc((size_t)len + 1u);
+    if (!cmd) return rt_string_new(NULL, 0);
+    if (len != 0) memcpy(cmd, data, (size_t)len);
+    cmd[len] = '\0';
+    char* out = spl_shell_output(cmd);
+    free(cmd);
+    if (!out) return rt_string_new(NULL, 0);
+    int64_t result = rt_string_new((const uint8_t*)out, (uint64_t)strlen(out));
+    SPL_FREE(out);
+    return result;
+}
 
-__attribute__((weak)) SplArray* rt_cli_get_args(void) {
+/* SPL_CLI_ARGS_WEAK: weak everywhere except Windows.
+ *
+ * runtime_native.c ALSO defines these three, also weak. On ELF and Mach-O two
+ * weak definitions are simply resolved to one and nothing is reported. On COFF
+ * they are not: clang-cl lowers `__attribute__((weak))` to a weak EXTERNAL
+ * carrying a default-resolution symbol named after the object it lives in, so
+ * the two translation units declare the same weak external with DIFFERENT
+ * defaults and link.exe fails
+ *
+ *   fatal error LNK1227: conflicting weak extern definition for
+ *   'rt_cli_get_args'. new default '.weak.rt_cli_get_args.default.
+ *   rt_random_hex' conflicts with previous default
+ *   '.weak.rt_cli_get_args.default.rt_dir_create_cpath'
+ *
+ * measured 2026-09-02 on the MSVC Stage 2 receiver probe (link.exe 14.44,
+ * exit 1227). `/FORCE:MULTIPLE` does NOT cover this -- it downgrades duplicate
+ * STRONG definitions to LNK4006 warnings (about 40 of those ride the same
+ * link), but conflicting weak-external defaults are a separate, unforceable
+ * rule.
+ *
+ * Making THIS file the strong owner on Windows fixes it while leaving exactly
+ * one weak external (runtime_native.c's), which resolves against a strong
+ * definition normally. The reverse -- compiling runtime_native.c's copies out
+ * under SIMPLE_CORE_C_STANDALONE -- was tried first and is WRONG: it leaves
+ * only a weak definition, and a weak archive member is never pulled in to
+ * satisfy a reference on PE/COFF (the hazard already documented at the
+ * rt_set_args carve-out in runtime_native.c), so the frontend-smoke lane then
+ * failed with `simple_runtime.lib(runtime_native.obj) : error LNK2019:
+ * unresolved external symbol rt_cli_get_args`.
+ *
+ * CROSS-PLATFORM: off Windows this macro expands to exactly the
+ * `__attribute__((weak))` that was here before, so Linux, macOS and FreeBSD
+ * are byte-identical. The mingw lane is COFF too and benefits identically. */
+#if defined(_WIN32)
+#  define SPL_CLI_ARGS_WEAK
+#else
+#  define SPL_CLI_ARGS_WEAK __attribute__((weak))
+#endif
+
+SPL_CLI_ARGS_WEAK SplArray* rt_cli_get_args(void) {
     SplArray* arr = spl_array_new();
     for (int i = 0; i < g_argc; i++) {
         spl_array_push(arr, spl_str(g_argv && g_argv[i] ? g_argv[i] : ""));
@@ -2213,11 +2588,11 @@ __attribute__((weak)) SplArray* rt_cli_get_args(void) {
     return arr;
 }
 
-__attribute__((weak)) int64_t rt_cli_arg_count(void) {
+SPL_CLI_ARGS_WEAK int64_t rt_cli_arg_count(void) {
     return spl_arg_count();
 }
 
-__attribute__((weak)) SplValue rt_cli_arg_at(int64_t index) {
+SPL_CLI_ARGS_WEAK SplValue rt_cli_arg_at(int64_t index) {
     if (index < 0 || index >= spl_arg_count()) {
         return spl_str("");
     }
@@ -2395,6 +2770,114 @@ int64_t spl_wffi_try_call_i64_c(void* fptr, const int64_t* args, int64_t nargs, 
     *out = result;
     return 0;
 }
+
+#if defined(_WIN32)
+/* rt_secure_temp_dir collapsed every Windows failure mode into an empty string,
+ * so its one caller -- AOT diagnostic staging in
+ * driver_aot_native_output.spl:2267 -- could only report "diagnostic staging
+ * unavailable" with no way to tell WHICH step failed, which left the Stage 2
+ * sanity smoke test blocked with nothing to go on. Name the failing step and
+ * the Win32 error instead; this runs only on a path that is already failing.
+ * Set SIMPLE_QUIET_SECURE_TEMP_DIAG=1 to silence. */
+static void rt_secure_temp_dir_diag(const char* stage, const char* detail) {
+    if (getenv("SIMPLE_QUIET_SECURE_TEMP_DIAG")) return;
+    fprintf(stderr, "rt_secure_temp_dir: %s failed (GetLastError=%lu) %s\n",
+            stage, (unsigned long)GetLastError(), detail ? detail : "");
+    fflush(stderr);
+}
+#endif
+
+int64_t rt_secure_temp_dir(const uint8_t* parent_ptr, uint64_t parent_len,
+                           const uint8_t* prefix_ptr, uint64_t prefix_len) {
+    char parent[RT_TEXT_PATH_MAX], prefix[128], path[RT_TEXT_PATH_MAX];
+    if (!rt_text_arg_to_path(parent_ptr, parent_len, parent, sizeof(parent)) ||
+        !rt_text_arg_to_path(prefix_ptr, prefix_len, prefix, sizeof(prefix)) ||
+        prefix[0] == '\0' || strchr(prefix, '/') || strchr(prefix, '\\')) return rt_string_new(NULL, 0);
+#if defined(_WIN32)
+    typedef LONG (WINAPI *BCryptGenRandomFn)(void*, unsigned char*, unsigned long, unsigned long);
+    typedef BOOL (WINAPI *ConvertSddlFn)(const char*, DWORD, PSECURITY_DESCRIPTOR*, ULONG*);
+    HMODULE lib = LoadLibraryA("bcrypt.dll"); unsigned char random[16];
+    BCryptGenRandomFn fill = lib ? (BCryptGenRandomFn)GetProcAddress(lib, "BCryptGenRandom") : NULL;
+    if (!fill || fill(NULL, random, sizeof(random), 2) < 0) { rt_secure_temp_dir_diag("BCryptGenRandom", parent); if (lib) FreeLibrary(lib); return rt_string_new(NULL, 0); }
+    FreeLibrary(lib); char suffix[33];
+    for (size_t i = 0; i < sizeof(random); i++) snprintf(suffix + i * 2, 3, "%02x", random[i]);
+    int n = snprintf(path, sizeof(path), "%s\\%s-%s", parent, prefix, suffix);
+    HMODULE advapi = LoadLibraryA("advapi32.dll"); PSECURITY_DESCRIPTOR descriptor = NULL;
+    ConvertSddlFn convert = advapi ? (ConvertSddlFn)GetProcAddress(advapi, "ConvertStringSecurityDescriptorToSecurityDescriptorA") : NULL;
+    if (n < 0 || (size_t)n >= sizeof(path) || !convert ||
+        !convert("D:P(A;;FA;;;SY)(A;;FA;;;OW)", 1, &descriptor, NULL)) {
+        rt_secure_temp_dir_diag("ConvertStringSecurityDescriptor", path);
+        if (advapi) FreeLibrary(advapi); return rt_string_new(NULL, 0);
+    }
+    SECURITY_ATTRIBUTES attributes = { sizeof(attributes), descriptor, FALSE };
+    /* CreateDirectoryA is an ANSI entry point capped at MAX_PATH; `parent`
+     * (the bootstrap cache root) is routinely already close to that limit, so
+     * appending "<prefix>-<32hex>" can push `path` over it. Same fix as
+     * rt_file_publish_noreplace below: prefer the widened, extended-length-
+     * prefixed call, falling back to the ANSI call only when widening fails.
+     * Twin of the same fix in runtime_secure_staging.c's rt_secure_temp_dir. */
+    wchar_t* wide_path = rt_widen_long_path_rc(path);
+    BOOL created = wide_path ? CreateDirectoryW(wide_path, &attributes)
+                             : CreateDirectoryA(path, &attributes);
+    free(wide_path);
+    LocalFree(descriptor); FreeLibrary(advapi);
+    if (!created) { rt_secure_temp_dir_diag("CreateDirectoryA", path); return rt_string_new(NULL, 0); }
+#else
+    int n = snprintf(path, sizeof(path), "%s/%s-XXXXXX", parent, prefix);
+    if (n < 0 || (size_t)n >= sizeof(path) || !mkdtemp(path)) return rt_string_new(NULL, 0);
+    if (chmod(path, 0700) != 0) { rmdir(path); return rt_string_new(NULL, 0); }
+#endif
+    return rt_string_new((const uint8_t*)path, (uint64_t)strlen(path));
+}
+
+int64_t rt_file_publish_noreplace(const uint8_t* staged_ptr, uint64_t staged_len,
+                                  const uint8_t* destination_ptr, uint64_t destination_len) {
+    char staged[RT_TEXT_PATH_MAX], destination[RT_TEXT_PATH_MAX];
+    if (!rt_text_arg_to_path(staged_ptr, staged_len, staged, sizeof(staged)) ||
+        !rt_text_arg_to_path(destination_ptr, destination_len, destination, sizeof(destination))) return -1;
+#if defined(_WIN32)
+    /* MoveFileExA is an ANSI entry point capped at MAX_PATH regardless of the
+     * underlying filesystem's real limit; the AOT native-build cache path
+     * (<repo>/.simple/storage/.../stage2-home/.cache/simple/v1/projects/
+     * <64-hex>/native-build/simple-aot-diagnostic-<32-hex>/message.module.o)
+     * routinely exceeds it, failing with ERROR_PATH_NOT_FOUND (3). Prefer the
+     * wide, extended-length-prefixed call (rt_widen_long_path_rc, already
+     * used by the bounded reader above) so both endpoints can exceed
+     * MAX_PATH. Twin of the same fix in runtime_native.c. */
+    {
+        wchar_t* wide_staged = rt_widen_long_path_rc(staged);
+        wchar_t* wide_dest = wide_staged ? rt_widen_long_path_rc(destination) : NULL;
+        if (wide_staged && wide_dest) {
+            BOOL ok = MoveFileExW(wide_staged, wide_dest, MOVEFILE_WRITE_THROUGH);
+            DWORD werror = ok ? 0 : GetLastError();
+            free(wide_staged); free(wide_dest);
+            if (ok) return 1;
+            if (werror == ERROR_ALREADY_EXISTS || werror == ERROR_FILE_EXISTS) return 0;
+            rt_secure_temp_dir_diag("rt_file_publish_noreplace MoveFileExW", destination);
+            return -1;
+        }
+        free(wide_staged); free(wide_dest);
+    }
+    if (MoveFileExA(staged, destination, MOVEFILE_WRITE_THROUGH)) return 1;
+    {
+        DWORD error = GetLastError();
+        if (error == ERROR_ALREADY_EXISTS || error == ERROR_FILE_EXISTS) return 0;
+        rt_secure_temp_dir_diag("rt_file_publish_noreplace MoveFileExA", destination);
+        return -1;
+    }
+#else
+#if defined(__linux__) && defined(SYS_renameat2)
+    if (syscall(SYS_renameat2, AT_FDCWD, staged, AT_FDCWD, destination, 1) == 0) return 1;
+    if (errno == EEXIST) return 0;
+    if (errno != ENOSYS && errno != EINVAL) return -1;
+#endif
+    if (link(staged, destination) != 0) return errno == EEXIST ? 0 : -1;
+    /* Publication is complete once link succeeds. Cleanup failure leaves the
+     * staged alias behind but must not misreport or roll back visible output. */
+    (void)unlink(staged);
+    return 1;
+#endif
+}
 int64_t spl_wffi_call_i64_c(void* fptr, int64_t* args, int64_t nargs) {
     int64_t result = 0;
     return spl_wffi_try_call_i64_c(fptr, args, nargs, &result) == 0 ? result : 0;
@@ -2404,27 +2887,27 @@ int64_t spl_wffi_call_i64_c(void* fptr, int64_t* args, int64_t nargs) {
  * JIT Exec Manager (stubs — core compiler uses tree-walk interpreter)
  * ================================================================ */
 
-__attribute__((weak)) int64_t rt_exec_manager_create(const char* backend) {
+SPL_WEAK int64_t rt_exec_manager_create(const char* backend) {
     (void)backend;
     return 0;
 }
 
-__attribute__((weak)) const char* rt_exec_manager_compile(int64_t handle, const char* mir_data) {
+SPL_WEAK const char* rt_exec_manager_compile(int64_t handle, const char* mir_data) {
     (void)handle; (void)mir_data;
     return "";
 }
 
-__attribute__((weak)) int64_t rt_exec_manager_execute(int64_t handle, const char* name, SplArray* args) {
+SPL_WEAK int64_t rt_exec_manager_execute(int64_t handle, const char* name, SplArray* args) {
     (void)handle; (void)name; (void)args;
     return 0;
 }
 
-__attribute__((weak)) bool rt_exec_manager_has_function(int64_t handle, const char* name) {
+SPL_WEAK bool rt_exec_manager_has_function(int64_t handle, const char* name) {
     (void)handle; (void)name;
     return false;
 }
 
-__attribute__((weak)) void rt_exec_manager_cleanup(int64_t handle) {
+SPL_WEAK void rt_exec_manager_cleanup(int64_t handle) {
     /* Clean up soft JIT temp file if it exists. */
     char path[256];
     snprintf(path, sizeof(path), "tmp/jit/simple_soft_jit_%lld.spl",
@@ -2522,7 +3005,11 @@ void spl_panic(const char* msg) {
 #endif
         snprintf(crash_path, sizeof(crash_path), "%s/simple_crash_%d.log",
                  tmp, (int)getpid());
+#if defined(_WIN32)
+        FILE* f = fopen(crash_path, "ab"); /* explicit binary; "a" text-translates LF->CRLF */
+#else
         FILE* f = fopen(crash_path, "a");
+#endif
         if (f) {
             fprintf(f, "=== SIMPLE C RUNTIME CRASH ===\n");
             fprintf(f, "PID: %d\n", (int)getpid());
@@ -2557,15 +3044,45 @@ static void _spl_atexit_handler(void) {
  * Crash Signal Handler (SIGSEGV / SIGBUS)
  * ---------------------------------------------------------------- */
 #ifndef _WIN32
+/* Classify a fault from siginfo_t.si_code.
+ *
+ * Phase 5 of doc/03_plan/infra/audit/serial_sigsegv_and_test_hardening.md:
+ * si_addr alone cannot tell a wild-pointer dereference apart from a fault the
+ * process brought on itself by exhausting a resource, and the two need
+ * different operator responses (fix the pointer bug vs. raise the limit).
+ * Pure lookup, no allocation, no locking — safe to call from a signal handler. */
+static const char* _spl_fault_class(int signum, int sicode) {
+    if (sicode == SI_USER) return "delivered by kill() — not a genuine fault";
+#ifdef SI_KERNEL
+    if (sicode == SI_KERNEL) return "kernel-raised fault";
+#endif
+    if (signum == SIGSEGV) {
+        if (sicode == SEGV_MAPERR) return "address not mapped — wild/null pointer";
+        /* A guard page (stack overflow, or an mmap'd region past a limit) is
+         * mapped but not accessible, so a resource-limit violation lands here
+         * rather than on SEGV_MAPERR. */
+        if (sicode == SEGV_ACCERR) return "permission denied on a mapped page — guard page / memory-limit violation";
+#ifdef SEGV_BNDERR
+        if (sicode == SEGV_BNDERR) return "bounds-check violation";
+#endif
+        return "unclassified segmentation fault";
+    }
+    if (sicode == BUS_ADRALN) return "misaligned address";
+    if (sicode == BUS_ADRERR) return "nonexistent physical address";
+    if (sicode == BUS_OBJERR) return "object-specific hardware error";
+    return "unclassified bus error";
+}
+
 static void _spl_crash_handler(int signum, siginfo_t *info, void *ucontext) {
     (void)ucontext;
     const char *signame = (signum == SIGSEGV) ? "SIGSEGV" : "SIGBUS";
+    int sicode = info->si_code;
 
     /* Use write() not fprintf — async-signal-safe */
     char buf[256];
     int len = snprintf(buf, sizeof(buf),
-        "\n[simple-runtime] Fatal: %s at address %p\n",
-        signame, info->si_addr);
+        "\n[simple-runtime] Fatal: %s at address %p (si_code=%d: %s)\n",
+        signame, info->si_addr, sicode, _spl_fault_class(signum, sicode));
     if (len > 0) write(STDERR_FILENO, buf, (size_t)len);
 
     /* Backtrace */
@@ -2596,6 +3113,7 @@ int64_t rt_install_crash_handler(void) {
 int64_t rt_install_crash_handler(void) { return 0; }
 #endif
 
+#ifndef _WIN32
 int64_t rt_signal_install(int64_t signal_num) {
     if (signal_num < 0 || signal_num >= 32) return 0;
     struct sigaction sa;
@@ -2605,6 +3123,13 @@ int64_t rt_signal_install(int64_t signal_num) {
     if (sigaction((int)signal_num, &sa, NULL) == -1) return 0;
     return 1;
 }
+#else
+/* Windows has no sigaction/sigemptyset, so this function had never compiled
+ * there. Report "not installed" exactly as rt_install_crash_handler already
+ * does under the same guard a few lines above, rather than pretending a
+ * handler was registered. */
+int64_t rt_signal_install(int64_t signal_num) { (void)signal_num; return 0; }
+#endif
 
 int64_t rt_signal_check(int64_t signal_num) {
     if (signal_num < 0 || signal_num >= 32) return 0;

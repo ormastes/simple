@@ -1,7 +1,9 @@
 # LLM Caret OpenCode Spec Compiler Conflict Blocker - 2026-07-01
+## Closed 2026-09-16 — Status Resolved in source and verified locally; bin/simple test PASS outputs in body
 
-Status: FIXED
-Status re-verified 2026-08-17 by source inspection (triage shard 02).
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
 
@@ -101,3 +103,4 @@ All checks passed (1 file(s))
 bin/simple check src/app/llm_runtime/serve_plan.spl
 EXIT_CODE=255 after compiler warning output; no serve-plan diagnostic emitted
 ```
+

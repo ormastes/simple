@@ -1,6 +1,6 @@
 # BUG: x86_64 sshd fails SSH version exchange under freestanding native-build
 
-**Status:** open
+**Status:** partial fix; target gate blocked by unrelated boot-object closure
 **Severity:** high (blocks all x86_64 SSH login; rv64 SSH login is proven, x64 is not)
 **Component:** sshd version exchange / net recv facade under freestanding native-build
 **Found:** 2026-07-08, booting a merged ring-3 + sshd x86_64 kernel
@@ -128,3 +128,69 @@ work before an SSH command can drive `fs_exec_spawn_ring3`. Fixing the version
 exchange (then verifying KEX/packet/auth for the same `[u8]`/take hazards) makes
 x64 SSH login work; the remaining exec wiring is small (route the resolved path to
 `fs_exec_spawn_ring3`).
+
+## 2026-09-22 isolated repair
+
+The x86 runtime had regressed to a two-field `HeapHeader` while its existing
+packed-byte producers and consumers still accessed `gc_flags`.  The isolated
+repair restores the canonical eight-byte `{type, gc_flags, reserved, size}`
+layout, marks packed `[u8]` consistently, and restores a fail-closed ABI probe.
+The sshd no longer performs the disproven/destructive second text take after a
+failed byte take.  Identification input is limited to the RFC 255-byte wire
+bound and printable `SSH-2.0-` data.
+
+Focused host regression: 4/4 pass.  The x86 target probe is now self-hosted,
+strict against fabricated stubs, and records wall/max-RSS, but remains RED at
+link before boot: minimal boot autodiscovery retains
+`multiboot2_elf64_loader.o` (`up2_elf64_module_load` unresolved), while the
+historical oversized probe still references `rt_abi_probe_str_hdr_type`.
+No target PASS is claimed until that probe is reduced to the byte ABI contract
+or boot-object selection excludes the unrelated loader.
+
+Deferred target gate: run `sh scripts/os/abi_probe_run.shs` and the SSH
+banner/version/KEX QEMU scenario after an admitted x86_64 self-hosted runtime
+is available. Host/source checks are not guest verification.
+
+## 2026-09-23 review correction: descriptor ownership and dirty headers
+
+The bytes-only SSH exchange now also serves mapped descriptors (including RV64
+registry handles), resolving the logical descriptor to its own `os_fd` and
+reading through `_rt_net_transport_read(os_fd, 1)`. Descriptor 200 keeps its
+existing raw buffered take. Missing/invalid owners fail closed. The reader
+retains fragmented input, stops immediately at LF without consuming a following
+packet, rejects a 255-byte line without LF, and permits at most 1,000 idle
+sleeps over the entire exchange. Its poll decision uses only scalar arguments
+and a scalar result; the line buffer is bounded to 255 bytes. It does not create
+per-poll state objects or copy an accumulated line through such objects.
+
+All 48 object-header construction sites in the x86 runtime now initialize
+`type`, `gc_flags`, and `reserved` through `runtime_heap_header_init` before
+assigning object size. Packed producers set `BYTE_PACKED` explicitly afterward.
+This prevents reused packed-array memory from turning a subsequent slot array
+into a falsely packed array. Raw/DMA `malloc` has no added clearing loop or
+branch. Heap layout, allocation size, and array growth policy are unchanged.
+
+Fresh scoped evidence:
+
+- `sh scripts/os/abi_probe_run.shs --host-only`: PASS. The host C harness executes
+  the production ABI slice with poisoned storage, packed bytes, packed-to-slot
+  allocation reuse, tagged reads/writes, and all seven object tags.
+- Removing only the new helper's flag/reserved stores makes that same harness
+  abort at the reused slot-header assertion (exit 134), reproducing the defect.
+- Host run: 0.00 s reported wall time and 1,072 KiB maximum RSS. This is a small
+  correctness fixture, not a guest performance benchmark.
+- Host AArch64 `-O2` disassembly of `abi_header_init_codegen` is one immediate
+  materialization plus one 32-bit metadata store and return. There are no calls,
+  loops, allocations, or per-object size growth in the helper. x86 target timing
+  remains unmeasured; no end-to-end performance claim is made.
+- `git diff --check`: PASS before this documentation follow-up.
+
+TODO when the admitted phase environment is ready: run
+`test/01_unit/os/kernel/net/rt_net_ssh_identification_spec.spl`, the full
+`sh scripts/os/abi_probe_run.shs` target gate (including the dirty-header marker),
+and real x86/RV64 mapped-socket SSH banner/version/KEX scenarios. Include idle
+fragmentation, descriptor 200 and non-200 owners, invalid descriptors, a 255-byte
+LF boundary, overlong input, and banner-plus-packet in the same transport buffer.
+Retain compiler/kernel hashes, serial receipts, elapsed time, and peak RSS for
+parent/candidate images. The Simple specs and QEMU gates were not run during
+this correction; the original bug stays OPEN until target acceptance.

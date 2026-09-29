@@ -91,37 +91,8 @@ possible so they are runner-verifiable.
    Spec `test/01_unit/app/office/slides/html_render_spec.spl` 4/4. Follow-up:
    wire `slides/render.spl` WidgetNode path + `slides/design.spl` once the
    ui/style parser bug is fixed.
-5. MOSTLY DONE — **Excel deeper**. This entry was badly stale; verified by
-   content 2026-08-17:
-   - "more functions (COUNTA/VLOOKUP/text fns)": DONE long ago and far beyond
-     the original scope. `src/app/office/sheets/formula.spl` is now 9,846 lines
-     with COUNTA/VLOOKUP/CONCATENATE, LET/LAMBDA, dynamic-array spills, a
-     function registry, and statistical/financial/engineering families, backed
-     by 60+ `test/01_unit/app/office/sheets/formula_*_spec.spl` files.
-   - "cell-ref numeric path (gated on the f64 blocker)": DONE.
-     `formula._resolve_cell_value` returns f64 and recursively evaluates
-     formula-valued referents, so recalc order does not affect correctness.
-   - "dependency-graph recalc": the CORRECTNESS half is now DONE. Depth-bounded
-     recursion made cycles terminate but return 0.0 sixty-four frames down, so
-     `A1=B1+1` / `B1=A1+1` silently cached `33` (measured on the seed) despite
-     formula.spl's header claiming "circular references resolve to an error".
-     `file_formats.recalculate_formula_cells` now runs a Phase 0
-     `_ff_circular_cells` graph pass (Kahn peeling on outgoing edges) and caches
-     `#CIRC!` for every formula cell on — or transitively depending on — a
-     cycle, without evaluating it. Spec
-     `test/01_unit/app/office/sheets/formula_circular_recalc_spec.spl` 6/6.
-   - SUPERSEDED 2026-08-18 — the bullet formerly here read: "STILL OPEN: the
-     PERFORMANCE half of dependency-graph recalc ... it is a pure perf change
-     with no observable value delta, so it needs a benchmark, not a value
-     spec." **That characterisation was wrong.** The ordering half was also a
-     CORRECTNESS bug, not merely a perf one: Dict-key-order evaluation with
-     recursive resolution hit `MAX_EVAL_DEPTH = 64`, so on a 59-cell dependency
-     chain **27 of 59 cells silently read `33`** — a wrong number, not a slow
-     one. Fixed in `12e908dd279` (`_ff_dep_plan` in
-     `src/app/office/file_formats.spl`: recalc now runs in dependency order),
-     with `test/01_unit/app/office/sheets/formula_chain_order_spec.spl`.
-     Whether any residual perf work remains after `_ff_dep_plan` is UNKNOWN —
-     no benchmark has been run.
+5. TODO — **Excel deeper**: dependency-graph recalc, cell-ref numeric path
+   (gated on the f64 blocker), more functions (COUNTA/VLOOKUP/text fns).
 6. DONE (landed origin d4323508) — **Plugin split**: `app.office.plugins`
    registers office-word/office-ppt/office-excel as three separate `PluginEntry`
    manifests over the shared md/CSS substrate, via the project's plugin registry
@@ -158,34 +129,6 @@ possible so they are runner-verifiable.
    manifest. Spec `test/01_unit/app/office/libreoffice_spec.spl` 6/6. (Branding
    layer, not a repo-wide symbol sweep — the right minimal interpretation.)
 
-## Off-plan slices (landed outside the original numbered plan)
-
-These were not in the 1..9 plan above and are recorded so the next session does
-not re-derive them:
-
-- **Fill series / autofill** — `6ae2baad0ec`, new
-  `src/app/office/sheets/fill_series.spl` with `fill_series_spec.spl` +
-  `fill_series_edge_spec.spl`.
-- **Named ranges (defined names)** — `5d26fefc65c`, new
-  `src/app/office/sheets/named_ranges.spl` with `named_ranges_spec.spl` +
-  `named_ranges_edge_spec.spl`.
-
-Spec pass counts for these four spec files are UNKNOWN in this session — they
-were not executed here (the box was saturated and no self-hosted binary was
-available). Do not report them as green without a run that prints `Results:`.
-
-## Sibling lane status (verified by content 2026-08-18)
-
-- `ide-office-plugin-suite` — genuinely CLOSED. Verified by presence of
-  `src/app/ide/feature_report.spl`, `src/app/ide/agent_dashboard.spl`,
-  `src/app/office/sheets/` compat surface, and `src/app/office/slides/design.spl`.
-- `ide_md_counter_office_hardening` — genuinely CLOSED. Verified by presence of
-  `src/app/office/counter.spl` (`counter_apply_action`),
-  `wysiwyg_update_line_checked`, `update_cell_checked`,
-  `slide_update_text_checked`, all wired through `src/app/office/mod.spl`.
-- `office_cli_tui_ui_access` — genuinely BLOCKED, blocker CONFIRMED STILL LIVE.
-  See that lane's state file: it needs a self-hosted binary and none exists.
-
 ## Log
 
 - 2026-06-14 dev: Opened lane. Measured ground truth (above). Landed slice 1
@@ -204,40 +147,3 @@ available). Do not report them as green without a run that prints `Results:`.
   it + word/ppt/excel as separate registered plugins. Remaining: slice 3 (IDE
   WYSIWYG view), 5 (deeper Excel, f64-blocked), 7 (db/draw/math), 8 (game
   connect), 9 (rename to LibreOffice, last/minimal).
-- 2026-08-17 dev: Resumed slice 5. Re-verified the whole lane BY CONTENT rather
-  than by these notes, and found this file materially over-pessimistic about
-  slice 5 (see the rewritten entry above) — the functions and numeric-ref work
-  it lists as TODO had already landed. The one real, user-visible defect left in
-  that slice was silent-wrong-number on circular references; fixed with a
-  dependency-graph pass in `recalculate_formula_cells` plus
-  `formula_circular_recalc_spec` (6/6). Regression-checked green:
-  `formula_spill_origin_spec` 6/6, `formula_arrays_spec` 10/10,
-  `formula_ref2_spec` 27/27, `formula_lookup_spec` 3/3, `formula_harden_spec`
-  3/3. Committed locally only — pushes are tree-wide blocked by a RED
-  `check-native-trailing-default-param.shs` owned by another agent.
-  NOT done: the perf half of dependency-graph recalc (topological ordering).
-- 2026-08-17 hygiene finding (not fixed, needs an owner): eight editor/backup
-  artifacts are TRACKED in git under `src/app/office/` —
-  `mod.spl.pre-erp`, `erp_bridge.spl.pre-erp`, `office_api.spl.pre-erp`,
-  `file_formats.spl.pre-comments`, `odf_ooxml.spl.pre-comments`,
-  `odf_ooxml.spl.pre-styles`, `word/html_render.spl.pre-comments`, and
-  `slides/deck_format.spl.tmp.3421194.9f60920de537`. They are stale copies that
-  shadow the real modules in any grep-based audit.
-- 2026-08-18 dev: Follow-on to the 08-17 circular-reference fix found that the
-  ORDERING half of dependency-graph recalc was ALSO a correctness bug, not the
-  perf-only item this file claimed — 27 of 59 chain cells silently read `33`
-  because `MAX_EVAL_DEPTH = 64` truncated recursive resolution. Fixed in
-  `12e908dd279` (`_ff_dep_plan`) with `formula_chain_order_spec.spl`. The old
-  "pure perf change, needs a benchmark not a value spec" claim is marked
-  SUPERSEDED in slice 5 rather than deleted.
-- 2026-08-18 dev: Recorded two off-plan office features that landed outside the
-  1..9 slice plan — fill series (`6ae2baad0ec`) and named ranges
-  (`5d26fefc65c`) — see the new "Off-plan slices" section.
-- 2026-08-18 dev: **Process note, twice-proven in this lane.** Slice 5 was
-  recorded here as TODO while the work had in fact long landed
-  (`formula.spl` ~9,846 lines, 60+ specs), and the ordering item was recorded
-  as perf-only while it was a wrong-number bug. Both were caught only by
-  reading the SOURCE, never by reading this file. Treat every claim in this
-  state file as a hypothesis to re-verify by content before acting on it.
-- 2026-08-18 dev: No spec was executed in this documentation pass. Every pass
-  count in this file predates today; today's edits add no new green claims.

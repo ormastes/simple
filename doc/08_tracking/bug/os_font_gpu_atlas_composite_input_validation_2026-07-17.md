@@ -1,4 +1,9 @@
 # GPU font atlas / composite path accepts invalid inputs and mis-aligns readback
+## Closed 2026-09-16 — Status fixed/landed with four fixing commit SHAs listed
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-07-17
 **Status:** fixed / landed (SHAs below)
@@ -50,3 +55,4 @@ glyph readback being *absent* rather than mis-validated/mis-aligned.
   distinct GPU font-offload bug (glyph readback missing entirely).
 - `cuda_font_companion_package_trust_anchor_2026-07-15.md` — CUDA font companion
   trust anchor (separately tracked).
+

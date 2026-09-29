@@ -5,6 +5,10 @@ description: Run local + domain research for a feature. Search src/ and doc/ for
 
 # Research — Self-Sufficient
 
+Resolve exact feature-group plus longest-prefix layer-base knowledge through
+`doc/00_llm_process/knowledge_registry.sdn` and retain its receipt. Kernel and
+driver paths are always `mdsoc_only`.
+
 **Self-sufficient.** Does not depend on any prior step or other LLM.
 
 ## Phase 1: Local Research

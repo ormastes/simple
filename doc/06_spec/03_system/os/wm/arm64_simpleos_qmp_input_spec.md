@@ -15,16 +15,36 @@ fail-closed producers for all three requirements.  Only its live scenario can
 produce runtime evidence, and that diagnostic evidence never substitutes for
 physical-input `REQ-QRS` rows.
 
+Requirement traceability: `REQ-AQMP-001` binds the selected compiler to the
+clean Stage 2/Stage 3 provenance manifest and its sanity evidence;
+`REQ-AQMP-002` requires zero fabricated freestanding stubs with fallback
+disabled; `REQ-AQMP-003` requires one same-run chain across admitted artifact
+identities, serial receipts, ordered QMP input, guest frame/RAMFB commits, and
+distinct QEMU screendumps.  The executable source-contract scenario checks the
+fail-closed producers for all three requirements.  Only its live scenario can
+produce runtime evidence, and that diagnostic evidence never substitutes for
+physical-input `REQ-QRS` rows.
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 2 | 2 | 0 | 0 |
 
-<details>
-<summary>Full Scenario Manual</summary>
+`Arm64VirtioInputBackend` now owns raw VirtIO polling, retains keyboard edges,
+groups pointer records through `SYN_REPORT`, and delivers typed
+`KeyEvent?`/`MouseEvent?` values through the compositor's canonical
+`InputBackend`. Before the frame's `SYN_REPORT` receipt, it emits retained
+per-frame `REL_X`/`REL_Y` summaries and `BTN_LEFT`/`BTN_RIGHT`/`BTN_MIDDLE`
+edge receipts. Every record uses the same guest-owned pointer frame sequence,
+so the final typed mouse delivery cannot erase the raw motion/button evidence.
+Production admission remains fail-closed with
+`[backend2d-event-blocker] reason=live-qmp-evidence-pending` until the required
+QEMU capture exists; failed device discovery uses the same blocker family.
 
 # Arm64 Simpleos Qmp Input Specification
 
-## Scenarios
+Traceability: `REQ-007` (canonical SimpleOS route). The installed generated
+theme snapshot remains the `REQ-001` single authority; input transport does
+not introduce a second theme or renderer path.
 
 ### ARM64 SimpleOS QMP input
 
@@ -156,45 +176,17 @@ expect(live_wrapper).to_contain(
 expect(live_wrapper).to_contain(
     "[ramfb-visual-commit\\] input_seq="
 )
-expect(entry).to_contain(
-    "[engine2d-simd] arch=aarch64 isa=neon enabled=1"
-)
-expect(entry).to_contain("scalar_parity=bit-exact")
-expect(live_wrapper).to_contain("def require_simd_receipt(text):")
-expect(live_wrapper).to_contain(
-    "expected exactly one guest Engine2D SIMD receipt"
-)
-expect(live_wrapper).to_contain(
-    "guest Engine2D SIMD receipt reports fallback or contract mismatch"
-)
-expect(live_wrapper).to_contain(
-    "guest Engine2D SIMD receipt lacks native vector execution"
-)
-expect(live_wrapper).to_contain(
-    "\"required_kernel_kinds\": \"fill\""
-)
-expect(live_wrapper).to_contain(
-    "\"executed_kernel_kinds\": \"fill\""
-)
-expect(live_wrapper).to_contain("\"fallback\": \"none\"")
-expect(live_wrapper).to_contain(
-    "final_simd_receipt = require_simd_receipt(serial_text())"
-)
-expect(live_wrapper).to_contain(
-    "arm64_qmp_input_simd_scalar_parity=$(field simd_scalar_parity)"
-)
-val simd_gate = live_wrapper.index_of(
-    "simd_receipt = require_simd_receipt(serial_text())"
-) ?? -1
-val input_gate = live_wrapper.index_of(
-    "event_backend=virtio-mmio keyboard=transport-ready"
-) ?? -1
-expect(simd_gate).to_be_greater_than(-1)
-expect(input_gate).to_be_greater_than(simd_gate)
 expect(live_wrapper).to_contain(
     "QMP pixel delta is outside guest-declared damage bounds"
 )
 expect(live_wrapper).to_contain("def inject_and_wait(")
+expect(live_wrapper).to_contain("def inject_key(")
+expect(live_wrapper).to_contain(
+    "missing fail-closed Ctrl Alt Tab chord receipt"
+)
+expect(live_wrapper).to_contain(
+    "arm64_qmp_input_chord=$(field chord)"
+)
 expect(live_wrapper).to_contain(
     "Each logical input action"
 )
@@ -387,6 +379,11 @@ expect(entry.contains("[backend2d-event-ready]")).to_be(false)
 expect(entry.contains("reason=input-backend-trait-mouse-return-erased-to-any")).to_be(false)
 expect(entry).to_contain("[wm-pointer-poll] source=poll input_seq=")
 expect(entry).to_contain("[wm-key-state] input_seq=")
+expect(entry).to_contain("input_backend.shift_held()")
+expect(entry).to_contain("input_backend.ctrl_held()")
+expect(entry).to_contain("input_backend.alt_held()")
+expect(entry).to_contain("[wm-key-chord] input_seq=")
+expect(entry).to_contain("chord=ctrl-alt-tab")
 expect(entry).to_contain("[wm-key-frame] input_seq=")
 expect(entry).to_contain("edge={{key_edge}}")
 expect(entry).to_contain("fn arm64_emit_ramfb_visual_commit(")

@@ -1,0 +1,56 @@
+#!/bin/sh
+# Exercise the actual pre-Stage2 gate's target, tool and authority routing.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+fixture=$(mktemp -d "${TMPDIR:-/tmp}/cocoa-owner-gate.XXXXXXXX")
+trap 'rm -rf "$fixture"' EXIT HUP INT TERM
+gate=$(sed -n '/^  stage2_hosted_runtime_sha256=/,/^  bootstrap_stage3_compare_bind/ {
+  /stage2_hosted_runtime_sha256/d
+  /bootstrap_stage3_compare_bind/d
+  p
+}' "$root/scripts/bootstrap/bootstrap-from-scratch.sh")
+[ -n "$gate" ]
+mkdir "$fixture/pinned tools"
+printf '#!/bin/sh\n[ "$1" = --bindir ] || exit 1\nprintf "%%s\\n" "$COCOA_GATE_TOOL_DIR"\n' > "$fixture/llvm-config"
+printf '#!/bin/sh\nexit 0\n' > "$fixture/pinned tools/llvm-nm"
+chmod +x "$fixture/llvm-config" "$fixture/pinned tools/llvm-nm"
+LLVM_CONFIG=$fixture/llvm-config
+COCOA_GATE_TOOL_DIR="$fixture/pinned tools"
+export COCOA_GATE_TOOL_DIR
+repo_root=$root
+stage2_runtime_authority="$fixture/frozen authority"
+run_logged() { printf '%s\n' "$@" > "$fixture/argv"; }
+PLATFORM=aarch64-apple-darwin
+eval "$gate"
+set --
+while IFS= read -r argument; do set -- "$@" "$argument"; done < "$fixture/argv"
+[ "$#" = 11 ]
+[ "$1" = macos-cocoa-owner ]
+[ "$2" = sh ]
+[ "$3" = "$root/scripts/bootstrap/run-process-group-timeout.shs" ]
+[ "$4" = 60 ] && [ "$5" = 2 ]
+[ "$6" = env ] && [ "$7" = "NM=$COCOA_GATE_TOOL_DIR/llvm-nm" ]
+[ "$8" = sh ]
+[ "$9" = "$root/scripts/check/check-macos-cocoa-runtime-owner.shs" ]
+[ "${10}" = "$stage2_runtime_authority/libsimple_runtime.dylib" ]
+[ "${11}" = "$stage2_runtime_authority/libsimple_native_all.a" ]
+echo 'PASS: macOS gate routes pinned nm and frozen artifacts through bounded process owner'
+
+rm "$fixture/argv"
+PLATFORM=x86_64-unknown-linux-gnu
+eval "$gate"
+[ ! -e "$fixture/argv" ]
+echo 'PASS: non-macOS target does not run Cocoa gate'
+
+PLATFORM=aarch64-apple-darwin
+COCOA_GATE_TOOL_DIR=relative-tools
+if (eval "$gate") >/dev/null 2>&1; then
+  echo 'FAIL: relative LLVM tool directory accepted' >&2; exit 1
+fi
+[ ! -e "$fixture/argv" ]
+COCOA_GATE_TOOL_DIR=$fixture/missing
+if (eval "$gate") >/dev/null 2>&1; then
+  echo 'FAIL: missing pinned llvm-nm accepted' >&2; exit 1
+fi
+[ ! -e "$fixture/argv" ]
+echo 'PASS: unusable pinned nm fails before checker dispatch'

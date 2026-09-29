@@ -3,8 +3,8 @@
 # Main RunnerTestDbCore class: load, save, update from test results, merge.
 # Manages both stable (test_db.sdn) and volatile (test_db_runs.sdn) data.
 
-use std.io.{getpid, hostname}
-use std.io.{timestamp_year, timestamp_month, timestamp_day, timestamp_hour, timestamp_minute, timestamp_second}
+use std.nogc_sync_mut.io.sysinfo_ops.{getpid, hostname}
+use std.nogc_sync_mut.io.time_ops.{timestamp_year, timestamp_month, timestamp_day, timestamp_hour, timestamp_minute, timestamp_second}
 use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
 use std.test_runner.string_interner.TestDbStringInterner
 use std.test_runner.test_db_types.{TestStatus, FileRecord, SuiteRecord, TestRecord, CounterRecord, TimingSummary, TimingRun, ChangeEvent, RunRecord, TimingConfig, status_to_str, change_type_str, is_flaky_change}
@@ -132,6 +132,8 @@ impl RunnerTestDbCore:
             case Err(reason): return Err(reason)
         if stable_content.trim() != "":
             val parsed = parse_stable_db(stable_content)
+            if parsed.integrity_error != "":
+                return Err("Invalid test database: {parsed.integrity_error}")
             db.interner = parsed.interner
             db.files = parsed.files
             db.suites = parsed.suites
@@ -163,6 +165,9 @@ impl RunnerTestDbCore:
         val stable_content = serialize_stable_db(
             self.interner, self.files, self.suites, self.tests
         )
+        val stable_check = parse_stable_db(stable_content)
+        if stable_check.integrity_error != "":
+            return Err("Refusing to save invalid test database: {stable_check.integrity_error}")
         match write_db_file_locked(DB_PATH, stable_content):
             case Ok(_): pass
             case Err(reason): return Err(reason)
@@ -193,6 +198,8 @@ impl RunnerTestDbCore:
             case Err(reason): return Err(reason)
         if stable_content.trim() != "":
             val parsed = parse_stable_db(stable_content)
+            if parsed.integrity_error != "":
+                return Err("Invalid test database: {parsed.integrity_error}")
             db.interner = parsed.interner
             db.files = parsed.files
             db.suites = parsed.suites
@@ -204,6 +211,9 @@ impl RunnerTestDbCore:
         val stable_content = serialize_stable_db(
             self.interner, self.files, self.suites, self.tests
         )
+        val stable_check = parse_stable_db(stable_content)
+        if stable_check.integrity_error != "":
+            return Err("Refusing to save invalid test database: {stable_check.integrity_error}")
         match write_db_file_locked(path, stable_content):
             case Ok(_): pass
             case Err(reason): return Err(reason)
@@ -518,13 +528,15 @@ impl RunnerTestDbCore:
     me complete_run(run_id: text, test_count: i64, passed: i64, failed: i64, timed_out: i64):
         var i = 0
         while i < self.test_runs.len():
-            if self.test_runs[i].run_id == run_id:
-                self.test_runs[i].end_time = micros_to_rfc3339(time_now_unix_micros())
-                self.test_runs[i].status = "completed"
-                self.test_runs[i].test_count = test_count
-                self.test_runs[i].passed = passed
-                self.test_runs[i].failed = failed
-                self.test_runs[i].timed_out = timed_out
+            var run = self.test_runs[i]
+            if run.run_id == run_id:
+                run.end_time = micros_to_rfc3339(time_now_unix_micros())
+                run.status = "completed"
+                run.test_count = test_count
+                run.passed = passed
+                run.failed = failed
+                run.timed_out = timed_out
+                self.test_runs[i] = run
                 self.dirty = true
                 return
             i = i + 1
@@ -538,12 +550,14 @@ impl RunnerTestDbCore:
         val max_age_micros = max_age_hours * 3600 * 1000000
         var i = 0
         while i < self.test_runs.len():
-            if self.test_runs[i].status == "running":
+            var run = self.test_runs[i]
+            if run.status == "running":
                 # Parse start_time back to micros for comparison
-                val start_micros = parse_rfc3339_to_micros(self.test_runs[i].start_time)
+                val start_micros = parse_rfc3339_to_micros(run.start_time)
                 if start_micros > 0 and (now - start_micros) > max_age_micros:
-                    self.test_runs[i].status = "crashed"
-                    self.test_runs[i].end_time = micros_to_rfc3339(now)
+                    run.status = "crashed"
+                    run.end_time = micros_to_rfc3339(now)
+                    self.test_runs[i] = run
                     self.dirty = true
             i = i + 1
 

@@ -1,0 +1,200 @@
+use std.spec.*
+use compiler.hir.hir_types.{HirModule, HirImport, SymbolTable}
+use compiler.common.diagnostics.span.{Span}
+use compiler.driver.cache.cold_hir_semantic_seed_v1.{
+    ColdHirSemanticInputV1, cold_hir_semantic_seed_v1,
+    cold_hir_semantic_seeds_v1,
+    cold_hir_typed_receipt_from_admitted_entry_v1
+}
+use compiler.hir.abi_interface.{
+    hir_abi_interface_digest_v1, hir_abi_interface_encoded_v1
+}
+use compiler.driver.cache.cold_hir_abi_smf_section_v1.{
+    cold_hir_abi_smf_section_v1
+}
+use compiler.driver.cache.package_tldr_metadata.{
+    PackageSmfPayloadSectionV1, package_export_smf_build_v1,
+    package_export_smf_payload_validate_v1
+}
+use std.scv.compile_source_inventory_core.{
+    CompileSourceInventoryEntryV1, CompileSourceInventoryV1,
+    compile_source_inventory_digest_v1
+}
+use std.common.crypto.sha256.{sha256_text}
+
+fn test_module(path: text, imports: [HirImport], name: text = "pkg.mod") -> HirModule:
+    HirModule(name: name, path: path, imports: imports, exports: [],
+        domain_blocks: [], symbols: SymbolTable.new(), functions: {},
+        gpu_function_targets: {}, gpu_function_backend_orders: {}, classes: {},
+        structs: {}, enums: {}, bitfields: {}, traits: {}, impls: [], constants: {},
+        static_asserts: [], aop_advices: [], di_bindings: [], arch_rules: [],
+        mock_decls: [], types: [], extend_enums: [])
+
+fn test_inventory(content: text, duplicate: bool = false) -> CompileSourceInventoryV1:
+    val empty = sha256_text("")
+    val entry = CompileSourceInventoryEntryV1(
+        "pkg/mod.spl", sha256_text(content), empty, empty, empty, empty,
+        content.len())
+    var entries = [entry]
+    if duplicate:
+        entries.push(entry)
+    CompileSourceInventoryV1(1, 1, entries)
+
+describe "cold HIR semantic seed":
+    it "emits a real ABI section from canonical typed HIR bytes":
+        val module = test_module("/repo/pkg/mod.spl", [])
+        val result = cold_hir_abi_smf_section_v1(module)
+        expect(result.is_ok()).to_be(true)
+        val produced = result.unwrap()
+        expect(produced.section.kind).to_equal("abi_interface")
+        expect(produced.section.offset).to_equal(0)
+        expect(produced.section.extent).to_equal(produced.payload.len())
+        expect(produced.section.digest).to_equal(sha256_text(produced.payload))
+        expect(produced.payload).to_equal(
+            hir_abi_interface_encoded_v1(module).unwrap())
+        expect(produced.abi_digest).to_equal(
+            hir_abi_interface_digest_v1(module).unwrap())
+        var changed = test_module("/repo/pkg/mod.spl", [])
+        changed.exports = ["visible"]
+        val changed_section = cold_hir_abi_smf_section_v1(changed).unwrap()
+        expect(changed_section.section.digest == produced.section.digest).to_be(false)
+        val smf = package_export_smf_build_v1(
+            "pkg", module.name, sha256_text("variant"), [
+                PackageSmfPayloadSectionV1("abi_interface", produced.payload)])
+        expect(smf.is_ok()).to_be(true)
+        val artifact = smf.unwrap()
+        expect(artifact.record.sections[0].digest).to_equal(produced.abi_digest)
+        expect(package_export_smf_payload_validate_v1(
+            artifact.record, artifact.payload)).to_equal("ok")
+
+    it "binds typed ABI and imports to a frozen source inventory":
+        val content = "fn entry() -> i64: 1\n"
+        val inventory = test_inventory(content)
+        val imports = [
+            HirImport("z.dep", [], false, Span.empty()),
+            HirImport("a.dep", [], false, Span.empty()),
+            HirImport("z.dep", [], false, Span.empty())]
+        val module = test_module("/repo/pkg/mod.spl", imports)
+        val result = cold_hir_semantic_seed_v1(module, "/repo", "pkg/mod.spl",
+            content, inventory, compile_source_inventory_digest_v1(inventory))
+        expect(result.is_ok()).to_be(true)
+        val seed = result.unwrap()
+        expect(seed.source_digest).to_equal(sha256_text(content))
+        expect(seed.abi_digest).to_equal(hir_abi_interface_digest_v1(module).unwrap())
+        expect(seed.direct_imports).to_equal(["a.dep", "z.dep"])
+
+    it "retains canonical ABI bytes and one matching digest for cold publication":
+        val content = "fn entry() -> i64: 1\n"
+        val inventory = test_inventory(content)
+        val module = test_module("/repo/pkg/mod.spl", [])
+        val receipt = cold_hir_typed_receipt_from_admitted_entry_v1(
+            module, "/repo", "pkg/mod.spl", content,
+            compile_source_inventory_digest_v1(inventory),
+            inventory.entries[0])
+        expect(receipt.is_ok()).to_be(true)
+        val produced = receipt.unwrap()
+        expect(produced.abi_payload).to_equal(
+            hir_abi_interface_encoded_v1(module).unwrap())
+        expect(produced.seed.abi_digest).to_equal(
+            sha256_text(produced.abi_payload))
+        expect(produced.seed.source_digest).to_equal(sha256_text(content))
+        val changed = cold_hir_typed_receipt_from_admitted_entry_v1(
+            module, "/repo", "pkg/mod.spl", "fn entry() -> i64: 2\n",
+            compile_source_inventory_digest_v1(inventory),
+            inventory.entries[0])
+        expect(changed.unwrap_err()).to_equal("cold-hir-source-content-mismatch")
+
+    it "rejects content or HIR path outside the frozen source":
+        val content = "fn entry() -> i64: 1\n"
+        val inventory = test_inventory(content)
+        val digest = compile_source_inventory_digest_v1(inventory)
+        val module = test_module("/repo/pkg/mod.spl", [])
+        val changed = cold_hir_semantic_seed_v1(module, "/repo", "pkg/mod.spl",
+            "fn entry() -> i64: 2\n", inventory, digest)
+        expect(changed.unwrap_err()).to_equal("cold-hir-source-content-mismatch")
+        val wrong_path = cold_hir_semantic_seed_v1(
+            test_module("/other/pkg/mod.spl", []), "/repo", "pkg/mod.spl",
+            content, inventory, digest)
+        expect(wrong_path.unwrap_err()).to_equal("cold-hir-module-source-mismatch")
+
+    it "rejects stale, duplicate, and missing inventory source records":
+        val content = "fn entry() -> i64: 1\n"
+        val inventory = test_inventory(content)
+        val module = test_module("/repo/pkg/mod.spl", [])
+        val stale = cold_hir_semantic_seed_v1(module, "/repo", "pkg/mod.spl",
+            content, inventory, sha256_text("stale"))
+        expect(stale.unwrap_err()).to_equal("cold-hir-inventory-mismatch")
+        val duplicate = test_inventory(content, true)
+        val result = cold_hir_semantic_seed_v1(module, "/repo", "pkg/mod.spl",
+            content, duplicate, compile_source_inventory_digest_v1(duplicate))
+        expect(result.unwrap_err()).to_equal("cold-hir-inventory-mismatch")
+        val missing = CompileSourceInventoryV1(1, 1, [])
+        val absent = cold_hir_semantic_seed_v1(module, "/repo", "pkg/mod.spl",
+            content, missing, compile_source_inventory_digest_v1(missing))
+        expect(absent.unwrap_err()).to_equal("cold-hir-source-absent")
+
+    it "rejects invalid import identities from typed HIR":
+        val content = "fn entry() -> i64: 1\n"
+        val inventory = test_inventory(content)
+        val module = test_module("/repo/pkg/mod.spl",
+            [HirImport("bad|module", [], false, Span.empty())])
+        val result = cold_hir_semantic_seed_v1(module, "/repo", "pkg/mod.spl",
+            content, inventory, compile_source_inventory_digest_v1(inventory))
+        expect(result.unwrap_err()).to_equal("cold-hir-import-invalid")
+
+    it "retains one canonical identity per import across a wide module":
+        val content = "fn entry() -> i64: 1\n"
+        val inventory = test_inventory(content)
+        var imports: [HirImport] = []
+        var index = 127
+        while index >= 0:
+            imports.push(HirImport("dep.{index}", [], false, Span.empty()))
+            imports.push(HirImport("dep.{index}", [], false, Span.empty()))
+            index = index - 1
+        val result = cold_hir_semantic_seed_v1(
+            test_module("/repo/pkg/mod.spl", imports), "/repo", "pkg/mod.spl",
+            content, inventory, compile_source_inventory_digest_v1(inventory))
+        expect(result.is_ok()).to_be(true)
+        val direct_imports = result.unwrap().direct_imports
+        expect(direct_imports.len()).to_equal(128)
+        expect(direct_imports[0]).to_equal("dep.0")
+        expect(direct_imports[127]).to_equal("dep.99")
+
+    it "binds a cold batch to one inventory digest and each source record":
+        val first_content = "fn first() -> i64: 1\n"
+        val second_content = "fn second() -> i64: 2\n"
+        val empty = sha256_text("")
+        val inventory = CompileSourceInventoryV1(1, 1, [
+            CompileSourceInventoryEntryV1("pkg/first.spl", sha256_text(first_content),
+                empty, empty, empty, empty, first_content.len()),
+            CompileSourceInventoryEntryV1("pkg/second.spl", sha256_text(second_content),
+                empty, empty, empty, empty, second_content.len())])
+        val inputs = [
+            ColdHirSemanticInputV1(test_module("/repo/pkg/second.spl", [], "pkg.second"),
+                "pkg/second.spl", second_content),
+            ColdHirSemanticInputV1(test_module("/repo/pkg/first.spl", [], "pkg.first"),
+                "pkg/first.spl", first_content)]
+        val digest = compile_source_inventory_digest_v1(inventory)
+        val result = cold_hir_semantic_seeds_v1(inputs, "/repo", inventory, digest)
+        expect(result.is_ok()).to_be(true)
+        val seeds = result.unwrap()
+        expect(seeds.len()).to_equal(2)
+        expect(seeds[0].module_identity).to_equal("pkg.second")
+        expect(seeds[0].source_digest).to_equal(sha256_text(second_content))
+        expect(seeds[1].module_identity).to_equal("pkg.first")
+        expect(seeds[1].inventory_digest).to_equal(digest)
+        val stale = cold_hir_semantic_seeds_v1(
+            inputs, "/repo", inventory, sha256_text("stale"))
+        expect(stale.unwrap_err()).to_equal("cold-hir-inventory-mismatch")
+        val wrong_content = [ColdHirSemanticInputV1(
+            test_module("/repo/pkg/first.spl", [], "pkg.first"),
+            "pkg/first.spl", second_content)]
+        val mismatch = cold_hir_semantic_seeds_v1(
+            wrong_content, "/repo", inventory, digest)
+        expect(mismatch.unwrap_err()).to_equal("cold-hir-source-content-mismatch")
+        val duplicate = cold_hir_semantic_seeds_v1(
+            [inputs[0], inputs[0]], "/repo", inventory, digest)
+        expect(duplicate.unwrap_err()).to_equal("cold-hir-source-duplicate")
+        val missing = cold_hir_semantic_seeds_v1(
+            [inputs[0]], "/repo", inventory, digest)
+        expect(missing.unwrap_err()).to_equal("cold-hir-source-missing:pkg/first.spl")

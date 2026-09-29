@@ -1,6 +1,6 @@
 #!/bin/sh
 set -eu
-root=$(CDPATH= cd -- "$(dirname "$0")/../../.." && pwd)
+root=$(CDPATH= cd -- "$(dirname "$0")/../../.." && pwd -P)
 gate="$root/scripts/check/check-mci-v2-aggregate.shs"
 reviewer_gate="$root/scripts/check/check-mci-v2-independent-review.shs"
 mkdir -p "$root/build"
@@ -20,6 +20,7 @@ run_id=run-contract
 now_ns=18446744073709551614
 
 hash_file() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'; else shasum -a 256 "$1" | awk '{print $1}'; fi; }
+hash=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
 scenarios() {
     case "$1" in
         compiler) echo 'MCI-COMP-001,MCI-COMP-002,MCI-COMP-003,MCI-NFR-003,MCI-NFR-004' ;;
@@ -78,7 +79,7 @@ build_baseline() {
         artifact="$evidence/artifacts/$baseline_check.evidence"
         case "$baseline_check" in
             compiler) schema=mci-compiler-collector-receipt-v2; schema_key=schema_version;;
-            tooling) schema=mci-tooling-child-manifest-v1; schema_key=manifest_schema;;
+            tooling) schema=mci-tooling-child-manifest-v2; schema_key=manifest_schema;;
             simpleos) schema=mci-simpleos-platform-evidence-v1; schema_key=artifact_schema;;
             rendering) schema=mci-rendering-evidence-v1; schema_key=artifact_schema;;
             allocation) schema=mci-allocation-domain-arena-evidence-v1; schema_key=artifact_schema;;
@@ -88,9 +89,28 @@ build_baseline() {
             traceability) schema=mci-traceability-artifact-v1; schema_key=schema_version;;
         esac
         if [ "$baseline_check" = tooling ]; then
-            mkdir -p "$work/tooling-generation"
-            { echo "$schema_key=$schema"; echo producer_class=tooling-admission; echo mode=live; echo release_eligible=true; echo result=pass; } > "$work/tooling-generation/manifest.env"
-            tar -cf "$artifact" -C "$work/tooling-generation" ./manifest.env
+            rm -rf "$work/tooling-generation"; mkdir -p "$work/tooling-generation/raw"
+            tooling_ids='compiler-check lib-check mcp-check lsp-check bootstrap-essential bootstrap-portability bootstrap-parity lint duplicate whole-test direct-env-working direct-env-staged runtime-contract artifact-execution warm-cli warm-mcp warm-lsp'
+            {
+                echo "$schema_key=$schema"; echo producer_class=tooling-admission; echo mode=live; echo release_eligible=true; echo required_child_ids="$tooling_ids"
+                echo capture_limit_bytes=16777216; echo timeout_seconds=1800; echo scan_count_limit=0; echo scan_count_policy=per-row-explicit
+                echo warm_cli_min_samples=30; echo warm_request_min_samples=1000; echo warm_cli_p95_max_ms=250; echo warm_cli_rss_max_kib=262144
+                echo warm_mcp_startup_max_ms=500; echo warm_mcp_request_p95_max_ms=100; echo warm_mcp_rss_max_kib=524288
+                echo warm_lsp_startup_max_ms=1500; echo warm_lsp_request_p95_max_ms=150; echo warm_lsp_rss_max_kib=786432
+                for id in $tooling_ids; do samples=20; case "$id" in warm-cli) samples=30;; warm-mcp|warm-lsp) samples=1000;; esac
+                    echo "row=$id|pass|$hash|$hash|$hash|17|$hash|19|1|2|1|0|false|0|$samples|10|12|100|12|0"
+                    echo "scan_policy=$id|not-applicable|command-contract-v1"
+                done
+                for id in warm-cli warm-mcp warm-lsp; do
+                    raw="$work/tooling-generation/raw/$id.samples"
+                    if [ "$id" = warm-cli ]; then awk 'BEGIN{for(i=1;i<=30;i++)print "10|100"}' > "$raw"; else { echo 'startup|20'; awk 'BEGIN{for(i=1;i<=1000;i++)print "request|10|100"}'; } > "$raw"; fi
+                    raw_hash=$(hash_file "$raw")
+                    samples=30; [ "$id" = warm-cli ] || samples=1000
+                    echo "metric=$id|startup_p95_ms|20|samples|$samples|p50_ms|10|p95_ms|12|p99_ms|12|max_rss_kib|100|raw_relpath|raw/$id.samples|raw_sha256|$raw_hash"
+                    echo "baseline=$id|100|100"
+                done
+            } > "$work/tooling-generation/manifest.env"
+    tar -cf "$artifact" -C "$work/tooling-generation" ./manifest.env ./raw
         elif [ "$baseline_check" = allocation ]; then
             {
                 echo "$schema_key=$schema"; echo artifact_mode=live; echo release_eligible=true
@@ -211,14 +231,15 @@ grep -q '^row=reviewer|PASS|none|' "$generation_evidence/aggregate-report-v1.env
 [ ! -e "$generation_evidence/receipts/tooling.receipt" ]
 [ ! -e "$generation_evidence/signatures/tooling.sig" ]
 printf 'not-a-generation\n' > "$generation_evidence/lane-generations/tooling.current"
+rm "$generation_evidence/aggregate-candidate-report-v1.env"
 if "$gate" --evidence "$generation_evidence" --run-id "$run_id" --source-hash "$source_hash" \
     --configuration-hash "$config_hash" --now-utc-ns "$now_ns" $trust_args >/dev/null 2>&1; then exit 1; fi
-grep -q '^row=tooling|BLOCKED|invalid-lane-generation|' "$generation_evidence/aggregate-report-v1.env"
+grep -q '^row=tooling|BLOCKED|invalid-lane-generation|' "$generation_evidence/aggregate-candidate-report-v1.env"
 # POSIX shell functions share variables; restore the original fixture root for
 # the existing flat-compatibility and negative-control matrix below.
 evidence="$work/evidence"
 first_hash=$(sed -n 's/^manifest_sha256=//p' "$evidence/aggregate-report-v1.env")
-evidence_reverse="$work/evidence-reverse"; mkdir -p "$evidence_reverse/receipts" "$evidence_reverse/artifacts" "$evidence_reverse/signatures"
+evidence_reverse="$work/evidence-reverse"; mkdir -p "$evidence_reverse/receipts" "$evidence_reverse/artifacts" "$evidence_reverse/signatures"; chmod 0700 "$evidence_reverse" "$evidence_reverse/receipts" "$evidence_reverse/artifacts" "$evidence_reverse/signatures"
 for check in $(printf '%s\n' $checks | sort -r); do
     cp "$evidence/receipts/$check.receipt" "$evidence_reverse/receipts/"
     [ "$check" = reviewer ] || cp "$evidence/artifacts/$check.evidence" "$evidence_reverse/artifacts/"
@@ -231,7 +252,7 @@ done
 # old review a replay. A separately signed review of generation B admits it.
 old_candidate=$(sed -n 's/^aggregate_candidate_sha256=//p' "$evidence/aggregate-report-v1.env")
 echo generation=B >> "$work/tooling-generation/manifest.env"
-tar -cf "$evidence/artifacts/tooling.evidence" -C "$work/tooling-generation" ./manifest.env
+tar -cf "$evidence/artifacts/tooling.evidence" -C "$work/tooling-generation" ./manifest.env ./raw
 sed "s/^artifact_sha256=.*/artifact_sha256=$(hash_file "$evidence/artifacts/tooling.evidence")/" "$evidence/receipts/tooling.receipt" > "$work/tooling-b.receipt"
 mv "$work/tooling-b.receipt" "$evidence/receipts/tooling.receipt"
 sign_receipt "$evidence/receipts/tooling.receipt" "$evidence/signatures/tooling.sig"
@@ -309,7 +330,7 @@ for check in tooling allocation process-safety simpleos; do
     if [ "$check" = tooling ]; then
         sed 's/^mode=live$/mode=contract-only/; s/^release_eligible=true$/release_eligible=false/' "$work/tooling-generation/manifest.env" > "$work/tooling-generation/manifest.fixture"
         mv "$work/tooling-generation/manifest.fixture" "$work/tooling-generation/manifest.env"
-        tar -cf "$artifact" -C "$work/tooling-generation" ./manifest.env
+        tar -cf "$artifact" -C "$work/tooling-generation" ./manifest.env ./raw
     else
         sed 's/^artifact_mode=live$/artifact_mode=fixture/; s/^release_eligible=true$/release_eligible=false/' "$artifact" > "$work/controlled-artifact"
         mv "$work/controlled-artifact" "$artifact"
@@ -430,4 +451,6 @@ build_baseline "$evidence"
 if PATH="$work/bin:$PATH" MCI_REAL_CP="$real_cp" MCI_REAL_MV="$(command -v mv)" \
     "$gate" --evidence "$evidence" --run-id "$run_id" --source-hash "$source_hash" --configuration-hash "$config_hash" --now-utc-ns "$now_ns" $trust_args >"$work/publish.out" 2>"$work/publish.err"; then exit 1; fi
 grep -q '^BLOCKED: published report verification failed$' "$work/publish.err"
+grep -Fq 'manifest != 1' "$gate"
+grep -Fq 'MCI_AGGREGATE_TAR_EXPANDED_LIMIT_BYTES' "$gate"
 echo 'PASS: MCI aggregate contract'

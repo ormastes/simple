@@ -1,4 +1,8 @@
 # Audit: `case SymbolKind.X:` / bare-name arms that went from permanently-dead to live after PTR1/PTR2
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Date:** 2026-07-30
 - **Lane:** DEAD1 (mission-critical hardening campaign)
@@ -197,3 +201,4 @@ release/x86_64-unknown-linux-gnu/simple`, tree-walk interpreter per `bin/simple 
 raise for this specific follow-up: the spec exercises the checker's `.spl` source directly via the
 interpreter, and the `Results: 9 total, 9 passed, 0 failed` line is the real outcome of that
 execution, not a stale-binary artifact.
+

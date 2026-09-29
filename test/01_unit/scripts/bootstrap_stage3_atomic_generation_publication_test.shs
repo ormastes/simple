@@ -1,0 +1,81 @@
+#!/bin/sh
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+BOOTSTRAP_STAGE3_FACADE_PATH="$root/scripts/check/lib/bootstrap-stage3-provenance.shs"
+export BOOTSTRAP_STAGE3_FACADE_PATH
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+. "$root/scripts/bootstrap/bootstrap-authority-wiring.shs"
+tmp=${TMPDIR:-/tmp}/simple-stage3-publish-test.$$
+trap 'chmod -R u+w "$tmp" 2>/dev/null || true; rm -rf "$tmp"' EXIT HUP INT TERM
+mkdir -p "$tmp"
+tmp=$(CDPATH= cd -- "$tmp" && pwd -P)
+mkdir -p "$tmp/source/deps"
+printf '#!/bin/sh\nexit 0\n' >"$tmp/source/simple"
+chmod 755 "$tmp/source/simple"
+printf 'native\n' >"$tmp/source/libsimple_native_all.a"
+printf 'backfill\n' >"$tmp/source/libsimple_compiler_backfill.a"
+printf 'runtime\n' >"$tmp/source/deps/libsimple_runtime.a"
+printf 'hosted\n' >"$tmp/source/deps/libspl_hosted_runtime-test.rlib"
+fingerprint=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+prepare() {
+    control_root=$1 nonce=$2
+    generation_root=$control_root/generations
+    mkdir -p "$generation_root"
+    bootstrap_stage3_prepare_seed_generation "$tmp/source" "$generation_root" \
+        "$fingerprint" simple libsimple_native_all.a \
+        libsimple_compiler_backfill.a "$nonce"
+    stage=$BOOTSTRAP_STAGE3_PREPARED_STAGING
+    final=$BOOTSTRAP_STAGE3_PREPARED_GENERATION
+    hash=$BOOTSTRAP_STAGE3_PREPARED_HASH
+}
+publish() {
+    bootstrap_stage3_publish_seed_generation "$stage" "$final" \
+        "$control_root/current.env" "$fingerprint" "$hash" "$fingerprint" \
+        "$control_root/bootstrap"
+}
+prepare "$tmp/success" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+publish
+[ -d "$final" ] && [ -f "$tmp/success/current.env" ]
+[ "$(stat -f %Lp "$final" 2>/dev/null || stat -c %a "$final")" = 500 ]
+
+prepare "$tmp/cross-a" bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+cross_stage=$stage
+mkdir -p "$tmp/cross-a/other-generations"
+final=$tmp/cross-a/other-generations/$(basename -- "$final")
+if publish; then exit 1; fi
+[ -d "$cross_stage" ] && [ ! -e "$tmp/cross-a/current.env" ]
+
+prepare "$tmp/alias" cccccccccccccccccccccccccccccccc
+mv "$tmp/alias/generations" "$tmp/alias/real-generations"
+ln -s real-generations "$tmp/alias/generations"
+stage=$tmp/alias/generations/$(basename -- "$stage")
+final=$tmp/alias/generations/$(basename -- "$final")
+if publish; then exit 1; fi
+[ ! -e "$tmp/alias/current.env" ]
+
+prepare "$tmp/denied" dddddddddddddddddddddddddddddddd
+chmod 500 "$tmp/denied/generations"
+if publish; then exit 1; fi
+chmod 700 "$tmp/denied/generations"
+[ -d "$stage" ] && [ ! -e "$final" ] && [ ! -e "$tmp/denied/current.env" ]
+
+prepare "$tmp/freeze" eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+SIMPLE_BOOTSTRAP_TEST_AUTHORITY_PUBLISH_FAIL_FREEZE=1
+export SIMPLE_BOOTSTRAP_TEST_AUTHORITY_PUBLISH_FAIL_FREEZE
+if publish; then exit 1; fi
+unset SIMPLE_BOOTSTRAP_TEST_AUTHORITY_PUBLISH_FAIL_FREEZE
+[ ! -e "$final" ] && [ ! -e "$tmp/freeze/current.env" ]
+set -- "$tmp/freeze/generations"/.rejected.*
+[ "$#" -eq 1 ] && [ -d "$1" ]
+
+prepare "$tmp/race" ffffffffffffffffffffffffffffffff
+SIMPLE_BOOTSTRAP_TEST_AUTHORITY_PUBLISH_RACE_AFTER_FREEZE=1
+export SIMPLE_BOOTSTRAP_TEST_AUTHORITY_PUBLISH_RACE_AFTER_FREEZE
+if publish; then exit 1; fi
+unset SIMPLE_BOOTSTRAP_TEST_AUTHORITY_PUBLISH_RACE_AFTER_FREEZE
+[ ! -e "$tmp/race/current.env" ] && [ ! -e "$tmp/race/bootstrap" ]
+set -- "$tmp/race.swapped."*/generations/.rejected.*
+[ "$#" -eq 1 ] && [ -d "$1" ]
+swapped_control=$(dirname -- "$(dirname -- "$1")")
+[ ! -e "$swapped_control/current.env" ] && [ ! -e "$swapped_control/bootstrap" ]
+echo 'BOOTSTRAP_STAGE3_ATOMIC_GENERATION_PUBLICATION_PASS'

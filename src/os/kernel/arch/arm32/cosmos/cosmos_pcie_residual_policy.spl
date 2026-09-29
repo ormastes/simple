@@ -1,0 +1,351 @@
+# Pure-Simple residual policy for the Cosmos+ PCIe/NVMe transport.
+#
+# Volatile MMIO, barriers, pointer admission, queue publication, IRQ handling,
+# and DMA commit state remain in C.  This module accepts and returns scalars
+# only, performs no allocation, and owns the closed 12-function policy audit.
+
+val COSMOS_OK: i32 = 0
+val COSMOS_UNAVAILABLE: i32 = 1
+val COSMOS_INVALID: i32 = 2
+val COSMOS_HW_ERROR: i32 = 4
+
+val COSMOS_PCIE_STATUS_DEFINED_MASK: u32 = 0x0000013Fu32
+val COSMOS_PCIE_STATUS_LINK_UP: u32 = 0x00000100u32
+val COSMOS_PCIE_STATUS_LTSSM_MASK: u32 = 0x0000003Fu32
+val COSMOS_PCIE_LTSSM_L0: u32 = 0x00000016u32
+val COSMOS_PCIE_FUNCTION_DEFINED_MASK: u32 = 0x0000007Fu32
+val COSMOS_PCIE_FUNCTION_BUS_MASTER: u32 = 0x00000001u32
+val COSMOS_PCIE_FUNCTION_MSI_ENABLE: u32 = 0x00000002u32
+val COSMOS_PCIE_FUNCTION_MSIX_ENABLE: u32 = 0x00000004u32
+val COSMOS_PCIE_FUNCTION_MME_SHIFT: u32 = 4u32
+val COSMOS_PCIE_FUNCTION_MME_MASK: u32 = 0x00000070u32
+val COSMOS_PCIE_FUNCTION_MME_MAX: u32 = 3u32
+val COSMOS_PCIE_NVME_STATUS_DEFINED_MASK: u32 = 0x00000077u32
+val COSMOS_PCIE_NVME_CC_ENABLE: u32 = 0x00000001u32
+val COSMOS_PCIE_NVME_CC_SHN_MASK: u32 = 0x00000006u32
+val COSMOS_PCIE_NVME_CSTS_READY: u32 = 0x00000010u32
+val COSMOS_PCIE_NVME_CSTS_SHST_MASK: u32 = 0x00000060u32
+val COSMOS_PCIE_ADMIN_DEFINED_MASK: u32 = 0x00000007u32
+val COSMOS_PCIE_ADMIN_CQ_VALID: u32 = 0x00000001u32
+val COSMOS_PCIE_ADMIN_SQ_VALID: u32 = 0x00000002u32
+val COSMOS_PCIE_ADMIN_CQ_IRQ_ENABLE: u32 = 0x00000004u32
+
+val COSMOS_PCIE_NVME_CMD_VALID: u32 = 0x80000000u32
+val COSMOS_PCIE_NVME_CMD_RESERVED_MASK: u32 = 0x7F0080F0u32
+val COSMOS_PCIE_NVME_CMD_QUEUE_MASK: u32 = 0x0000000Fu32
+val COSMOS_PCIE_NVME_CMD_SLOT_MASK: u32 = 0x00007F00u32
+val COSMOS_PCIE_NVME_CMD_SLOT_SHIFT: u32 = 8u32
+val COSMOS_PCIE_NVME_MAX_QUEUE_ID: u32 = 8u32
+val COSMOS_PCIE_NVME_CMD_SLOT_COUNT: u32 = 128u32
+val COSMOS_PCIE_NVME_CPL_STATUS_RESERVED_MASK: u32 = 0x00003001u32
+
+val COSMOS_PCIE_HOST_DMA_DEVICE_ALIGNMENT: u32 = 4u32
+val COSMOS_PCIE_HOST_DMA_HOST_ALIGNMENT: u32 = 16u32
+val COSMOS_PCIE_HOST_DMA_MAX_BYTES: u32 = 0x00001000u32
+val COSMOS_PCIE_HOST_DMA_HOST_HIGH_MASK: u32 = 0x0000000Fu32
+val COSMOS_PCIE_HOST_DMA_SLOT_MASK: u32 = 0x0000007Fu32
+val COSMOS_PCIE_HOST_DMA_AUTO_OFFSET_MAX: u32 = 255u32
+val COSMOS_PCIE_HOST_DMA_DIRECT_RX_COUNT_SHIFT: u32 = 0u32
+val COSMOS_PCIE_HOST_DMA_DIRECT_TX_COUNT_SHIFT: u32 = 8u32
+val COSMOS_PCIE_HOST_DMA_AUTO_RX_COUNT_SHIFT: u32 = 16u32
+val COSMOS_PCIE_HOST_DMA_AUTO_TX_COUNT_SHIFT: u32 = 24u32
+val COSMOS_PCIE_HOST_TO_DEVICE: u32 = 0u32
+val COSMOS_NFC_DATA_POOL_BASE: u32 = 0x10000000u32
+val COSMOS_NFC_DATA_POOL_END: u32 = 0x110FFFFFu32
+
+val COSMOS_PCIE_RESIDUAL_POLICY_FUNCTIONS: u32 = 12u32
+val COSMOS_PCIE_RESIDUAL_POLICY_DECISIONS: u32 = 19u32
+val COSMOS_PCIE_RESIDUAL_POLICY_OUTCOMES_REQUIRED_LOW: u32 = 0xFFFFFFFFu32
+val COSMOS_PCIE_RESIDUAL_POLICY_OUTCOMES_REQUIRED_HIGH: u32 = 0x0000003Fu32
+
+# Closed actual-execution decision audit.  Each site owns two adjacent bits:
+# false at 2*id and true at 2*id+1.
+val D_SNAPSHOT_UNDEFINED_BITS: u32 = 0u32
+val D_SNAPSHOT_TRANSPORT_UNAVAILABLE: u32 = 1u32
+val D_SNAPSHOT_MSIX_ENABLED: u32 = 2u32
+val D_SNAPSHOT_MME_EXCESSIVE: u32 = 3u32
+val D_SNAPSHOT_ADMIN_PARTIAL: u32 = 4u32
+val D_SNAPSHOT_ADMIN_IRQ_WITHOUT_CQ: u32 = 5u32
+val D_SNAPSHOT_NVME_DISABLED_PAYLOAD: u32 = 6u32
+val D_SNAPSHOT_READY_ADMIN_INCOMPLETE: u32 = 7u32
+val D_SNAPSHOTS_EQUAL: u32 = 8u32
+val D_COMMAND_MISSING_VALID: u32 = 9u32
+val D_COMMAND_RESERVED_BITS: u32 = 10u32
+val D_COMMAND_METADATA_BOUNDS: u32 = 11u32
+val D_COMPLETION_FIELDS_INVALID: u32 = 12u32
+val D_DMA_DEVICE_BUFFER_INVALID: u32 = 13u32
+val D_DMA_DIRECT_BASE_INVALID: u32 = 14u32
+val D_DMA_DIRECT_WRAP_INVALID: u32 = 15u32
+val D_DMA_COUNTER_DIRECT: u32 = 16u32
+val D_DMA_COUNTER_HOST_TO_DEVICE: u32 = 17u32
+val D_DMA_AUTO_INVALID: u32 = 18u32
+
+var g_cosmos_pcie_residual_policy_outcomes_low: u32 = 0u32
+var g_cosmos_pcie_residual_policy_outcomes_high: u32 = 0u32
+
+fn _coverage_record(decision_id: u32, result: bool):
+    val outcome_id = decision_id * 2u32 + (result as u32)
+    if outcome_id < 32u32:
+        g_cosmos_pcie_residual_policy_outcomes_low =
+            g_cosmos_pcie_residual_policy_outcomes_low | (1u32 << outcome_id)
+    else:
+        g_cosmos_pcie_residual_policy_outcomes_high =
+            g_cosmos_pcie_residual_policy_outcomes_high |
+            (1u32 << (outcome_id - 32u32))
+
+@export("C", name: "cosmos_pcie_residual_policy_coverage_reset")
+pub fn cosmos_pcie_residual_policy_coverage_reset():
+    g_cosmos_pcie_residual_policy_outcomes_low = 0u32
+    g_cosmos_pcie_residual_policy_outcomes_high = 0u32
+
+@export("C", name: "cosmos_pcie_residual_policy_coverage_mask")
+pub fn cosmos_pcie_residual_policy_coverage_mask(bank: u32) -> u32:
+    if bank == 0u32:
+        return g_cosmos_pcie_residual_policy_outcomes_low
+    g_cosmos_pcie_residual_policy_outcomes_high
+
+@export("C", name: "cosmos_pcie_residual_policy_coverage_required")
+pub fn cosmos_pcie_residual_policy_coverage_required(bank: u32) -> u32:
+    if bank == 0u32:
+        return COSMOS_PCIE_RESIDUAL_POLICY_OUTCOMES_REQUIRED_LOW
+    COSMOS_PCIE_RESIDUAL_POLICY_OUTCOMES_REQUIRED_HIGH
+
+@export("C", name: "cosmos_pcie_residual_policy_coverage_decisions")
+pub fn cosmos_pcie_residual_policy_coverage_decisions() -> u32:
+    COSMOS_PCIE_RESIDUAL_POLICY_DECISIONS
+
+@export("C", name: "cosmos_pcie_residual_policy_function_count")
+pub fn cosmos_pcie_residual_policy_function_count() -> u32:
+    COSMOS_PCIE_RESIDUAL_POLICY_FUNCTIONS
+
+@export("C", name: "cosmos_pcie_residual_policy_snapshot_status")
+pub fn cosmos_pcie_residual_policy_snapshot_status(
+    status: u32, function: u32, nvme: u32, admin: u32
+) -> i32:
+    val admin_valid = admin &
+        (COSMOS_PCIE_ADMIN_CQ_VALID | COSMOS_PCIE_ADMIN_SQ_VALID)
+    val undefined_bits = (
+        (status & ~COSMOS_PCIE_STATUS_DEFINED_MASK) != 0u32 or
+        (function & ~COSMOS_PCIE_FUNCTION_DEFINED_MASK) != 0u32 or
+        (nvme & ~COSMOS_PCIE_NVME_STATUS_DEFINED_MASK) != 0u32 or
+        (admin & ~COSMOS_PCIE_ADMIN_DEFINED_MASK) != 0u32
+    )
+    _coverage_record(D_SNAPSHOT_UNDEFINED_BITS, undefined_bits)
+    if undefined_bits:
+        return COSMOS_HW_ERROR
+
+    val transport_unavailable = (
+        (status & COSMOS_PCIE_STATUS_LINK_UP) == 0u32 or
+        (status & COSMOS_PCIE_STATUS_LTSSM_MASK) != COSMOS_PCIE_LTSSM_L0 or
+        (function & COSMOS_PCIE_FUNCTION_BUS_MASTER) == 0u32 or
+        (function & COSMOS_PCIE_FUNCTION_MSI_ENABLE) == 0u32
+    )
+    _coverage_record(D_SNAPSHOT_TRANSPORT_UNAVAILABLE, transport_unavailable)
+    if transport_unavailable:
+        return COSMOS_UNAVAILABLE
+
+    val msix_enabled =
+        (function & COSMOS_PCIE_FUNCTION_MSIX_ENABLE) != 0u32
+    _coverage_record(D_SNAPSHOT_MSIX_ENABLED, msix_enabled)
+    if msix_enabled:
+        return COSMOS_HW_ERROR
+
+    val mme_excessive = (
+        (function & COSMOS_PCIE_FUNCTION_MME_MASK) >>
+        COSMOS_PCIE_FUNCTION_MME_SHIFT
+    ) > COSMOS_PCIE_FUNCTION_MME_MAX
+    _coverage_record(D_SNAPSHOT_MME_EXCESSIVE, mme_excessive)
+    if mme_excessive:
+        return COSMOS_HW_ERROR
+
+    val admin_partial = (
+        admin_valid != 0u32 and
+        admin_valid !=
+            (COSMOS_PCIE_ADMIN_CQ_VALID | COSMOS_PCIE_ADMIN_SQ_VALID)
+    )
+    _coverage_record(D_SNAPSHOT_ADMIN_PARTIAL, admin_partial)
+    if admin_partial:
+        return COSMOS_HW_ERROR
+
+    val admin_irq_without_cq = (
+        (admin & COSMOS_PCIE_ADMIN_CQ_IRQ_ENABLE) != 0u32 and
+        (admin & COSMOS_PCIE_ADMIN_CQ_VALID) == 0u32
+    )
+    _coverage_record(D_SNAPSHOT_ADMIN_IRQ_WITHOUT_CQ, admin_irq_without_cq)
+    if admin_irq_without_cq:
+        return COSMOS_HW_ERROR
+
+    val nvme_disabled_payload = (
+        (nvme & COSMOS_PCIE_NVME_CC_ENABLE) == 0u32 and
+        ((nvme & (COSMOS_PCIE_NVME_CC_SHN_MASK |
+                  COSMOS_PCIE_NVME_CSTS_READY |
+                  COSMOS_PCIE_NVME_CSTS_SHST_MASK)) != 0u32 or
+         admin != 0u32)
+    )
+    _coverage_record(D_SNAPSHOT_NVME_DISABLED_PAYLOAD, nvme_disabled_payload)
+    if nvme_disabled_payload:
+        return COSMOS_HW_ERROR
+
+    val ready_admin_incomplete = (
+        (nvme & COSMOS_PCIE_NVME_CSTS_READY) != 0u32 and
+        (admin & (COSMOS_PCIE_ADMIN_CQ_VALID |
+                  COSMOS_PCIE_ADMIN_SQ_VALID |
+                  COSMOS_PCIE_ADMIN_CQ_IRQ_ENABLE)) !=
+            (COSMOS_PCIE_ADMIN_CQ_VALID |
+             COSMOS_PCIE_ADMIN_SQ_VALID |
+             COSMOS_PCIE_ADMIN_CQ_IRQ_ENABLE)
+    )
+    _coverage_record(D_SNAPSHOT_READY_ADMIN_INCOMPLETE, ready_admin_incomplete)
+    if ready_admin_incomplete:
+        return COSMOS_HW_ERROR
+    COSMOS_OK
+
+@export("C", name: "cosmos_pcie_residual_policy_snapshots_equal")
+pub fn cosmos_pcie_residual_policy_snapshots_equal(
+    left_status: u32, left_function: u32, left_nvme: u32, left_admin: u32,
+    right_status: u32, right_function: u32, right_nvme: u32, right_admin: u32
+) -> i32:
+    val equal = (
+        left_status == right_status and
+        left_function == right_function and
+        left_nvme == right_nvme and
+        left_admin == right_admin
+    )
+    _coverage_record(D_SNAPSHOTS_EQUAL, equal)
+    if equal: 1 else: 0
+
+@export("C", name: "cosmos_pcie_residual_policy_nvme_cmd_word_status")
+pub fn cosmos_pcie_residual_policy_nvme_cmd_word_status(word: u32) -> i32:
+    val missing_valid = (word & COSMOS_PCIE_NVME_CMD_VALID) == 0u32
+    _coverage_record(D_COMMAND_MISSING_VALID, missing_valid)
+    if missing_valid:
+        return COSMOS_UNAVAILABLE
+
+    val reserved_bits =
+        (word & COSMOS_PCIE_NVME_CMD_RESERVED_MASK) != 0u32
+    _coverage_record(D_COMMAND_RESERVED_BITS, reserved_bits)
+    if reserved_bits:
+        return COSMOS_HW_ERROR
+
+    val queue_id = word & COSMOS_PCIE_NVME_CMD_QUEUE_MASK
+    val slot_tag = (word & COSMOS_PCIE_NVME_CMD_SLOT_MASK) >>
+        COSMOS_PCIE_NVME_CMD_SLOT_SHIFT
+    val metadata_out_of_bounds = (
+        queue_id > COSMOS_PCIE_NVME_MAX_QUEUE_ID or
+        slot_tag >= COSMOS_PCIE_NVME_CMD_SLOT_COUNT
+    )
+    _coverage_record(D_COMMAND_METADATA_BOUNDS, metadata_out_of_bounds)
+    if metadata_out_of_bounds: COSMOS_HW_ERROR else: COSMOS_OK
+
+@export("C", name: "cosmos_pcie_residual_policy_nvme_completion_fields_valid")
+pub fn cosmos_pcie_residual_policy_nvme_completion_fields_valid(
+    queue_id: u32, slot_tag: u32, sequence: u32, cid: u32, status_word: u32
+) -> i32:
+    val invalid = (
+        queue_id > COSMOS_PCIE_NVME_MAX_QUEUE_ID or
+        slot_tag >= COSMOS_PCIE_NVME_CMD_SLOT_COUNT or
+        sequence > 0xFFu32 or
+        cid > 0xFFFFu32 or
+        status_word > 0xFFFFu32 or
+        (status_word & COSMOS_PCIE_NVME_CPL_STATUS_RESERVED_MASK) != 0u32
+    )
+    _coverage_record(D_COMPLETION_FIELDS_INVALID, invalid)
+    if invalid: 0 else: 1
+
+@export("C", name: "cosmos_pcie_residual_policy_host_dma_device_buffer_status")
+pub fn cosmos_pcie_residual_policy_host_dma_device_buffer_status(
+    device_address: u32, length: u32
+) -> i32:
+    val invalid = (
+        (device_address & (COSMOS_PCIE_HOST_DMA_DEVICE_ALIGNMENT - 1u32)) != 0u32 or
+        length == 0u32 or
+        length > COSMOS_PCIE_HOST_DMA_MAX_BYTES or
+        (length & (COSMOS_PCIE_HOST_DMA_DEVICE_ALIGNMENT - 1u32)) != 0u32 or
+        device_address < COSMOS_NFC_DATA_POOL_BASE or
+        device_address > COSMOS_NFC_DATA_POOL_END or
+        length - 1u32 > COSMOS_NFC_DATA_POOL_END - device_address
+    )
+    _coverage_record(D_DMA_DEVICE_BUFFER_INVALID, invalid)
+    if invalid: COSMOS_INVALID else: COSMOS_OK
+
+@export("C", name: "cosmos_pcie_residual_policy_host_dma_direct_status")
+pub fn cosmos_pcie_residual_policy_host_dma_direct_status(
+    device_address: u32, host_address_high: u32,
+    host_address_low: u32, length: u32
+) -> i32:
+    val base_invalid = (
+        cosmos_pcie_residual_policy_host_dma_device_buffer_status(
+            device_address, length
+        ) != COSMOS_OK or
+        (host_address_low & (COSMOS_PCIE_HOST_DMA_HOST_ALIGNMENT - 1u32)) != 0u32 or
+        host_address_high > COSMOS_PCIE_HOST_DMA_HOST_HIGH_MASK
+    )
+    _coverage_record(D_DMA_DIRECT_BASE_INVALID, base_invalid)
+    if base_invalid:
+        return COSMOS_INVALID
+
+    val last_host_address_low = host_address_low + length - 1u32
+    val wrap_invalid = (
+        last_host_address_low < host_address_low and
+        host_address_high == COSMOS_PCIE_HOST_DMA_HOST_HIGH_MASK
+    )
+    _coverage_record(D_DMA_DIRECT_WRAP_INVALID, wrap_invalid)
+    if wrap_invalid: COSMOS_INVALID else: COSMOS_OK
+
+@export("C", name: "cosmos_pcie_residual_policy_host_dma_counter_shift")
+pub fn cosmos_pcie_residual_policy_host_dma_counter_shift(
+    direct: u32, direction: u32
+) -> u32:
+    val is_direct = direct != 0u32
+    val is_host_to_device = direction == COSMOS_PCIE_HOST_TO_DEVICE
+    _coverage_record(D_DMA_COUNTER_DIRECT, is_direct)
+    _coverage_record(D_DMA_COUNTER_HOST_TO_DEVICE, is_host_to_device)
+    if is_direct:
+        if is_host_to_device:
+            return COSMOS_PCIE_HOST_DMA_DIRECT_RX_COUNT_SHIFT
+        return COSMOS_PCIE_HOST_DMA_DIRECT_TX_COUNT_SHIFT
+    if is_host_to_device:
+        return COSMOS_PCIE_HOST_DMA_AUTO_RX_COUNT_SHIFT
+    COSMOS_PCIE_HOST_DMA_AUTO_TX_COUNT_SHIFT
+
+@export("C", name: "cosmos_pcie_residual_policy_host_dma_counter_index")
+pub fn cosmos_pcie_residual_policy_host_dma_counter_index(
+    direct: u32, direction: u32
+) -> u32:
+    cosmos_pcie_residual_policy_host_dma_counter_shift(direct, direction) >> 3u32
+
+@export("C", name: "cosmos_pcie_residual_policy_host_dma_direct_word3")
+pub fn cosmos_pcie_residual_policy_host_dma_direct_word3(
+    direction: u32, length: u32
+) -> u32:
+    (1u32 << 31u32) | (direction << 30u32) | length
+
+@export("C", name: "cosmos_pcie_residual_policy_host_dma_auto_status")
+pub fn cosmos_pcie_residual_policy_host_dma_auto_status(
+    command_slot_tag: u32, command_4k_offset: u32, device_address: u32
+) -> i32:
+    val invalid = (
+        command_slot_tag > COSMOS_PCIE_HOST_DMA_SLOT_MASK or
+        command_4k_offset > COSMOS_PCIE_HOST_DMA_AUTO_OFFSET_MAX or
+        cosmos_pcie_residual_policy_host_dma_device_buffer_status(
+            device_address, COSMOS_PCIE_HOST_DMA_MAX_BYTES
+        ) != COSMOS_OK
+    )
+    _coverage_record(D_DMA_AUTO_INVALID, invalid)
+    if invalid: COSMOS_INVALID else: COSMOS_OK
+
+@export("C", name: "cosmos_pcie_residual_policy_host_dma_auto_word3")
+pub fn cosmos_pcie_residual_policy_host_dma_auto_word3(
+    direction: u32, command_slot_tag: u32, command_4k_offset: u32
+) -> u32:
+    (direction << 30u32) |
+        (command_slot_tag << 23u32) |
+        (command_4k_offset << 14u32)
+
+@export("C", name: "cosmos_pcie_residual_policy_nvme_completion_word2")
+pub fn cosmos_pcie_residual_policy_nvme_completion_word2(
+    slot_tag: u32, status_word: u32
+) -> u32:
+    ((status_word & 0xFFFFu32) << 16u32) |
+        (1u32 << 14u32) |
+        (slot_tag & 0x7Fu32)

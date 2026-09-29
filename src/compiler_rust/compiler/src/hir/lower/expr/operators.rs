@@ -6,7 +6,7 @@
 use simple_parser::{self as ast, ast::ReferenceCapability, Expr};
 
 use crate::hir::lower::context::FunctionContext;
-use crate::hir::lower::error::LowerResult;
+use crate::hir::lower::error::{LowerError, LowerResult};
 use crate::hir::lower::lowerer::Lowerer;
 use crate::hir::types::*;
 
@@ -35,6 +35,45 @@ impl Lowerer {
     ) -> LowerResult<HirExpr> {
         let left_hir = Box::new(self.lower_expr(left, ctx)?);
         let right_hir = Box::new(self.lower_expr(right, ctx)?);
+
+        // Arithmetic / bitwise / ordered comparison on an UNNARROWED optional
+        // scalar is rejected statically. There is no flow-sensitive narrowing
+        // yet (`doc/05_design/language/type_system/flow_sensitive_narrowing_design.md`
+        // is a PROPOSAL), so `v: i64?` stays optional inside `if v != nil:` —
+        // the interpreter lane already fails such arithmetic closed at runtime
+        // ("type mismatch: cannot convert enum to int"), while the JIT lane
+        // silently computed on the tagged bit pattern (`42 << 3` printed 2688
+        // == (42<<3)<<3). Failing the compile keeps the two lanes agreeing and
+        // names the working idioms. Eq/NotEq/Is stay allowed: nil checks must
+        // work on optionals.
+        // Bug: doc/08_tracking/bug/optional_i64_return_payload_corruption_2026-08-31.md
+        if matches!(
+            op,
+            ast::BinOp::Add
+                | ast::BinOp::Sub
+                | ast::BinOp::Mul
+                | ast::BinOp::Div
+                | ast::BinOp::Mod
+                | ast::BinOp::Pow
+                | ast::BinOp::BitAnd
+                | ast::BinOp::BitOr
+                | ast::BinOp::BitXor
+                | ast::BinOp::ShiftLeft
+                | ast::BinOp::ShiftRight
+                | ast::BinOp::Lt
+                | ast::BinOp::Gt
+                | ast::BinOp::LtEq
+                | ast::BinOp::GtEq
+        ) && (self.optional_boxint_scalar_inner(left_hir.ty).is_some()
+            || self.optional_boxint_scalar_inner(right_hir.ty).is_some())
+        {
+            return Err(LowerError::Unsupported(format!(
+                "cannot apply `{:?}` to an optional value that has not been unwrapped; \
+                 `if x != nil:` does not narrow `T?` to `T` — unwrap with `x ?? default`, \
+                 `x.unwrap()`, or `if val v = x:` first",
+                op
+            )));
+        }
 
         // Type is determined by operands
         // For SIMD vectors, comparison returns a SIMD bool vector

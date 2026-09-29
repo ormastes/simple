@@ -1,0 +1,194 @@
+# @gc -- one fresh-process real-model Slang KV benchmark sample.
+use std.gc_async_mut.slang.engine.llm_engine.{EngineGenerationRequest, engine_set_lib_path, engine_set_n_ctx_text, engine_set_matched_cpu_threads_text, engine_set_physical_pages_config, engine_set_prefix_cache_limits, engine_ensure_loaded, engine_generate_observed_request, engine_kv_execution_mode_text, engine_physical_page_reason, engine_prefix_cache_stats, engine_physical_page_allocated_bytes, engine_physical_page_bytes, paged_executor_configuration_text, engine_unload}
+use std.gc_async_mut.slang.model_executor.model_loader.native_formats.{NativeModel}
+use std.gc_async_mut.slang.model_executor.paged_executor.{paged_executor_active, paged_executor_telemetry}
+use std.cli.cli_util.{get_cli_args}
+use std.common.crypto.sha256.{sha256_text}
+use std.io_runtime.{time_now_monotonic_ms}
+
+fn argument(args: [text], name: text, fallback: text) -> text:
+    val prefix = "--" + name + "="
+    for item in args:
+        if item.starts_with(prefix):
+            return item.substring(prefix.len())
+    fallback
+
+fn blocked(reason: text):
+    print "SLANG_KV_RESULT status=BLOCKED reason={reason} ttft_status=unavailable ttft_reason=backend-api-has-no-first-token-timestamp"
+
+struct WorkloadObservation:
+    receipt: text
+    generated_token_vector: text
+    generated_tokens_total: text
+    requested_tokens: text
+
+fn append_request(prompt: text,
+                  observation: WorkloadObservation) -> Result<WorkloadObservation, text>:
+    val tokens = observation.requested_tokens.parse_i64() ?? 0
+    match engine_generate_observed_request(EngineGenerationRequest(
+          prompt: prompt, max_tokens: observation.requested_tokens)):
+        Err(reason): Err(reason)
+        Ok(generated):
+            val generated_count = generated.generated_tokens.parse_i64() ?? -1
+            if generated_count < 0:
+                return Err("invalid-generated-token-count-" + generated.generated_tokens)
+            if generated_count > tokens:
+                return Err("generation-budget-exceeded-requested-" +
+                    tokens.to_text() + "-observed-" +
+                    generated.generated_tokens)
+            var vector = observation.generated_token_vector
+            if vector != "":
+                vector = vector + ","
+            vector = vector + generated.generated_tokens
+            val prior_total = observation.generated_tokens_total.parse_i64() ?? 0
+            Ok(WorkloadObservation(
+                receipt: observation.receipt + generated.output.len().to_text() +
+                    ":" + generated.output + "|",
+                generated_token_vector: vector,
+                generated_tokens_total: (prior_total + generated_count).to_text(),
+                requested_tokens: observation.requested_tokens))
+
+fn run_workload(workload: text, requested_tokens: text) -> Result<WorkloadObservation, text>:
+    var out = WorkloadObservation(receipt: "", generated_token_vector: "",
+        generated_tokens_total: "0", requested_tokens: requested_tokens)
+    if workload == "cold":
+        return append_request("Summarize the ownership rule for a KV page.", out)
+    if workload == "exact_repeat":
+        match append_request(
+              "Explain why immutable cache keys matter in one paragraph.", out):
+            Err(e): return Err(e)
+            Ok(v): out = v
+        return append_request(
+            "Explain why immutable cache keys matter in one paragraph.", out)
+    if workload == "prefix_extension":
+        match append_request("Explain why immutable cache keys matter", out):
+            Err(e): return Err(e)
+            Ok(v): out = v
+        return append_request(
+            "Explain why immutable cache keys matter. Include a concrete example.", out)
+    if workload == "alternating_prefix":
+        match append_request("Cache family alpha has this shared prefix", out):
+            Err(e): return Err(e)
+            Ok(v): out = v
+        match append_request("Cache family beta has this shared prefix", out):
+            Err(e): return Err(e)
+            Ok(v): out = v
+        match append_request(
+              "Cache family alpha has this shared prefix and a correctness suffix.", out):
+            Err(e): return Err(e)
+            Ok(v): out = v
+        return append_request(
+            "Cache family beta has this shared prefix and a performance suffix.", out)
+    if workload == "eviction_pressure":
+        var index: i64 = 0
+        while index < 6:
+            match append_request(
+                  "KV eviction probe " + index.to_text() + ": give one cache invariant.", out):
+                Err(e): return Err(e)
+                Ok(v): out = v
+            index = index + 1
+        return append_request(
+            "KV eviction probe 0: give one cache invariant.", out)
+    Err("unknown-workload")
+
+fn main():
+    val args = get_cli_args()
+    val model_path = argument(args, "model-path", "")
+    val model_id = argument(args, "model-id", "")
+    val lib_path = argument(args, "lib", "build/sffi/libslang_ggml.so")
+    val lane = argument(args, "lane", "")
+    val workload = argument(args, "workload", "")
+    val tokens = argument(args, "tokens", "8").parse_i64() ?? 0
+    val threads = argument(args, "threads", "1").parse_i64() ?? 0
+    val n_ctx = argument(args, "n-ctx", "4096").parse_i64() ?? 0
+    if model_path == "" or model_id == "" or tokens <= 0 or threads <= 0 or n_ctx <= 0:
+        blocked("invalid-arguments")
+        return
+    if n_ctx % 64 != 0:
+        blocked("n-ctx-must-be-divisible-by-64")
+        return
+    if lane != "snapshot" and lane != "physical_pages":
+        blocked("invalid-lane")
+        return
+    engine_set_lib_path(lib_path)
+    if not engine_set_n_ctx_text(argument(args, "n-ctx", "4096")):
+        blocked("context-configuration-rejected")
+        return
+    if not engine_set_matched_cpu_threads_text(argument(args, "threads", "1")):
+        blocked("matched-cpu-configuration-rejected")
+        return
+    engine_set_prefix_cache_limits(4, 2147483648)
+    val page_tokens: i64 = 64
+    val page_capacity = n_ctx / page_tokens
+    # Leave the default disabled state untouched for snapshot mode. Passing a
+    # false Boolean through the current cross-module multi-argument interpreter
+    # path can be mis-bound; physical admission is therefore an explicit call.
+    if lane == "physical_pages":
+        if not engine_set_physical_pages_config("true|" + page_tokens.to_text() +
+              "|" + page_capacity.to_text() + "|4|2147483648"):
+            blocked("physical-configuration-rejected")
+            return
+
+    # Load and a disjoint one-token warmup are outside resident-request timing.
+    val model = NativeModel(id: model_id, root: model_path, format: "gguf",
+        bytes: file_size(model_path), entry_path: model_path, runnable: true,
+        reason: "")
+    match engine_ensure_loaded(model):
+        Err(reason):
+            blocked("load:" + reason)
+            return
+        Ok(_): ()
+    match engine_generate_observed_request(EngineGenerationRequest(
+          prompt: "Slang KV benchmark residency warmup.", max_tokens: "1")):
+        Err(reason):
+            blocked("load-warmup:" + reason)
+            return
+        Ok(_): ()
+    val actual_mode = engine_kv_execution_mode_text()
+    if actual_mode != lane:
+        engine_unload()
+        blocked("mode-mismatch-requested-" + lane + "-actual-" + actual_mode +
+            "-reason-" + engine_physical_page_reason())
+        return
+    val started_ms = time_now_monotonic_ms()
+    val generated = run_workload(workload, tokens.to_text())
+    val elapsed_ms = time_now_monotonic_ms() - started_ms
+    if elapsed_ms <= 0:
+        engine_unload()
+        blocked("non-positive-monotonic-interval")
+        return
+    match generated:
+        Err(reason):
+            engine_unload()
+            blocked("request:" + reason)
+            return
+        Ok(observed):
+            val receipt = observed.receipt
+            val stats = engine_prefix_cache_stats()
+            if stats == nil:
+                engine_unload()
+                blocked("telemetry-unavailable")
+                return
+            var physical = "physical_telemetry=unavailable"
+            if lane == "physical_pages":
+                val p = paged_executor_telemetry()
+                if p == nil:
+                    engine_unload()
+                    blocked("physical-telemetry-unavailable")
+                    return
+                val provider_allocated = engine_physical_page_allocated_bytes()
+                val provider_page_bytes = engine_physical_page_bytes()
+                if provider_allocated.is_err() or provider_page_bytes.is_err():
+                    engine_unload()
+                    blocked("provider-physical-byte-telemetry-unavailable")
+                    return
+                physical = "physical_telemetry=available " + paged_executor_configuration_text() + " allocated_pages=" + p!.allocated_pages.to_text() + " allocated_bytes=" + p!.allocated_bytes.to_text() + " provider_allocated_bytes=" + provider_allocated.unwrap().to_text() + " provider_page_bytes=" + provider_page_bytes.unwrap().to_text() + " page_high_water=" + p!.page_high_water.to_text() + " byte_high_water=" + p!.byte_high_water.to_text() + " active_requests=" + p!.active_requests.to_text() + " active_prefixes=" + p!.active_prefixes.to_text() + " cache_references=" + p!.cache_references.to_text() + " request_references=" + p!.request_references.to_text() + " active_reservations=" + p!.active_reservations.to_text() + " reservation_high_water=" + p!.reservation_high_water.to_text() + " reservation_attempts=" + p!.reservation_attempts.to_text() + " cow_commits=" + p!.cow_commits.to_text() + " cow_aborts=" + p!.cow_aborts.to_text() + " committed_prefix_restores=" + p!.committed_prefix_restores.to_text() + " boundary_evaluations=" + p!.boundary_evaluations.to_text() + " copied_tail_rows=" + p!.copied_tail_rows.to_text() + " generation_failures=" + p!.generation_failures.to_text() + " stale_rejects=" + p!.stale_rejects.to_text() + " busy_rejects=" + p!.busy_rejects.to_text()
+            match engine_unload():
+                Err(reason): blocked("unload:" + reason)
+                Ok(_):
+                    if paged_executor_active() or paged_executor_telemetry() != nil:
+                        blocked("cleanup-state-retained")
+                        return
+                    print "SLANG_KV_RESULT status=PASS lane={actual_mode} workload={workload} requested_tokens={tokens} threads={threads} n_ctx={n_ctx} page_tokens={page_tokens} page_capacity={page_capacity} resident_elapsed_ms={elapsed_ms} output_digest={sha256_text(receipt)} output_bytes={receipt.len()} generated_token_vector={observed.generated_token_vector} generated_tokens_total={observed.generated_tokens_total} hits={stats!.hits} misses={stats!.misses} reused_tokens={stats!.tokens_reused} prefilled_tokens={stats!.tokens_prefilled} admissions={stats!.admissions} evictions={stats!.evictions} resident_entries={stats!.resident_entries} resident_bytes={stats!.resident_bytes} rejected_bytes={stats!.rejected_bytes} restore_failures={stats!.restore_failures} {physical} cleanup_active=false cleanup_telemetry=nil ttft_status=unavailable ttft_reason=backend-api-has-no-first-token-timestamp"
+
+main()

@@ -5,32 +5,27 @@ extern fn rt_riscv_smf_cli_load() -> i64
 extern fn rt_riscv_smf_gui_probe() -> i64
 extern fn rt_riscv_native_gui_process_render() -> i64
 extern fn rt_qemu_exit_success()
+extern fn rt_qemu_exit_failure()
 extern fn rt_arm_array_len_u32(arr: [u8]) -> u32
 
-use os.kernel.loader.riscv64_fs_exec_spawn.{riscv64_fs_exec_spawn_capture}
+use os.kernel.loader.fs_exec_spawn.{fs_exec_spawn}
 use os.kernel.loader.app_registry.{app_registry_entries, app_registry_load_hardcoded_fallback, app_registry_is_loaded}
 use os.services.vfs.vfs_init.{g_vfs_read_executable_bytes, g_vfs_file_size}
-
-# Freestanding module-var init never runs, so `_mmio_test_mode` reads
-# garbage-true; force hardware MMIO before the VFS/loader touch the device.
-use os.kernel.boot.mmio.{mmio_disable_test_mode}
 
 fn _fail(stage: text):
     serial_println("[hosted] {stage}")
     serial_println("HOSTED_PREFLIGHT_FAILED stage={stage}")
     serial_println("TEST FAILED")
-    rt_qemu_exit_success()
+    rt_qemu_exit_failure()
 
 fn _read_len(path: text) -> u32:
     val bytes = g_vfs_read_executable_bytes(path)
     rt_arm_array_len_u32(bytes)
 
 fn _manifest_len(path: text) -> u32:
-    match g_vfs_file_size(path):
-        Some(size):
-            size.to_i64().to_u32()
-        nil:
-            0
+    if val Some(size) = g_vfs_file_size(path):
+        return size.to_i64().to_u32()
+    0
 
 fn _path_name(path: text) -> text:
     val parts = path.split("/")
@@ -56,11 +51,11 @@ fn _smoke_spawn_app(app_name: text, app_path: text) -> bool:
         return false
     serial_println("[desktop-e2e] vfs-app-read:ok source=generic-vfs path={app_path} bytes={byte_len}")
 
-    val result = riscv64_fs_exec_spawn_capture(app_path, [app_path], [])
-    if result.exit_code != 0:
+    val pid = fs_exec_spawn(app_path, [app_path], [])
+    if pid <= 0:
         _fail("fs-spawn-{app_name}")
         return false
-    serial_println("[desktop-e2e] process-backed:ok app={app_name} exit={result.exit_code} stdout_bytes={result.bytes.len()}")
+    serial_println("[desktop-e2e] process-backed:ok app={app_name} pid={pid}")
     true
 
 fn _smoke_toolchain_manifest(app_name: text, manifest_path: text) -> bool:
@@ -71,7 +66,6 @@ fn _smoke_toolchain_manifest(app_name: text, manifest_path: text) -> bool:
     true
 
 fn spl_start():
-    mmio_disable_test_mode()
     serial_println("")
     serial_println("=== SimpleOS RV64 hosted fs toolchain preflight ===")
     serial_println("SimpleOS RV64 boot OK")

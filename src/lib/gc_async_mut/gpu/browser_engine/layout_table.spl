@@ -10,6 +10,9 @@ use std.gc_async_mut.gpu.browser_engine.dom_accessors.{be_dom_get_tag,
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{
     HNode, HtmlChildIndex, attr_value, parse_int
 }
+use std.gc_async_mut.gpu.browser_engine.layout_m14_types.{
+    LayoutContext, LayoutBox, LineBox, InlineFragment
+}
 
 fn _find_table_node(node: BeDomNode) -> BeDomNode:
     """Walk into node to find a table element, or return node itself."""
@@ -186,3 +189,387 @@ fn simple_web_fixed_table_column_count(
         if row_columns > columns:
             columns = row_columns
     columns
+
+# =========================================================================
+# CSS 2.1 §17.5.2.2 — automatic table layout column distribution
+#
+# Shared by BOTH table lanes: the M14 spec-facing `layout_table` below and the
+# Draw-IR renderer's `explicit_auto_table_column_offsets`
+# (`simple_web_html_layout_renderer_layout.spl`). Keeping the distribution in
+# ONE pure function is what makes the two lanes twins rather than two
+# independently drifting implementations.
+# =========================================================================
+
+pub fn table_distribute_auto_columns(
+    col_min: [i32], col_max: [i32], available: i32
+) -> [i32]:
+    """Distribute `available` content width across columns given their
+    min-content and max-content widths (CSS 2.1 §17.5.2.2).
+
+    - `available <= 0` (a shrink-to-fit table): every column takes its
+      max-content width, so the table is exactly as wide as its content.
+    - `available >= sum(max)`: columns take max-content and the excess is
+      distributed in proportion to max-content (Chrome's auto-table rule),
+      falling back to an even split when every max-content width is 0.
+    - `sum(min) < available < sum(max)`: each column grows from its min by the
+      same fraction of its own min..max range.
+    - `available <= sum(min)`: every column takes its min-content width.
+    """
+    var widths: [i32] = []
+    val n = col_max.len()
+    if n <= 0:
+        return widths
+    var sum_min = 0
+    var sum_max = 0
+    var i = 0
+    while i < n:
+        var lo = col_min[i]
+        if lo < 0:
+            lo = 0
+        var hi = col_max[i]
+        if hi < lo:
+            hi = lo
+        sum_min = sum_min + lo
+        sum_max = sum_max + hi
+        i = i + 1
+
+    if available <= 0 or available == sum_max:
+        i = 0
+        while i < n:
+            var hi = col_max[i]
+            if hi < col_min[i]:
+                hi = col_min[i]
+            if hi < 0:
+                hi = 0
+            widths.push(hi)
+            i = i + 1
+        return widths
+
+    if available > sum_max:
+        val extra = available - sum_max
+        var assigned = 0
+        i = 0
+        while i < n:
+            var hi = col_max[i]
+            if hi < col_min[i]:
+                hi = col_min[i]
+            if hi < 0:
+                hi = 0
+            val share = if sum_max > 0:
+                extra * hi / sum_max
+            else:
+                extra / n
+            widths.push(hi + share)
+            assigned = assigned + hi + share
+            i = i + 1
+        # Integer division loses at most n-1 px; hand it to the leading
+        # columns so the tracks always sum EXACTLY to `available`.
+        var leftover = available - assigned
+        var k = 0
+        while leftover > 0 and k < n:
+            widths[k] = widths[k] + 1
+            leftover = leftover - 1
+            k = k + 1
+        return widths
+
+    if available <= sum_min:
+        i = 0
+        while i < n:
+            var lo = col_min[i]
+            if lo < 0:
+                lo = 0
+            widths.push(lo)
+            i = i + 1
+        return widths
+
+    val range = sum_max - sum_min
+    val grow = available - sum_min
+    var assigned2 = 0
+    i = 0
+    while i < n:
+        var lo = col_min[i]
+        if lo < 0:
+            lo = 0
+        var hi = col_max[i]
+        if hi < lo:
+            hi = lo
+        val w = lo + (hi - lo) * grow / range
+        widths.push(w)
+        assigned2 = assigned2 + w
+        i = i + 1
+    var leftover2 = available - assigned2
+    var k2 = 0
+    while leftover2 > 0 and k2 < n:
+        widths[k2] = widths[k2] + 1
+        leftover2 = leftover2 - 1
+        k2 = k2 + 1
+    widths
+
+# =========================================================================
+# CSS 2.1 §17 — M14 spec-facing automatic table layout
+#
+# Lays a <table> out over the M14 public `LayoutBox` type: one child box per
+# row, one grandchild box per cell. Column widths come from the SHARED
+# distributor above, so this lane and the Draw-IR renderer lane resolve
+# columns by the same rule.
+#
+# Modelled here: automatic column widths from cell min/max-content, colspan
+# (a spanning cell's requirement is distributed over the columns it covers),
+# row height = the tallest cell in the row, <th> centering/bold defaults as a
+# wider max-content contribution, and a top caption emitted as the table's
+# first child box. NOT modelled: rowspan (filed), border-collapse winner
+# widths, percentage column widths.
+# =========================================================================
+
+val M14_TABLE_CHAR_W = 8
+val M14_TABLE_LINE_HEIGHT = 24
+val M14_TABLE_BASELINE = 19
+val M14_TABLE_CELL_PAD = 2
+val M14_TABLE_BORDER_SPACING = 0
+
+fn _m14_table_text_of(node: BeDomNode) -> text:
+    """Concatenated text content of `node` and its descendants."""
+    val tag = be_dom_get_tag(node)
+    if tag == "#text":
+        return node.data
+    var out = ""
+    val kids = be_dom_get_children(node)
+    var i = 0
+    while i < kids.len():
+        out = out + _m14_table_text_of(kids[i])
+        i = i + 1
+    out
+
+fn _m14_longest_word_len(s: text) -> i32:
+    """Longest run of non-space characters — the min-content character count."""
+    var longest = 0
+    var cur = 0
+    var i = 0
+    while i < s.len():
+        val ch = s.char_at(i)
+        if ch == " " or ch == "\t" or ch == "\n":
+            cur = 0
+        else:
+            cur = cur + 1
+            if cur > longest:
+                longest = cur
+        i = i + 1
+    longest
+
+fn _m14_cell_is_header(cell: BeDomNode) -> bool:
+    be_dom_get_tag(cell) == "th"
+
+fn _m14_cell_max_content(cell: BeDomNode) -> i32:
+    """Max-content width of a cell: its whole text on one line, plus padding.
+    A <th> carries the UA bold default, whose advances are wider; the bold
+    face is approximated here by a one-eighth wider run."""
+    val txt = _m14_table_text_of(cell)
+    var chars = txt.trim().len()
+    var w = chars * M14_TABLE_CHAR_W
+    if _m14_cell_is_header(cell):
+        w = w + w / 8
+    w + M14_TABLE_CELL_PAD * 2
+
+fn _m14_cell_min_content(cell: BeDomNode) -> i32:
+    """Min-content width of a cell: its longest word, plus padding."""
+    val txt = _m14_table_text_of(cell)
+    var w = _m14_longest_word_len(txt.trim()) * M14_TABLE_CHAR_W
+    if _m14_cell_is_header(cell):
+        w = w + w / 8
+    w + M14_TABLE_CELL_PAD * 2
+
+fn _m14_find_caption(table: BeDomNode) -> BeDomNode?:
+    val kids = be_dom_get_children(table)
+    var i = 0
+    while i < kids.len():
+        if be_dom_get_tag(kids[i]) == "caption":
+            return kids[i]
+        i = i + 1
+    nil
+
+fn _m14_table_column_count(rows: [BeDomNode]) -> i32:
+    var columns = 0
+    var r = 0
+    while r < rows.len():
+        val n = _count_logical_columns(_collect_cells(rows[r]))
+        if n > columns:
+            columns = n
+        r = r + 1
+    if columns > 0: columns else: 1
+
+# Accumulate one row's cells into the running per-column min/max arrays.
+# A cell with colspan=1 contributes directly; a spanning cell contributes only
+# the part of its requirement the covered columns cannot already satisfy,
+# split evenly across them (CSS 2.1 §17.5.2.2 spanning-cell rule).
+fn _m14_accumulate_row(
+    row: BeDomNode, column_count: i32, col_min: [i32], col_max: [i32]
+):
+    val cells = _collect_cells(row)
+    var column = 0
+    var c = 0
+    while c < cells.len():
+        val cell = cells[c]
+        c = c + 1
+        var span = _get_colspan(cell)
+        if column >= column_count:
+            break
+        if column + span > column_count:
+            span = column_count - column
+        val cell_min = _m14_cell_min_content(cell)
+        val cell_max = _m14_cell_max_content(cell)
+        if span == 1:
+            if cell_min > col_min[column]:
+                col_min[column] = cell_min
+            if cell_max > col_max[column]:
+                col_max[column] = cell_max
+        else:
+            var have_min = 0
+            var have_max = 0
+            var k = column
+            while k < column + span:
+                have_min = have_min + col_min[k]
+                have_max = have_max + col_max[k]
+                k = k + 1
+            if cell_min > have_min:
+                val add = (cell_min - have_min) / span
+                var rem = cell_min - have_min - add * span
+                k = column
+                while k < column + span:
+                    col_min[k] = col_min[k] + add + (if rem > 0: 1 else: 0)
+                    if rem > 0:
+                        rem = rem - 1
+                    k = k + 1
+            if cell_max > have_max:
+                val add2 = (cell_max - have_max) / span
+                var rem2 = cell_max - have_max - add2 * span
+                k = column
+                while k < column + span:
+                    col_max[k] = col_max[k] + add2 + (if rem2 > 0: 1 else: 0)
+                    if rem2 > 0:
+                        rem2 = rem2 - 1
+                    k = k + 1
+        column = column + span
+
+fn _m14_cell_height(cell: BeDomNode, width: i32) -> i32:
+    """A cell is as tall as the lines its text wraps into at `width`."""
+    val chars = _m14_table_text_of(cell).trim().len()
+    val inner = width - M14_TABLE_CELL_PAD * 2
+    if inner < M14_TABLE_CHAR_W or chars == 0:
+        return M14_TABLE_LINE_HEIGHT
+    val per_line = inner / M14_TABLE_CHAR_W
+    var lines = chars / per_line
+    if lines * per_line < chars:
+        lines = lines + 1
+    if lines < 1:
+        lines = 1
+    lines * M14_TABLE_LINE_HEIGHT
+
+pub fn layout_table(node: BeDomNode, ctx: LayoutContext) -> LayoutBox:
+    """Lay out the table reachable from `node` per CSS 2.1 §17 automatic table
+    layout, over the M14 public `LayoutBox` type.
+
+    Children of the returned box are the rows (and the caption first, when the
+    table has one); each row's children are its cells. Column widths never
+    exceed `ctx.available_width`."""
+    val table = _find_table_node(node)
+    val rows = _collect_table_rows(table)
+    val column_count = _m14_table_column_count(rows)
+
+    var col_min: [i32] = [0; column_count]
+    var col_max: [i32] = [0; column_count]
+    var r = 0
+    while r < rows.len():
+        _m14_accumulate_row(rows[r], column_count, col_min, col_max)
+        r = r + 1
+
+    val spacing_total = M14_TABLE_BORDER_SPACING * (column_count + 1)
+    var available = ctx.available_width - spacing_total
+    if available < 0:
+        available = 0
+    val widths = table_distribute_auto_columns(col_min, col_max, available)
+
+    var children: [LayoutBox] = []
+    var y = 0
+
+    val caption = _m14_find_caption(table)
+    if caption != nil:
+        val cap = caption!
+        val cap_box = LayoutBox(
+            x: 0, y: y, width: ctx.available_width, height: M14_TABLE_LINE_HEIGHT,
+            is_anonymous: false,
+            line_boxes: [LineBox(
+                x: 0, y: y, width: ctx.available_width,
+                height: M14_TABLE_LINE_HEIGHT, baseline: M14_TABLE_BASELINE,
+                fragments: [InlineFragment(
+                    x: 0, y: y, width: ctx.available_width,
+                    height: M14_TABLE_LINE_HEIGHT, baseline_offset: M14_TABLE_BASELINE,
+                    text_run: _m14_table_text_of(cap).trim()
+                )]
+            )],
+            children: []
+        )
+        children.push(cap_box)
+        y = y + M14_TABLE_LINE_HEIGHT
+
+    var table_width = spacing_total
+    var w = 0
+    while w < widths.len():
+        table_width = table_width + widths[w]
+        w = w + 1
+
+    r = 0
+    while r < rows.len():
+        val cells = _collect_cells(rows[r])
+        var cell_boxes: [LayoutBox] = []
+        var column = 0
+        var x = M14_TABLE_BORDER_SPACING
+        var row_h = M14_TABLE_LINE_HEIGHT
+        var c = 0
+        while c < cells.len():
+            val cell = cells[c]
+            c = c + 1
+            if column >= column_count:
+                break
+            var span = _get_colspan(cell)
+            if column + span > column_count:
+                span = column_count - column
+            var cw = M14_TABLE_BORDER_SPACING * (span - 1)
+            var k = column
+            while k < column + span:
+                cw = cw + widths[k]
+                k = k + 1
+            val ch = _m14_cell_height(cell, cw)
+            if ch > row_h:
+                row_h = ch
+            cell_boxes.push(LayoutBox(
+                x: x, y: y, width: cw, height: ch,
+                is_anonymous: false,
+                line_boxes: [LineBox(
+                    x: x, y: y, width: cw, height: M14_TABLE_LINE_HEIGHT,
+                    baseline: M14_TABLE_BASELINE,
+                    fragments: [InlineFragment(
+                        x: x, y: y, width: cw,
+                        height: M14_TABLE_LINE_HEIGHT,
+                        baseline_offset: M14_TABLE_BASELINE,
+                        text_run: _m14_table_text_of(cell).trim()
+                    )]
+                )],
+                children: []
+            ))
+            x = x + cw + M14_TABLE_BORDER_SPACING
+            column = column + span
+        var b = 0
+        while b < cell_boxes.len():
+            cell_boxes[b].height = row_h
+            b = b + 1
+        children.push(LayoutBox(
+            x: 0, y: y, width: table_width, height: row_h,
+            is_anonymous: false, line_boxes: [], children: cell_boxes
+        ))
+        y = y + row_h + M14_TABLE_BORDER_SPACING
+        r = r + 1
+
+    LayoutBox(
+        x: 0, y: 0, width: table_width, height: y,
+        is_anonymous: false, line_boxes: [], children: children
+    )

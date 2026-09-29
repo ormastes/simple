@@ -28,6 +28,26 @@ elif [ -x "$root/bin/release/x86_64-unknown-linux-gnu/simple" ]; then
 else
     simple_bin=$root/bin/simple
 fi
+
+# bin/simple is a shell WRAPPER on some hosts (macOS deploys one that execs the
+# real binary with an absolute argv0 — see the comment in that file). `nm` on a
+# shell script yields 0 symbols, so this audit aborted with
+#   "ERROR — nothing was checked: ... yielded 0 defined symbol(s) (floor 100);
+#    it is stripped or not a readable object for this nm"
+# and, because it is a dependency of the BLOCKING push-tier gate
+# push-sffi-v2-authority, every push from such a host failed. The pre-existing
+# fallback only knows one hardcoded path
+# (bin/release/x86_64-unknown-linux-gnu/simple), which no mac has.
+# Follow the wrapper instead of guessing more triples. Explicit SIMPLE_BIN still
+# wins, and a non-wrapper bin/simple is untouched.
+if [ -f "$simple_bin" ] && [ "$(head -c 2 "$simple_bin" 2>/dev/null)" = '#!' ]; then
+    _wrapped=$(sed -n 's/^exec "\$DIR\/\([^"]*\)".*/\1/p' "$simple_bin" | head -1)
+    if [ -n "$_wrapped" ]; then
+        _wrapdir=$(CDPATH= cd -- "$(dirname -- "$simple_bin")" 2>/dev/null && pwd -P)
+        [ -n "$_wrapdir" ] && [ -x "$_wrapdir/$_wrapped" ] && simple_bin="$_wrapdir/$_wrapped"
+    fi
+fi
+
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT INT TERM
 
@@ -145,6 +165,44 @@ test -s "$work/files.bin" || {
     echo 'SFFI contract inventory: no Simple source files were discovered' >&2
     exit 2
 }
+
+# Source-only mode intentionally does not claim runtime backing.  It can still
+# count direct raw calls that are visibly inside a lexical FFI capability
+# block.  This is a conservative source estimate: it is useful for tracking
+# unsafe-scope minimization, but never for artifact admission or provider
+# identity.  Keep the scan linear in source bytes and emit only symbols with
+# one or more observed lexical calls.
+if [ "${SFFI_SOURCE_ONLY:-0}" = 1 ]; then
+    xargs -0 -r -n 200 perl -0ne '
+        my $file = $ARGV;
+        my @lines = split /\n/, $_, -1;
+        my $unsafe_indent = -1;
+        for my $line (@lines) {
+            my ($prefix) = $line =~ /^(\s*)/;
+            my $indent = length($prefix // "");
+            my $code = $line;
+            $code =~ s/#.*$//;
+            if ($unsafe_indent >= 0 && $code !~ /^\s*$/ && $indent <= $unsafe_indent) {
+                $unsafe_indent = -1;
+            }
+            if ($code =~ /^(\s*)unsafe\(capabilities:\s*\[[^\]]*\bffi\b[^\]]*\]\):\s*(.*)$/) {
+                $unsafe_indent = length($1);
+                $code = $2;
+            } elsif ($unsafe_indent < 0) {
+                next;
+            }
+            while ($code =~ /\b((?:rt_|spl_)[A-Za-z0-9_]+)\s*\(/g) {
+                print "$1\n";
+            }
+        }
+    ' <"$work/files.bin" | sort | uniq -c | awk 'BEGIN { OFS="\t" }
+        { print $2, "source_static_lexical", $1, "source-only", "none_observed" }
+    ' >"$work/source-static-lexical.tsv"
+    {
+        printf 'symbol\tclass\tscoped_callsites\tfirst_declaring_file\tsource_languages\n'
+        cat "$work/source-static-lexical.tsv"
+    } >"$work/backing.tsv"
+fi
 xargs -0 -r -n 200 perl -MDigest::SHA=sha256_hex -0ne '
     my $file = $ARGV;
     my @lines = split /\n/, $_, -1;
@@ -222,8 +280,7 @@ xargs -0 -r -n 200 perl -MDigest::SHA=sha256_hex -0ne '
                       $context =~ /\@unsafe\s*\([\s\S]*?capabilities\s*:\s*\[[^\]]*\bffi\b[^\]]*\]/i)
             ? "tagged" : "missing";
         my $contract = ($context =~ /\@sffi\b/i) ? "sffi_metadata" :
-                       ($declaration =~ /->\s*(?:Result\b|Option\b|[^#\n]*\?)/ ||
-                        $symbol =~ /(?:^|_)(?:try|checked)(?:_|$)/) ? "typed_result" :
+                       ($declaration =~ /->\s*(?:Result\b|Option\b|[^#\n]*\?)/) ? "typed_result" :
                        ($context =~ /(?:\bcontract\s*:|nonnull|nullability|ownership|status[_ -]out|sentinel|false\s+means|nil\s+(?:is|means)|empty\s+(?:is|means)|negative[^\n"]*\bmeans|non-positive[^\n"]*\b(?:clear|means)|family\s+is)/i) ? "documented" :
                        "missing";
         # Source metadata is only a claim. This source census cannot verify a

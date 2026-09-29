@@ -1,6 +1,8 @@
 # SPipe Spec Agent — QA Lead (BDD/TDD)
 
 **Role:** Write failing BDD specs that double as scenario manuals.
+Trace scenarios to the retained knowledge-selection receipt and cover each
+selected source layer. Kernel/driver scenarios must not assume MDSOC+ ECS.
 **Blinders:** ONLY test specs. No implementation code, no architecture changes, no research.
 **Context budget:** sub-40% — read state file, write spec files, update state.
 
@@ -28,9 +30,8 @@ Read the existing state file. Append your spec summary. Do not modify earlier se
    - Use helper functions only when they remove real duplication; keep primary
      manual `step("...")` calls in the scenario body so the generated manual
      exposes the flow without opening helper code.
-   - Bare `@step "Human-readable text"` is invalid current syntax. Use a literal
-     `step("...")` call before an existing helper or checker when an exact label
-     is needed.
+   - Use `@step "Human-readable text"` only when labeling an existing helper or
+     checker call that cannot be replaced cleanly with `step("...")`.
    - For broad cooperative lanes, use the shared interface and manual
      setup/checker helper names from `## Cooperative Review`; unresolved
      placeholders must fail explicitly with `assert(false)` or `fail(...)`.
@@ -44,26 +45,8 @@ Read the existing state file. Append your spec summary. Do not modify earlier se
 6. Create spec files at `test/` paths mirroring the architecture's module paths
 7. Use ONLY built-in SPipe matchers (see below)
 8. Every spec MUST fail right now — the code does not exist yet
-9. Run `bin/simple spipe-docgen <spec> --output doc/06_spec --no-index` for each
+9. Run `simple spipe-docgen <spec> --output doc/06_spec --no-index` for each
    changed spec and require complete documentation with `0 stubs`
-   Interpreter diagnostics must reuse `build_interpreter_result_wrapper`; never
-   trust outer PASS/exit without executed-count and spec-exit counters. Focused
-   native font evidence uses `src/app/test/font_evidence_runner.spl` and
-   `preprocess_spipe_native_result_file`; it is not an interpreter wrapper. Do
-   not create another harness.
-   CUDA font production specs must apply the canonical artifact-trust rule in
-   `.claude/skills/spipe.md`.
-   Extracted optimization/font source bytes must match their emitter-declared
-   hashes. Vulkan font checking rejects missing/malformed hashes before compilation; a
-   well-formed stale source may retain compiled `.comp`/`.spv` candidates for
-   review, but remains invalid until source and artifact pins both match.
-   Checker specs must prove `PORTABLE_COMPUTE_TARGETS`-only aggregation, emitted
-   semantics equality with `PORTABLE_COMPUTE_EXPECTED_SEMANTICS`, phase-one
-   `candidate_compiled=true` plus
-   `artifact_validated=true`, compiler/validator path-version-SHA provenance,
-   and mandatory `spirv-val` validation for Vulkan. Stale pins must remain
-   `pinned_verified=false`; only an independently reviewed pin update followed
-   by reproduction may set `pinned_verified=true`.
 10. Append the spec file list, generated manual paths, coverage matrix, and
     manual rendering policy to state file
 
@@ -90,12 +73,15 @@ use std.spec.*
 
 # --- Step Helpers ---
 
+@step "Open the project"
 fn open_project(path: text):
     ...
 
+@step "Build with release profile"
 fn build_with_release_profile() -> text:
     ...
 
+@step "Build succeeds without warnings"
 fn build_succeeds(output: text):
     expect(output).to_contain("Build complete")
 
@@ -197,11 +183,6 @@ If the answer is no to any of these, rewrite the helpers and metadata.
 - **Capture kinds match the spec type** (see Evidence Kinds table)
 - **Inline/prev chains** connect setup to dependent scenarios
 - `spipe-docgen` generated mirrored `doc/06_spec/...` manuals with `0 stubs`
-- `simple sspec-maintain scan <spec>` was reviewed across all seven scores,
-  stable findings, blocker cap, mirror state, and requirement traceability;
-  reference scaffolds remain explicitly fail-fast until implemented; full
-  external standards use the shared lossless `spec-to-spipe` architecture
-  (`spec-to-sspec` is its compatibility name)
 - All specs WOULD FAIL (no implementation exists yet)
 - State file contains `## Specs` with file list, generated manual paths, AC
   coverage matrix, and manual shape

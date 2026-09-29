@@ -2,6 +2,7 @@
 #
 # This module handles lowering of statements from AST to HIR.
 
+use compiler.common.dependency.visibility.{Visibility}
 use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
 use compiler.frontend.parser_types.*
@@ -10,6 +11,7 @@ use compiler.frontend.parser_types_expr.{StmtKind, Expr}  # explicit: a glob is 
 use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_lowering.types.HirLowering
 use compiler.hir.hir_lowering.expressions.*
+use compiler.hir.hir_lowering._Expressions.expression_support.{hir_expr_kind_disc}
 
 extern fn rt_enum_payload(value: StmtKind) -> Expr
 extern fn rt_enum_discriminant(value: StmtKind) -> i64
@@ -21,7 +23,51 @@ fn hir_stmt_kind_disc(k: StmtKind) -> i64:
 # Statement Lowering
 # ============================================================================
 
+# Returns the element list of an AST tuple-literal expression, or [] for
+# anything else. Uses the discriminant helper rather than a bare `match` on
+# `ExprKind`: a qualified-arm match against an enum value built through a
+# different import spelling of the same module silently falls to the wildcard
+# on some lanes, which is why the statement dispatcher below is written as
+# `hir_stmt_kind_disc` comparisons instead of a match. The `match` is still
+# used to pull the payload out, but only once the discriminant has confirmed
+# the variant.
+fn _ast_tuple_lit_elements(e: Expr) -> [Expr]:
+    val ek: ExprKind = e.kind
+    if hir_expr_kind_disc(ek) == hir_expr_kind_disc(ExprKind.TupleLit([])):
+        match ek:
+            case ExprKind.TupleLit(els):
+                return els
+            case _:
+                return []
+    []
+
 impl HirLowering:
+    # True only for the parser's encoded `val/var (a, b) = ...` statement
+    # shape. Keep the marker test identical to lower_hir_stmt_multi: the flat
+    # parser guarantees the closing `)`, while callers that construct a
+    # malformed AST retain the pre-existing prefix-based routing and errors.
+    # Block lowering uses this predicate to keep ordinary 1:1 statements on
+    # the scalar path instead of allocating and re-indexing a singleton array.
+    me hir_stmt_requires_multi_lowering(s: Stmt) -> bool:
+        val stmt_kind_value: StmtKind = s.kind
+        val sk_disc: i64 = hir_stmt_kind_disc(stmt_kind_value)
+        val sk_dummy: Expr = Expr(kind: ExprKind.NilLit, span: s.span)
+        if sk_disc == hir_stmt_kind_disc(StmtKind.Val("", nil, sk_dummy)):
+            val v_name: text = match stmt_kind_value:
+                case StmtKind.Val(vname, _, _):
+                    vname
+                case _:
+                    ""
+            return v_name.len() > 1 and v_name[0:1] == "("
+        if sk_disc == hir_stmt_kind_disc(StmtKind.Var("", nil, nil)):
+            val vr_name: text = match stmt_kind_value:
+                case StmtKind.Var(vrname, _, _):
+                    vrname
+                case _:
+                    ""
+            return vr_name.len() > 1 and vr_name[0:1] == "("
+        false
+
     # Nested-field-access support (native --entry path bug -- see
     # struct_field_types_by_name / local_struct_types doc comments in
     # types.spl). `val/var x = StructName(...)` is the only local-declared-
@@ -111,9 +157,43 @@ impl HirLowering:
             case AssignOp.Div: HirAssignOp.Div
             case AssignOp.Mod: HirAssignOp.Mod
 
+    me lower_for_iter(iter: Expr) -> HirExpr:
+        """Lower a `for` iterable. `range(a, b)` whose `range` resolves to no
+        symbol (no prelude/import/local definition, e.g. the Stage 4 no-prelude
+        closure) is the builtin half-open range the type checker already
+        accepts (30.types checker `env["range"]`, builtin_registry). Lower it
+        to the same HIR range that `a..b` produces instead of failing with
+        "unresolved name: range". A resolvable `range` always wins."""
+        match iter.kind:
+            case ExprKind.Call(callee, args):
+                val range_args: [CallArg] = args
+                match callee.kind:
+                    case ExprKind.Ident(callee_name):
+                        if callee_name == "range" and range_args.len() == 2 and not range_args[0].has_name and not range_args[1].has_name:
+                            val range_resolves = self.symbols.lookup_or_invalid("range").is_valid() or
+                                self.try_register_bootstrap_global_symbol("range", iter.span)
+                            if not range_resolves:
+                                val range_start = self.lower_hir_expr(range_args[0].value)
+                                val range_end = self.lower_hir_expr(range_args[1].value)
+                                return HirExpr(kind: HirExprKind.Range(range_start, range_end, false, nil), type_: nil, span: iter.span)
+                    case _:
+                        pass
+            case _:
+                pass
+        self.lower_hir_expr(iter)
+
     me lower_hir_assign_op_opt(op: AssignOp?) -> HirAssignOp?:
+        # Returns a PLAIN NULLABLE, not an Option box. All three call sites (:455,
+        # :482, :538) feed the result straight into `HirStmtKind.Assign`, whose `op`
+        # slot is declared FLAT (`op: HirAssignOp`), and all five readers of that slot
+        # (monomorphize_integration.spl:1051, monomorphize/type_subst.spl:302,
+        # monomorphize/hir_subst/body_subst.spl:272, mir_lowering_stmts.spl:1352,
+        # svmg_lowering.spl:539) bind it positionally -- none tests `case Some(...)`.
+        # Boxing it was the same defect class as `HirStmtKind.Let.type_`; here the
+        # symptom is a silently wrong operator rather than a SEGV, because both the
+        # box and the payload are enums.
         if op.?:
-            Some(self.lower_hir_assign_op(op.unwrap()))
+            self.lower_hir_assign_op(op.unwrap())
         else:
             nil
 
@@ -122,7 +202,7 @@ impl HirLowering:
         for item in items:
             val hir_context = self.lower_hir_expr(item.context_expr)
             val hir_target: SymbolId? = if item.target.?:
-                val symbol = self.symbols.define(item.target ?? "", SymbolKind.Variable, nil, item.span, false, false, nil)
+                val symbol = self.symbols.define(item.target ?? "", SymbolKind.Variable, nil, item.span, Visibility.Private, false, nil)
                 Some(symbol)
             else:
                 nil
@@ -197,7 +277,7 @@ impl HirLowering:
                     while i < names.len():
                         val nm = names[i]
                         val hir_init = self.lower_hir_expr(elements[i])
-                        val symbol = self.symbols.define(nm, SymbolKind.Variable, nil, span, false, false, nil)
+                        val symbol = self.symbols.define(nm, SymbolKind.Variable, nil, span, Visibility.Private, false, nil)
                         result = result.push(HirStmt(kind: HirStmtKind.Let(symbol, nil, hir_init), span: span))
                         i = i + 1
                     result
@@ -230,7 +310,7 @@ impl HirLowering:
                     while i < names.len():
                         val nm = names[i]
                         val hir_init = self.lower_hir_expr(elements[i])
-                        val symbol = self.symbols.define(nm, SymbolKind.Variable, nil, span, false, true, nil)
+                        val symbol = self.symbols.define(nm, SymbolKind.Variable, nil, span, Visibility.Private, true, nil)
                         result = result.push(HirStmt(kind: HirStmtKind.Let(symbol, nil, hir_init), span: span))
                         i = i + 1
                     result
@@ -280,11 +360,69 @@ impl HirLowering:
             case _:
                 return ""
 
+    # Desugar `(a, b, ...) = <expr>` -- tuple destructuring as an ASSIGNMENT to
+    # variables that are ALREADY declared, as opposed to the `val (a, b) = ...`
+    # / `var (a, b) = ...` declaration forms handled by
+    # lower_hir_tuple_destructure_val / _var above.
+    #
+    # Without this the statement survived into MIR as
+    # `Assign(target: TupleLit([...]), ...)` and hit the catch-all at
+    # 50.mir/mir_lowering_stmts.spl:1740, `unsupported MIR assignment target:
+    # HirExprKind::TupleLit(...)`. That blocked native-build of anything using
+    # the form -- `src/app/mcp/` alone has ten call sites.
+    # doc/08_tracking/bug/mir_no_tuple_assignment_target_2026-08-24.md
+    #
+    # Structure mirrors lower_tuple_destructure below: bind the RHS to a temp
+    # ONCE (so a call initializer is evaluated exactly once, left to right),
+    # then read element i out of it. The only difference is that each element
+    # goes to an existing place via `Assign` instead of defining a new symbol
+    # via `Let`. Element TYPES are recovered from the same by-NAME
+    # `fn_tuple_returns` registry for the same reason spelled out there: with a
+    # nil element type the locals default to i64, which renders a `text`
+    # element's handle as a decimal integer and breaks every text method on it.
+    me lower_hir_tuple_destructure_assign(targets: [Expr], value: Expr, span: Span) -> HirStmt:
+        val hir_value = self.lower_hir_expr(value)
+        var stmts: [HirStmt] = []
+        val tmp_sym = self.symbols.define("__tuple_assign", SymbolKind.Variable, nil, span, Visibility.Private, false, nil)
+        stmts = stmts.push(HirStmt(kind: HirStmtKind.Let(tmp_sym, nil, hir_value), span: span))
+        var ta_elem_types: [HirType] = []
+        val ta_base_sym: SymbolId? = match hir_value.kind:
+            case HirExprKind.Var(ta_sym): ta_sym
+            case HirExprKind.NamedVar(ta_sym2, _): ta_sym2
+            case _: nil
+        if val ta_bs = ta_base_sym:
+            if self.local_tuple_types.has(ta_bs.id):
+                for ta_elem_type in self.local_tuple_types[ta_bs.id]:
+                    ta_elem_types = ta_elem_types.push(ta_elem_type)
+        if ta_elem_types.len() == 0:
+            val ta_callee_name: text = self.td_init_callee_name(hir_value)
+            if ta_callee_name != "" and self.fn_tuple_returns.has(ta_callee_name):
+                for ta_return_type in self.fn_tuple_returns[ta_callee_name]:
+                    ta_elem_types = ta_elem_types.push(ta_return_type)
+        var i = 0
+        while i < targets.len():
+            # A bare `_` target discards its element, matching the `pname != "_"`
+            # skip in lower_tuple_destructure. `_rc` and friends are ordinary
+            # names and are assigned normally.
+            val ta_is_hole: bool = match targets[i].kind:
+                case ExprKind.Ident(ta_nm): ta_nm == "_"
+                case _: false
+            if not ta_is_hole:
+                val ta_idx_type: HirType? = if i < ta_elem_types.len(): ta_elem_types[i] else: nil
+                val ta_idx_expr = HirExpr(kind: HirExprKind.Index(
+                    HirExpr(kind: HirExprKind.Var(tmp_sym), type_: nil, span: span),
+                    HirExpr(kind: HirExprKind.IntLit(i, nil), type_: nil, span: span)
+                ), type_: ta_idx_type, span: span)
+                stmts = stmts.push(HirStmt(kind: HirStmtKind.Assign(
+                    self.lower_hir_expr(targets[i]), nil, ta_idx_expr), span: span))
+            i = i + 1
+        HirStmt(kind: HirStmtKind.Block(HirBlock(stmts: stmts, has: false, value: HirExpr(kind: HirExprKind.NilLit, type_: nil, span: span), span: span)), span: span)
+
     me lower_tuple_destructure(name: text, hir_init: HirExpr, is_mut: bool, span: Span) -> HirStmt:
         val inner = name.slice(1, name.len() - 1)
         val parts = inner.split(",")
         var stmts: [HirStmt] = []
-        val tmp_sym = self.symbols.define("__tuple_destr", SymbolKind.Variable, nil, span, false, false, nil)
+        val tmp_sym = self.symbols.define("__tuple_destr", SymbolKind.Variable, nil, span, Visibility.Private, false, nil)
         stmts = stmts.push(HirStmt(kind: HirStmtKind.Let(tmp_sym, nil, hir_init), span: span))
         var td_elem_types: [HirType] = []
         val td_base_sym: SymbolId? = match hir_init.kind:
@@ -324,7 +462,7 @@ impl HirLowering:
                     HirExpr(kind: HirExprKind.Var(tmp_sym), type_: nil, span: span),
                     HirExpr(kind: HirExprKind.IntLit(i, nil), type_: nil, span: span)
                 ), type_: td_idx_type, span: span)
-                val psym = self.symbols.define(pname, SymbolKind.Variable, nil, span, false, is_mut, nil)
+                val psym = self.symbols.define(pname, SymbolKind.Variable, nil, span, Visibility.Private, is_mut, nil)
                 stmts = stmts.push(HirStmt(kind: HirStmtKind.Let(psym, nil, idx_expr), span: span))
             i = i + 1
         HirStmt(kind: HirStmtKind.Block(HirBlock(stmts: stmts, has: false, value: HirExpr(kind: HirExprKind.NilLit, type_: nil, span: span), span: span)), span: span)
@@ -362,11 +500,30 @@ impl HirLowering:
                 case _:
                     sk_dummy
             val v_hir_type = if v_type.?:
-                Some(self.lower_type(v_type ?? Type(kind: TypeKind.Infer, span: s.span)))
+                self.lower_type(v_type ?? Type(kind: TypeKind.Infer, span: s.span))
             else:
                 nil
+            # `HirStmtKind.Let.type_` is a PLAIN NULLABLE, not an Option box
+            # (repo rule, statements.spl:409/580 + module_declarations_bootstrap.spl:435,
+            # citing bug doc 2026-07-23: "a nullable is not an Option box"). Boxing it
+            # here made every `case Let(_, type_, _)` arm binding deep-copy an RtCoreEnum
+            # as a `HirType`, whose word[1] = (discriminant<<32)|enum_id has enum_id==1 ==
+            # RT_VALUE_TAG_HEAP, so the copy's heap-box guard passed and it dereferenced
+            # (discriminant<<32) -> SIGSEGV in any_check_stmt.
+            # The SYMBOL TABLE type slot is a SEPARATE field with its own reader set
+            # (get_symbol_type_raw -> mir_lowering_stmts.spl:812 `case Some`, plus the
+            # get_symbol_type wrapper at hir_symbol_table_methods.spl:467) and is
+            # deliberately NOT migrated here, so it keeps receiving the boxed form.
+            # NO `Some(...)` box. HirSymbol.type_ is declared `HirType?` -- a PLAIN
+            # NULLABLE -- and the repo rule is explicit: "a nullable is not an
+            # Option box". Boxing it forced every reader to EXTRACT a payload, and
+            # every extraction form corrupts an aggregate on this lane, measured:
+            # `case Some` deep-copies and corrupts it (disc=-1), `.unwrap()` is
+            # stolen by Poll.unwrap and returns raw 0, `??` corrupts it too.
+            # Removing the box removes the extraction, so there is nothing to corrupt.
+            val v_sym_type = v_hir_type
             val v_hir_init = self.lower_hir_expr(v_init)
-            val v_symbol = self.symbols.define(v_name, SymbolKind.Variable, v_hir_type, s.span, false, false, nil)
+            val v_symbol = self.symbols.define(v_name, SymbolKind.Variable, v_sym_type, s.span, Visibility.Private, false, nil)
             self.try_register_local_struct_type(v_symbol, v_init)
             self.try_register_local_tuple_type(v_symbol, v_init)
             return HirStmt(kind: HirStmtKind.Let(v_symbol, v_hir_type, v_hir_init), span: s.span)
@@ -387,14 +544,16 @@ impl HirLowering:
                 case _:
                     nil
             val vr_hir_type = if vr_type.?:
-                Some(self.lower_type(vr_type ?? Type(kind: TypeKind.Infer, span: s.span)))
+                self.lower_type(vr_type ?? Type(kind: TypeKind.Infer, span: s.span))
             else:
                 nil
+            # Same field migration as the `val` path above; see the note there.
+            val vr_sym_type = if vr_hir_type != nil: Some(vr_hir_type) else: nil
             val vr_hir_init = if vr_init.?:
                 self.lower_hir_expr(vr_init ?? sk_dummy)
             else:
                 HirExpr(kind: HirExprKind.NilLit, type_: nil, span: s.span)
-            val vr_symbol = self.symbols.define(vr_name, SymbolKind.Variable, vr_hir_type, s.span, false, true, nil)
+            val vr_symbol = self.symbols.define(vr_name, SymbolKind.Variable, vr_sym_type, s.span, Visibility.Private, true, nil)
             if val vr_init_present = vr_init:
                 self.try_register_local_struct_type(vr_symbol, vr_init_present)
                 self.try_register_local_tuple_type(vr_symbol, vr_init_present)
@@ -453,11 +612,22 @@ impl HirLowering:
             # their own Expr-typed fields (rt_enum_payload -- Return's
             # idiom -- comes back nil for Expr's payload specifically; see
             # bug doc hir_stmt_expr_payload_extraction_nil_2026-07-17.md).
-            val expr_t: Expr = match stmt_kind_value:
+            var expr_payload_ok = false
+            var expr_t: Expr = sk_dummy
+            match stmt_kind_value:
                 case StmtKind.Expr(einner):
-                    einner
+                    expr_t = einner
+                    expr_payload_ok = true
                 case _:
-                    sk_dummy
+                    pass
+            if not expr_payload_ok:
+                # A matching discriminator with an unreadable payload is a
+                # malformed AST boundary, not a source-level nil literal.
+                # Fail closed instead of silently substituting `sk_dummy`,
+                # which can turn a declared value return into NilLit and let
+                # native code fabricate an ABI default.
+                self.error("expression statement payload is malformed", s.span)
+                return HirStmt(kind: HirStmtKind.Expr(HirExpr(kind: HirExprKind.Error, type_: nil, span: s.span)), span: s.span)
             # The flat parser emits `target = value` as an EXPRESSION
             # statement (expr_assign), never StmtKind.Assign. Route it
             # into HirStmtKind.Assign so MIR's assignment lowering
@@ -465,6 +635,15 @@ impl HirLowering:
             match expr_t.kind:
                 case ExprKind.Assign(assign_target, assign_op, assign_value):
                     val hir_assign_op = self.lower_hir_assign_op_opt(assign_op)
+                    # `(a, b) = <expr>` -- destructuring assignment to
+                    # already-declared variables. This is THE path it arrives
+                    # on (the flat parser emits every `target = value` as an
+                    # expression statement), so the desugar has to happen here;
+                    # left alone it survives into MIR as
+                    # `Assign(target: TupleLit([...]))` and is rejected outright.
+                    val ea_tuple_elems: [Expr] = _ast_tuple_lit_elements(assign_target)
+                    if ea_tuple_elems.len() > 0 and not assign_op.?:
+                        return self.lower_hir_tuple_destructure_assign(ea_tuple_elems, assign_value, s.span)
                     return HirStmt(kind: HirStmtKind.Assign(
                         self.lower_hir_expr(assign_target),
                         hir_assign_op,
@@ -476,23 +655,47 @@ impl HirLowering:
         val kind: HirStmtKind = match stmt_kind_value:
             case StmtKind.Val(name, type_, init):
                 val hir_type = if type_.?:
-                    Some(self.lower_type(type_ ?? Type(kind: TypeKind.Infer, span: s.span)))
+                    self.lower_type(type_ ?? Type(kind: TypeKind.Infer, span: s.span))
                 else:
                     nil
+                # `HirStmtKind.Let.type_` is a PLAIN NULLABLE, not an Option box
+                # (repo rule, statements.spl:409/580 + module_declarations_bootstrap.spl:435,
+                # citing bug doc 2026-07-23: "a nullable is not an Option box"). Boxing it
+                # here made every `case Let(_, type_, _)` arm binding deep-copy an RtCoreEnum
+                # as a `HirType`, whose word[1] = (discriminant<<32)|enum_id has enum_id==1 ==
+                # RT_VALUE_TAG_HEAP, so the copy's heap-box guard passed and it dereferenced
+                # (discriminant<<32) -> SIGSEGV in any_check_stmt.
+                # The SYMBOL TABLE type slot is a SEPARATE field with its own reader set
+                # (get_symbol_type_raw -> mir_lowering_stmts.spl:812 `case Some`, plus the
+                # get_symbol_type wrapper at hir_symbol_table_methods.spl:467) and is
+                # deliberately NOT migrated here, so it keeps receiving the boxed form.
+                val sym_type = hir_type
                 val hir_init = self.lower_hir_expr(init)
-                val symbol = self.symbols.define(name, SymbolKind.Variable, hir_type, s.span, false, false, nil)
+                val symbol = self.symbols.define(name, SymbolKind.Variable, sym_type, s.span, Visibility.Private, false, nil)
                 HirStmtKind.Let(symbol, hir_type, hir_init)
 
             case StmtKind.Var(name, type_, init):
                 val hir_type = if type_.?:
-                    Some(self.lower_type(type_ ?? Type(kind: TypeKind.Infer, span: s.span)))
+                    self.lower_type(type_ ?? Type(kind: TypeKind.Infer, span: s.span))
                 else:
                     nil
+                # `HirStmtKind.Let.type_` is a PLAIN NULLABLE, not an Option box
+                # (repo rule, statements.spl:409/580 + module_declarations_bootstrap.spl:435,
+                # citing bug doc 2026-07-23: "a nullable is not an Option box"). Boxing it
+                # here made every `case Let(_, type_, _)` arm binding deep-copy an RtCoreEnum
+                # as a `HirType`, whose word[1] = (discriminant<<32)|enum_id has enum_id==1 ==
+                # RT_VALUE_TAG_HEAP, so the copy's heap-box guard passed and it dereferenced
+                # (discriminant<<32) -> SIGSEGV in any_check_stmt.
+                # The SYMBOL TABLE type slot is a SEPARATE field with its own reader set
+                # (get_symbol_type_raw -> mir_lowering_stmts.spl:812 `case Some`, plus the
+                # get_symbol_type wrapper at hir_symbol_table_methods.spl:467) and is
+                # deliberately NOT migrated here, so it keeps receiving the boxed form.
+                val sym_type = hir_type
                 val hir_init = if init.?:
                     self.lower_hir_expr(init ?? Expr(kind: ExprKind.NilLit, span: s.span))
                 else:
                     HirExpr(kind: HirExprKind.NilLit, type_: nil, span: s.span)
-                val symbol = self.symbols.define(name, SymbolKind.Variable, hir_type, s.span, false, true, nil)
+                val symbol = self.symbols.define(name, SymbolKind.Variable, sym_type, s.span, Visibility.Private, true, nil)
                 HirStmtKind.Let(symbol, hir_type, hir_init)
 
             case StmtKind.Assign(target, op, value):
@@ -502,7 +705,7 @@ impl HirLowering:
             case StmtKind.For(var_, iter, body):
                 self.symbols.push_scope(ScopeKind.Loop)
                 self.loop_depth = self.loop_depth + 1
-                val hir_iter = self.lower_hir_expr(iter)
+                val hir_iter = self.lower_for_iter(iter)
                 # Tuple destructuring: `for (k, v) in pairs:` -- the parser
                 # (parse_for_stmt, G40) encodes the pattern as the joined
                 # string "(k,v)" in `var_`, mirroring the `val (a, b) = ...`
@@ -520,7 +723,7 @@ impl HirLowering:
                 val hir_body_kind = if for_is_tuple:
                     val for_inner = var_.slice(1, var_.len() - 1)
                     val for_parts = for_inner.split(",")
-                    val for_elem_sym = self.symbols.define("__for_tuple_elem", SymbolKind.Variable, nil, s.span, false, false, nil)
+                    val for_elem_sym = self.symbols.define("__for_tuple_elem", SymbolKind.Variable, nil, s.span, Visibility.Private, false, nil)
                     var for_prefix: [HirStmt] = []
                     var for_pi = 0
                     while for_pi < for_parts.len():
@@ -530,7 +733,7 @@ impl HirLowering:
                                 HirExpr(kind: HirExprKind.Var(for_elem_sym), type_: nil, span: s.span),
                                 HirExpr(kind: HirExprKind.IntLit(for_pi, nil), type_: nil, span: s.span)
                             ), type_: nil, span: s.span)
-                            val for_psym = self.symbols.define(for_pname, SymbolKind.Variable, nil, s.span, false, false, nil)
+                            val for_psym = self.symbols.define(for_pname, SymbolKind.Variable, nil, s.span, Visibility.Private, false, nil)
                             for_prefix = for_prefix.push(HirStmt(kind: HirStmtKind.Let(for_psym, nil, for_idx_expr), span: s.span))
                         for_pi = for_pi + 1
                     val for_hir_body_raw = self.lower_hir_block(body)
@@ -542,7 +745,7 @@ impl HirLowering:
                     )
                     HirExprKind.For(for_elem_sym, hir_iter, for_hir_body, nil)
                 else:
-                    val symbol = self.symbols.define(var_, SymbolKind.Variable, nil, s.span, false, false, nil)
+                    val symbol = self.symbols.define(var_, SymbolKind.Variable, nil, s.span, Visibility.Private, false, nil)
                     val hir_body = self.lower_hir_block(body)
                     HirExprKind.For(symbol, hir_iter, hir_body, nil)
                 self.loop_depth = self.loop_depth - 1

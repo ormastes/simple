@@ -1,0 +1,42 @@
+# Gateway routing keeps origin deployment and credentials independent.
+# @cover src/app/devhub/auth.spl
+# @cover src/app/devhub/adapter_confluence.spl
+
+use app.devhub.config.{ItfConfig}
+use app.devhub.auth.{confluence_api_base}
+use app.devhub.adapter_confluence.{confluence_content_root, _confluence_configured_argv}
+
+
+describe "Confluence gateway requests":
+    it "uses the configured gateway API prefix for Cloud and Data Center":
+        # @req REQ-DEVHUB-GATEWAY-003
+        for deployment in ["cloud", "datacenter"]:
+            val config = ItfConfig(confluence_url: "https://origin.example/wiki", confluence_deployment: deployment, confluence_gateway_url: "https://gateway.example/proxy/confluence/")
+            expect(confluence_api_base(config)).to_equal("https://gateway.example/proxy/confluence")
+            expect(confluence_content_root(config)).to_equal("https://gateway.example/proxy/confluence/content")
+            expect(config.confluence_url).to_equal("https://origin.example/wiki")
+            expect(config.confluence_deployment).to_equal(deployment)
+
+    it "preserves direct API routing when gateway is empty":
+        # @req REQ-DEVHUB-GATEWAY-003
+        val cloud = ItfConfig(confluence_url: "https://site.atlassian.net/wiki", confluence_deployment: "cloud", confluence_gateway_url: "")
+        val dc = ItfConfig(confluence_url: "https://origin.example/confluence", confluence_deployment: "datacenter", confluence_gateway_url: "")
+        expect(confluence_api_base(cloud)).to_equal("https://site.atlassian.net/wiki/api/v2")
+        expect(confluence_api_base(dc)).to_equal("https://origin.example/confluence/rest/api")
+        expect(confluence_content_root(cloud)).to_equal("https://site.atlassian.net/wiki/rest/api/content")
+        expect(confluence_content_root(dc)).to_equal("https://origin.example/confluence/rest/api/content")
+
+    it "attaches repeated configured headers and authorization to every HTTP verb":
+        # @req REQ-DEVHUB-GATEWAY-003
+        for method in ["GET", "POST", "PUT", "DELETE"]:
+            val payload = if method == "POST" or method == "PUT": "request body" else: ""
+            val argv = _confluence_configured_argv("Bearer test-only", method, "https://gateway.example/content", payload, [], ["X-Scope: first", "X-Scope: second"])
+            expect(argv[3]).to_equal(method)
+            expect(argv.contains("Authorization: Bearer test-only")).to_equal(true)
+            expect(argv[argv.len() - 4]).to_equal("-H")
+            expect(argv[argv.len() - 3]).to_equal("X-Scope: first")
+            expect(argv[argv.len() - 2]).to_equal("-H")
+            expect(argv[argv.len() - 1]).to_equal("X-Scope: second")
+            if payload != "":
+                expect(argv.contains(payload)).to_equal(true)
+                expect(argv.contains("Content-Type: application/json")).to_equal(true)

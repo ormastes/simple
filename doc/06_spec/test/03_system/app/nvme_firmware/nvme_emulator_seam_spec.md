@@ -49,7 +49,7 @@ NVMe host/device emulator — end-to-end system scenario + Lean4 verification.
 | Design | N/A |
 | Research | doc/01_research/hardware/nvme_firmware/nvme_ssd_firmware_architecture.md |
 | Source | `test/03_system/app/nvme_firmware/nvme_emulator_seam_spec.spl` |
-| Updated | 2026-07-07 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 NVMe host/device emulator — end-to-end system scenario + Lean4 verification.
@@ -76,13 +76,12 @@ shows. Run: `bin/simple test test/03_system/app/nvme_firmware/nvme_emulator_seam
 - Host writes LBA 5, the device stores it in NAND, the host reads it back intact
 - A second LBA lands in a different NAND channel and round-trips independently
 - The end-to-end scenario reports overall PASS
--  expect no fail marker
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -99,7 +98,6 @@ expect(out).to_contain("LBA20 word3 survives full path (ch1)")
 
 step("The end-to-end scenario reports overall PASS")
 expect(out).to_contain("EMU E2E PASS")
-_expect_no_fail_marker(out, "emulator end-to-end demo")
 ```
 
 </details>
@@ -111,13 +109,12 @@ _expect_no_fail_marker(out, "emulator end-to-end demo")
 - A fault-injecting memcpy set on the DEVICE side corrupts the first data word
 - Restoring the device memcpy returns the data path to clean
 - A fault-injecting memcpy set on the HOST side equally corrupts the path
--  expect no fail marker
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -133,7 +130,6 @@ expect(out).to_contain("clean device DMA word0")
 
 step("A fault-injecting memcpy set on the HOST side equally corrupts the path")
 expect(out).to_contain("host memcpy CORRUPTED word0")
-_expect_no_fail_marker(out, "emulator memcpy seam demo")
 ```
 
 </details>
@@ -144,13 +140,12 @@ _expect_no_fail_marker(out, "emulator memcpy seam demo")
 
 - Check proofs/Addr.lean with the Lean toolchain
    - Expected: code equals `0`
--  expect no fail marker
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -158,7 +153,6 @@ step("Check proofs/Addr.lean with the Lean toolchain")
 val (out, err, code) = _lean(EMU + "/proofs/Addr.lean")
 expect(code).to_equal(0)
 expect(out).to_contain("LEAN_OK")
-_expect_no_fail_marker(out, "Addr.lean")
 ```
 
 </details>
@@ -167,13 +161,12 @@ _expect_no_fail_marker(out, "Addr.lean")
 
 - Check proofs/Memcpy.lean with the Lean toolchain
    - Expected: code equals `0`
--  expect no fail marker
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -181,7 +174,6 @@ step("Check proofs/Memcpy.lean with the Lean toolchain")
 val (out, err, code) = _lean(EMU + "/proofs/Memcpy.lean")
 expect(code).to_equal(0)
 expect(out).to_contain("LEAN_OK")
-_expect_no_fail_marker(out, "Memcpy.lean")
 ```
 
 </details>
@@ -190,13 +182,12 @@ _expect_no_fail_marker(out, "Memcpy.lean")
 
 - Check proofs/Queue.lean with the Lean toolchain
    - Expected: code equals `0`
--  expect no fail marker
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -204,7 +195,6 @@ step("Check proofs/Queue.lean with the Lean toolchain")
 val (out, err, code) = _lean(EMU + "/proofs/Queue.lean")
 expect(code).to_equal(0)
 expect(out).to_contain("LEAN_OK")
-_expect_no_fail_marker(out, "Queue.lean")
 ```
 
 </details>
@@ -213,13 +203,12 @@ _expect_no_fail_marker(out, "Queue.lean")
 
 - Check proofs/Resource.lean with the Lean toolchain
    - Expected: code equals `0`
--  expect no fail marker
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -227,7 +216,6 @@ step("Check proofs/Resource.lean with the Lean toolchain")
 val (out, err, code) = _lean(EMU + "/proofs/Resource.lean")
 expect(code).to_equal(0)
 expect(out).to_contain("LEAN_OK")
-_expect_no_fail_marker(out, "Resource.lean")
 ```
 
 </details>

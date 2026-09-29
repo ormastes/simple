@@ -1,0 +1,137 @@
+"""
+## Purpose and audience
+
+Pins the static import closure of the shared UI session model for the engineers
+working the slim TUI/GUI kernel-plugin lane. `nogc_sync_mut.ui.session` is the
+one module every backend shares -- CLI, TUI, GUI and the host window manager all
+build a `UISession`. If that module reaches an OpenType/glyph parser, then every
+terminal UI in the product silently drags a font rasteriser into its module
+graph, which is exactly what REQ-UI-SLIM-004 forbids.
+
+The font-dependent frame producer still exists; it lives in the sibling module
+`nogc_sync_mut.ui.session_draw_ir`, which a GUI consumer imports explicitly.
+
+## Operator workflow
+
+Run this spec and confirm the Results line reports 0 failed. Each scenario shells
+out to the seed compiler's `deps fast` closure printer and reads the real
+transitive module list it prints -- no log scraping, no mocking.
+
+## Compatibility and limitations
+
+The seed binary path comes from `SIMPLE_SEED`, defaulting to
+`src/compiler_rust/target/bootstrap/simple`. If that binary is absent the first
+oracle fails loudly and names the path; the spec never skips silently. The
+closure is a STATIC import closure, so it proves what the module graph reaches,
+not what a given run initialises. `deps fast` resolves only imports it can root
+against a package path, so its file list is a LOWER bound -- absence of a
+forbidden prefix is necessary, not sufficient. That is why scenario 2 exists: it
+proves the same command, run the same way, does report `src/lib/skia` for the
+sibling module that genuinely reaches it.
+
+## Verification guidance and troubleshooting
+
+If scenario 1 fails, run the printed command by hand and look for the import edge
+that reintroduces `src/lib/skia`. The historical edge was
+`use common.ui.widget_draw_ir.{widget_tree_to_draw_ir_with_theme}` in
+`session.spl`, reaching Skia through
+`std.nogc_sync_mut.text_layout.font_renderer.resolve_font_metrics_with_language`.
+A re-export of the sibling module from `session.spl` reintroduces the edge and is
+not an acceptable fix. If scenario 2 fails, the scan itself is suspect: it is the
+non-vacuity control proving `deps fast` really does report `src/lib/skia` when a
+module genuinely reaches it.
+"""
+# Lifecycle: plan: doc/03_plan/ui/slim_kernel_plugin/plan.md ; design: doc/05_design/ui/slim_kernel_plugin/design.md
+# @cover src/lib/nogc_sync_mut/ui/session.spl
+# @cover src/lib/nogc_sync_mut/ui/session_draw_ir.spl
+# @manual_section: slim UI session closure
+
+use std.spec.step
+
+use std.spec.{describe, it, expect}
+use std.io_runtime.{process_run, env_get, file_exists}
+
+val SESSION_MODULE = "src/lib/nogc_sync_mut/ui/session.spl"
+val SESSION_DRAW_IR_MODULE = "src/lib/nogc_sync_mut/ui/session_draw_ir.spl"
+val TUI_ROUTE = "src/app/ui.tui/async_app.spl"
+
+fn seed_path() -> text:
+    """Resolve the diagnostic seed binary used to print the closure."""
+    val from_env = env_get("SIMPLE_SEED")
+    if from_env == nil or from_env == "":
+        return "src/compiler_rust/target/bootstrap/simple"
+    return from_env
+
+fn closure_lines(module_path: text) -> [text]:
+    """Return every `deps fast` stdout line that names a repo source file."""
+    val seed = seed_path()
+    val (out, _err, _code) = process_run(seed, ["deps", "fast", module_path])
+    var kept: [text] = []
+    for line in out.split("\n"):
+        if line.contains("src/"):
+            kept.push(line.trim())
+    return kept
+
+fn closure_mentions(lines: [text], prefix: text) -> bool:
+    """True when any closure line names a file under the given path prefix."""
+    for line in lines:
+        if line.contains(prefix):
+            return true
+    return false
+
+describe "shared UI session import closure":
+
+    it "reaches no font parser compositor driver kernel or gpu module":
+        # @req REQ-UI-SLIM-004
+        # @capture(statistics): per-prefix hit counts over the shared session closure
+        step("confirm the diagnostic seed binary is present")
+        val seed = seed_path()
+        expect(file_exists(seed)).to_equal(true)  # oracle: SIMPLE_SEED (or the default src/compiler_rust/target/bootstrap/simple) must exist; this spec never skips
+
+        step("print the static import closure of the shared UI session module")
+        val lines = closure_lines(SESSION_MODULE)
+
+        step("prove the scan is non-vacuous before asserting absence")
+        expect(closure_mentions(lines, SESSION_MODULE)).to_equal(true)  # oracle: deps fast echoes the queried module, so a zero-output run cannot pass
+        expect(lines.len()).to_be_greater_than(4)  # oracle: the session still resolves the common.ui widget/state/surface chain; fewer than 5 src/ lines means nothing was scanned
+
+        step("assert every forbidden heavy-subsystem prefix is absent")
+        expect(closure_mentions(lines, "src/lib/skia")).to_equal(false)  # oracle: Skia OpenType/glyph parsing belongs to the GUI frame producer, never to the shared session
+        expect(closure_mentions(lines, "src/os/compositor")).to_equal(false)  # oracle: host compositor is a consumer of the session, not a dependency
+        expect(closure_mentions(lines, "src/os/drivers")).to_equal(false)  # oracle: GPU/input drivers arrive only via the compositor edge
+        expect(closure_mentions(lines, "src/os/kernel")).to_equal(false)  # oracle: kernel modules arrive only via the compositor edge
+        expect(closure_mentions(lines, "src/lib/gc_async_mut/gpu")).to_equal(false)  # oracle: GPU tier arrives only via the GUI renderer edge
+
+    it "keeps the terminal TUI route free of the same subsystems":
+        # @req REQ-UI-SLIM-004
+        # @capture(statistics): per-prefix hit counts over the ordinary TUI route closure
+        step("confirm the diagnostic seed binary is present")
+        expect(file_exists(seed_path())).to_equal(true)  # oracle: same seed precondition as scenario 1
+
+        step("print the static import closure of the ordinary async TUI route")
+        val lines = closure_lines(TUI_ROUTE)
+
+        step("prove the scan is non-vacuous before asserting absence")
+        expect(closure_mentions(lines, TUI_ROUTE)).to_equal(true)  # oracle: deps fast echoes the queried module
+        expect(lines.len()).to_be_greater_than(4)  # oracle: the TUI route still resolves its channel/io_runtime chain
+
+        step("assert the TUI inherits no font parser through the session edge")
+        expect(closure_mentions(lines, "src/lib/skia")).to_equal(false)  # oracle: a terminal UI must not load an OpenType/glyph parser
+        expect(closure_mentions(lines, "src/os/compositor")).to_equal(false)  # oracle: host compositor belongs to the shared-WM route only
+        expect(closure_mentions(lines, "src/os/drivers")).to_equal(false)  # oracle: GPU/input drivers arrive only via the compositor edge
+        expect(closure_mentions(lines, "src/os/kernel")).to_equal(false)  # oracle: kernel modules arrive only via the compositor edge
+        expect(closure_mentions(lines, "src/lib/gc_async_mut/gpu")).to_equal(false)  # oracle: GPU tier arrives only via the compositor edge
+
+    it "still reaches skia from the GUI frame producer sibling":
+        # @req REQ-UI-SLIM-009
+        # @capture(statistics): control closure proving the scan detects a real skia edge
+        step("confirm the diagnostic seed binary is present")
+        expect(file_exists(seed_path())).to_equal(true)  # oracle: same seed precondition as scenario 1
+
+        step("print the static import closure of the GUI frame producer module")
+        val lines = closure_lines(SESSION_DRAW_IR_MODULE)
+
+        step("assert the font-dependent feature was preserved, not deleted")
+        expect(lines.len()).to_be_greater_than(4)  # oracle: same non-vacuity floor as scenario 1
+        expect(closure_mentions(lines, SESSION_DRAW_IR_MODULE)).to_equal(true)  # oracle: the sibling module must exist and be resolvable
+        expect(closure_mentions(lines, "src/lib/skia")).to_equal(true)  # oracle: loading less must never remove a feature -- the GUI frame producer keeps its font-metrics edge

@@ -1,4 +1,8 @@
 # Parser rejects line continuation after a trailing binary comparison operator
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Date:** 2026-08-04
 - **Area:** compiler/parser (both Rust seed and self-hosted stage binary agree)
@@ -50,3 +54,4 @@ Either support line continuation after a trailing binary operator (the file
 was committed in that style, so some earlier lane accepted or never parsed
 it), or have lint/fmt flag bare trailing-operator continuations at commit
 time so they cannot land unparsed.
+

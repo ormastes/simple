@@ -3,17 +3,13 @@
 
 Architecture: `doc/04_architecture/web_iframe_draw_ir_embedding.md`
 
-Status: static source/spec/manual implemented; qualified execution and five
-legacy caller parity migrations remain held.
-
 ## Minimal source changes
 
 1. `src/lib/common/ui/draw_ir.spl`: add `draw_ir_embed_composition` and one
    private command copy-with-clip helper; reuse existing rect operations.
 2. `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl`:
-   `_simple_web_layout_compose_document` scopes/restores child deadlines;
-   retained composition carries depth, segments commands, and inserts children
-   in paint order.
+   extract `_simple_web_layout_compose_document`; extend retained composition
+   with depth/deadline; segment commands and insert children in paint order.
 3. `simple_web_html_layout_renderer_paint_layout.spl`: retain pixel helpers
    during parity; delete them only after all five callers migrate.
 4. Add `test/02_integration/rendering/simple_web_iframe_draw_ir_embedding_spec.spl`

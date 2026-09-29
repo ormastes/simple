@@ -102,7 +102,9 @@ pub(crate) fn runtime_inputs_fingerprint(runtime_root: &Path, inputs: &[&str]) -
 }
 
 fn archive_has_exact_runtime_members(archive: &Path, inputs: &[&str]) -> bool {
-    let tool = find_archive_tool();
+    let Ok(tool) = find_archive_tool() else {
+        return false;
+    };
     let output = archive_list_command(&tool, archive).output();
     let Ok(output) = output else {
         return false;
@@ -153,7 +155,7 @@ fn archive_from_dir(dir: &Path, stem: &str) -> Option<PathBuf> {
     None
 }
 
-fn archive_from_path_or_dir(path: &Path, stem: &str) -> Option<PathBuf> {
+pub(crate) fn archive_from_path_or_dir(path: &Path, stem: &str) -> Option<PathBuf> {
     if path.is_dir() {
         return archive_from_dir(path, stem);
     }
@@ -168,16 +170,47 @@ pub(crate) fn find_c_compiler() -> String {
     simple_common::platform::cc_detect::find_c_compiler()
 }
 
-/// Find an archive tool -- delegates to `simple_common::platform::cc_detect`.
-pub(crate) fn find_archive_tool() -> String {
-    simple_common::platform::cc_detect::find_archive_tool()
+/// Error for a required LLVM tool that is not installed. Toolchain policy is
+/// clang/LLVM only and fail-fast: GNU binutils (`nm`, `ar`, `objcopy`) and
+/// MSVC `lib.exe` are never used as silent substitutes -- a fallback to GNU
+/// `nm` is exactly what hid the Windows MAX_PATH object-path bug.
+pub(crate) fn missing_llvm_tool_error(tool: &str) -> String {
+    format!(
+        "required LLVM tool `{tool}` was not found on PATH (clang/LLVM-only toolchain;          GNU binutils and MSVC tools are not used as a fallback).          Install it with: sh scripts/setup/bootstrap-prereqs.shs install"
+    )
+}
+
+/// File stem of a tool path, splitting on both `/` and `\\` so a Windows
+/// path is recognised on any host (`Path` only splits on the host separator).
+fn tool_file_stem(tool: &str) -> &str {
+    let base = tool.rsplit(['/', '\\']).next().unwrap_or(tool);
+    Path::new(base).file_stem().and_then(|stem| stem.to_str()).unwrap_or(base)
+}
+
+/// True when `tool` names an LLVM archiver (`llvm-ar[.exe]` / `llvm-lib[.exe]`).
+fn is_llvm_archive_tool(tool: &str) -> bool {
+    let stem = tool_file_stem(tool);
+    stem.eq_ignore_ascii_case("llvm-ar") || stem.eq_ignore_ascii_case("llvm-lib")
+}
+
+/// Find the LLVM archive tool. `cc_detect` still probes GNU `ar` / MSVC `lib`
+/// for other consumers; the native build accepts only an LLVM archiver.
+pub(crate) fn find_archive_tool() -> Result<String, String> {
+    let tool = simple_common::platform::cc_detect::find_archive_tool();
+    if is_llvm_archive_tool(&tool) {
+        Ok(tool)
+    } else {
+        Err(missing_llvm_tool_error("llvm-ar"))
+    }
 }
 
 fn is_msvc_archive_tool(tool: &str) -> bool {
     Path::new(tool)
         .file_stem()
         .and_then(|stem| stem.to_str())
-        .is_some_and(|stem| stem.eq_ignore_ascii_case("lib"))
+        .is_some_and(|stem| {
+            stem.eq_ignore_ascii_case("lib") || stem.eq_ignore_ascii_case("llvm-lib")
+        })
 }
 
 pub(super) fn archive_create_command(
@@ -241,6 +274,14 @@ pub(crate) fn hosted_linux_cross_compiler(
 }
 
 pub(crate) fn target_c_compiler(target: simple_common::target::Target) -> String {
+    // Windows GNU bootstrap is Clang-only.  The MinGW GCC driver rejects the
+    // target-qualified flags used by the generated-C and hosted-link paths,
+    // and using two driver families makes their ABI/toolchain policy diverge.
+    if target.os == simple_common::target::TargetOS::Windows
+        && target.linker_flavor() == simple_common::target::LinkerFlavor::Gnu
+    {
+        return "clang".to_string();
+    }
     hosted_linux_cross_compiler(target, false)
         .map(str::to_string)
         .unwrap_or_else(|| simple_common::platform::cc_detect::detect_c_compiler_for_target(&target))
@@ -302,10 +343,14 @@ fn host_object_extension() -> &'static str {
 
 pub(crate) fn core_c_target_flags(
     target: simple_common::target::Target,
+    compiler: &str,
     source: &str,
     riscv_vector: bool,
 ) -> Vec<&'static str> {
     let mut flags = Vec::new();
+    if let Some(flag) = windows_gnu_target_flag(target, compiler) {
+        flags.push(flag);
+    }
     if target.arch == simple_common::target::TargetArch::Aarch64 {
         flags.push("-mno-outline-atomics");
     }
@@ -314,6 +359,46 @@ pub(crate) fn core_c_target_flags(
         flags.extend(["-march=rv64gcv", "-mabi=lp64d"]);
     }
     flags
+}
+
+pub(crate) fn windows_gnu_target_flag(
+    target: simple_common::target::Target,
+    compiler: &str,
+) -> Option<&'static str> {
+    (target.os == simple_common::target::TargetOS::Windows
+        && target.linker_flavor() == simple_common::target::LinkerFlavor::Gnu)
+        .then_some(())
+        .filter(|_| compiler.to_ascii_lowercase().contains("clang"))
+        .map(|_| "--target=x86_64-w64-windows-gnu")
+}
+
+pub(crate) fn compiler_accepts_target_flag(compiler: &str) -> bool {
+    compiler.to_ascii_lowercase().contains("clang")
+}
+
+/// C11-atomics flags required by the MSVC-style drivers, and by nobody else.
+///
+/// Measured 2026-09-06 (cl 19.44.35207, MSVC 2022 14.44): without BOTH
+/// `-std:c11` and `-experimental:c11atomics`, cl.exe stops at
+/// `fatal error C1189: "C atomics require C11 or later"` inside
+/// `<vcruntime_c11_stdatomic.h>` before it ever reaches a runtime source, so
+/// `runtime.c` / `runtime_native.c` cannot compile at all. With both, they
+/// compile clean (the GNU-shaped `-f*` / `-std=gnu11` flags around them are
+/// merely ignored with `warning D9002`). clang-cl 18.1.8 accepts both too --
+/// it needs neither, and reports `-experimental:c11atomics` as unused -- so
+/// one flag set covers both MSVC drivers.
+///
+/// Gated on the compiler BINARY, not on `LinkerFlavor::Msvc`: that flavor can
+/// also resolve to plain `clang` (see `MSVC_C_COMPILERS` in `cc_detect`),
+/// whose GNU driver rejects `-std:c11`. Every gcc/clang lane on Linux/macOS
+/// gets an empty slice, so their argument vectors stay byte-identical.
+fn msvc_c11_atomics_flags(cc: &str) -> &'static [&'static str] {
+    let base = Path::new(cc).file_name().and_then(|n| n.to_str()).unwrap_or(cc);
+    if simple_common::platform::cc_detect::is_msvc_compiler(cc) || base.contains("clang-cl") {
+        &["-std:c11", "-experimental:c11atomics"]
+    } else {
+        &[]
+    }
 }
 
 pub(crate) fn find_core_c_runtime_source_root() -> Option<PathBuf> {
@@ -338,18 +423,74 @@ pub(crate) fn find_core_c_runtime_source_root() -> Option<PathBuf> {
     None
 }
 
-fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Option<PathBuf> {
+fn build_c_runtime_library(
+    build_dir: &Path,
+    include_stage4_hosted: bool,
+    include_cranelift_stubs: bool,
+) -> Option<PathBuf> {
     let archive = build_dir.join(host_archive_name());
     let runtime_root = find_core_c_runtime_source_root()?;
     let target = effective_target();
     let mut runtime_inputs = vec![
         "runtime_native.c",
+        "runtime_file_view.c",
+        "runtime_cache_host_authority_v1.c",
         "runtime_framebuffer.c",
         "runtime_directx_core.c",
         "runtime_legacy_core.c",
+        // Groups F/G/I-rest/J of stage2_windows_unresolved_inventory_2026-08-31:
+        // the 12 io/system externs (rt_stdin_read{,_all}, rt_term_{write,flush},
+        // rt_file_modified{,_time}, rt_list_dir_recursive, rt_path_normalize,
+        // rt_shell, rt_process_output, rt_string_{to,from}_byte_array) had NO
+        // native definition anywhere -- Simple-side `extern fn` only. This TU
+        // defines exactly those twelve, self-contained, all helpers static
+        // (same shape as the group-E TU; adding runtime.c wholesale collides
+        // on 53/69 symbols, same class as the disproved runtime_native.c fix).
+        "runtime_core_io_exports.c",
+        // Time/timestamp/uuid/cpu-count host services. Registered by
+        // bb397d8d147; the line was lost in a later merge with main while
+        // the .c file itself survived, which silently reintroduced 18
+        // LNK2019 unresolved externals at the Stage 2 link.
+        "runtime_core_host_services.c",
         "runtime_fork.c",
         "runtime_memtrack.c",
         "runtime_process.c",
+        // Owned-process receipt ABI (rt_process_run_owned_observed_bounded_value
+        // and siblings) and the coverage probe/dump ABI. Both were registered by
+        // 97a39131fe3 "fix(runtime): close core tool host providers" and dropped
+        // from this list by the 929de773c88 (#150) stale snapshot alongside
+        // runtime_core_host_services.c (since restored). The pure-Simple backend
+        // list (src/compiler/70.backend/backend/runtime_compiler.spl) has carried
+        // runtime_process_owned throughout, so this was a seed-only lane gap of
+        // the same never-an-archive-member class as runtime_simd_case.c above.
+        // Verified collision-free against every other member (nm, host cc).
+        //
+        // Restored 2026-09-06: dropped a SECOND time by bcc52735edb, a
+        // stale-snapshot "Merge remote-tracking branch 'origin/main' into HEAD"
+        // in the PR #261 lineage, which rewound all three of 0e3bf3f535a (#273)
+        // hunks in this file while carrying its own forward work. Detected by
+        // scripts/check/check-runtime-source-list-parity.shs, which is exactly
+        // the dropped-list-entry class that gate exists to catch.
+        "runtime_memory.c",
+        // ^ canonical memory provider, compiled WITH -DSIMPLE_RUNTIME_MEMORY_OWNER=1
+        // (see the compile flags below).  It shares 16 symbol NAMES with
+        // runtime_native.c (rt_alloc, rt_free, rt_realloc, rt_memcpy, rt_memset,
+        // rt_struct_alloc, rt_struct_receiver_valid, rt_ptr_*, copy_mem,
+        // rt_mem_guard_stats) but those are not duplicate DEFINITIONS:
+        // runtime_native.c wraps its entire copy of that family in
+        // `#if !defined(SIMPLE_RUNTIME_MEMORY_OWNER)` (lines 5893 and 11701), so
+        // exactly one owner survives any given build.  The macro is what makes
+        // the two mutually exclusive, and the seed lane was setting neither the
+        // flag nor the file -- which is why core-C carried NO definition at all
+        // of rt_ptr_read_i32, rt_mem_harden_check_native, rt_mem_profile_*,
+        // rt_transient_raw_scope_* or spl_i64_is_zero: those live ONLY in
+        // runtime_memory.c.  The pure-Simple backend lane already does both
+        // (70.backend/backend/runtime_compiler.spl:521,545 push the define, and
+        // its `sources` array carries "runtime_memory"), and tests.rs:3145-3150
+        // pins that lane's flag -- so this closes a seed-only lane gap rather
+        // than changing the design.
+        "runtime_process_owned.c",
+        "runtime_coverage_core.c",
         // Defines simple_contract_check / simple_contract_check_msg. Migrated
         // Rust -> C by 76371b85c3, then silently dropped from this list by
         // ea30567675 "chore: sync diagnostics and runtime updates" while the .c
@@ -362,6 +503,20 @@ fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Opt
         // would create duplicate pool definitions.
         "runtime_thread.c",
         "runtime_simd_utf8.c",
+        // ASCII/case SIMD kernels backing rt_text_is_ascii (std.common.encoding
+        // simd_text_ffi). Same never-an-archive-member class as
+        // runtime_terminal.c below: the pure-Simple backend's own source list
+        // (src/compiler/70.backend/backend/runtime_compiler.spl) has always
+        // carried runtime_simd_case, but this seed-side list never did, so a
+        // core-C native link of any tool whose closure reaches std text
+        // helpers left rt_text_is_ascii undefined -- the tolerated-undefined
+        // then NULL-GOT SIGSEGV class of rt_unwrap_or_trap
+        // (stage3_native_build_and_compile_segv_on_hello_world_2026-08-18).
+        // Compiles with zero symbol collisions against the existing members.
+        "runtime_simd_case.c",
+        // Core-C provider for rt_simd_str_search, used by the full CLI's
+        // string-search closure. It must be an archive member under host-gpu.
+        "runtime_simd_search.c",
         // engine2d SIMD row kernels (C/NEON) backing rt_engine2d_simd_*_row_u32;
         // replaces the Rust-seed engine2d_simd_ops backing for native builds.
         "runtime_simd_dispatch.c",
@@ -376,6 +531,40 @@ fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Opt
         // tolerated-undefined-then-SIGSEGV class as rt_unwrap_or_trap
         // (stage3_native_build_and_compile_segv_on_hello_world_2026-08-18).
         "runtime_terminal.c",
+        // Env-gated SIGPROF PC sampler (diagnostic tooling). Compiles to an
+        // empty TU off Linux x86_64/aarch64. When SIMPLE_PROF_SAMPLE_FILE is
+        // set, a constructor(101) installs a SIGPROF handler + 100 Hz
+        // ITIMER_PROF and appends raw 8-byte PCs to the named file. Zero
+        // symbols are referenced by other members, so the archive link would
+        // drop this TU; prof_sample_force_link is forced as a retention
+        // root by runtime_retention_symbols (native_project/linker.rs).
+        // Self-contained: no runtime.h include, zero symbol overlap.
+        "runtime_prof_sample.c",
+        // Group E of stage2_windows_unresolved_inventory_2026-08-31: the only
+        // definitions of rt_mkdir / rt_random_i64 / rt_readdir{,_count,_entry,
+        // _free} / rt_shell_output live in runtime.c, which is NOT in this list
+        // and cannot be added wholesale (measured: 53 symbol collisions with
+        // this archive, 69 with the Rust runtime libs -- same class as the
+        // disproved runtime_native.c wholesale fix, 475 collisions). This TU
+        // carries exactly those seven, self-contained, all helpers static.
+        // Re-verified against THIS list's members 2026-08-31 (nm, 956 defined
+        // symbols incl. runtime_native.c: zero overlap). Tagged-text ABI --
+        // see the TU header; behavioural tests in
+        // src/runtime/test/rt_core_exports_behaviour_selfcheck.c.
+        "runtime_core_exports.c",
+        // Backend-plugin transport (spl_backend_plugin_run_v1), backing
+        // compiler.backend.backend_plugin.transport. Same never-an-archive-member
+        // class as runtime_terminal.c and runtime_simd_case.c above: the symbol
+        // is defined in src/runtime/runtime_backend_plugin.c and declared in
+        // runtime.h, but this list never carried the TU, so a core-lane native
+        // link of any entry whose closure reaches the backend-plugin transport
+        // left it undefined. Surfaced by the Stage4 compiler DRIVER entry on the
+        // dynamic-runtime lane, where it was the ONLY unresolved symbol left
+        // after the shared runtime and the core-C supplement resolved everything
+        // else. Measured before adding: the TU defines exactly one global symbol
+        // and has ZERO overlap with the 1,302 symbols defined by the other
+        // members of this list.
+        "runtime_backend_plugin.c",
         "runtime_value.h",
         "runtime.h",
         "runtime_packed_span.h",
@@ -397,6 +586,18 @@ fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Opt
     }
     if include_stage4_hosted {
         runtime_inputs.extend(["runtime_font.c", "runtime_sqlite.c"]);
+    } else if include_cranelift_stubs {
+        // Cranelift JIT bridge NAMED-TRAP stubs (75 symbols) -- see
+        // doc/08_tracking/bug/stage2_link_full_undefined_symbol_census_2026-09-07.md
+        // "Bucket 2 deferred: cranelift JIT bridge". Only the core-C-bootstrap
+        // lane (this branch, include_stage4_hosted == false) needs these: the
+        // real symbols are defined in Rust
+        // (compiler/src/codegen/cranelift_sffi.rs) and already exported by
+        // libsimple_compiler.so / native_all, which is what
+        // build_stage4_c_runtime_library's lane links. Adding them there too
+        // would be an immediate "symbol is already defined" break -- keep
+        // this in the include_stage4_hosted == false arm only.
+        runtime_inputs.push("runtime_cranelift_bridge_stub.c");
     }
 
     let fingerprint = runtime_inputs_fingerprint(&runtime_root, &runtime_inputs)?;
@@ -424,35 +625,87 @@ fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Opt
     let build_dir_ino_before: u64 = 0;
 
     let cc = target_c_compiler(target);
-    let ar = find_archive_tool();
+    let ar = find_archive_tool().ok()?;
     let obj_ext = host_object_extension();
     let mut objects = Vec::new();
 
-    for source in runtime_inputs.iter().copied().filter(|input| input.ends_with(".c")) {
-        let object = build_dir.join(format!("{}.{}", source.trim_end_matches(".c"), obj_ext));
-        let riscv_vector = std::env::var("SIMPLE_RUNTIME_RISCV64_VECTOR").ok().as_deref() == Some("1");
-        let status = std::process::Command::new(&cc)
-            .arg("-c")
-            .arg("-Os")
-            .arg("-ffunction-sections")
-            .arg("-fdata-sections")
-            .arg("-fno-unwind-tables")
-            .arg("-fno-asynchronous-unwind-tables")
-            .arg("-fno-stack-protector")
-            .arg("-fPIC")
-            .arg("-std=gnu11")
-            .arg("-D_GNU_SOURCE")
-            .arg("-DSIMPLE_CORE_C_STANDALONE=1")
-            .args(core_c_target_flags(target, source, riscv_vector))
-            .arg(format!("-I{}", runtime_root.display()))
-            .arg(format!("-I{}", runtime_root.join("platform").display()))
-            .arg(runtime_root.join(source))
-            .arg("-o")
-            .arg(&object)
-            .status()
-            .ok()?;
-        if !status.success() {
-            if native_project_rust_trace_enabled() {
+    let riscv_vector = std::env::var("SIMPLE_RUNTIME_RISCV64_VECTOR").ok().as_deref() == Some("1");
+    // cl.exe understands none of the GNU codegen flags -- it reports each as
+    // `warning D9002: ignoring unknown option` -- and, decisively, reads
+    // `-o` as its long-deprecated `/o` (`warning D9035`) rather than as
+    // "write the object here". Every translation unit then compiles
+    // successfully while no .obj appears at the requested path, and the
+    // failure surfaces much later and far from its cause, at the archive
+    // step: `llvm-ar: runtime_native.obj: no such file or directory`.
+    let msvc = simple_common::platform::cc_detect::is_msvc_compiler(&cc);
+    // Host C translation units compile independently; run them across the
+    // rayon pool (sized by --threads, default = host parallelism) instead of
+    // one cc at a time. The serial loop cost OS lanes tens of minutes
+    // (hundreds of .c files at seconds each).
+    let c_results: Vec<(&str, PathBuf, bool)> = {
+        use rayon::prelude::*;
+        runtime_inputs
+            .iter()
+            .copied()
+            .filter(|input| input.ends_with(".c"))
+            .collect::<Vec<_>>()
+            .into_par_iter()
+            .map(|source| {
+                let object = build_dir.join(format!("{}.{}", source.trim_end_matches(".c"), obj_ext));
+                let mut command = std::process::Command::new(&cc);
+                if msvc {
+                    command
+                        .arg("-c")
+                        .arg("-O1")   // -Os: optimise for size
+                        .arg("-Gy")   // -ffunction-sections
+                        .arg("-Gw")   // -fdata-sections
+                        .arg("-GS-"); // -fno-stack-protector
+                    // -fPIC and the unwind-table flags have no MSVC equivalent: Windows
+                    // code is position-independent by construction and SEH unwind data
+                    // is not optional there.
+                } else {
+                    command
+                        .arg("-c")
+                        .arg("-Os")
+                        .arg("-ffunction-sections")
+                        .arg("-fdata-sections")
+                        .arg("-fno-unwind-tables")
+                        .arg("-fno-asynchronous-unwind-tables")
+                        .arg("-fno-stack-protector")
+                        .arg("-fPIC")
+                        .arg("-std=gnu11");
+                }
+                let ok = command
+                    .args(msvc_c11_atomics_flags(&cc))
+                    .arg("-DSIMPLE_CORE_C_STANDALONE=1")
+                    // Selects runtime_memory.c as THE memory provider and compiles out
+                    // runtime_native.c's mutually-exclusive fallback copies of the same
+                    // 16 names.  Mirrors runtime_compiler.spl:545 in the pure-Simple lane.
+                    .arg("-DSIMPLE_RUNTIME_MEMORY_OWNER=1")
+                    .args(core_c_target_flags(target, &cc, source, riscv_vector))
+                    .arg(format!("-I{}", runtime_root.display()))
+                    .arg(format!("-I{}", runtime_root.join("platform").display()))
+                    .arg(runtime_root.join(source))
+                    .args(if msvc {
+                        vec![format!("-Fo{}", object.display())]
+                    } else {
+                        vec!["-o".to_string(), object.display().to_string()]
+                    })
+                    .status()
+                    .ok()
+                    .map(|status| status.success())
+                    .unwrap_or(false);
+                (source, object, ok)
+            })
+            .collect()
+    };
+    let compiled_count = c_results.iter().filter(|(_, _, ok)| *ok).count();
+    for (source, object, ok) in &c_results {
+        if *ok {
+            objects.push(object.clone());
+            continue;
+        }
+        if native_project_rust_trace_enabled() {
                 #[cfg(unix)]
                 let ino_now: u64 = {
                     use std::os::unix::fs::MetadataExt;
@@ -488,12 +741,10 @@ fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Opt
                             .collect::<Vec<_>>())
                         .unwrap_or_else(|e| vec![format!("<read_dir failed: {e}>")]),
                     staging_entries,
-                    objects.len(),
+                    compiled_count,
                 );
             }
             return None;
-        }
-        objects.push(object);
     }
 
     let status = archive_create_command(&ar, &archive, &objects, false, false)
@@ -508,11 +759,17 @@ fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Opt
 }
 
 pub(crate) fn build_core_c_runtime_library(build_dir: &Path) -> Option<PathBuf> {
-    build_c_runtime_library(build_dir, false)
+    build_c_runtime_library(build_dir, false, true)
+}
+
+pub(crate) fn build_stage4_compiler_core_c_runtime_library(build_dir: &Path) -> Option<PathBuf> {
+    // The compiler backfill owns the real Cranelift hooks. Keep ordinary
+    // bootstrap's named-trap stubs out of this archive to prevent overlap.
+    build_c_runtime_library(build_dir, false, false)
 }
 
 pub(crate) fn build_stage4_c_runtime_library(build_dir: &Path) -> Option<PathBuf> {
-    build_c_runtime_library(build_dir, true)
+    build_c_runtime_library(build_dir, true, false)
 }
 
 /// Compile ONLY `src/runtime/runtime_sqlite.c` into a standalone object.
@@ -531,6 +788,10 @@ pub(crate) fn build_stage4_c_runtime_library(build_dir: &Path) -> Option<PathBuf
 /// Flags mirror `build_c_runtime_library` exactly so the object is ABI-identical
 /// to the archive members it links beside.
 pub(crate) fn build_sqlite_runtime_object(build_dir: &Path) -> Option<PathBuf> {
+    build_sqlite_runtime_object_with_include(build_dir, None)
+}
+
+fn build_sqlite_runtime_object_with_include(build_dir: &Path, sqlite_include: Option<&Path>) -> Option<PathBuf> {
     let runtime_root = find_core_c_runtime_source_root()?;
     let source = "runtime_sqlite.c";
     let source_path = runtime_root.join(source);
@@ -555,26 +816,120 @@ pub(crate) fn build_sqlite_runtime_object(build_dir: &Path) -> Option<PathBuf> {
     std::fs::create_dir_all(build_dir).ok()?;
     let cc = target_c_compiler(target);
     let riscv_vector = std::env::var("SIMPLE_RUNTIME_RISCV64_VECTOR").ok().as_deref() == Some("1");
-    let status = std::process::Command::new(&cc)
-        .arg("-c")
-        .arg("-Os")
-        .arg("-ffunction-sections")
-        .arg("-fdata-sections")
-        .arg("-fno-unwind-tables")
-        .arg("-fno-asynchronous-unwind-tables")
-        .arg("-fno-stack-protector")
-        .arg("-fPIC")
-        .arg("-std=gnu11")
+    // cl.exe understands none of the GCC codegen flags -- it reports each as
+    // `warning D9002: ignoring unknown option` -- and, worse, reads `-o` as its
+    // long-deprecated `/o` (`warning D9035`) rather than as "write the object
+    // here". The object therefore never appeared at the requested path and the
+    // archive step failed with `llvm-ar: runtime_native.obj: no such file or
+    // directory` AFTER every translation unit had compiled successfully. Give
+    // MSVC its own spelling of the same intent; the GNU branch is unchanged.
+    let msvc = simple_common::platform::cc_detect::is_msvc_compiler(&cc);
+    let mut command = std::process::Command::new(&cc);
+    if let Some(include) = sqlite_include {
+        command.arg(format!("-I{}", include.display()));
+    }
+    if msvc {
+        command
+            .arg("-c")
+            .arg("-O1")   // -Os: optimise for size
+            .arg("-Gy")   // -ffunction-sections
+            .arg("-Gw")   // -fdata-sections
+            .arg("-GS-"); // -fno-stack-protector
+        // -fPIC and the unwind-table flags have no MSVC equivalent: Windows
+        // code is position-independent by construction, and SEH unwind data is
+        // not optional there.
+    } else {
+        command
+            .arg("-c")
+            .arg("-Os")
+            .arg("-ffunction-sections")
+            .arg("-fdata-sections")
+            .arg("-fno-unwind-tables")
+            .arg("-fno-asynchronous-unwind-tables")
+            .arg("-fno-stack-protector")
+            .arg("-fPIC")
+            .arg("-std=gnu11");
+    }
+    let status = command
+        .args(msvc_c11_atomics_flags(&cc))
         .arg("-DSIMPLE_CORE_C_STANDALONE=1")
-        .args(core_c_target_flags(target, source, riscv_vector))
+        .args(core_c_target_flags(target, &cc, source, riscv_vector))
         .arg(format!("-I{}", runtime_root.display()))
         .arg(format!("-I{}", runtime_root.join("platform").display()))
         .arg(&source_path)
-        .arg("-o")
-        .arg(&object)
+        .args(if msvc {
+            vec![format!("-Fo{}", object.display())]
+        } else {
+            vec!["-o".to_string(), object.display().to_string()]
+        })
         .status()
         .ok()?;
     (status.success() && std::fs::metadata(&object).map(|m| m.len() > 0).unwrap_or(false)).then_some(object)
+}
+
+pub(crate) struct BootstrapToolsSqliteInputs {
+    pub object: PathBuf,
+    pub library: Option<PathBuf>,
+    pub runtime_dll: Option<PathBuf>,
+}
+
+#[cfg(all(target_os = "windows", target_env = "msvc"))]
+fn prepare_bootstrap_tools_sqlite_sdk(build_dir: &Path) -> Result<(PathBuf, PathBuf, PathBuf), String> {
+    // Copy only sqlite3.h: adding a whole MinGW include tree to MSVC would
+    // select foreign stdint/stdlib headers. The real COFF import archive is
+    // copied byte-for-byte under a suffix understood by clang-cl.
+    for prefix in ["C:/msys64/clang64", "C:/msys64/ucrt64", "C:/msys64/mingw64"] {
+        let prefix = Path::new(prefix);
+        let header = prefix.join("include/sqlite3.h");
+        let library = prefix.join("lib/libsqlite3.dll.a");
+        let dll = prefix.join("bin/libsqlite3-0.dll");
+        if !(header.is_file() && library.is_file() && dll.is_file()) {
+            continue;
+        }
+        let include = build_dir.join("sqlite-sdk-include");
+        std::fs::create_dir_all(&include).map_err(|e| format!("create private SQLite include: {e}"))?;
+        let copied_library = build_dir.join("sqlite3.lib");
+        for (source, destination) in [(&header, include.join("sqlite3.h")), (&library, copied_library.clone())] {
+            std::fs::copy(source, &destination).map_err(|e| format!("stage SQLite SDK {}: {e}", source.display()))?;
+            let original = std::fs::read(source).map_err(|e| format!("read SQLite SDK input {}: {e}", source.display()))?;
+            let copied = std::fs::read(&destination).map_err(|e| format!("read SQLite SDK copy {}: {e}", destination.display()))?;
+            if original != copied {
+                return Err(format!("SQLite SDK copy differs: {}", destination.display()));
+            }
+        }
+        return Ok((include, copied_library, dll));
+    }
+    Err("bootstrap-tools requires a complete real Windows SQLite SDK (sqlite3.h, x86-64 COFF import archive, and matching DLL); checked installed MSYS2 clang64/ucrt64/mingw64 SDKs".to_string())
+}
+
+pub(crate) fn build_bootstrap_tools_sqlite_runtime(build_dir: &Path) -> Result<BootstrapToolsSqliteInputs, String> {
+    #[cfg(all(target_os = "windows", target_env = "msvc"))]
+    let (include, library, runtime_dll) = {
+        let (include, library, dll) = prepare_bootstrap_tools_sqlite_sdk(build_dir)?;
+        (Some(include), Some(library), Some(dll))
+    };
+    #[cfg(not(all(target_os = "windows", target_env = "msvc")))]
+    let (include, library, runtime_dll): (Option<PathBuf>, Option<PathBuf>, Option<PathBuf>) = (None, None, None);
+    let object = build_sqlite_runtime_object_with_include(build_dir, include.as_deref())
+        .ok_or_else(|| "bootstrap-tools cannot compile the real SQLite provider; install target sqlite3 headers and library".to_string())?;
+    Ok(BootstrapToolsSqliteInputs { object, library, runtime_dll })
+}
+
+pub(crate) fn stage_sqlite_runtime_dll(dll: &Path, output: &Path) -> Result<(), String> {
+    let directory = output.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
+    let name = dll.file_name().ok_or_else(|| "SQLite DLL has no file name".to_string())?;
+    let destination = directory.join(name);
+    let bytes = std::fs::read(dll).map_err(|e| format!("read SQLite DLL {}: {e}", dll.display()))?;
+    if std::fs::read(&destination).ok().as_deref() != Some(bytes.as_slice()) {
+        std::fs::copy(dll, &destination).map_err(|e| format!("place SQLite DLL beside {}: {e}", output.display()))?;
+    }
+    if std::fs::read(&destination).map_err(|e| format!("verify staged SQLite DLL: {e}"))? != bytes {
+        return Err("staged SQLite DLL differs from selected SDK dependency".to_string());
+    }
+    let hash = ring::digest::digest(&ring::digest::SHA256, &bytes);
+    let hash = hash.as_ref().iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+    eprintln!("[native-link] SQLite dependency {} sha256={hash}", destination.display());
+    Ok(())
 }
 
 pub(crate) fn runtime_authority_search_dirs(runtime_path: &Path) -> Vec<PathBuf> {
@@ -595,6 +950,78 @@ pub(crate) fn runtime_authority_search_dirs(runtime_path: &Path) -> Vec<PathBuf>
         }
     }
     dirs
+}
+
+/// The `rustc version ...` string recorded in an rlib's metadata.
+pub(crate) fn rlib_rustc_version(rlib: &Path) -> Option<String> {
+    let bytes = std::fs::read(rlib).ok()?;
+    let needle = b"rustc version ";
+    let start = bytes.windows(needle.len()).position(|w| w == needle)? + needle.len();
+    let end = bytes[start..].iter().position(|&b| b == b')')? + start + 1;
+    String::from_utf8(bytes[start..end].to_vec()).ok()
+}
+
+/// Build the Rust standard library + allocator shim the hosted runtime rlib
+/// needs when it is linked into a non-Rust (C / Simple) image.
+///
+/// A bare `.rlib` carries none of its dependencies, and `std`'s
+/// `__rust_alloc` family is only emitted by rustc for a final artifact. Linking
+/// `libspl_hosted_runtime-*.rlib` (whose Windows-only `win32` module uses
+/// `std::sync::Mutex`, `HashMap`, `eprintln!`, ...) therefore left 28 std/core/
+/// alloc internals undefined in the host-gpu full-CLI link. An empty
+/// `staticlib` built by the SAME rustc bundles exactly those crates and the
+/// shim. The compiler must match the rlib byte-for-byte in version, or the
+/// v0-mangled crate hashes differ; a mismatch fails fast.
+pub(crate) fn build_rust_std_shim_for_rlib(rlib: &Path, temp_dir: &Path) -> Result<PathBuf, String> {
+    let wanted = rlib_rustc_version(rlib)
+        .ok_or_else(|| format!("cannot read the rustc version recorded in {}", rlib.display()))?;
+    let dir = temp_dir.join("rust_std_shim");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+    let source = dir.join("spl_std_shim.rs");
+    std::fs::write(&source, "#![no_std]\nextern crate std;\n#[doc(hidden)]\npub fn spl_std_shim_anchor() {}\n")
+        .map_err(|e| format!("write {}: {e}", source.display()))?;
+    let output = dir.join(if cfg!(target_env = "msvc") { "spl_std_shim.lib" } else { "libspl_std_shim.a" });
+    let mut candidates: Vec<(String, Vec<String>)> = Vec::new();
+    if let Ok(rustc) = std::env::var("RUSTC") {
+        candidates.push((rustc, Vec::new()));
+    }
+    candidates.push(("rustc".to_string(), Vec::new()));
+    candidates.push(("rustc".to_string(), vec!["+nightly".to_string()]));
+    let mut seen = Vec::new();
+    for (program, toolchain) in candidates {
+        let Ok(version) = std::process::Command::new(&program).args(&toolchain).arg("--version").output() else {
+            continue;
+        };
+        let version = String::from_utf8_lossy(&version.stdout).trim().to_string();
+        let version = version.strip_prefix("rustc ").unwrap_or(&version).to_string();
+        if version != wanted {
+            seen.push(format!("{program} {} -> {version}", toolchain.join(" ")));
+            continue;
+        }
+        let status = std::process::Command::new(&program)
+            .args(&toolchain)
+            .args(["--edition", "2021", "--crate-type", "staticlib", "--crate-name", "spl_std_shim"])
+            .args(["-C", "opt-level=3", "-C", "panic=abort", "-C", "codegen-units=1"])
+            .arg(&source)
+            .arg("-o")
+            .arg(&output)
+            .output()
+            .map_err(|e| format!("rustc std shim: {e}"))?;
+        if !status.status.success() {
+            return Err(format!(
+                "failed to build the Rust std shim: {}",
+                String::from_utf8_lossy(&status.stderr)
+            ));
+        }
+        return Ok(output);
+    }
+    Err(format!(
+        "no rustc matching the hosted runtime rlib's compiler ({wanted}) was found; tried: {}. \
+         The rlib's std/core/alloc references are v0-mangled with that compiler's crate hashes. \
+         Install that toolchain or set RUSTC. Install prerequisites with: \
+         sh scripts/setup/bootstrap-prereqs.shs install",
+        seen.join("; ")
+    ))
 }
 
 pub(crate) fn find_hosted_runtime_rlib(runtime_path: &Path) -> Option<PathBuf> {
@@ -674,6 +1101,73 @@ pub(crate) fn find_simple_core_runtime_library() -> Option<PathBuf> {
     None
 }
 
+/// Spell a path for an external tool's argv. The native-build cache root is
+/// Windows verbatim (`\\?\C:\...`, see `win_long_path`), so every path under it
+/// inherits that form, but `llvm-nm` rejects it ("invalid argument"). That nm
+/// failure made `read_global_symbols` return no symbols, `generate_init_caller`
+/// found no `__module_init_*`, and the stage-2 binary ran with every module
+/// global null (SEGV in the first registry read). LLVM tools lift MAX_PATH
+/// themselves, so the plain absolute form is safe to pass.
+pub(crate) fn external_tool_path<P: AsRef<Path>>(path: P) -> PathBuf {
+    let path = path.as_ref();
+    #[cfg(windows)]
+    {
+        let raw = path.as_os_str().to_string_lossy();
+        if let Some(rest) = raw.strip_prefix(r"\\?\UNC\") {
+            return PathBuf::from(format!(r"\\{rest}"));
+        }
+        if let Some(rest) = raw.strip_prefix(r"\\?\") {
+            return PathBuf::from(rest);
+        }
+    }
+    path.to_path_buf()
+}
+
+/// Respell every verbatim (`\?\C:\...`) argument of an external tool's command
+/// in plain absolute form.
+///
+/// `external_tool_path` above fixes ONE path at a time, which works when a call
+/// site knows which of its arguments is a path. A link line does not: the
+/// clang-driver link in `linker.rs` assembles 100+ arguments across a dozen
+/// branches (objects, archives, the main stub, the init caller, the runtime
+/// supplement, `-o`), and any of them can inherit the verbatim spelling from
+/// the native-build cache root.
+///
+/// GNU `ld` cannot consume that spelling at all. Measured 2026-09-26 on a
+/// Windows GNU-ABI Stage 2 link (mingw-winlibs 16.2.0 `ld.exe`), every verbatim
+/// argument was truncated to its last component and the whole link failed:
+///
+/// ```text
+/// ld.exe: cannot find \\_main_stub.o: No such file or directory
+/// ld.exe: cannot find \\libspl_objects.a: No such file or directory
+/// ```
+///
+/// Passing the plain form is safe for both linkers for the reason
+/// `external_tool_path` already gives: LLVM tools lift MAX_PATH themselves, and
+/// GNU ld has no other spelling it accepts.
+pub(crate) fn respell_args_for_external_tool(
+    cmd: &std::process::Command,
+) -> std::process::Command {
+    let mut rebuilt = std::process::Command::new(cmd.get_program());
+    for arg in cmd.get_args() {
+        if arg.to_string_lossy().starts_with(r"\\?\") {
+            rebuilt.arg(external_tool_path(Path::new(arg)));
+        } else {
+            rebuilt.arg(arg);
+        }
+    }
+    if let Some(dir) = cmd.get_current_dir() {
+        rebuilt.current_dir(dir);
+    }
+    for (key, value) in cmd.get_envs() {
+        match value {
+            Some(value) => rebuilt.env(key, value),
+            None => rebuilt.env_remove(key),
+        };
+    }
+    rebuilt
+}
+
 /// Resolve the `nm`-style symbol-table reader to use for scanning archives and
 /// object files.
 ///
@@ -693,12 +1187,12 @@ pub(crate) fn find_simple_core_runtime_library() -> Option<PathBuf> {
 ///    `PATH`): `/opt/homebrew/opt/llvm*/bin/llvm-nm`,
 ///    `/usr/local/opt/llvm*/bin/llvm-nm`.
 /// 3. Fall back to plain `nm`.
-pub(super) fn nm_command() -> std::process::Command {
-    static NM_TOOL: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+pub(super) fn nm_command() -> Result<std::process::Command, String> {
+    static NM_TOOL: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
     let tool = NM_TOOL.get_or_init(|| {
         if let Ok(path) = std::env::var("SIMPLE_NM") {
             if !path.is_empty() {
-                return PathBuf::from(path);
+                return Some(PathBuf::from(path));
             }
         }
 
@@ -712,23 +1206,56 @@ pub(super) fn nm_command() -> std::process::Command {
             .into_iter()
             .filter_map(|path| llvm_nm_major_version(&path).map(|version| (version, path)))
             .max_by_key(|(version, _)| *version);
-        match best {
-            Some((_, path)) => path,
-            None => PathBuf::from("nm"),
-        }
+        // No plain-`nm` fallback: see missing_llvm_tool_error.
+        best.map(|(_, path)| path)
     });
-    std::process::Command::new(tool)
+    match tool {
+        Some(path) => Ok(std::process::Command::new(path)),
+        None => Err(missing_llvm_tool_error("llvm-nm")),
+    }
 }
 
 fn which_on_path(tool: &str) -> Option<PathBuf> {
     let path_var = std::env::var_os("PATH")?;
     for dir in std::env::split_paths(&path_var) {
-        let candidate = dir.join(tool);
-        if candidate.is_file() {
-            return Some(candidate);
+        for name in executable_file_names(tool) {
+            let candidate = dir.join(&name);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
         }
     }
     None
+}
+
+/// File names an executable `tool` can have on disk. On Windows a bare
+/// `llvm-nm` never exists -- the file is `llvm-nm.exe` -- so probing only the
+/// bare name made `nm_command` silently fall back to plain `nm`, which on the
+/// bootstrap PATH is MSYS2's GNU nm. GNU nm cannot open paths longer than
+/// MAX_PATH ("No such file"), which failed the stage-2 full-CLI link on the
+/// deep native-incremental cache; llvm-nm widens long paths itself.
+fn executable_file_names(tool: &str) -> Vec<String> {
+    if cfg!(windows) && !tool.to_ascii_lowercase().ends_with(".exe") {
+        vec![format!("{tool}.exe"), tool.to_string()]
+    } else {
+        vec![tool.to_string()]
+    }
+}
+
+#[cfg(test)]
+mod executable_file_name_tests {
+    use super::executable_file_names;
+
+    #[test]
+    fn windows_probes_the_exe_name_first() {
+        let names = executable_file_names("llvm-nm");
+        if cfg!(windows) {
+            assert_eq!(names, vec!["llvm-nm.exe".to_string(), "llvm-nm".to_string()]);
+        } else {
+            assert_eq!(names, vec!["llvm-nm".to_string()]);
+        }
+        assert_eq!(executable_file_names("llvm-nm.exe"), vec!["llvm-nm.exe".to_string()]);
+    }
 }
 
 fn homebrew_llvm_nm_candidates() -> Vec<PathBuf> {
@@ -768,7 +1295,7 @@ fn llvm_nm_major_version(path: &Path) -> Option<u32> {
 }
 
 pub(super) fn archive_defined_symbols(path: &Path) -> Option<HashSet<String>> {
-    let output = nm_command().arg("-g").arg("--defined-only").arg(path).output();
+    let output = nm_command().ok()?.arg("-g").arg("--defined-only").arg(external_tool_path(path)).output();
     let Ok(output) = output else {
         return None;
     };
@@ -871,6 +1398,52 @@ pub(crate) fn find_compiler_rt_builtins(triple: &str) -> Option<PathBuf> {
     }
 }
 
+/// Find the compiler-rt builtins archive for a HOSTED clang/clang-cl Windows
+/// MSVC link (`.lib`, not the freestanding ELF/Mach-O archive
+/// `find_compiler_rt_builtins` above resolves).
+///
+/// GCC-style CPU-dispatch code (`__builtin_cpu_init`/`__builtin_cpu_supports`,
+/// used by `src/runtime/runtime_simd_dispatch.c`) lowers to references to
+/// `__cpu_model`/`__cpu_indicator_init`. On the GNU/mingw lane these are
+/// resolved automatically because g++/gcc always link libgcc; on Linux/macOS
+/// clang also links its own compiler-rt/libclang_rt.builtins by default. On
+/// Windows MSVC, `--rtlib` is NOT applied by default the same way, so nothing
+/// pulls in `clang_rt.builtins-<arch>.lib` and these symbols are genuinely
+/// unresolved (LNK2019) -- this was previously masked only because the linker
+/// fabricated a stub definition for them (removed in
+/// `is_compiler_rt_builtin_symbol`, since that stub collided with the real
+/// definition on the GNU lane). Measured 2026-08-31: `clang --target=
+/// x86_64-pc-windows-msvc -print-libgcc-file-name` alone reports the bare
+/// name `libgcc.a` (not found on disk, MSVC has no libgcc); `-print-file-name=
+/// clang_rt.builtins-<arch>.lib` resolves the real path under the clang
+/// resource directory (`.../lib/clang/<ver>/lib/windows/`) for both `clang`
+/// and `clang-cl`. Only clang-family drivers understand this flag -- a
+/// straight `cl.exe` MSVC_C_COMPILERS entry (last resort, behind clang-cl and
+/// clang) is skipped, since it never provides these GCC-ABI symbols either
+/// and querying it for `-print-file-name` is not meaningful.
+pub(crate) fn find_msvc_compiler_rt_builtins(cc: &str, arch_name: &str) -> Option<PathBuf> {
+    if !cc.contains("clang") {
+        return None;
+    }
+    let output = std::process::Command::new(cc)
+        .arg(format!("-print-file-name=clang_rt.builtins-{arch_name}.lib"))
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if raw.is_empty() {
+        return None;
+    }
+    let path = PathBuf::from(raw);
+    if path.exists() && path.is_file() {
+        Some(path)
+    } else {
+        None
+    }
+}
+
 /// Find an objcopy tool that can handle the host object format.
 ///
 /// Prefer the NEWEST llvm-objcopy (same rationale as `nm_command`): LLVM 18's
@@ -898,9 +1471,7 @@ pub(crate) fn find_objcopy_tool() -> Option<String> {
     {
         return Some("llvm-objcopy".to_string());
     }
-    if std::process::Command::new("objcopy").arg("--version").output().is_ok() {
-        return Some("objcopy".to_string());
-    }
+    // No GNU `objcopy` fallback: see missing_llvm_tool_error.
     None
 }
 
@@ -920,16 +1491,15 @@ fn canonical_archive_symbol(symbol: &str) -> &str {
 /// is how runtime_memtrack.c's rt_heap_* fallbacks yield to the Rust runtime
 /// accounting (93e0b028ffb). `archive_global_symbols` counts these as defined.
 pub(super) fn archive_weak_global_symbols(path: &Path) -> Result<BTreeSet<String>, String> {
-    // Mach-O nm's single-letter output labels weak text definitions T. Read
-    // the explicit weak-definition flags so owner-overridable fallbacks are
-    // not mistaken for strong definitions. Inspection failures remain fatal.
+    // Mach-O weak definitions appear as T in the one-letter nm output. Read
+    // their explicit flags; an undefined weak reference is not an owner.
     let macho = cfg!(target_os = "macos");
-    let output = nm_command()
-        .arg("-g")
-        .arg(if macho { "-m" } else { "-p" })
-        .arg(path)
-        .output()
-        .map_err(|err| format!("failed to inspect archive {}: {err}", path.display()))?;
+    let output = {
+        let mut cmd = nm_command()?;
+        cmd.arg("-g").arg(if macho { "-m" } else { "-p" });
+        cmd.arg(external_tool_path(path)).output()
+    }
+    .map_err(|err| format!("failed to inspect archive {}: {err}", path.display()))?;
     if !output.status.success() {
         return Err(format!(
             "failed to inspect archive {}: {}",
@@ -945,19 +1515,48 @@ pub(super) fn parse_archive_weak_global_symbols(output: &str, macho: bool) -> BT
     for line in output.lines() {
         let fields: Vec<&str> = line.split_whitespace().collect();
         if macho {
-            // Definitions have an address and section. Undefined weak
-            // references are not definitions and must never grant authority.
+            // LLVM bitcode definitions use dashes until link. Undefined weak
+            // references still carry an explicit (undefined) section.
+            let has_address = fields.first().is_some_and(|address| {
+                address.bytes().all(|byte| byte.is_ascii_hexdigit())
+                    || matches!(*address, "--------" | "----------------")
+            });
             if fields.len() < 5
-                || !fields[0].bytes().all(|byte| byte.is_ascii_hexdigit())
+                || !has_address
                 || !fields[1].starts_with('(')
+                || !fields[1].ends_with(')')
                 || fields[1] == "(undefined)"
-                || fields[2..4] != ["weak", "external"]
             {
                 continue;
             }
-            let name = match &fields[4..] {
-                [name] => *name,
-                ["automatically", "hidden", name] => *name,
+            let mut flags = &fields[2..];
+            if flags.starts_with(&["[referenced", "dynamically]"]) {
+                flags = &flags[2..];
+            }
+            if !flags.starts_with(&["weak", "external"]) {
+                continue;
+            }
+            flags = &flags[2..];
+            if flags.starts_with(&["automatically", "hidden"]) {
+                flags = &flags[2..];
+            }
+            loop {
+                let annotation_len = if flags.starts_with(&["[no", "dead", "strip]"]) {
+                    3
+                } else if flags.starts_with(&["[symbol", "resolver]"])
+                    || flags.starts_with(&["[alt", "entry]"])
+                    || flags.starts_with(&["[cold", "func]"])
+                {
+                    2
+                } else if flags.starts_with(&["[Thumb]"]) {
+                    1
+                } else {
+                    break;
+                };
+                flags = &flags[annotation_len..];
+            }
+            let name = match flags {
+                [name] if !name.starts_with('[') => *name,
                 _ => continue,
             };
             weak.insert(name.to_string());
@@ -976,10 +1575,10 @@ pub(super) fn parse_archive_weak_global_symbols(output: &str, macho: bool) -> BT
 }
 
 pub(super) fn archive_global_symbols(path: &Path) -> Result<(BTreeMap<String, usize>, BTreeSet<String>), String> {
-    let output = nm_command()
+    let output = nm_command()?
         .arg("-g")
         .arg("-p")
-        .arg(path)
+        .arg(external_tool_path(path))
         .output()
         .map_err(|err| format!("failed to inspect archive {}: {err}", path.display()))?;
     if !output.status.success() {
@@ -1055,6 +1654,26 @@ struct Stage4CliCProviderSpec {
     undefined: Stage4CliCUndefinedPolicy,
 }
 
+// Stage4's C time provider is a THIN ABI SHIM only: a hosted clock plus the
+// bounded thread-local progress slots. Calendar arithmetic and progress policy
+// are owned by `std.common.time_utils` in pure Simple (fa170a1350d
+// "refactor(runtime): move timestamp policy to Simple"), and the C bodies for
+// rt_timestamp_* / rt_progress_{init,reset,get_elapsed_seconds} survive ONLY
+// inside `#ifdef SIMPLE_BOOTSTRAP_TIMESTAMP_COMPAT` in
+// src/runtime/runtime_timestamp.c -- a macro defined in exactly one place
+// (src/compiler_rust/runtime/build.rs) for the Rust seed's cdylib, which cannot
+// link Pure Simple modules. Stage4 never defines it, so expecting those 12
+// names here asserted a duplicate policy provider that the architecture
+// deliberately removed.
+//
+// fa170a1350d corrected this list to the 6 shim symbols; 929de773c88 (#150,
+// "fix(windows): native-build works end to end") reintroduced the pre-refactor
+// 14 as a stale-snapshot clobber -- it never touched runtime_timestamp.c and
+// added no replacement Windows provider, so this is a revert, not a redesign.
+//
+// Restored 2026-09-06 after bcc52735edb (a stale "Merge remote-tracking branch
+// 'origin/main' into HEAD" in the PR #261 lineage) rewound 0e3bf3f535a (#273)
+// and reinstated the pre-refactor 14 for a THIRD time.
 const STAGE4_C_TIME_DEFINITIONS: &[&str] = &[
     "rt_progress_clock_now_nanos",
     "rt_progress_tls_clear",
@@ -1065,6 +1684,9 @@ const STAGE4_C_TIME_DEFINITIONS: &[&str] = &[
 ];
 
 const STAGE4_C_SQLITE_DEFINITIONS: &[&str] = &[
+    // The same provider source exports this version probe for the demand-load
+    // bridge; retain it in the exact static archive contract as well.
+    "spl_sqlite_provider_abi_version_v1",
     "rt_sqlite_begin",
     "rt_sqlite_bind_float",
     "rt_sqlite_bind_int",
@@ -1095,6 +1717,18 @@ const STAGE4_C_SQLITE_DEFINITIONS: &[&str] = &[
 ];
 
 const STAGE4_C_TIME_UNDEFINED: &[&str] = &["clock_gettime"];
+
+/// Undefined symbols a provider MAY carry without being required to.
+///
+/// `_tlv_bootstrap` is emitted by clang into any Mach-O object that declares a
+/// thread-local — `runtime_timestamp.c:15` defines `RT_TIME_THREAD_LOCAL` as
+/// `_Thread_local`, so every macOS build of that provider references it. It is
+/// resolved by dyld/libSystem, never by us. It cannot appear in an ELF object,
+/// so permitting it unconditionally weakens nothing on Linux while unblocking
+/// the Stage-4 link on Apple targets. Membership here only removes a symbol
+/// from `unexpected_undefined`; it is never treated as required, so a provider
+/// that does not reference it still validates.
+const STAGE4_C_PERMITTED_UNDEFINED: &[&str] = &["_tlv_bootstrap"];
 
 const STAGE4_C_SQLITE_UNDEFINED: &[&str] = &[
     // NUL-terminating copies (commit 8d04ee87582) allocate with malloc/free and
@@ -1198,6 +1832,7 @@ fn validate_stage4_cli_c_provider_archive(
     let unexpected_undefined: Vec<&str> = actual_undefined
         .difference(&expected_undefined)
         .map(String::as_str)
+        .filter(|symbol| !STAGE4_C_PERMITTED_UNDEFINED.contains(symbol))
         .collect();
     if !missing.is_empty()
         || !unexpected.is_empty()
@@ -1227,6 +1862,11 @@ pub(super) fn validate_stage4_cli_c_provider_archive_contract(path: &Path, sourc
 
 fn archive_definition_owners(archives: &[(&str, &Path)]) -> Result<BTreeMap<String, String>, String> {
     let mut owners = BTreeMap::<String, String>::new();
+    // Core-C fallbacks are weak by design (runtime_native.c SPL_CORE_C_WEAK:
+    // "Full hosted builds provide stronger implementations"), so a strong
+    // provider definition overrides them at link time. Only that pairing is
+    // admitted; any other overlap stays fatal.
+    let mut weak_core = BTreeSet::<String>::new();
     for (label, archive) in archives {
         // Providers must arrive constructor-free (validate_stage4_cli_c_provider_archive
         // enforces the same on each one). The CORE is different: it is the whole C
@@ -1250,15 +1890,23 @@ fn archive_definition_owners(archives: &[(&str, &Path)]) -> Result<BTreeMap<Stri
         if defined.is_empty() {
             return Err(format!("Stage4 archive {label} defines no global symbols"));
         }
+        let weak = archive_weak_global_symbols(archive)?;
         for (raw_symbol, count) in defined {
             let symbol = canonical_archive_symbol(&raw_symbol).to_string();
             if count != 1 {
                 return Err(format!("Stage4 archive {label} defines `{symbol}` {count} times"));
             }
+            let is_weak = weak.contains(&raw_symbol);
             if let Some(first_owner) = owners.insert(symbol.clone(), (*label).to_string()) {
+                if !is_weak && weak_core.remove(&symbol) {
+                    continue;
+                }
                 return Err(format!(
                     "Stage4 archive overlap: `{symbol}` is defined by both {first_owner} and {label}"
                 ));
+            }
+            if *label == "core" && is_weak {
+                weak_core.insert(symbol);
             }
         }
     }
@@ -1315,11 +1963,11 @@ fn stage4_system_library_path(cc: &str, name: &str) -> Result<PathBuf, String> {
 }
 
 fn stage4_shared_library_definitions(path: &Path) -> Result<BTreeSet<String>, String> {
-    let output = nm_command()
+    let output = nm_command()?
         .arg("-D")
         .arg("-g")
         .arg("--defined-only")
-        .arg(path)
+        .arg(external_tool_path(path))
         .output()
         .map_err(|err| format!("failed to inspect system library {}: {err}", path.display()))?;
     if !output.status.success() {
@@ -1461,11 +2109,16 @@ fn validate_stage4_macos_system_ownership(archives: &[PathBuf], cc: &str, build_
             .arg("-Wl,-undefined,error")
             .arg(format!("-Wl,-force_load,{}", archive.display()));
         if matches!(spec.undefined, Stage4CliCUndefinedPolicy::Sqlite) {
-            // These two ABI names are deliberately owned by the adjacent
+            // These three ABI names are deliberately owned by the adjacent
             // core-C capsule; every remaining undefined must resolve through
             // the macOS SDK's SQLite/System libraries in this strict probe.
+            // The set must stay in step with STAGE4_C_SQLITE_UNDEFINED and with
+            // validate_stage4_system_library_ownership, which both already list
+            // all three. `_rt_string_len` was missing here, so `_borrow_string`
+            // in runtime_sqlite.o failed this probe on every macOS Stage-4 link.
             command
                 .arg("-Wl,-U,_rt_string_data")
+                .arg("-Wl,-U,_rt_string_len")
                 .arg("-Wl,-U,_rt_string_new")
                 .arg("-lsqlite3");
         }
@@ -1554,7 +2207,7 @@ pub(crate) fn build_stage4_cli_c_provider_archives(build_dir: &Path) -> Result<V
         )
     })?;
     let cc = target_c_compiler(target);
-    let ar = find_archive_tool();
+    let ar = find_archive_tool()?;
     let riscv_vector = std::env::var("SIMPLE_RUNTIME_RISCV64_VECTOR").ok().as_deref() == Some("1");
     let mut archives = Vec::new();
 
@@ -1578,7 +2231,8 @@ pub(crate) fn build_stage4_cli_c_provider_archives(build_dir: &Path) -> Result<V
             .arg("-fno-builtin")
             .arg("-fPIC")
             .arg("-std=gnu11")
-            .args(core_c_target_flags(target, spec.source, riscv_vector))
+            .args(msvc_c11_atomics_flags(&cc))
+            .args(core_c_target_flags(target, &cc, spec.source, riscv_vector))
             .arg(format!("-I{}", runtime_root.display()))
             .arg(format!("-I{}", runtime_root.join("platform").display()))
             .arg(runtime_root.join(spec.source))
@@ -1704,6 +2358,32 @@ pub(crate) fn build_stage4_rust_runtime_projection_archive(
     allowed_external_runtime_symbols: &[String],
     temp_dir: &Path,
 ) -> Result<PathBuf, String> {
+    // A live entry may need only the compiler backfill and core-C providers.
+    // In that case there are no Rust runtime roots to project. Keep an empty
+    // archive in the final link so any missed dependency still fails there.
+    if requested_symbols.is_empty() {
+        if let Some(symbol) = allowed_external_runtime_symbols
+            .iter()
+            .find(|symbol| !symbol.starts_with("rt_") && !symbol.starts_with("spl_"))
+        {
+            return Err(format!("Stage4 allowed external `{symbol}` is not a runtime ABI symbol"));
+        }
+        std::fs::create_dir_all(temp_dir)
+            .map_err(|err| format!("create empty Stage4 Rust runtime capsule directory: {err}"))?;
+        let output = temp_dir.join("libsimple_stage4_rust_runtime.a");
+        let _ = std::fs::remove_file(&output);
+        let ar = find_archive_tool()?;
+        let created = archive_create_command(&ar, &output, &[], false, true)
+            .output()
+            .map_err(|err| format!("execute empty Stage4 Rust runtime archive tool {ar}: {err}"))?;
+        if !created.status.success() {
+            return Err(format!(
+                "create empty Stage4 Rust runtime capsule: {}",
+                String::from_utf8_lossy(&created.stderr).trim()
+            ));
+        }
+        return Ok(output);
+    }
     project_stage4_archive_closure(
         &[rust_runtime_archive],
         requested_symbols,
@@ -1731,6 +2411,10 @@ pub(crate) fn build_bootstrap_mutex_runtime_capsule_archive(
         "rt_mem_snapshot_open",
         "rt_mem_snapshot_record",
         "rt_mem_snapshot_close",
+        "rt_file_create_excl",
+        "rt_file_sync",
+        "rt_simple_abi_version",
+        "rt_simple_abi_version_deferred",
     ]
     .into_iter()
     .map(str::to_string)
@@ -1764,6 +2448,7 @@ fn project_stage4_archive_closure(
     let closure_object = temp_dir.join(format!("{stem}_closure.o"));
     let localized_object = temp_dir.join(format!("{stem}_local.o"));
     let localize_path = temp_dir.join(format!("{stem}_localize.syms"));
+    let weaken_path = temp_dir.join(format!("{stem}_weaken.syms"));
     if inputs.is_empty() {
         return Err("Stage4 archive projection requires at least one input".to_string());
     }
@@ -1822,6 +2507,12 @@ fn project_stage4_archive_closure(
         })?;
         let cc = find_c_compiler();
         let mut closure_cmd = std::process::Command::new(&cc);
+        // A relocatable closure made by GNU ld can carry misaligned AArch64
+        // LDST relocations into an lld final link. Use the selected linker
+        // for both steps so the capsule has the same relocation semantics.
+        if let Some(linker) = super::linker::requested_linker_driver_name()? {
+            closure_cmd.arg(format!("-fuse-ld={linker}"));
+        }
         closure_cmd.arg("-nostdlib").arg("-Wl,-r");
         #[cfg(target_os = "linux")]
         closure_cmd.arg("-no-pie").arg("-Wl,--gc-sections");
@@ -1918,28 +2609,53 @@ fn project_stage4_archive_closure(
             // leaves the final link undefined (observed run 9, 2026-07-24).
             .filter(|raw| canonical_archive_symbol(raw) != "rust_eh_personality")
             // Allowed-external runtime symbols are OWNED by the outer link (the
-            // Rust runtime's rt_heap_* accounting). The core-C archive ships
-            // WEAK fallbacks for them in the same object as rt_mem_snapshot_*,
-            // so the closure carries them; localizing a weak fallback would bind
-            // the capsule to a private copy the strong owner can never override.
-            // Keep them global; `verify` below insists they stay weak.
+            // Rust runtime's rt_heap_* accounting, or -- for the Stage4 Rust
+            // runtime projection -- every rt_/spl_ symbol the core-C providers
+            // also define). The closure carries them because `ld -r` cannot
+            // drop a symbol from an object it otherwise needs (Rust's codegen
+            // units bundle many functions per .o, so pulling in one requested
+            // root can pull its whole CGU's exports along as passengers, e.g.
+            // rt_array_get/rt_string_concat riding in with unrelated roots on
+            // aarch64-apple-darwin, 2026-09-07). Keep them global rather than
+            // localizing a copy the strong owner could never override.
             .filter(|raw| !allowed_external.contains(canonical_archive_symbol(raw)))
             .map(String::as_str)
             .collect::<Vec<_>>()
             .join("\n");
-        std::fs::write(
-            &localize_path,
-            if localize_text.is_empty() {
-                String::new()
-            } else {
-                localize_text + "\n"
-            },
-        )
-        .map_err(|err| format!("failed to write Stage4 runtime capsule localization list: {err}"))?;
+        // Always newline-terminated: GNU objcopy 2.42 exits 1 with no message
+        // on a zero-byte --localize-symbols/--weaken-symbols file, while a
+        // lone "\n" is an empty list to both GNU and LLVM objcopy.
+        std::fs::write(&localize_path, localize_text + "\n")
+            .map_err(|err| format!("failed to write Stage4 runtime capsule localization list: {err}"))?;
 
-        let objcopy = find_objcopy_tool().ok_or_else(|| "Stage4 runtime capsule requires objcopy".to_string())?;
+        // Allowed-external symbols that are kept global (above) must yield to
+        // the owner at the final link, i.e. be WEAK, not strong. The core-C
+        // archive already ships its allowed-external fallbacks
+        // (rt_heap_live_bytes/rt_heap_peak_bytes) as source-level
+        // `__attribute__((weak))`, so weakening them again here is a no-op.
+        // The Rust runtime crate's rt_/spl_ C-ABI exports (rt_array_get,
+        // rt_string_concat, ...) have no such attribute available on stable
+        // Rust -- `#[no_mangle] pub extern "C" fn` is always STRONG -- so
+        // without this step every one of them that rides along in a closure
+        // (see above) trips "defines owner-provided runtime symbols STRONGLY"
+        // even though nothing about the source is wrong; the property this
+        // projection promises (owner-overridable) was previously only
+        // ASSUMED true of the input archive instead of being enforced by the
+        // tool that makes the promise. `--weaken-symbols` makes it true
+        // unconditionally, and the STRONGLY check below still verifies it.
+        let weaken_text = closure_defined
+            .keys()
+            .filter(|raw| allowed_external.contains(canonical_archive_symbol(raw)))
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(&weaken_path, weaken_text + "\n")
+            .map_err(|err| format!("failed to write Stage4 runtime capsule weaken list: {err}"))?;
+
+        let objcopy = find_objcopy_tool().ok_or_else(|| missing_llvm_tool_error("llvm-objcopy") + " (Stage4 runtime capsule)")?;
         let localized = std::process::Command::new(&objcopy)
             .arg(format!("--localize-symbols={}", localize_path.display()))
+            .arg(format!("--weaken-symbols={}", weaken_path.display()))
             .arg("--remove-section=.init_array")
             .arg("--remove-section=.init_array.*")
             .arg("--remove-section=.ctors")
@@ -1958,7 +2674,8 @@ fn project_stage4_archive_closure(
             .map_err(|err| format!("failed to execute Stage4 runtime capsule objcopy: {err}"))?;
         if !localized.status.success() {
             return Err(format!(
-                "Stage4 runtime capsule objcopy failed: {}",
+                "Stage4 runtime capsule objcopy failed ({}): {}",
+                localized.status,
                 String::from_utf8_lossy(&localized.stderr).trim()
             ));
         }
@@ -2015,7 +2732,7 @@ fn project_stage4_archive_closure(
             ));
         }
 
-        let ar = find_archive_tool();
+        let ar = find_archive_tool()?;
         let archived = archive_create_command(&ar, &output, std::slice::from_ref(&localized_object), false, true)
             .output()
             .map_err(|err| format!("failed to execute deterministic archive tool {ar}: {err}"))?;
@@ -2066,8 +2783,9 @@ fn project_stage4_archive_closure(
 
 /// Build the Stage-4 compiler hook archive without importing a second runtime.
 ///
-/// The dedicated archive's globally defined `rt_cranelift_*` symbols are the
-/// exact export contract. On GNU/Linux, a relocatable link roots those exports
+/// The dedicated archive's globally defined `rt_cranelift_*` symbols and the
+/// three versioned AOT configuration hooks form the exact export contract.
+/// On GNU/Linux, a relocatable link roots those exports
 /// and section-GCs everything outside their dependency closure. Surviving
 /// non-contract definitions are localized; the result is rejected unless its
 /// public ABI is contract-only and disjoint from every provider.
@@ -2105,7 +2823,14 @@ pub(crate) fn build_compiler_backfill_archive(
         let mut manifest_raw = BTreeSet::new();
         for (symbol, count) in &source_defined {
             let canonical = canonical_archive_symbol(symbol);
-            if canonical.starts_with("rt_cranelift_") {
+            if canonical.starts_with("rt_cranelift_")
+                || matches!(
+                    canonical,
+                    "spl_cranelift_new_aot_module_config_v2"
+                        | "spl_cranelift_aot_isa_feature_v2"
+                        | "spl_cranelift_aot_opt_level_v2"
+                )
+            {
                 *contract_counts.entry(canonical.to_string()).or_insert(0usize) += *count;
                 manifest_raw.insert(symbol.clone());
             }
@@ -2147,6 +2872,12 @@ pub(crate) fn build_compiler_backfill_archive(
         })?;
         let cc = find_c_compiler();
         let mut closure_cmd = std::process::Command::new(&cc);
+        // Match the final linker's relocation handling. GNU ld's partial
+        // AArch64 closure can leave misaligned LDST128 relocations that lld
+        // rejects when the localized backfill reaches the final link.
+        if let Some(linker) = super::linker::requested_linker_driver_name()? {
+            closure_cmd.arg(format!("-fuse-ld={linker}"));
+        }
         closure_cmd.arg("-nostdlib").arg("-Wl,-r");
         #[cfg(target_os = "linux")]
         closure_cmd.arg("-no-pie").arg("-Wl,--gc-sections");
@@ -2213,7 +2944,7 @@ pub(crate) fn build_compiler_backfill_archive(
         )
         .map_err(|err| format!("failed to write compiler backfill localization list: {err}"))?;
 
-        let objcopy = find_objcopy_tool().ok_or_else(|| "compiler backfill requires objcopy".to_string())?;
+        let objcopy = find_objcopy_tool().ok_or_else(|| missing_llvm_tool_error("llvm-objcopy") + " (compiler backfill)")?;
         let command_output = std::process::Command::new(&objcopy)
             .arg(format!("--localize-symbols={}", localize_path.display()))
             .arg("--remove-section=.init_array")
@@ -2307,7 +3038,7 @@ pub(crate) fn build_compiler_backfill_archive(
             ));
         }
 
-        let archive_tool = find_archive_tool();
+        let archive_tool = find_archive_tool()?;
         let archive_result = archive_create_command(
             &archive_tool,
             &output,
@@ -2370,9 +3101,10 @@ impl std::fmt::Display for StripError {
         match self {
             StripError::ObjcopyNotFound => write!(
                 f,
-                "[LIM-010] no llvm-objcopy/objcopy was found, so LLVM static constructors could not \
+                "[LIM-010] no llvm-objcopy was found, so LLVM static constructors could not \
                  be removed from the archive. Linking it unstripped re-registers LLVM's CLI options \
-                 twice and segfaults Stage 3 (exit 139). Install LLVM binutils or put objcopy on PATH."
+                 twice and segfaults Stage 3 (exit 139). {}",
+                missing_llvm_tool_error("llvm-objcopy")
             ),
             StripError::ObjcopyFailed { exit_code, stderr } => write!(
                 f,
@@ -2586,6 +3318,17 @@ pub(crate) fn is_system_symbol(sym: &str) -> bool {
     }
 }
 
+pub(crate) fn is_system_symbol_for_target(sym: &str, target: simple_common::target::Target) -> bool {
+    if target.os == simple_common::target::TargetOS::Windows {
+        let name = sym.strip_prefix('_').unwrap_or(sym);
+        return is_windows_system_name(sym)
+            || is_windows_system_name(name)
+            || is_windows_system_prefix(sym)
+            || is_windows_system_prefix(name);
+    }
+    is_system_symbol(sym)
+}
+
 /// Return true for libgcc/compiler-rt low-level helper names.
 ///
 /// Freestanding links must resolve these from compiler-rt/libgcc, not from the
@@ -2595,6 +3338,21 @@ pub(crate) fn is_compiler_rt_builtin_symbol(sym: &str) -> bool {
     let name = sym.strip_prefix('_').unwrap_or(sym);
     if !sym.starts_with("__") && !name.starts_with("__") {
         return false;
+    }
+    // GCC's x86 CPU-feature-dispatch support symbols, defined with real
+    // bodies/data in libgcc's `cpuinfo.o` (`__cpu_indicator_init` a function,
+    // `__cpu_model`/`__cpu_features2` `.bss` data) and referenced whenever
+    // generated code uses `__builtin_cpu_supports`/`__builtin_cpu_init`. An
+    // exact-name check (not a prefix) avoids swallowing an unrelated
+    // application symbol that merely starts with "__cpu". Weak-stubbing
+    // `__cpu_model` here fabricated a *function* returning a nil sentinel
+    // under the same name as libgcc's *data* symbol, which collided at final
+    // link as "multiple definition of `__cpu_model`" (Windows/MinGW GNU
+    // lane, `windows_mingw()` in link_config.rs, whose `system_scan_libs` is
+    // empty so this stub generator never sees libgcc's real definition).
+    let cpu_dispatch_exact = ["__cpu_model", "__cpu_indicator_init", "__cpu_features2"];
+    if cpu_dispatch_exact.contains(&sym) || cpu_dispatch_exact.contains(&name) {
+        return true;
     }
     let builtin_prefixes = [
         "__add",
@@ -2637,7 +3395,6 @@ pub(crate) fn is_compiler_rt_builtin_symbol(sym: &str) -> bool {
         .any(|prefix| sym.starts_with(prefix) || name.starts_with(prefix))
 }
 
-#[cfg(target_os = "windows")]
 fn is_windows_system_name(name: &str) -> bool {
     matches!(
         name,
@@ -2665,6 +3422,8 @@ fn is_windows_system_name(name: &str) -> bool {
             | "strstr"
             | "strchr"
             | "strrchr"
+            | "wcscmp"
+            | "wcscpy"
             | "strtol"
             | "strtoul"
             | "strtod"
@@ -2705,6 +3464,7 @@ fn is_windows_system_name(name: &str) -> bool {
             | "exit"
             | "_exit"
             | "abort"
+            | "raise"
             | "atexit"
             | "getenv"
             | "system"
@@ -2757,6 +3517,7 @@ fn is_windows_system_name(name: &str) -> bool {
             | "trunc"
             | "truncf"
             | "_hypot"
+            | "hypot"
             | "qsort"
             | "bsearch"
             | "abs"
@@ -2827,7 +3588,6 @@ fn is_windows_system_name(name: &str) -> bool {
     )
 }
 
-#[cfg(target_os = "windows")]
 fn is_windows_system_prefix(name: &str) -> bool {
     name.starts_with("__imp_")
         || name.starts_with("__mingw_")
@@ -3112,6 +3872,7 @@ fn is_known_system_name(name: &str) -> bool {
             // only in is_macos_system_symbol, so on a Linux host they were
             // weak-stub candidates (test_cxx_abi_symbols_are_not_stub_candidates).
             | "clock_getres"
+            | "flock"
             | "recvmsg"
             | "sendfile"
             | "sigaltstack"
@@ -3212,6 +3973,7 @@ fn is_known_system_name(name: &str) -> bool {
             | "exit"
             | "_exit"
             | "abort"
+            | "raise"
             | "atexit"
             | "getenv"
             | "setenv"
@@ -3384,5 +4146,155 @@ fn is_known_system_name(name: &str) -> bool {
             | "madvise"
             | "mremap"
             | "mincore"
+            // glibc/POSIX names that were missing here and therefore became
+            // weak-stub candidates on this host. This is the same defect the
+            // "clock_getres/recvmsg/..." comment above records, and it is not
+            // cosmetic: a fabricated stub returns the tagged-nil sentinel 3, so
+            // a stubbed `bcmp` reports "different" for every comparison. On
+            // aarch64 clang lowers equality-only memcmp to `bcmp`, so every
+            // `text == text` and `starts_with` in a native-built binary
+            // silently returned false — which is exactly how the Stage-3
+            // admission planner rejected its own valid --bootstrap-reason.
+            // A weak definition in the executable also wins over libc's, so
+            // the linker never had a chance to fix it.
+            | "bcmp"
+            | "strncasecmp"
+            | "strcasecmp"
+            | "strpbrk"
+            | "strtok_r"
+            | "atoi"
+            | "remove"
+            | "fgetc"
+            | "isatty"
+            | "chmod"
+            | "fchmod"
+            | "fsync"
+            | "ftruncate"
+            | "pread"
+            | "pwrite"
+            | "openat"
+            | "mkdirat"
+            | "unlinkat"
+            | "faccessat"
+            | "getgid"
+            | "getpgid"
+            | "setpgid"
+            | "gethostname"
+            | "getpeername"
+            | "getsockname"
+            | "shutdown"
+            | "setrlimit"
+            | "sched_yield"
+            | "localtime_r"
+            | "dladdr"
+            | "wait4"
+            | "waitid"
+            | "sigismember"
+            | "sigpending"
+            | "sigwait"
+            | "tcgetattr"
+            | "tcsetattr"
+            | "pthread_once"
+            | "pthread_sigmask"
+            | "pthread_testcancel"
+            | "pthread_setcancelstate"
+            | "pthread_mutex_trylock"
+            | "pthread_cond_timedwait"
+            | "pthread_attr_init"
+            | "pthread_attr_destroy"
+            | "pthread_attr_setdetachstate"
+            | "__pthread_register_cancel"
+            | "__pthread_unregister_cancel"
+            | "__assert_fail"
+            | "__clear_cache"
+            | "__sigsetjmp"
+            // glibc's locale/ctype tables and its C23 scanf/strtol renames.
+            // glibc >= 2.38 emits the `__isoc23_*` spellings, so a host on a
+            // newer glibc than this list anticipated stubs them out.
+            | "__ctype_b_loc"
+            | "__ctype_tolower_loc"
+            | "__ctype_toupper_loc"
+            | "__isoc99_sscanf"
+            | "__isoc23_sscanf"
+            | "__isoc23_strtol"
+            | "__isoc23_strtoll"
+            | "__isoc23_strtoull"
     )
+}
+
+#[cfg(test)]
+mod llvm_tool_policy_tests {
+    use super::{build_rust_std_shim_for_rlib, is_llvm_archive_tool, missing_llvm_tool_error};
+
+    #[cfg(all(target_os = "windows", target_env = "msvc"))]
+    #[test]
+    fn bootstrap_tools_sqlite_sdk_loads_adjacent_dll_without_sdk_path() {
+        let directory = tempfile::tempdir().unwrap();
+        let (include, library, dll) = super::prepare_bootstrap_tools_sqlite_sdk(directory.path()).unwrap();
+        assert_eq!(std::fs::read_dir(&include).unwrap().count(), 1, "only sqlite3.h may be placed on MSVC's include path");
+        let source = directory.path().join("sqlite_sdk_version.c");
+        let executable = directory.path().join("sqlite_sdk_version.exe");
+        std::fs::write(&source, "#include <sqlite3.h>\n#include <stdio.h>\nint main(void) { int v = sqlite3_libversion_number(); printf(\"SQLite SDK version %d\\n\", v); return v >= 3000000 ? 0 : 1; }\n").unwrap();
+        let compiler = super::target_c_compiler(super::effective_target());
+        let link = std::process::Command::new(&compiler)
+            .arg("-O1").arg("-MD").arg(format!("-I{}", include.display()))
+            .arg(&source).arg(&library).arg(format!("-Fe{}", executable.display()))
+            .args(["-link", "-OPT:REF"]).output().unwrap();
+        assert!(link.status.success(), "real SQLite SDK link failed: {} {}", String::from_utf8_lossy(&link.stdout), String::from_utf8_lossy(&link.stderr));
+        super::stage_sqlite_runtime_dll(&dll, &executable).unwrap();
+        let system_root = std::env::var_os("SystemRoot").expect("Windows system root");
+        let system_path = std::path::Path::new(&system_root).join("System32");
+        let run = std::process::Command::new(&executable).env_clear()
+            .env("SystemRoot", &system_root).env("PATH", &system_path)
+            .env("TEMP", directory.path()).env("TMP", directory.path())
+            .current_dir(directory.path()).output().unwrap();
+        assert!(run.status.success(), "adjacent real SQLite DLL execution failed: {:?} {}", run.status.code(), String::from_utf8_lossy(&run.stderr));
+        assert!(String::from_utf8_lossy(&run.stdout).contains("SQLite SDK version "));
+    }
+
+    #[test]
+    fn missing_tool_error_names_the_tool_and_the_install_command() {
+        let message = missing_llvm_tool_error("llvm-nm");
+        assert!(message.contains("`llvm-nm`"), "{message}");
+        assert!(message.contains("sh scripts/setup/bootstrap-prereqs.shs install"), "{message}");
+    }
+
+    #[test]
+    fn only_llvm_archivers_are_accepted() {
+        assert!(is_llvm_archive_tool("llvm-ar"));
+        assert!(is_llvm_archive_tool(r"C:\LLVM\bin\llvm-ar.exe"));
+        assert!(is_llvm_archive_tool("/usr/lib/llvm-23/bin/llvm-lib"));
+        assert!(!is_llvm_archive_tool("ar"));
+        assert!(!is_llvm_archive_tool("/usr/bin/ar"));
+        assert!(!is_llvm_archive_tool("lib"));
+        assert!(!is_llvm_archive_tool(r"C:\msys64\mingw64\bin\ar.exe"));
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn bootstrap_tools_hosted_rlib_links_with_real_matching_std() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("hosted_probe.rs");
+        std::fs::write(&source, "#[no_mangle]\npub extern \"C\" fn hosted_probe_env_len() -> i64 { std::env::var(\"SIMPLE_BOOTSTRAP_STD_LINK_PROBE\").map(|text| text.len() as i64).unwrap_or(-1) }\n").unwrap();
+        let rlib = directory.path().join("libhosted_probe.rlib");
+        let result = std::process::Command::new("rustc")
+            .args(["--edition=2021", "--crate-type=rlib", "--crate-name=hosted_probe", "-Cpanic=abort", "-Copt-level=1"])
+            .arg(&source).arg("-o").arg(&rlib).output().unwrap();
+        assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+        let c_source = directory.path().join("main.c");
+        std::fs::write(&c_source, "extern long long hosted_probe_env_len(void); int main(void) { return hosted_probe_env_len() == 7 ? 0 : 1; }\n").unwrap();
+        let executable = directory.path().join("probe");
+        let no_std = std::process::Command::new("clang").arg(&c_source).arg(&rlib)
+            .arg("-o").arg(&executable).output().unwrap();
+        assert!(!no_std.status.success(), "a bare hosted rlib must not accidentally resolve from untracked std inputs");
+        let shim = build_rust_std_shim_for_rlib(&rlib, directory.path()).unwrap();
+        assert_eq!(shim.extension().and_then(|extension| extension.to_str()), Some("a"));
+        let link = std::process::Command::new("clang").arg(&c_source).arg(&rlib).arg(&shim)
+            .args(["-ldl", "-lpthread", "-lm", "-lrt", "-lutil"])
+            .arg("-o").arg(&executable).output().unwrap();
+        assert!(link.status.success(), "{}", String::from_utf8_lossy(&link.stderr));
+        let run = std::process::Command::new(&executable)
+            .env("SIMPLE_BOOTSTRAP_STD_LINK_PROBE", "ownerok").output().unwrap();
+        assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    }
 }

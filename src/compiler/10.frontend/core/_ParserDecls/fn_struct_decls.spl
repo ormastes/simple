@@ -34,14 +34,15 @@ use compiler.core.tokens.{TOK_KW_BITFIELD}
 use compiler.core.tokens.{TOK_KW_PUB}
 use compiler.core.tokens.{TOK_UNDERSCORE, TOK_TILDE, TOK_AT}
 use compiler.core.tokens.{TOK_KW_AND}
-use compiler.core.ast.{expr_ident, expr_call, expr_unit, expr_block, expr_binary, expr_field_access}
-use compiler.core.ast.{expr_method_call, expr_bool_lit, expr_string_lit, expr_int_lit}
+use compiler.core.ast.{expr_call, expr_unit, expr_block, expr_binary, expr_field_access}
+use compiler.core.ast.{expr_method_call, expr_bool_lit, expr_int_lit}
+use compiler.frontend.core._AstExpr.nodes.{expr_ident, expr_string_lit}
 use compiler.core.ast.{stmt_expr_stmt}
 use compiler.core.ast.{DECL_FN, DECL_EXTERN_FN, DECL_STRUCT, DECL_USE, DECL_EXPORT}
 use compiler.core.ast.{DECL_VAL, DECL_VAR, DECL_ENUM, DECL_LAZY_VAL}
 use compiler.core.ast.{DECL_CE, decl_ce_block}
 use compiler.core.ast.{decl_fn, decl_extern_fn, decl_struct_def}
-use compiler.core.ast.{decl_set_is_value_type, decl_set_type_params}
+use compiler.core.ast.{decl_set_is_value_type, decl_set_type_params, decl_set_type_param_constraints}
 use compiler.core.ast.{decl_set_param_defaults}
 use compiler.core.ast.{decl_val_binding, decl_lazy_val_binding, decl_var_binding}
 use compiler.core.ast.{decl_use_import, decl_export_names, decl_enum_def, decl_set_lazy}
@@ -50,7 +51,7 @@ use compiler.core.ast.{decl_set_comptime}
 use compiler.core.ast.{decl_set_visibility_text}
 use compiler.core.ast.{decl_is_gpu_kernel, decl_is_simd, decl_is_packed, decl_derives}
 use compiler.core.ast.{decl_get_name, decl_get_fields, decl_get_derives, decl_set_derives}
-use compiler.core.ast.{module_set_path, module_add_decl}
+use compiler.core.ast.{module_set_path, module_get_path, module_add_decl}
 use compiler.frontend.core.lexer.{lex_token_start_get, lex_token_end_get, lex_live_line_get, lex_live_col_get, lex_force_set_pos}
 use compiler.frontend.core.lexer.{lex_source_char_at, lex_source_len, lex_source_slice}
 use compiler.frontend.core.lexer.{lex_snapshot_save, lex_snapshot_commit, lex_snapshot_rollback}
@@ -79,8 +80,19 @@ use compiler.frontend.core.parser_decls_use.*
 use compiler.core.parser_cli.{parse_cli_decl}
 use compiler.frontend.core._Ast.decl_nodes.{decl_set_param_muts}
 use compiler.frontend.layer_eq_registry.{layer_field_pending_set}
+use std.io_runtime.{hash_text}
+use compiler.frontend.core.collection_feedback.{
+    parser_collection_attributed_expr, parser_collection_site_owner_push,
+    parser_collection_site_owner_restore, parser_collection_field_site_id,
+    parser_collection_module_key
+}
 
 # ===== Helper Functions =====
+
+fn collection_attribute_recover_member():
+    while par_kind_get() != TOK_NEWLINE and par_kind_get() != TOK_DEDENT and par_kind_get() != TOK_EOF:
+        parser_advance()
+    parser_skip_newlines_and_semicolons()
 
 fn parser_skip_tilde_if_present():
     # Skip ~ prefix for keyword-only parameter marker
@@ -499,17 +511,33 @@ fn parser_try_skip_signature_layout_before_colon() -> bool:
     parser_tok_restore(sl_tok_nums, sl_tok_text)
     false
 
-# Consume a function where-clause without confusing each constraint's colon
-# (`T: Hash`) with the body colon. The pure parser does not yet lower where
-# metadata, but it must preserve declaration boundaries and balanced generic
-# trait arguments exactly as the canonical parser does.
-fn parser_skip_fn_where_clause():
+fn parser_where_bound_append(rows: [[text]], index: i64, start: i64, finish: i64) -> [[text]]:
+    var result = rows
+    if index < 0 or index >= result.len() or start < 0:
+        return result
+    val bound = lex_source_slice(start, finish).trim()
+    if bound == "":
+        parser_error("empty where trait bound")
+        return result
+    var current = result[index]
+    current.push(bound)
+    result[index] = current
+    result
+
+# Retain each declared bound in the flat AST while preserving the body-colon
+# boundary and balanced generic trait arguments.
+fn parser_skip_where_clause(type_params: [text]) -> [[text]]:
+    var bounds: [[text]] = []
+    for _ in type_params:
+        bounds.push([])
     if par_kind_get() != TOK_KW_WHERE:
-        return
+        return bounds
     parser_advance()
     var expect_subject = true
     var expect_subject_colon = false
     var saw_bound_token = false
+    var subject_index: i64 = -1
+    var bound_start: i64 = -1
     var paren_depth: i64 = 0
     var bracket_depth: i64 = 0
     var angle_depth: i64 = 0
@@ -520,15 +548,25 @@ fn parser_skip_fn_where_clause():
         val at_end = wk == TOK_NEWLINE or wk == TOK_SEMICOLON or
             wk == TOK_DEDENT or wk == TOK_EOF
         if at_end:
-            if expect_subject_colon or (not expect_subject and not saw_bound_token):
-                parser_error("incomplete function where constraint")
-            return
+            if expect_subject or expect_subject_colon or not saw_bound_token or
+                    paren_depth != 0 or bracket_depth != 0 or angle_depth != 0:
+                parser_error("incomplete where constraint")
+            else:
+                bounds = parser_where_bound_append(bounds, subject_index, bound_start, lex_token_start_get())
+            return bounds
 
         if expect_subject:
             val subject = declaration_identifier_text(wk, par_text_get())
             if subject == "":
                 parser_error("expected type parameter name after where")
-                return
+                return bounds
+            subject_index = -1
+            for i in 0..type_params.len():
+                if type_params[i] == subject:
+                    subject_index = i
+                    break
+            if subject_index < 0:
+                parser_error("where subject is not a declared type parameter: " + subject)
             parser_advance()
             expect_subject = false
             expect_subject_colon = true
@@ -538,24 +576,40 @@ fn parser_skip_fn_where_clause():
         if expect_subject_colon:
             if wk != TOK_COLON:
                 parser_error("expected ':' after where type parameter")
-                return
+                return bounds
             parser_advance()
             expect_subject_colon = false
+            bound_start = -1
             continue
 
         val at_top = paren_depth == 0 and bracket_depth == 0 and angle_depth == 0
         if at_top and wk == TOK_COLON:
             if not saw_bound_token:
                 parser_error("expected trait bound after where ':'")
-            return
+            else:
+                bounds = parser_where_bound_append(bounds, subject_index, bound_start, lex_token_start_get())
+            return bounds
         if at_top and wk == TOK_COMMA:
             if not saw_bound_token:
                 parser_error("expected trait bound before where ','")
-                return
+                return bounds
+            bounds = parser_where_bound_append(bounds, subject_index, bound_start, lex_token_start_get())
             parser_advance()
             expect_subject = true
+            bound_start = -1
+            continue
+        if at_top and wk == TOK_PLUS:
+            if not saw_bound_token:
+                parser_error("expected trait bound before where '+'")
+                return bounds
+            bounds = parser_where_bound_append(bounds, subject_index, bound_start, lex_token_start_get())
+            parser_advance()
+            saw_bound_token = false
+            bound_start = -1
             continue
 
+        if bound_start < 0:
+            bound_start = lex_token_start_get()
         if wk == TOK_LPAREN:
             paren_depth = paren_depth + 1
         elif wk == TOK_RPAREN and paren_depth > 0:
@@ -570,7 +624,8 @@ fn parser_skip_fn_where_clause():
             angle_depth = angle_depth - 1
         saw_bound_token = true
         parser_advance()
-    parser_error("function where clause is too long")
+    parser_error("where clause is too long")
+    bounds
 
 fn parse_fn_decl(is_async: i64) -> i64:
     val decl_start = lex_token_start_get()
@@ -582,6 +637,7 @@ fn parse_fn_decl(is_async: i64) -> i64:
         parser_expect(TOK_IDENT)
     else:
         parser_advance()
+    val previous_collection_owner = parser_collection_site_owner_push(fn_name)
 
     # Parse optional type parameters: fn name<T, U>(...)
     val type_params = parse_type_params()
@@ -649,7 +705,7 @@ fn parse_fn_decl(is_async: i64) -> i64:
         if par_kind_get() == TOK_NEWLINE:
             parser_try_skip_signature_layout_before_colon()
 
-    parser_skip_fn_where_clause()
+    val where_bounds = parser_skip_where_clause(type_params)
 
     # Canonical declarations may be bodyless (forward/extern-style surface),
     # or may use the legacy colonless indented block spelling. Do not consume
@@ -663,8 +719,10 @@ fn parse_fn_decl(is_async: i64) -> i64:
     elif par_kind_get() == TOK_SEMICOLON:
         parser_advance()
 
+    parser_collection_site_owner_restore(previous_collection_owner)
     val decl_span = flat_span_new(decl_start, lex_token_start_get(), decl_line, decl_col)
     val fn_decl_idx = decl_fn(fn_name, param_names, param_types, ret_type, body, is_async, type_params, decl_span)
+    decl_set_type_param_constraints(fn_decl_idx, where_bounds)
     decl_set_param_defaults(fn_decl_idx, param_defaults)
     decl_set_param_muts(fn_decl_idx, param_muts)
     fn_decl_idx
@@ -865,6 +923,7 @@ fn parse_struct_or_trait_decl(is_class: bool, is_trait: bool) -> i64:
     parser_advance()
     val struct_name = par_text_get()
     parser_expect(6)
+    val previous_collection_owner = parser_collection_site_owner_push(struct_name)
     # Stage1 bootstrap cannot safely mutate imported text-array parser state here.
 
     # Parse optional type parameters: class Box<T>:, struct Node<T>:
@@ -889,6 +948,10 @@ fn parse_struct_or_trait_decl(is_class: bool, is_trait: bool) -> i64:
             while par_kind_get() == 160:
                 parser_advance()
                 parser_expect(6)
+    # The same where grammar applies to generic structs/classes. Keep the
+    # body colon intact for parser_expect below; semantic bound enforcement
+    # remains a separate gate before these types are instantiated.
+    val where_bounds = parser_skip_where_clause(type_params)
     parser_expect(161)
     parser_skip_newlines()
     parser_expect(181)
@@ -907,6 +970,7 @@ fn parse_struct_or_trait_decl(is_class: bool, is_trait: bool) -> i64:
     var layer_field_renames: [text] = []
     var layer_field_saw_any = false
     var layer_field_next = ""
+    var collection_algorithm_next = ""
 
     while true:
         parser_skip_newlines()
@@ -918,6 +982,9 @@ fn parse_struct_or_trait_decl(is_class: bool, is_trait: bool) -> i64:
 
         # Skip docstrings in class/struct body
         if par_kind_get() == 3:
+            if collection_algorithm_next != "":
+                parser_error("@collection_algorithm must immediately precede a field")
+                collection_algorithm_next = ""
             parser_advance()
             parser_skip_newlines_and_semicolons()
             continue
@@ -935,6 +1002,31 @@ fn parse_struct_or_trait_decl(is_class: bool, is_trait: bool) -> i64:
             val lf_snap = lex_snapshot_save()
             val (lf_tok_nums, lf_tok_text) = parser_tok_save()
             parser_advance()
+            val is_collection_algorithm: bool = par_kind_get() == TOK_IDENT and par_text_get() == "collection_algorithm"
+            if is_collection_algorithm:
+                lex_snapshot_commit(lf_snap)
+                parser_advance()
+                if not parser_expect(TOK_LPAREN):
+                    collection_attribute_recover_member()
+                    continue
+                if par_kind_get() != TOK_STRING_LIT:
+                    parser_error("@collection_algorithm requires one string algorithm name")
+                    collection_attribute_recover_member()
+                    continue
+                val algorithm = par_text_get()
+                parser_advance()
+                if not parser_expect(TOK_RPAREN):
+                    collection_attribute_recover_member()
+                    continue
+                if algorithm != "auto" and algorithm != "linear" and algorithm != "hash" and algorithm != "ordered":
+                    parser_error("unknown collection algorithm: " + algorithm)
+                    collection_attribute_recover_member()
+                    continue
+                if collection_algorithm_next != "":
+                    parser_error("duplicate @collection_algorithm on one field")
+                collection_algorithm_next = algorithm
+                parser_skip_newlines_and_semicolons()
+                continue
             val lf_is_layer_field: bool = par_kind_get() == 6 and par_text_get() == "layer_field"
             if lf_is_layer_field:
                 parser_advance()
@@ -950,11 +1042,25 @@ fn parse_struct_or_trait_decl(is_class: bool, is_trait: bool) -> i64:
                 continue
             lex_snapshot_rollback(lf_snap)
             parser_tok_restore(lf_tok_nums, lf_tok_text)
+            if collection_algorithm_next != "":
+                parser_error("@collection_algorithm must immediately precede a field")
+                collection_algorithm_next = ""
+            # Any OTHER member-position decorator (`@unsafe(...)` and friends)
+            # is parsed as metadata by the module-decl loop's twin arm; without
+            # this the loop fell through to "unexpected token in class body"
+            # and no self-hosted build could parse the 310 annotated stdlib
+            # methods. B1 of
+            # doc/08_tracking/bug/caret_suite_native_build_blocked_stage2_windows_2026-09-03.md
+            if parser_parse_member_attribute():
+                continue
 
         # Associated types: type Item = T (skip for now, just parse and ignore).
         # `type: T` is instead a keyword-named field, as in the canonical Rust
         # parser's parse_field/expect_identifier path.
         if par_kind_get() == 35 and not parser_class_member_followed_by_colon():
+            if collection_algorithm_next != "":
+                parser_error("@collection_algorithm requires a field")
+                collection_algorithm_next = ""
             parser_advance()
             # Skip: 'type IDENT' or 'type IDENT = Type'
             if par_kind_get() == 6:
@@ -975,6 +1081,9 @@ fn parse_struct_or_trait_decl(is_class: bool, is_trait: bool) -> i64:
         val is_any_pass2: bool = is_pass_dn2 or is_pass_kw
         val is_pass: bool = is_any_pass or is_any_pass2
         if is_pass and not parser_class_member_followed_by_colon():
+            if collection_algorithm_next != "":
+                parser_error("@collection_algorithm requires a field")
+                collection_algorithm_next = ""
             parser_advance()
             parser_skip_newlines_and_semicolons()
             continue
@@ -988,35 +1097,54 @@ fn parse_struct_or_trait_decl(is_class: bool, is_trait: bool) -> i64:
 
         # Handle methods in class/struct body
         if par_kind_get() == 30:
+            if collection_algorithm_next != "":
+                parser_error("@collection_algorithm requires a field")
+                collection_algorithm_next = ""
             val sm_id = parse_class_body_method(struct_name, true, false)
             if sm_id >= 0:
                 if class_member_is_pub:
                     decl_set_visibility_text(sm_id, "pub")
                 class_method_ids.push(sm_id)
+                parser_record_unsafe_annotation(decl_get_name(sm_id))
+            parser_reset_pending_unsafe()
             continue
         if par_kind_get() == 20:
+            if collection_algorithm_next != "":
+                parser_error("@collection_algorithm requires a field")
+                collection_algorithm_next = ""
             val fm_id = parse_class_body_method(struct_name, false, false)
             if fm_id >= 0:
                 if class_member_is_pub:
                     decl_set_visibility_text(fm_id, "pub")
                 class_method_ids.push(fm_id)
+                parser_record_unsafe_annotation(decl_get_name(fm_id))
+            parser_reset_pending_unsafe()
             continue
         if par_kind_get() == 34:
+            if collection_algorithm_next != "":
+                parser_error("@collection_algorithm requires a field")
+                collection_algorithm_next = ""
             val mm_id = parse_class_body_method(struct_name, false, true)
             if mm_id >= 0:
                 if class_member_is_pub:
                     decl_set_visibility_text(mm_id, "pub")
                 class_method_ids.push(mm_id)
+                parser_record_unsafe_annotation(decl_get_name(mm_id))
+            parser_reset_pending_unsafe()
             continue
 
         # Field prefixes: `val name: T` / `var name: T`.  A colon immediately
         # after the keyword means the keyword itself is the field name.
+        val field_declaration_start = lex_token_start_get()
         val is_field_prefix = par_kind_get() == TOK_KW_VAL or par_kind_get() == TOK_KW_VAR
         if is_field_prefix and not parser_class_member_followed_by_colon():
             parser_advance()
         var fname = par_text_get()
         val fname_kw = use_kw_segment_text(par_kind_get())
         if par_kind_get() != TOK_IDENT and fname_kw == "":
+            if collection_algorithm_next != "":
+                parser_error("@collection_algorithm requires a field")
+                collection_algorithm_next = ""
             # Unparseable member: report once and advance so the loop cannot
             # stall on the same token for the full iteration budget.
             parser_error("unexpected token in class body")
@@ -1034,8 +1162,11 @@ fn parse_struct_or_trait_decl(is_class: bool, is_trait: bool) -> i64:
         # later parser_parse_type assignment, so `.push(ftype)` skips scalar
         # boxing and the array read decodes a raw type tag with `>> 3`.
         var ftype: i64 = TYPE_ANY
+        var declared_collection_family = ""
         if par_kind_get() == TOK_COLON:
             parser_advance()
+            if par_kind_get() == TOK_IDENT:
+                declared_collection_family = par_text_get()
             ftype = parser_parse_type()
         field_names.push(fname)
         field_types.push(ftype)
@@ -1072,6 +1203,24 @@ fn parse_struct_or_trait_decl(is_class: bool, is_trait: bool) -> i64:
         if par_kind_get() == 100:
             parser_advance()
             fdefault = parse_expr()
+        if collection_algorithm_next != "":
+            if fdefault < 0:
+                parser_error("@collection_algorithm requires an initialized field")
+            else:
+                # An attribute changes the physical algorithm, not the site
+                # whose workload was measured in an earlier profile.
+                val field_text = lex_source_slice(field_declaration_start, lex_token_start_get())
+                val field_hash = hash_text(field_text)
+                val module_key = parser_collection_module_key(module_get_path())
+                val site_id = parser_collection_field_site_id(module_key, fname, field_hash)
+                val attributed = parser_collection_attributed_expr(
+                    fdefault, collection_algorithm_next, site_id, declared_collection_family
+                )
+                if attributed < 0:
+                    parser_error("@collection_algorithm requires an adaptive set or map initializer with a known family")
+                else:
+                    fdefault = attributed
+            collection_algorithm_next = ""
         field_defaults.push(fdefault)
         field_bits.push(fbits)
         parser_skip_newlines_and_semicolons()
@@ -1082,6 +1231,8 @@ fn parse_struct_or_trait_decl(is_class: bool, is_trait: bool) -> i64:
     # partial tag set look total and defeat obligation 2's all-or-none rule).
     if layer_field_next != "":
         parser_error("`@layer_field(" + layer_field_next + ")` is not followed by a field in '" + struct_name + "'")
+    if collection_algorithm_next != "":
+        parser_error("@collection_algorithm is not followed by a field in '" + struct_name + "'")
     # C1: publish THIS struct's rename slots (whole-list replace, see
     # layer_eq_registry.spl) before returning, so the `@layer_eq` decorator arm
     # that called us reads a list parallel to exactly these `field_names`.
@@ -1105,6 +1256,7 @@ fn parse_struct_or_trait_decl(is_class: bool, is_trait: bool) -> i64:
     # diagnostic at HIR time.
     if type_params.len() > 0:
         decl_set_type_params(struct_d, type_params)
+        decl_set_type_param_constraints(struct_d, where_bounds)
 
     # #157: a `trait T:` is parsed via this same struct-body path, collecting its
     # method decls (abstract + default bodies) in class_method_ids. Mark the decl
@@ -1143,6 +1295,7 @@ fn parse_struct_or_trait_decl(is_class: bool, is_trait: bool) -> i64:
             decl_set_type_params(impl_d, type_params)
         module_add_decl(impl_d)
 
+    parser_collection_site_owner_restore(previous_collection_owner)
     struct_d
 
 export parse_type_params, parser_generic_constraints_reset

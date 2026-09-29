@@ -1,5 +1,17 @@
 # SimpleOS WM Host QMP Mouse Input Produces No Framebuffer Delta
 
+## Not closed 2026-09-13 — still open; the lane cannot be exercised from this host
+
+- **inferred** The repro is a QEMU/QMP lane driven by
+  `scripts/check/check-simpleos-wm-qmp-drag-delta-evidence.shs` with
+  `SIMPLE_BIN=src/compiler_rust/target/release/simple` — a Linux-host recipe. This session
+  runs on Windows with no QEMU SimpleOS lane available.
+- **measured** The native build path this lane depends on is itself broken here:
+  `bin/simple native-build` aborts with `SCV-E-SNAPSHOT: snapshot-cache-root-not-owned`
+  and `unknown extern function: rt_env_vars` before producing an artifact.
+- Left OPEN: needs the Linux QEMU host; a Windows non-reproduction would prove nothing.
+
+
 Date: 2026-06-11
 Status: Open
 

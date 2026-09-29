@@ -46,10 +46,12 @@
 #     via passthrough); jira only implements it for `view` here.
 
 use app.devhub.config.{load_config}
+use app.devhub.backend_resolve.{pick_facade_backend, load_repo_devhub_config}
+use std.nogc_sync_mut.env.{env_get}
 use app.devhub.adapter_github.{gh_run, gh_available, gh_actionable_error}
 use app.devhub.cmd_github.{handle_github, _gh_field, _gh_login, _default_fields}
-use app.devhub.adapter_jira.{jira_search, JiraIssue}
-use app.devhub.cmd_jira.{handle_jira, _truncate}
+use app.devhub.adapter_jira.{JiraIssue}
+use app.devhub.cmd_jira.{handle_jira, _truncate, jira_search_any}
 use app.devhub.flags.{_extract_flag, _has_flag, _positional_args, _remove_flags}
 use app.devhub.output.{print_error, print_warning, print_table_dynamic, colorize_state, relative_time, format_json_output, wants_json, set_no_pager, open_in_browser}
 use std.json.{json_parse, json_array_get, json_array_length, json_get_type}
@@ -106,9 +108,19 @@ fn _tasks_backend_default() -> text:
     config.sdn (ItfConfig.tasks_default_backend, gap G6 — mirrors
     cmd_wiki.spl's `_wiki_backend_default()`), else "github" (step 3 of the
     full D1 rule — listing configured backends and erroring on ambiguity —
-    is simplified to this fixed default per this facade's brief)."""
-    val configured = load_config().tasks_default_backend
-    if configured != "": configured else: "github"
+    is simplified to this fixed default per this facade's brief).
+
+    Extended with the repo rung `git` already had:
+    DEVHUB_TASKS_BACKEND > `.spipe/config.sdn` devhub: tasks_backend >
+    `~/.config/itf/config.sdn` tasks: default_backend > "github". Previously
+    the user config was the only configurable rung, so a project could not
+    commit that its tracker is Jira. Unset everywhere still yields "github"."""
+    pick_facade_backend(
+        env_get("DEVHUB_TASKS_BACKEND"),
+        load_repo_devhub_config().tasks_backend,
+        load_config().tasks_default_backend,
+        "github"
+    )
 
 
 fn _tasks_jira_done_status() -> text:
@@ -280,7 +292,7 @@ fn _tasks_list(args: [text]) -> i64:
 fn _tasks_list_jira_only(args: [text], assignee: text, label: text, state: text, search: text, limit: i64) -> i64:
     val config = load_config()
     val jql = _jira_build_list_jql(assignee, label, state, search)
-    val (ok, issues, raw) = jira_search(config, jql, "", limit)
+    val (ok, issues, raw) = jira_search_any(config, jql, "", limit)
     if not ok:
         print_error(raw)
         return 1
@@ -351,7 +363,7 @@ fn _tasks_list_all(args: [text], assignee: text, label: text, state: text, searc
     val config = load_config()
     val (gh_ok, gh_raw, gh_err) = _tasks_github_list_raw(assignee, label, state, search, limit)
     val jql = _jira_build_list_jql(assignee, label, state, search)
-    val (jr_ok, jr_issues, jr_raw) = jira_search(config, jql, "", limit)
+    val (jr_ok, jr_issues, jr_raw) = jira_search_any(config, jql, "", limit)
 
     if not gh_ok and not jr_ok:
         print_error("github: {gh_err}; jira: {jr_raw}")

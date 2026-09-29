@@ -1,0 +1,38 @@
+# @tag: rendering, vulkan, vector-font, performance, c-parity
+# @req NFR-GPU-DYN-001 NFR-GPU-DYN-010
+
+use std.spec.{describe, it, expect, step}
+use app.wm_compare.vulkan_font_feature_producer.{packed_font_batch, packed_font_batch_valid}
+use app.io.mod.{file_read_text}
+
+describe "Simple packed-font Vulkan C parity producer":
+    it "uses the exact synthetic atlas and one packed batch":
+        step("Build the shared synthetic packed-font workload")
+        val batch = packed_font_batch()
+        expect(packed_font_batch_valid(batch)).to_be(true)
+        expect(batch.atlas_width).to_equal(16)
+        expect(batch.atlas_height).to_equal(16)
+        expect(batch.atlas_pixels.len()).to_equal(256)
+        expect(batch.quads.len()).to_equal(64)
+        expect(batch.execution_target).to_equal("vulkan")
+        expect(batch.quads[0].dst_x).to_equal(0)
+        expect(batch.quads[1].dst_x).to_equal(20)
+        expect(batch.quads[0].width).to_equal(16)
+        expect(batch.quads[0].height).to_equal(16)
+
+    it "times no-readback submit completion and validates final pixels":
+        step("Inspect the executable producer contract")
+        val source = file_read_text(
+            "src/app/wm_compare/vulkan_font_feature_producer.spl")
+        expect(source).to_contain("engine.finalize_compute_frame_no_readback()")
+        expect(source).to_contain("receipt.?.readback_bytes != 0")
+        expect(source).to_contain("engine.read_pixels_with_source()")
+        expect(source).to_contain("readback.pixels.len() == WIDTH.to_i64() * HEIGHT.to_i64()")
+        expect(source).to_contain("readback.backend_handle > 0")
+        expect(source).to_contain("readback.device_identity > 0")
+        expect(source).to_contain("readback.checksum > 0")
+        expect(source).to_contain("mismatches == 0")
+        expect(source).to_contain("font_evidence.?.dispatch_count == 1")
+        expect(source).to_contain("schema=engine2d-vulkan-feature-perf-v1")
+        expect(source).to_contain(
+            "timing_scope=params-upload-and-vulkan-submit-and-fence")

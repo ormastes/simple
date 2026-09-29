@@ -1,0 +1,58 @@
+"""
+## Purpose and audience
+Purpose: Pin two facts about `MirLowering`'s import surface that a plausible
+"fix" would destroy. (1) REPRODUCING: the sanctioned import
+`compiler.mir.mir_lowering.{MirLowering}` resolves and constructs, while the
+facade `compiler.mir.{MirLowering}` does not — the facade omission is
+DELIBERATE, and re-adding it reintroduces the Stage 3 self-host `Effect`
+conflict recorded in
+doc/08_tracking/bug/t3_full_bootstrap_stage3_unresolved_type_byteorder_cache_validator_2026-08-06.md.
+(2) GENERALIZING: every in-tree product consumer of `MirLowering` reaches it
+through that one sanctioned path, so the facade can stay closed.
+Audience: compiler engineers tempted to "restore the missing re-export".
+## Operator workflow
+Run with the test runner from the repo root (the source-pin scenarios read
+compiler sources by relative path). A red scenario means either the sanctioned
+import broke, or someone re-opened the facade, or a new consumer started
+importing `MirLowering` by a non-sanctioned route.
+## Compatibility and limitations
+The facade's failure mode is deliberately NOT asserted behaviorally here: `use
+compiler.mir.{MirLowering}` raises nothing at import time and only fails at the
+first use site, so observing it requires a subprocess. That silent-import
+defect is filed separately in
+doc/08_tracking/bug/mir_facade_mirlowering_silent_unresolved_import_2026-09-01.md
+and pinned below by source inspection instead, per repo convention.
+Cross-platform: these are source-level facts, identical on Windows and Unix.
+"""
+# @req: REQ-BUGS-001
+
+use std.spec
+use compiler.mir.mir_lowering.{MirLowering}
+
+extern fn rt_file_read_text(path: text) -> text
+
+describe "MirLowering import surface (facade omission is by design)":
+    it "constructs MirLowering through the sanctioned submodule import":
+        step("Verify: the sanctioned import compiler.mir.mir_lowering resolves and constructs")
+        # @req: REQ-BUGS-001
+        val lowering = MirLowering.new(nil)
+        expect(lowering != nil).to_equal(true)  # oracle: true — the sanctioned path binds a real type
+
+    it "keeps the compiler.mir facade closed for MirLowering, with its rationale":
+        step("Verify: compiler.mir/__init__.spl omits MirLowering and records why")
+        # @req: REQ-BUGS-001
+        val init_src = rt_file_read_text("src/compiler/50.mir/__init__.spl")
+        expect(init_src.contains("export use compiler.mir.mir_lowering")).to_equal(false)  # oracle: false — re-opening the facade re-breaks Stage 3
+        expect(init_src.contains("reachable only via the direct submodule path")).to_equal(true)  # oracle: true — the rationale must survive edits
+
+    it "routes every product consumer of MirLowering through the sanctioned path":
+        step("Verify: both in-tree consumers import compiler.mir.mir_lowering")
+        # @req: REQ-BUGS-001
+        # NOTE: the brace form is spelled without `{...}` on purpose — `{X}` inside a
+        # text literal is INTERPOLATION, so the literal would evaluate MirLowering
+        # rather than match it (this bit the first draft of this spec).
+        val sanctioned = "use compiler.mir.mir_lowering."
+        val driver_src = rt_file_read_text("src/compiler/80.driver/pipeline_fn.spl")
+        expect(driver_src.contains(sanctioned)).to_equal(true)  # oracle: true — the driver's route
+        val tool_src = rt_file_read_text("src/app/simpleos_tool/focused_pipeline.spl")
+        expect(tool_src.contains(sanctioned)).to_equal(true)  # oracle: true — the simpleos tool's route

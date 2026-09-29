@@ -17,6 +17,7 @@
 use std.log.{debug, log_get_level, LOG_DEBUG}
 use compiler.mir.mir_data.*
 use compiler.interp.execir.{ExecIrModule, ExecIrArenaCtx, execir_encode_call, execir_binop_code}
+use compiler.interp.mir_simd_interpreter.{MirSimdState, MirSimdShape}
 use compiler.common.diagnostics.span.{Span}
 use std.io_runtime.{env_get_opt}
 
@@ -98,6 +99,7 @@ class MirInterpreter:
     execir_verdicts: {text: i64}
     execir_probe_count: i64
     pending_exception_type_tag: i64
+    simd_state: MirSimdState
 
 impl MirInterpreter:
     static fn create() -> MirInterpreter:
@@ -139,7 +141,8 @@ impl MirInterpreter:
             execir_arenas: {},
             execir_verdicts: {},
             execir_probe_count: 0,
-            pending_exception_type_tag: 0
+            pending_exception_type_tag: 0,
+            simd_state: MirSimdState.create()
         )
 
     fn execir_memo_size() -> i64:
@@ -213,6 +216,78 @@ impl MirInterpreter:
     fn is_local_set(local: LocalId) -> bool:
         """Miri-mode helper: has this local ever been written?"""
         self.locals.contains(local.id)
+
+    me set_simd_vector(local: LocalId, type_: MirType, lanes: [i64]) -> InterpError?:
+        """Install an encoded lane vector for focused interpreter tests."""
+        val shape = self.simd_state.shape_for_type(type_)
+        val handle = self.simd_state.put(lanes, shape)
+        self._finish_simd(local, handle)
+
+    fn get_simd_vector(local: LocalId) -> [i64]?:
+        """Read encoded lanes from a SIMD local for parity assertions."""
+        self.simd_state.get(self.get_local(local))
+
+    me _finish_simd(dest: LocalId, handle: i64) -> InterpError?:
+        val error = self.simd_state.take_error()
+        if error.?:
+            return Some(InterpError.UnsupportedOperation(op: "SIMD interpreter: {error.unwrap()}"))
+        self.set_local(dest, handle)
+        nil
+
+    me _execute_simd_load(dest: LocalId, ptr: MirOperand, type_: MirType) -> InterpError?:
+        val shape = self.simd_state.shape_for_type(type_)
+        if shape.lanes <= 0:
+            return Some(InterpError.UnsupportedOperation(op: "SIMD interpreter: invalid vector load type"))
+        val base = self.get_operand(ptr)
+        var lanes: [i64] = []
+        var i = 0
+        while i < shape.lanes:
+            lanes.push(self.get_local(LocalId(id: base + (i * 8))))
+            i = i + 1
+        val handle = self.simd_state.put(lanes, shape)
+        self._finish_simd(dest, handle)
+
+    me _execute_simd_store(value: MirOperand, ptr: MirOperand) -> InterpError?:
+        val handle = self.get_operand(value)
+        val lanes_opt = self.simd_state.get(handle)
+        if not lanes_opt.?:
+            return Some(InterpError.UnsupportedOperation(op: "SIMD interpreter: store value is not a vector"))
+        # Snapshot lanes before writing so overlapping input/output spans are
+        # deterministic and cannot observe partially-written results.
+        val lanes = lanes_opt.unwrap()
+        val base = self.get_operand(ptr)
+        var i = 0
+        while i < lanes.len():
+            self.set_local(LocalId(id: base + (i * 8)), lanes[i])
+            i = i + 1
+        nil
+
+    me _execute_simd_gather(dest: LocalId, base: MirOperand, indices: MirOperand, type_: MirType) -> InterpError?:
+        val index_handle = self.get_operand(indices)
+        val index_lanes_opt = self.simd_state.get(index_handle)
+        val shape = self.simd_state.shape_for_type(type_)
+        if not index_lanes_opt.? or index_lanes_opt.unwrap().len() != shape.lanes:
+            return Some(InterpError.UnsupportedOperation(op: "SIMD interpreter: gather index shape mismatch"))
+        val index_lanes = index_lanes_opt.unwrap()
+        val base_addr = self.get_operand(base)
+        var lanes: [i64] = []
+        for index in index_lanes:
+            lanes.push(self.get_local(LocalId(id: base_addr + (index * 8))))
+        self._finish_simd(dest, self.simd_state.put(lanes, shape))
+
+    me _execute_simd_scatter(value: MirOperand, base: MirOperand, indices: MirOperand) -> InterpError?:
+        val lanes_opt = self.simd_state.get(self.get_operand(value))
+        val index_lanes_opt = self.simd_state.get(self.get_operand(indices))
+        if not lanes_opt.? or not index_lanes_opt.? or lanes_opt.unwrap().len() != index_lanes_opt.unwrap().len():
+            return Some(InterpError.UnsupportedOperation(op: "SIMD interpreter: scatter operand shape mismatch"))
+        val lanes = lanes_opt.unwrap()
+        val index_lanes = index_lanes_opt.unwrap()
+        val base_addr = self.get_operand(base)
+        var i = 0
+        while i < lanes.len():
+            self.set_local(LocalId(id: base_addr + (index_lanes[i] * 8)), lanes[i])
+            i = i + 1
+        nil
 
     fn _format_span(span: Span?) -> text:
         """Miri-mode helper: render a source span for a loud diagnostic, or
@@ -624,36 +699,37 @@ impl MirInterpreter:
                 self._unsupported_inst("MaskedMul", inst.span)
             case MaskFromCmp(_, _, _, _):
                 self._unsupported_inst("MaskFromCmp", inst.span)
-            case MirSimdBinop(_, _, _, _):
-                self._unsupported_inst("MirSimdBinop", inst.span)
-            case MirSimdCmp(_, _, _, _):
-                self._unsupported_inst("MirSimdCmp", inst.span)
-            case MirSimdGather(_, _, _, _):
-                self._unsupported_inst("MirSimdGather", inst.span)
-            case MirSimdLoad(_, _, _, _):
-                self._unsupported_inst("MirSimdLoad", inst.span)
-            case MirSimdMaskOp(_, _, _, _):
-                self._unsupported_inst("MirSimdMaskOp", inst.span)
-            case MirSimdPermute(_, _, _):
-                self._unsupported_inst("MirSimdPermute", inst.span)
-            case MirSimdReduce(_, _, _):
-                self._unsupported_inst("MirSimdReduce", inst.span)
-            case MirSimdScalableVsetvl(_, _, _):
-                self._unsupported_inst("MirSimdScalableVsetvl", inst.span)
-            case MirSimdScatter(_, _, _):
-                self._unsupported_inst("MirSimdScatter", inst.span)
-            case MirSimdSelect(_, _, _, _):
-                self._unsupported_inst("MirSimdSelect", inst.span)
-            case MirSimdShuffle(_, _, _, _):
-                self._unsupported_inst("MirSimdShuffle", inst.span)
-            case MirSimdSplat(_, _, _):
-                self._unsupported_inst("MirSimdSplat", inst.span)
-            case MirSimdStore(_, _, _):
-                self._unsupported_inst("MirSimdStore", inst.span)
-            case MirSimdTernop(_, _, _, _, _):
-                self._unsupported_inst("MirSimdTernop", inst.span)
-            case MirSimdUnop(_, _, _):
-                self._unsupported_inst("MirSimdUnop", inst.span)
+            case MirSimdBinop(dest, lhs, rhs, op):
+                self._finish_simd(dest, self.simd_state.binop(self.get_operand(lhs), self.get_operand(rhs), op))
+            case MirSimdCmp(dest, lhs, rhs, op):
+                self._finish_simd(dest, self.simd_state.compare(self.get_operand(lhs), self.get_operand(rhs), op))
+            case MirSimdGather(dest, base, indices, vec_type):
+                self._execute_simd_gather(dest, base, indices, vec_type)
+            case MirSimdLoad(dest, ptr, _, vec_type):
+                self._execute_simd_load(dest, ptr, vec_type)
+            case MirSimdMaskOp(dest, lhs, rhs, op):
+                self._finish_simd(dest, self.simd_state.mask_op(self.get_operand(lhs), self.get_operand(rhs), op))
+            case MirSimdPermute(dest, src, ctrl):
+                self._finish_simd(dest, self.simd_state.permute(self.get_operand(src), self.get_operand(ctrl)))
+            case MirSimdReduce(dest, src, op):
+                self._finish_simd(dest, self.simd_state.reduce(self.get_operand(src), op))
+            case MirSimdScalableVsetvl(dest, requested, elem_type):
+                val lanes = self.simd_state.set_scalable_vl(self.get_operand(requested), elem_type)
+                self._finish_simd(dest, lanes)
+            case MirSimdScatter(value, base, indices):
+                self._execute_simd_scatter(value, base, indices)
+            case MirSimdSelect(dest, mask, t, f):
+                self._finish_simd(dest, self.simd_state.select(self.get_operand(mask), self.get_operand(t), self.get_operand(f)))
+            case MirSimdShuffle(dest, lhs, rhs, kind):
+                self._finish_simd(dest, self.simd_state.shuffle(self.get_operand(lhs), self.get_operand(rhs), kind))
+            case MirSimdSplat(dest, value, vec_type):
+                self._finish_simd(dest, self.simd_state.splat(self.get_operand(value), vec_type))
+            case MirSimdStore(value, ptr, _):
+                self._execute_simd_store(value, ptr)
+            case MirSimdTernop(dest, a, b, c, op):
+                self._finish_simd(dest, self.simd_state.ternop(self.get_operand(a), self.get_operand(b), self.get_operand(c), op))
+            case MirSimdUnop(dest, src, op):
+                self._finish_simd(dest, self.simd_state.unop(self.get_operand(src), op))
             case MirWarpActivesMask(_):
                 self._unsupported_inst("MirWarpActivesMask", inst.span)
             case MirWarpBallot(_, _, _):
@@ -683,27 +759,13 @@ impl MirInterpreter:
                 # native-unbuildable (E-BACKEND-LLVM-INST-ResultMatchSemantic).
                 ()
             case ScalableVecFence(_):
-                self._unsupported_inst("ScalableVecFence", inst.span)
-            case SimdAddF32x4(_, _, _):
-                self._unsupported_inst("SimdAddF32x4", inst.span)
-            case SimdAddF32x8(_, _, _):
-                self._unsupported_inst("SimdAddF32x8", inst.span)
-            case SimdAddF64x4(_, _, _):
-                self._unsupported_inst("SimdAddF64x4", inst.span)
-            case SimdAddI32x4(_, _, _):
-                self._unsupported_inst("SimdAddI32x4", inst.span)
-            case SimdAddI32x8(_, _, _):
-                self._unsupported_inst("SimdAddI32x8", inst.span)
-            case SimdAndI32x4(_, _, _):
-                self._unsupported_inst("SimdAndI32x4", inst.span)
-            case SimdAndI32x8(_, _, _):
-                self._unsupported_inst("SimdAndI32x8", inst.span)
-            case SimdDivF32x4(_, _, _):
-                self._unsupported_inst("SimdDivF32x4", inst.span)
-            case SimdDivF32x8(_, _, _):
-                self._unsupported_inst("SimdDivF32x8", inst.span)
-            case SimdDivF64x4(_, _, _):
-                self._unsupported_inst("SimdDivF64x4", inst.span)
+                ()
+            case SimdAddF32x4(dest, a, b) | SimdAddF32x8(dest, a, b) | SimdAddF64x4(dest, a, b) | SimdAddI32x4(dest, a, b) | SimdAddI32x8(dest, a, b):
+                self._finish_simd(dest, self.simd_state.binop(self.get_operand(a), self.get_operand(b), "Add"))
+            case SimdAndI32x4(dest, a, b) | SimdAndI32x8(dest, a, b):
+                self._finish_simd(dest, self.simd_state.binop(self.get_operand(a), self.get_operand(b), "And"))
+            case SimdDivF32x4(dest, a, b) | SimdDivF32x8(dest, a, b) | SimdDivF64x4(dest, a, b):
+                self._finish_simd(dest, self.simd_state.binop(self.get_operand(a), self.get_operand(b), "Div"))
             case SimdFmaF32x4(_, _, _, _):
                 self._unsupported_inst("SimdFmaF32x4", inst.span)
             case SimdFmaF32x8(_, _, _, _):
@@ -716,20 +778,10 @@ impl MirInterpreter:
                 self._unsupported_inst("SimdHmaxF32x4", inst.span)
             case SimdHminF32x4(_, _):
                 self._unsupported_inst("SimdHminF32x4", inst.span)
-            case SimdMulF32x4(_, _, _):
-                self._unsupported_inst("SimdMulF32x4", inst.span)
-            case SimdMulF32x8(_, _, _):
-                self._unsupported_inst("SimdMulF32x8", inst.span)
-            case SimdMulF64x4(_, _, _):
-                self._unsupported_inst("SimdMulF64x4", inst.span)
-            case SimdMulI32x4(_, _, _):
-                self._unsupported_inst("SimdMulI32x4", inst.span)
-            case SimdMulI32x8(_, _, _):
-                self._unsupported_inst("SimdMulI32x8", inst.span)
-            case SimdOrI32x4(_, _, _):
-                self._unsupported_inst("SimdOrI32x4", inst.span)
-            case SimdOrI32x8(_, _, _):
-                self._unsupported_inst("SimdOrI32x8", inst.span)
+            case SimdMulF32x4(dest, a, b) | SimdMulF32x8(dest, a, b) | SimdMulF64x4(dest, a, b) | SimdMulI32x4(dest, a, b) | SimdMulI32x8(dest, a, b):
+                self._finish_simd(dest, self.simd_state.binop(self.get_operand(a), self.get_operand(b), "Mul"))
+            case SimdOrI32x4(dest, a, b) | SimdOrI32x8(dest, a, b):
+                self._finish_simd(dest, self.simd_state.binop(self.get_operand(a), self.get_operand(b), "Or"))
             case SimdShlI32x4(_, _, _):
                 self._unsupported_inst("SimdShlI32x4", inst.span)
             case SimdShlI32x8(_, _, _):
@@ -738,20 +790,10 @@ impl MirInterpreter:
                 self._unsupported_inst("SimdShrI32x4", inst.span)
             case SimdShrI32x8(_, _, _):
                 self._unsupported_inst("SimdShrI32x8", inst.span)
-            case SimdSubF32x4(_, _, _):
-                self._unsupported_inst("SimdSubF32x4", inst.span)
-            case SimdSubF32x8(_, _, _):
-                self._unsupported_inst("SimdSubF32x8", inst.span)
-            case SimdSubF64x4(_, _, _):
-                self._unsupported_inst("SimdSubF64x4", inst.span)
-            case SimdSubI32x4(_, _, _):
-                self._unsupported_inst("SimdSubI32x4", inst.span)
-            case SimdSubI32x8(_, _, _):
-                self._unsupported_inst("SimdSubI32x8", inst.span)
-            case SimdXorI32x4(_, _, _):
-                self._unsupported_inst("SimdXorI32x4", inst.span)
-            case SimdXorI32x8(_, _, _):
-                self._unsupported_inst("SimdXorI32x8", inst.span)
+            case SimdSubF32x4(dest, a, b) | SimdSubF32x8(dest, a, b) | SimdSubF64x4(dest, a, b) | SimdSubI32x4(dest, a, b) | SimdSubI32x8(dest, a, b):
+                self._finish_simd(dest, self.simd_state.binop(self.get_operand(a), self.get_operand(b), "Sub"))
+            case SimdXorI32x4(dest, a, b) | SimdXorI32x8(dest, a, b):
+                self._finish_simd(dest, self.simd_state.binop(self.get_operand(a), self.get_operand(b), "Xor"))
             case StoreGlobal(_, _):
                 self._unsupported_inst("StoreGlobal", inst.span)
             case VhdlConcat(_, _):

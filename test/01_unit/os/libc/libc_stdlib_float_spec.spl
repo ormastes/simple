@@ -1,0 +1,106 @@
+# Pure-Simple strtod/strtof semantic and edge-case coverage.
+
+use std.spec
+use os.libc.simpleos_stdlib_float.{libc_strtod, libc_strtof}
+
+fn close_to(actual: f64, expected: f64, epsilon: f64) -> bool:
+    val delta = if actual < expected: expected - actual else: actual - expected
+    delta <= epsilon
+
+fn repeated_byte(byte: u8, count: i64) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < count:
+        out.push(byte)
+        i = i + 1
+    out
+
+describe("SimpleOS libc floating-point parsing"):
+    it("parses integer and fractional digits"):
+        val r = libc_strtod("125.75tail".bytes())
+        expect(close_to(r.value, 125.75, 0.000000000001)).to_be(true)
+        expect(r.end_index).to_equal(6)
+        expect(r.converted).to_be(true)
+
+    it("handles leading space and a negative exponent"):
+        val r = libc_strtod("  -1.25e2!".bytes())
+        expect(close_to(r.value, -125.0, 0.000000000001)).to_be(true)
+        expect(r.end_index).to_equal(9)
+
+    it("handles a leading decimal point"):
+        val r = libc_strtod(".125".bytes())
+        expect(close_to(r.value, 0.125, 0.000000000001)).to_be(true)
+        expect(r.end_index).to_equal(4)
+
+    it("does not consume a malformed exponent"):
+        val r = libc_strtod("12e+tail".bytes())
+        expect(close_to(r.value, 12.0, 0.000000000001)).to_be(true)
+        expect(r.end_index).to_equal(2)
+
+    it("reports no conversion at the original token start"):
+        val r = libc_strtod("  -x".bytes())
+        expect(r.value).to_equal(0.0)
+        expect(r.end_index).to_equal(0)
+        expect(r.converted).to_be(false)
+
+    it("saturates hostile exponents without integer overflow"):
+        val high = libc_strtod("1e999999999999".bytes())
+        val low = libc_strtod("1e-999999999999".bytes())
+        expect(high.value > 1.0).to_be(true)
+        expect(low.value).to_equal(0.0)
+        expect(high.end_index).to_equal(14)
+        expect(low.end_index).to_equal(15)
+
+    it("keeps zero stable under a huge exponent"):
+        val r = libc_strtod("0e999999999999".bytes())
+        expect(r.value).to_equal(0.0)
+        expect(r.end_index).to_equal(14)
+
+    it("strtof shares the decimal grammar"):
+        val r = libc_strtof("3.5e-1".bytes())
+        expect(close_to(r.value, 0.35, 0.0000001)).to_be(true)
+        expect(r.end_index).to_equal(6)
+
+    it("normalizes the significand before compensated exponents"):
+        var large: [u8] = [49]
+        large.extend(repeated_byte(48, 309))
+        large.extend("e-309".bytes())
+        val recovered_large = libc_strtod(large)
+        expect(recovered_large.value).to_equal(1.0)
+
+        var tiny: [u8] = "0.".bytes()
+        tiny.extend(repeated_byte(48, 323))
+        tiny.extend("1e324".bytes())
+        val recovered_tiny = libc_strtod(tiny)
+        expect(recovered_tiny.value).to_equal(1.0)
+
+        var very_large: [u8] = [49]
+        very_large.extend(repeated_byte(48, 11000))
+        very_large.extend("e-11000".bytes())
+        expect(libc_strtod(very_large).value).to_equal(1.0)
+
+    it("rounds strtof through binary32"):
+        # Exact integer halfway cases exercise round-to-nearest, ties-to-even
+        # without relying on the test compiler's decimal-literal conversion.
+        val even_down = libc_strtof("16777217".bytes())
+        val even_up = libc_strtof("16777219".bytes())
+        expect(even_down.value).to_equal(16777216.0)
+        expect(even_up.value).to_equal(16777220.0)
+
+        # Oracle values are the exact decimal renderings of the smallest
+        # positive binary32 subnormal and the largest finite binary32 value.
+        val smallest = libc_strtof("1.401298464324817e-45".bytes())
+        val largest = libc_strtof("3.4028234663852886e38".bytes())
+        expect(smallest.value).to_equal(1.401298464324817e-45)
+        expect(largest.value).to_equal(3.4028234663852886e38)
+
+    it("covers binary64 finite-range boundaries without pre-scaling overflow"):
+        val largest_finite = libc_strtod("1.7976931348623157e308".bytes())
+        val overflow = libc_strtod("1.7976931348623159e308".bytes())
+        val smallest_subnormal = libc_strtod("4.9406564584124654e-324".bytes())
+        val underflow = libc_strtod("2e-324".bytes())
+
+        expect(largest_finite.value > 1.0e308).to_be(true)
+        expect(overflow.value > largest_finite.value).to_be(true)
+        expect(smallest_subnormal.value).to_equal(4.9406564584124654e-324)
+        expect(underflow.value).to_equal(0.0)

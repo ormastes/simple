@@ -1,0 +1,102 @@
+"""
+# The showcase overview page renders at full 4K without leaving the GPU boundary
+## Purpose and audience
+For the engineers who own the 4K web showcase lane
+(`scripts/check/check-web-showcase-4k-receipt.shs` and the Vulkan web
+renderer). 4K is where the showcase's GPU-residency claim matters most: a
+3840x2160 frame is 8.3 million pixels, so any host-side pixel work or extra
+readback that is merely slow at 320x180 becomes the dominant cost here.
+## Operator workflow
+Run: SIMPLE_EXECUTION_MODE=interpreter SIMPLE_TIMEOUT_SECONDS=0 \\
+     bin/simple test test/02_integration/ui/web_showcase/overview_4k_render_spec.spl
+One 3840x2160 headless Vulkan render of the overview page, checked for the
+receipt lane's geometry contract and for the GPU boundary counters.
+## Compatibility and limitations
+Slow by construction: a single 4K frame measured about 177 seconds under the
+interpreter on an Apple M-series host, which is why this file is tagged slow
+and renders exactly one frame. Needs a working Vulkan device; the CPU path at
+this size is not viable (the 1080p CPU figure in
+doc/10_metrics/ui/web_4k_showcase_after_gpu_boundary_fixes_macos_2026-09-12.md
+is about 107 s/frame with 4K recorded as could-not-complete-in-time), so a
+CPU fallback is reported as blocked rather than waited on.
+NO frame-time budget is asserted. This repo pins none: the 4K receipt gate
+checks geometry and schema only, and measured cost here is not even monotonic
+in pixel count (160x90 measured slower than 320x180). The elapsed time is
+captured as evidence instead --
+doc/08_tracking/bug/web_showcase_4k_frame_time_unbudgeted_2026-09-13.md.
+UNVERIFIED as landed: this spec has never produced a verdict on the authoring
+host, because the runner kills a spec at ~900 s and relaunches it forever
+instead of failing it --
+doc/08_tracking/bug/web_showcase_slow_specs_relaunch_loop_at_900s_cap_2026-09-13.md.
+The behaviour it asserts WAS confirmed by direct probe outside the runner: the
+4K frame came back as 8,294,400 non-blank pixels in 177 s with
+`cpu_fallback=false` and `readbacks=1`. Treat the spec itself as unproven
+until that loop is fixed.
+## Verification guidance and troubleshooting
+A wrong pixel count means the renderer silently resized the request. A blank
+frame at 4K with a good frame at 320x180 points at an allocation or tiling
+limit rather than at layout. A readback count above one at this size is the
+expensive regression the boundary audit exists to catch.
+"""
+# Lifecycle: doc/01_research/local/web_renderer_vs_chrome_speed_2026-09-05.md ;
+# doc/02_requirements/nfr/engine2d_vulkan_2d_perf.md ;
+# doc/03_plan/ui/gpu_scheduler_hardening_gpu_resident_rendering.md
+# @manual_section: web-showcase-4k
+# @tag: ui, web, showcase, vulkan, gpu, 4k, slow
+
+use std.spec.{describe, it, expect, step}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
+    simple_web_render_html_to_pixels_with_engine2d_backend,
+    simple_web_resolved_engine2d_backend_name_with_reason}
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    web_vulkan_lane_census_line, web_vulkan_lane_census_drain}
+use std.nogc_sync_mut.ui.host_frame_clock.{default_frame_clock}
+use app.ui.chrome_showcase.catalog.{
+    chrome_catalog_tabs, chrome_catalog_page, CHROME_CATALOG_SOURCE}
+use app.ui.chrome_showcase.gpu_boundary_audit.{audit_frame_digest, audit_field}
+use app.ui.chrome_showcase.frame.{chrome_frame_nonblank}
+
+val UHD_W: i32 = 3840
+val UHD_H: i32 = 2160
+
+describe "the showcase overview page at 4K":
+
+    # @slow
+    it "renders a full 3840x2160 frame of the overview page with ink in it":
+        # @req REQ-UI-WEBSHOWCASE-050
+        # @capture(statistics): 3840x2160 overview frame digest and elapsed milliseconds
+        step("Resolve the backend for a 4K request and render one headless overview frame")
+        val tabs = chrome_catalog_tabs()
+        val html = chrome_catalog_page(read_file(CHROME_CATALOG_SOURCE), tabs[0])
+        val (reported, fallback_reason) = simple_web_resolved_engine2d_backend_name_with_reason(
+            UHD_W, UHD_H, "vulkan")
+        print("4K backend_reported={reported} fallback_reason={fallback_reason}")
+
+        if reported != "vulkan":
+            step("blocked: the 4K request resolved to {reported} ({fallback_reason}); the CPU path is not viable at this size, so no frame is rendered")
+            expect(reported == "vulkan").to_equal(false)
+        else:
+            web_vulkan_lane_census_drain()
+            val clock = default_frame_clock()
+            val started = clock.now_micros()
+            val pixels = simple_web_render_html_to_pixels_with_engine2d_backend(
+                html, UHD_W, UHD_H, "vulkan")
+            val elapsed_ms = (clock.now_micros() - started) / 1000
+            val census = web_vulkan_lane_census_line()
+            print("4K px={pixels.len()} ms={elapsed_ms} digest={audit_frame_digest(pixels)} nonblank={chrome_frame_nonblank(pixels)}")
+            print(census)
+
+            step("The frame came back at the requested 4K geometry and is not blank")
+            # oracle: the geometry the 4K receipt lane pins in
+            #         scripts/check/check-web-showcase-4k-receipt.shs -- width=3840,
+            #         height=2160, requested_backend=vulkan, mode=headless-readback
+            expect(pixels.len()).to_equal(8294400)
+            expect(chrome_frame_nonblank(pixels)).to_equal(true)
+
+            step("The 4K frame stayed on the GPU and took exactly one readback; elapsed time is captured as evidence only, because no 4K frame-time budget is pinned in this repo")
+            # oracle: the audited invariant readbacks <= 1
+            #         (check-web-vulkan-gpu-boundary-audit.shs header); the lower
+            #         bound keeps a lane that stopped reading back at all from
+            #         passing this as if it were GPU-resident
+            expect(audit_field(census, "cpu_fallback")).to_equal("false")
+            expect(audit_field(census, "readbacks").to_i64()).to_equal(1)

@@ -1,0 +1,46 @@
+# RV64 early boot page allocator bridge.
+#
+# The freestanding RV64 boot path brings up the monotonic runtime allocator
+# before generic PMM metadata exists.  PID1 image frames and supervisor trap
+# stacks therefore use this owner explicitly during early boot; they are
+# boot-lifetime allocations and must never be returned through generic PMM
+# free APIs.
+
+use os.kernel.types.memory_types.{PageFrame, PhysAddr}
+
+extern fn rt_riscv_noalloc_alloc_page() -> u64
+
+val RV64_BOOT_PAGE_SIZE: u64 = 4096u64
+
+fn _rv64_boot_alloc_raw_page() -> u64:
+    val physical = rt_riscv_noalloc_alloc_page()
+    if physical == 0u64 or (physical & (RV64_BOOT_PAGE_SIZE - 1u64)) != 0u64:
+        return 0u64
+    physical
+
+pub fn rv64_boot_alloc_page_frame() -> PageFrame?:
+    """Allocate one boot-lifetime frame from the initialized RV64 arena."""
+    val physical = _rv64_boot_alloc_raw_page()
+    if physical == 0u64:
+        return nil
+    PageFrame(pfn: physical / RV64_BOOT_PAGE_SIZE)
+
+pub fn rv64_boot_alloc_contiguous_pages(count: u64) -> PhysAddr?:
+    """Allocate a contiguous boot-lifetime range without generic PMM state.
+
+    The runtime owner is monotonic, so consecutive successful page requests
+    must be physically adjacent.  A partial failed reservation remains owned
+    until reset rather than being incorrectly returned through the generic PMM.
+    """
+    if count == 0u64:
+        return nil
+    val base = _rv64_boot_alloc_raw_page()
+    if base == 0u64:
+        return nil
+    var index: u64 = 1u64
+    while index < count:
+        val next = _rv64_boot_alloc_raw_page()
+        if next == 0u64 or next != base + index * RV64_BOOT_PAGE_SIZE:
+            return nil
+        index = index + 1u64
+    PhysAddr(addr: base)

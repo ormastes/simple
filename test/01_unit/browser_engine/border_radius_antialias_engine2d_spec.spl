@@ -1,0 +1,65 @@
+"""
+## Purpose and audience
+Purpose: Assert that the Engine2D rounded-corner rasterizer anti-aliases the
+corner arc by pixel coverage.
+Audience: browser-engine and Engine2D maintainers.
+
+GREEN as of 2026-09-12. `emu_draw_rounded_rect` now implements the SHARED
+ROUNDED-RECT CORNER COVERAGE FORMULA v1 — defined once in the comment block
+above that function in `src/lib/gc_async_mut/gpu/engine2d/backend_emu.spl`, and
+implemented identically by all three twin lanes: CPU and Vulkan share that code
+(`backend_vulkan.spl`'s `draw_rounded_rect` delegates to it), Metal
+transliterates it in `kernel_draw_rounded_rect`.
+
+The earlier attempt was reverted because it changed the CPU alone, which broke
+the CPU<->GPU parity contract in
+`test/02_integration/rendering/engine2d_shared_raster_parity_spec.spl` (1
+pre-existing failure -> 5). All three lanes now move together, so that spec's
+rounded-rect rows still pass. It additionally carries the ABSOLUTE oracle for
+the formula (hand-derived coverage values), because parity alone would be
+satisfied by three lanes agreeing on a WRONG formula — "MATCH != correct".
+See doc/08_tracking/bug/web_border_radius_corner_not_antialiased_2026-09-12.md
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-BORDER-RADIUS-AA-002 — Engine2D rounded corners are coverage anti-aliased.
+"""
+# @cover src/lib/gc_async_mut/gpu/engine2d/backend_emu.spl 4%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
+    simple_web_render_html_to_pixels_with_engine2d_backend
+}
+
+# Fixture: a 160x160 white page with a 100x100 black box at (20, 20) and
+# border-radius 40px, so the top-left arc centre is (60, 60) with r = 40.
+val VIEW: i32 = 160
+val FIXTURE = (
+    "<html><body style=\"margin:0;padding:0;background:#ffffff\">" +
+    "<div style=\"margin:20px 0 0 20px;width:100px;height:100px;background:#000000;" +
+    "border-radius:40px\"></div></body></html>"
+)
+
+fn page_gray(x: i32, y: i32) -> i32:
+    val pixels = simple_web_render_html_to_pixels_with_engine2d_backend(FIXTURE, VIEW, VIEW, "cpu_simd")
+    ((pixels[y * VIEW + x] >> 16) & 0xFFu32) as i32
+
+describe "Engine2D rounded corner is coverage anti-aliased":
+    it "AC-1: a pixel on the corner arc takes an intermediate value":
+        # Arc centre (60, 60), r = 40. Both of these pixel centres sit on the
+        # arc: neither pure fill nor pure background. Measured 205 and 134.
+        val diagonal = page_gray(31, 31)
+        assert_true(diagonal > 0)
+        assert_true(diagonal < 255)
+        val near_tangent = page_gray(53, 20)
+        assert_true(near_tangent > 0)
+        assert_true(near_tangent < 255)
+
+    it "AC-2: well inside the arc is exact fill and the corner tip is exact background":
+        expect(page_gray(60, 60)).to_equal(0)
+        expect(page_gray(21, 21)).to_equal(255)
+
+    it "AC-3: the straight edge tangent to the arc stays exact fill":
+        # The tangent column/row must not pick up a half-coverage notch.
+        expect(page_gray(60, 20)).to_equal(0)
+        expect(page_gray(20, 60)).to_equal(0)
+

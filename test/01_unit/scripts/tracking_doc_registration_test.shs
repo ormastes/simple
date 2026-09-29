@@ -1,0 +1,97 @@
+#!/bin/sh
+# Filesystem fixtures exercise the production registration owner, never a copy.
+set -eu
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)
+guard=$repo/scripts/check/check-tracking-doc-registration.shs
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+bug=$tmp/doc/08_tracking/bug
+todo=$tmp/doc/08_tracking/todo
+mkdir -p "$bug/nested" "$todo"
+cat > "$bug/bug_db.sdn" <<'EOF'
+bugs |id, severity, status, title, file, line, reproducible_by, created_at, updated_at, valid|
+    registered, P2, open, "fixture, with comma", src/fixture.spl, 1, NONE, 2026-09-21, 2026-09-21, true
+EOF
+cat > "$todo/todo_db.sdn" <<'EOF'
+todos |id, keyword, area, priority, description, file, line, issue, blocked, status, valid|
+    7, TODO, test, P2, "source-only task", src/fixture.spl, 5, , "", open, true
+EOF
+printf '# Registered fixture\nStatus: OPEN\n' > "$bug/registered.md"
+passed=0
+expect() {
+    label=$1; want=$2; token=$3
+    rc=0; sh "$guard" --root "$tmp" > "$tmp/out" 2>&1 || rc=$?
+    [ "$rc" -eq "$want" ] && grep -F "$token" "$tmp/out" >/dev/null || {
+        echo "FAIL $label expected=$want actual=$rc token=$token"; cat "$tmp/out"; exit 1;
+    }
+    passed=$((passed+1))
+}
+expect source-only-todo-valid 0 'PASS rows=2'
+printf '# Plain open\nStatus: open\n' > "$bug/nested/missing.md"
+expect recursive-plain-open 1 'unregistered-bug-document'
+printf '# Blocked\nStatus: BLOCKED pending host\n' > "$bug/nested/missing.md"
+expect blocked-is-unresolved 1 'unregistered-bug-document'
+printf '# Not a lifecycle record\nStatus: opened input handle\n' > "$bug/nested/missing.md"
+expect token-boundary 0 'PASS rows=2'
+printf '# Tutorial\n```text\nStatus: OPEN\n```\n' > "$bug/nested/missing.md"
+expect fenced-example-ignored 0 'PASS rows=2'
+printf '# Pending task\nStatus: in-progress\n' > "$todo/pending.md"
+expect todo-orphan 1 'unregistered-todo-document'
+printf '    8, TODO, test, P2, "curated task", doc/08_tracking/todo/pending.md, 1, , "", blocked, true\n' >> "$todo/todo_db.sdn"
+expect curated-todo-registered 0 'PASS rows=3'
+printf '# Blocked task\nStatus: BLOCKED pending hardware\n' > "$todo/blocked.md"
+printf '    10, TODO, test, P2, "blocked task", doc/08_tracking/todo/blocked.md, 1, , "", open, true\n' >> "$todo/todo_db.sdn"
+expect blocked-todo-status-mismatch 1 'todo-status-mismatch'
+awk 'index($0,"    10, TODO,")==1 { print "    10, TODO, test, P2, \"blocked task\", doc/08_tracking/todo/blocked.md, 1, , \"\", blocked, true"; next } { print }' "$todo/todo_db.sdn" > "$todo/todo_db.tmp"
+mv "$todo/todo_db.tmp" "$todo/todo_db.sdn"
+expect blocked-todo-needs-blocker 1 'todo-blocker-missing'
+awk 'index($0,"    10, TODO,")==1 { print "    10, TODO, test, P2, \"blocked task\", doc/08_tracking/todo/blocked.md, 1, , \"pending-hardware\", blocked, true"; next } { print }' "$todo/todo_db.sdn" > "$todo/todo_db.tmp"
+mv "$todo/todo_db.tmp" "$todo/todo_db.sdn"
+expect blocked-todo-registered 0 'PASS rows=4'
+printf '# Marker-only task\n# TODO: execute retained fixture\n' > "$todo/marker.md"
+expect marker-needs-triage 1 'todo-marker-without-row'
+printf '# Historical note without lifecycle or marker\n' > "$todo/marker.md"
+printf '    missing_doc, P2, open, fixture, src/fixture.spl, 1, NONE, 2026-09-21, 2026-09-21, true\n' >> "$bug/bug_db.sdn"
+expect reverse-document-link 1 'bug-row-without-exact-document'
+printf '# Missing doc\nStatus: OPEN\n' > "$bug/missing_doc.md"
+expect reverse-link-repaired 0 'PASS rows=5'
+printf '    alias_2026_09_21, P2, open, alias, src/fixture.spl, 1, NONE, 2026-09-21, 2026-09-21, true\n' >> "$bug/bug_db.sdn"
+printf '# Date spelling\nStatus: OPEN\n' > "$bug/alias_2026-09-21.md"
+expect date-spelling-does-not-register 1 'candidate-id=alias_2026_09_21'
+mv "$bug/alias_2026-09-21.md" "$bug/alias_2026_09_21.md"
+expect exact-date-identity 0 'PASS rows=6'
+printf '    check_stage3_recovery_authority_arity_drift_2026_09_17, P1, fixed, canonical, src/fixture.spl, 1, NONE, 2026-09-17, 2026-09-18, true\n' >> "$bug/bug_db.sdn"
+printf '# Reviewed alias\nStatus: OPEN\n' > "$bug/check_stage3_recovery_authority_arity_drift_2026-09-17.md"
+expect explicit-semantic-alias 0 'PASS rows=7'
+printf '    check_stage3_recovery_authority_arity_drift_2026-09-17, P3, open, duplicate, src/fixture.spl, 1, NONE, 2026-09-17, 2026-09-21, true\n' >> "$bug/bug_db.sdn"
+expect semantic-alias-duplicate 1 'duplicate-bug-semantic-id'
+printf '    9, TODO, test, P2, broken, unquoted, comma, src/fixture.spl, 1, , "", open, true\n' >> "$todo/todo_db.sdn"
+expect malformed-width 1 'malformed-row'
+printf '\nbugs_active |id, severity, status, title, file, line, reproducible_by, created_at, updated_at, valid|\n    registered, P2, open, duplicate, src/fixture.spl, 1, NONE, 2026-09-21, 2026-09-21, true\n' >> "$bug/bug_db.sdn"
+expect cross-table-duplicate 1 'duplicate-bug-id'
+mv "$todo/todo_db.sdn" "$todo/missing.sdn"
+expect missing-db-is-error 2 'ERROR missing-db'
+# Anchored by the reviewed blocker text rather than a numeric TODO id: the id
+# a row lands on shifts by +/-N every time an earlier row is inserted or
+# removed by an unrelated rebase (measured drift 322->323 after one main
+# rebase), so pinning to an id here is brittle and unrelated to what this
+# fixture actually verifies -- that a specific, known-blocked TODO carries
+# its reviewed blocker text and status. Matching on the blocker text keeps
+# the same guarantee (row exists, is TODO, is blocked=true with that exact
+# blocker) without depending on row order.
+expect_repo_todo_blocked() {
+    label=$1; blocker=$2
+    line=$(grep -F ", \"$blocker\", blocked, true" "$repo/doc/08_tracking/todo/todo_db.sdn") || {
+        echo "FAIL $label missing a blocked TODO with blocker: $blocker"; exit 1;
+    }
+    printf '%s\n' "$line" | grep -Eq '^    [0-9]+, TODO,' || {
+        echo "FAIL $label row with blocker '$blocker' is not a TODO row: $line"; exit 1;
+    }
+    passed=$((passed+1))
+}
+expect_repo_todo_blocked image-markdown-blocked 'release admission pending an admitted self-hosted runtime and retained verification/performance receipts'
+expect_repo_todo_blocked qrb2210-physical-blocked 'physical QRB2210 SimpleOS driver bring-up and an attached UNO Q are unavailable'
+expect_repo_todo_blocked macos-receipt-blocked 'prepared macOS qualification host is unavailable'
+expect_repo_todo_blocked windows-receipt-blocked 'prepared Windows qualification host is unavailable'
+expect_repo_todo_blocked three-arch-qemu-blocked 'structural admission exists but no live three-architecture QEMU run was authorized'
+echo "PASS tracking registration: $passed fixtures"

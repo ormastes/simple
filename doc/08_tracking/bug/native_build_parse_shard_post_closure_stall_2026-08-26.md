@@ -1,4 +1,8 @@
 # Native-build parse shard stalls after source-closure progress
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -34,3 +38,4 @@ current-item progress, and apply the normal native-build worker timeout to
 direct parse-shard mode. The owning loop must either converge or fail with a
 specific source/task receipt before the pure-Simple CLI, rendering guest, and
 Vulkan showcase can be admitted.
+

@@ -1,4 +1,9 @@
 # sspec: hollow-expect provisional text clobbers real failure message (2026-08-19)
+## Closed 2026-09-16 — ...ng expectation is wrong/misleading. ## Fix sketch On the matcher-pass path at bdd.rs:1134,
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** OPEN (filed only; fix deliberately deferred)
 **Site:** `src/compiler_rust/compiler/src/interpreter_call/bdd.rs:1134`
@@ -23,3 +28,4 @@ or discarded per-expect rather than per-test).
 
 Debugging closure_captured_instance_loses_method_self_mutation_2026-08-19 — the
 secondary defect made the primary failure's message unreadable.
+

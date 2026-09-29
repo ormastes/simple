@@ -2637,3 +2637,164 @@ accepted surface: workspace root/view, artifact, section, trace, diagnostics,
 legacy alias after canonical reauthorization, and the `spipe_search` tool. A
 positive alias case must render only the canonical authorized target; it cannot
 prove success by returning legacy-alias text or an unbound URI echo.
+
+## 20. Selected transactional authority-service detail design (F1/N1)
+
+This supersedes direct host-CAS execution and consumes REQ-SPKC-031/032 and
+NFR-SPKC-026/027; no source is admitted. `AuthorityServiceV1` owns admission,
+decision store, canonical open, leases, and a private certified backend. Clients
+own only `AuthorityClientV1` and cannot construct a store/backend or treat a
+pointer as authority.
+
+1. Authenticate and validate exact scope/capability/trust, bounded key, and
+   canonical proposal before transaction admission.
+2. Validate `G=0` paired-null or `G>0` exact raw predecessor bytes/digest for
+   `G-1`, next canonical pointer `G`, and terminal/object graph. In one
+   serializable transaction, equal `(scope,key)` returns stored bytes; changed
+   bytes rejects; a different contender returns the one durable `MismatchV1`
+   winner; missing successor current is durable `HostReplaceFatalV1(SPK704)`.
+   Otherwise write Request, Decision, and OpenIndex durably.
+3. Commit, then return exact `ReplacedV1`/`MismatchV1`/SPK704 outcome. An invalid
+   authenticated capability/scope/trust/authorization binding before Request
+   admission is explicit non-enumerating `CapabilityDeniedV1`; only
+   authentication/availability/transport failure is payload-free
+   `ServiceTransportFailureV1`;
+   a post-commit lost reply is client-local `IndeterminateDeliveryV1` and
+   resolves only by same key plus request digest. A resolve with no admitted
+   request returns only signed `NoAdmissionV1(scope,key,requestDigest,
+   admissionWatermark,negativeIndexProof)`, never cache absence.
+4. `open` pins the committed index, validates the full graph, then returns a
+   lease-bound immutable view. Tenant UID appears in every primary/secondary
+   key; audit records retain actor/key/capability/scope/request/decision digests,
+   timestamp and code, never private canonical content.
+
+Partitions/unavailable quorum admit no decision. An unexpired lease may serve
+only its proven commit index; stale/revoked lease fails closed. Recovery
+replays the decision log before service. `CertifiedAuthorityBackendV1` has only
+private `certifyTuple`, `prepareEffects`, `commitEffects`, and `verifyEffects`
+commands; certificate/result mismatch, expiry, or native error denies before
+decision commit. Node has no backend chooser and no filesystem fallback.
+
+The qualified deployment uses the §21.11 1,024-tenant/8,192-global queue,
+1-MiB request bound, 500 decisions/s, publish 25/75-ms and open 10/30-ms
+P95/P99, RPO=0, and 60-s single-member RTO. The qualifying fixture is three
+8-vCPU/32-GiB/NVMe Linux nodes, recording CPU model/count and governor/turbo/
+frequency policy, RAM, OS/kernel, isolated network topology/link
+characteristics, and storage device/filesystem/mount options; it pins the
+50,000-artifact corpus SHA-256 and canonical deterministic generator
+revision/seed/distribution manifest. It uses a monotonic raw clock, five-minute
+warmup, 30-minute/100,000-op 70/20/10 open/publish/resolve load at 70% capacity,
+nearest-rank percentiles, and one power-cut per member. Telemetry samples queue,
+commit, fsync, replication, lease, certificate, and failover; RPO/RTO boundaries
+are §22.9's power-cut-to-log/open events.
+
+### 20.1 First source-slice implementation contract (non-admitted)
+
+The first source slice creates `authority/protocol`, `authority/client`,
+`authority/service`, `authority/records`, and `authority/service_main` only as
+closed codec/router boundaries. It is not a substitute decision store. The
+request encoders must carry the signed caller/capability identity and every
+scope coordinate (tenant, workspace, project-or-null, worktree, revision,
+registry, base, snapshot), key, digest, and P3 raw-byte evidence; open binds a
+required decision digest. Decoder validation is exact and rejects additional or
+noncanonical fields before service dispatch.
+
+`service_main` accepts only mutually authenticated framed IPC connections whose
+peer credential and capability verifier are constructed at the service
+composition root from trusted OS/certificate configuration. It must not read
+credentials from env/argv/globals or accept a caller-provided verifier. Without
+an admitted private durable backend it returns a pre-admission failure and
+creates no mutable record, audit admission, receipt, backend command, or local
+publication effect. This state claims zero positive availability.
+
+`AuthorityClientV1.publish` invokes `selectCommitInputV1` once, binds the P2
+replay digest/scope, and sends one `PublishRequestV1`. It neither constructs nor
+selects a store/backend. Reply loss returns `IndeterminateDeliveryV1`; only a
+same-scope/key/digest resolve can replace it, with exact durable terminal/winner
+evidence or quorum-signed `NoAdmissionV1`. Missing or lost resolve remains
+indeterminate. F2 is reachable only from a lexical private composition root and
+requires live certification, parity, and service commit checks; normal Node is
+denied before staging.
+
+This slice tests only canonical codecs, the exactly-once P2 call sequence,
+capability/transport denial, lost-delivery representation, and fail-closed
+service main. It explicitly does not execute or satisfy W5A-65..93, and it
+does not claim any §21.11 deployment target.
+
+### 20.2 Sealed trust, send-state, and response-verification prerequisite
+
+The source slice has one lexical composition owner.  It alone binds the client
+channel, service listener, OS peer-credential/platform-certificate adapter,
+service credential, trusted verification roots, response verifier, durable
+store, and optional certified backend.  Product modules obtain only opaque
+already-bound handles.  There is no exported factory/installer, constructor
+argument, public DI token, test authority, environment/argv/global selector,
+or caller-provided signer/verifier/store/backend object.  This applies equally
+to Node and tests; normal Node has no substitute authority.
+
+`AuthorityClientV1.publish` uses the following exact state machine after its
+single P2 preflight: `prepared -> authenticated -> sendStarted -> awaitingReply
+-> definitive|indeterminate`.  `authenticated` means mutual peer/service
+identity and the connection binding have been verified.  Only a failure before
+`sendStarted` returns local `ServiceTransportFailureV1`; the transition is
+recorded immediately before the first framed write.  Once entered, all write,
+flush, timeout, cancellation, peer-close, and decoder failures are
+`IndeterminateDeliveryV1` unless the client verifies a definitive receipt.  A
+valid service `CapabilityDeniedV1` is decoded as a service pre-admission result
+even though it arrives after `sendStarted`.  `resolveAccepted` reuses the
+unchanged `{scopeDigest,idempotencyKey,requestDigest,connectionBindingDigest}`;
+it never tries another publish or changes scope/key/digest.
+
+`AuthorityResponseReceiptV1` is canonical signed data, not a transport-shaped
+object.  It binds `{header,responseKind,serviceInstanceUid,authorityKeyId,
+authorityKeyEpoch,tenantUid,callerSubjectDigest,connectionBindingDigest,
+scopeDigest,requestDigest,idempotencyKeyOrNull,decisionDigestOrNull,
+terminalDigestOrNull,admissionWatermarkOrNull,negativeIndexProofDigestOrNull,
+issuedAtMs,expiresAtMs,signature}`.  Terminal/winner responses require exact
+non-null decision/terminal bytes and digests and null negative-proof fields.
+`NoAdmissionV1` requires exact non-null quorum watermark and signed negative
+proof and null terminal/winner fields.  Before returning either, the client
+checks canonical bytes, signature/key epoch/revocation, service identity,
+authenticated connection and caller-subject binding, original request tuple,
+expiry, and the applicable durable terminal/proof binding.  Any failure keeps
+the post-send request indeterminate.
+
+Private test composition is a separate executable fixture, not public product
+injection: test code can request named barriers and read observations but cannot
+construct a peer credential, signer, verifier, durable proof, store, backend,
+or authority response.  Valid signed vectors originate inside that sealed
+fixture; public tests supply only invalid/malformed values.  This permits
+negative trust-boundary evidence without granting synthetic publication
+authority or claiming durable-service admission.
+
+### 20.3 Snapshot-read kernel: closed, fixture-only, and non-admitted
+
+The read-kernel implementation boundary is
+`SnapshotAuthorityPortV1.openBoundSnapshot(binding)`.  It accepts no raw
+manifest, map, path, store, snapshot handle, URI, cursor, or projection object.
+Its sealed composition root internally supplies its only admissible value: a
+private branded `PublishedAuthorityInventoryV1`; it does not expose or rename
+the separate `TargetInventoryStoreV1.openPublishedAuthorityInventoryV1`
+boundary.  Before a result is exposed,
+the kernel compares all seven binding coordinates
+`{workspaceUid,projectUidOrNull,worktreeUid,baseSnapshotUid,
+authoritySnapshotUid,revisionId,registryRevisionId}` plus
+`authorityInstanceUid` and `authorityManifestDigest`; a mismatch returns a
+closed non-admission failure.  `resolveCanonicalTarget` and
+`listDirectoryTarget` return opaque candidate values with no locator, byte
+reader, grant, URI, path, cursor position, or rendering method.
+
+This module has no imports from external-open, MCP, URI parsing, cursor,
+filesystem, store, or projection surfaces.  Its private fixture tests are
+limited to shape/brand/binding/membership negatives and opaque-result checks.
+They cannot create a positive open, call a renderer, or stand in for a durable
+publication.  No public factory, installer, fake inventory builder, or test DI
+hook exists.
+
+The first positive canonical open is intentionally deferred: a service must
+first publish the exact inventory durably, then `AuthorizationPortV1` must
+verify the canonical-read receipt and issue/verify a cursor when applicable,
+and only then may `ProjectionPortV1` and the resolver consume a verified grant.
+The frozen trace-inventory candidate is excluded from this kernel because its
+aliased-object limit bypass invalidates unique-membership proof; it supplies no
+strict-trace completion evidence.

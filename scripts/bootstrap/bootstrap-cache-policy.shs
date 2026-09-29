@@ -1,5 +1,8 @@
 #!/bin/sh
-# Pure cache-policy predicates shared by the bootstrap wrapper and its tests.
+# Cache-policy predicates and helpers shared by the bootstrap wrapper and its
+# tests. Most of this file is pure predicates; bootstrap_prune_stale_seed_scope_dirs
+# below is the one exception (it does real filesystem I/O) and is kept here
+# anyway so the wrapper and its selftest share one implementation.
 
 bootstrap_cache_force_clear_one_binary() {
   cache_execution_profile=$1
@@ -24,4 +27,73 @@ bootstrap_strategy_failure_policy() {
     full) printf '%s\n' inventory-to-end ;;
     *) return 1 ;;
   esac
+}
+
+# Prune sibling `scope-*` seed-cache dirs (native_project/mod.rs's
+# `scope-<16 hex>/objects/<16 hex>.o` layout, keyed by lane +
+# compiler_fingerprint) that are provably NOT the scope the just-finished
+# Stage 2 build used. The scope name comes straight from the seed's own
+# `[native-build] compiled=... scope=<name>` receipt line -- never
+# recomputed here -- so a dead scope orphaned by a superseded seed
+# fingerprint is removed the same run it goes stale, instead of relying on
+# an mtime TTL (unsafe for this layout: writes land under
+# `scope-*/objects/`, never touching the scope dir's own mtime, so a TTL
+# sweep cannot tell an in-use scope from a dead one).
+#
+# Args: $1 = stage2 exit status, $2 = stage2 native-build log path,
+#       $3 = stage2 native-build cache dir (absolute).
+# Never fails the caller: every failure mode (bad/missing log, ambiguous or
+# malformed scope value, a locked/undeletable directory) is a warning on
+# stderr, and the function always returns 0.
+bootstrap_scope_hex_pattern='scope-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]'
+bootstrap_prune_stale_seed_scope_dirs() {
+  bpssd_status=$1
+  bpssd_log=$2
+  bpssd_cache_dir=$3
+  bpssd_current_scope=""
+  bpssd_status_ok=0
+  case "${bpssd_status}" in
+    0) bpssd_status_ok=1 ;;
+  esac
+  if [ "${bpssd_status_ok}" -eq 1 ] && [ -f "${bpssd_log}" ]; then
+    # Parse ONLY our own receipt line, never a bare `scope=` grep -- that
+    # would also match unrelated fields like `in_scope=` and could hand a
+    # bogus value (e.g. `.`) to `-d`/`rm -rf`.
+    bpssd_scope_values=$(
+      sed -n 's/^\[native-build\] compiled=.* scope=\([^ ]*\)[[:space:]]*$/\1/p' \
+        "${bpssd_log}" 2>/dev/null | sort -u
+    )
+    bpssd_scope_count=0
+    if [ -n "${bpssd_scope_values}" ]; then
+      bpssd_scope_count=$(printf '%s\n' "${bpssd_scope_values}" | grep -c '.')
+    fi
+    if [ "${bpssd_scope_count}" -eq 1 ]; then
+      case "${bpssd_scope_values}" in
+        ${bootstrap_scope_hex_pattern}) bpssd_current_scope=${bpssd_scope_values} ;;
+        *)
+          echo "  native cache: skip stale-scope prune (scope value '${bpssd_scope_values}' does not match scope-<16 hex>)" >&2
+          ;;
+      esac
+    else
+      echo "  native cache: skip stale-scope prune (found ${bpssd_scope_count} distinct scope value(s) in ${bpssd_log}, need exactly 1)" >&2
+    fi
+  fi
+  if [ -n "${bpssd_current_scope}" ] &&
+     [ -d "${bpssd_cache_dir}/${bpssd_current_scope}" ]; then
+    for bpssd_dir in "${bpssd_cache_dir}"/scope-*; do
+      [ -d "${bpssd_dir}" ] || continue
+      bpssd_name=$(basename "${bpssd_dir}")
+      case "${bpssd_name}" in
+        ${bootstrap_scope_hex_pattern}) ;;
+        *) continue ;;
+      esac
+      [ "${bpssd_name}" = "${bpssd_current_scope}" ] && continue
+      if rm -rf "${bpssd_dir}"; then
+        echo "  native cache: pruned stale seed scope dir ${bpssd_name} (current: ${bpssd_current_scope})"
+      else
+        echo "  warning: could not prune stale seed scope dir ${bpssd_name} (in use / locked?); leaving it in place" >&2
+      fi
+    done
+  fi
+  return 0
 }

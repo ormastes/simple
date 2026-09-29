@@ -1,0 +1,62 @@
+# @tag:in-development
+# Tracks: doc/08_tracking/bug/pr1870_pr1830_unreviewed_merge_fallout_2026-09-28.md
+# @req REQ-2D-002 REQ-2D-003 REQ-2D-005 NFR-2D-001 NFR-2D-002
+# @tag: system, draw_ir, skia, renderdoc, evidence
+"""Selected C/N2 admission: a scene reaches both adapters, but absent GPU
+pixels remain a typed blocked result rather than a visual PASS.
+"""
+
+use std.spec.{describe, it, expect}
+use std.spec.step
+use std.common.crypto.sha256.{sha256_text}
+use common.ui.draw_ir.{draw_ir_batch, draw_ir_composition,
+    draw_ir_embedding_config, draw_ir_fractional_rect}
+use common.ui.ui_ir.{draw_ir_to_ui_ir}
+use std.skia.backend.upstream_ganesh_vulkan.provider.{upstream_skia_ganesh_vulkan_preflight}
+use common.renderdoc.final_output_pixels.{FinalOutputMetadata,
+    FinalOutputCapture, FinalOutputTolerance, compare_final_output_pixels}
+
+describe "selected 2D Skia RenderDoc admission":
+    it "preserves fractional input but blocks a missing physical capture":
+        step("Load the pinned scene")
+        val source = "controlled-quarter-rectangle-v1"
+        val digest = sha256_text(source)
+        val scene = draw_ir_composition("controlled-rect", source, "gpu", [
+            draw_ir_batch("offscreen", "gpu",
+                draw_ir_embedding_config("surface", "root", 0, 0, 16, 16,
+                    0, 1000, false), [
+                    draw_ir_fractional_rect("quarter", 0.25, 1.5, 4.0, 3.5,
+                        0xff336699u32)
+                ])
+        ])
+        val lowered = draw_ir_to_ui_ir(scene)
+        expect(lowered.accepted).to_equal(true)
+        expect(lowered.commands.len()).to_equal(1)
+        expect(lowered.commands[0].x).to_equal(0.25)
+
+        step("Preflight the complete picture")
+        val provider_admission = upstream_skia_ganesh_vulkan_preflight(scene)
+        expect(provider_admission.accepted).to_equal(true)
+        expect(provider_admission.rect_count).to_equal(1)
+
+        step("Validate capture provenance")
+        val absent = FinalOutputCapture(metadata: FinalOutputMetadata(
+            fixture_id: source, fixture_digest: digest,
+            frame_id: "frame-1", resource_id: "", selected_resource_count: 0,
+            mip_level: 0, array_layer: 0, submission_token: "",
+            completion_token: "", frame_complete: false,
+            readback_complete: false, device_status: "absent",
+            width: 16, height: 16, stride: 64,
+            pixel_format: "R8G8B8A8_UNORM", alpha_mode: "straight",
+            color_space: "srgb", color_primaries: "srgb",
+            transfer_function: "srgb", origin: "top-left",
+            crop_x: 0, crop_y: 0, crop_width: 16, crop_height: 16),
+            pixel_bytes: [])
+        val exact = FinalOutputTolerance(fixture_id: source,
+            verified_source_digest: digest, max_channel_delta: 0,
+            max_excess_pixels: 0)
+
+        step("Compare canonical final pixels")
+        val comparison = compare_final_output_pixels(absent, absent, exact)
+        expect(comparison.passed).to_equal(false)
+        expect(comparison.status).to_equal("left-blocked-environment")

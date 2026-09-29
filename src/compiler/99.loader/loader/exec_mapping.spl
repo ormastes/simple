@@ -13,41 +13,235 @@ use .smf_mmap_native.{
     native_get_function_pointer,
     native_free_exec_memory
 }
+use .exec_mapping_cleanup_v1.{
+    EXEC_CLEANUP_RETRY_DRAIN_LIMIT_V1,
+    ExecCleanupStateV1, ExecCleanupCompletionMailboxV1,
+    ExecCleanupNativeDispatchV1, ExecCleanupNativeOutcomeKindV1,
+    exec_cleanup_state_v1, exec_cleanup_completion_mailbox_v1,
+    exec_cleanup_reserve_v1,
+    exec_cleanup_begin_construct_v1, exec_cleanup_complete_construct_v1,
+    exec_cleanup_construct_dispatch_v1, exec_cleanup_release_dispatch_v1,
+    exec_cleanup_bind_failure_v1, exec_cleanup_arm_native_dispatch_v1,
+    exec_cleanup_publish_native_outcome_v1,
+    exec_cleanup_drain_native_outcomes_v1,
+    exec_cleanup_retry_at_map_entry_v1,
+    exec_cleanup_free_range_allowed_v1
+}
+use std.nogc_sync_mut.atomic.{AtomicI64, MemoryOrdering, atomic_i64_new}
+use std.nogc_sync_mut.concurrent.thread.{thread_yield}
+
+val _EXEC_MAPPING_CLEANUP_GATE_BUDGET_V1: i64 = 65536
+val _EXEC_MAPPING_COMPLETION_DRAIN_BUDGET_V1: i64 = 4
+var _exec_mapping_cleanup_gate_v1: AtomicI64 = atomic_i64_new(0)
+var _exec_mapping_cleanup_state_v1: ExecCleanupStateV1 = exec_cleanup_state_v1()
+var _exec_mapping_cleanup_mailbox_v1: ExecCleanupCompletionMailboxV1 =
+    exec_cleanup_completion_mailbox_v1()
+
+fn _exec_mapping_cleanup_enter_v1() -> bool:
+    var waits: i64 = 0
+    while waits < _EXEC_MAPPING_CLEANUP_GATE_BUDGET_V1:
+        if _exec_mapping_cleanup_gate_v1.compare_exchange(
+                0, 1, MemoryOrdering.AcqRel, MemoryOrdering.Acquire):
+            return true
+        thread_yield()
+        waits = waits + 1
+    false
+
+fn _exec_mapping_cleanup_exit_v1() -> bool:
+    _exec_mapping_cleanup_gate_v1.compare_exchange(
+        1, 0, MemoryOrdering.AcqRel, MemoryOrdering.Acquire)
+
+fn _exec_mapping_cleanup_publish_release_v1(
+        dispatch: ExecCleanupNativeDispatchV1) -> bool:
+    if not dispatch.ticket_present:
+        return false
+    val released = unsafe(capabilities: [raw_ptr]):
+        native_free_exec_memory(
+            dispatch.transition.release_address,
+            dispatch.transition.release_bytes)
+    val outcome = if released:
+        ExecCleanupNativeOutcomeKindV1.NativeReleaseSucceeded
+    else:
+        ExecCleanupNativeOutcomeKindV1.NativeReleaseFailed
+    exec_cleanup_publish_native_outcome_v1(
+        _exec_mapping_cleanup_mailbox_v1, dispatch.ticket, outcome)
+
+fn _exec_mapping_cleanup_dispatch_release_v1(
+        dispatch: ExecCleanupNativeDispatchV1) -> bool:
+    if not dispatch.ticket_present or
+            not exec_cleanup_arm_native_dispatch_v1(
+                _exec_mapping_cleanup_mailbox_v1, dispatch):
+        return false
+    _exec_mapping_cleanup_state_v1 = dispatch.transition.state
+    if not _exec_mapping_cleanup_exit_v1():
+        return false
+    _exec_mapping_cleanup_publish_release_v1(dispatch)
+
+fn _exec_mapping_cleanup_retry_drain_v1():
+    # Completed native outcomes are committed in FIFO ticket order before any
+    # retry.  A retry snapshot excludes rows created after this map entry.
+    if not _exec_mapping_cleanup_enter_v1():
+        return
+    val retry_frontier = _exec_mapping_cleanup_state_v1.next_token
+    _ = _exec_mapping_cleanup_exit_v1()
+    var attempted_tokens: [i64] = []
+    var attempts: i64 = 0
+    var mailbox_drains: i64 = 0
+    while (attempts < EXEC_CLEANUP_RETRY_DRAIN_LIMIT_V1 and
+            mailbox_drains < _EXEC_MAPPING_COMPLETION_DRAIN_BUDGET_V1):
+        if not _exec_mapping_cleanup_enter_v1():
+            return
+        val drained = exec_cleanup_drain_native_outcomes_v1(
+            _exec_mapping_cleanup_state_v1,
+            _exec_mapping_cleanup_mailbox_v1)
+        if not drained.ok:
+            _ = _exec_mapping_cleanup_exit_v1()
+            return
+        _exec_mapping_cleanup_state_v1 = drained.state
+        if drained.dispatch_present:
+            mailbox_drains = mailbox_drains + 1
+            if not exec_cleanup_arm_native_dispatch_v1(
+                    _exec_mapping_cleanup_mailbox_v1, drained.dispatch):
+                _ = _exec_mapping_cleanup_exit_v1()
+                return
+            if not _exec_mapping_cleanup_exit_v1():
+                return
+            _ = _exec_mapping_cleanup_publish_release_v1(drained.dispatch)
+            continue
+        if drained.drained > 0:
+            mailbox_drains = mailbox_drains + 1
+            _ = _exec_mapping_cleanup_exit_v1()
+            continue
+        var blocked = attempted_tokens
+        for slot in _exec_mapping_cleanup_state_v1.slots:
+            if slot.token >= retry_frontier:
+                blocked = blocked.push(slot.token)
+        val retry = exec_cleanup_retry_at_map_entry_v1(
+            _exec_mapping_cleanup_state_v1, blocked)
+        if not retry.ok or not retry.permit_present:
+            _ = _exec_mapping_cleanup_exit_v1()
+            return
+        val dispatch = exec_cleanup_release_dispatch_v1(
+            retry, ExecCleanupNativeOutcomeKindV1.NativeReleaseFailed)
+        if not exec_cleanup_arm_native_dispatch_v1(
+                _exec_mapping_cleanup_mailbox_v1, dispatch):
+            _ = _exec_mapping_cleanup_exit_v1()
+            return
+        _exec_mapping_cleanup_state_v1 = retry.state
+        attempted_tokens = attempted_tokens.push(retry.token)
+        if not _exec_mapping_cleanup_exit_v1():
+            return
+        _ = _exec_mapping_cleanup_publish_release_v1(dispatch)
+        attempts = attempts + 1
+
+fn _exec_mapping_cleanup_publish_construct_failure_v1(
+        dispatch: ExecCleanupNativeDispatchV1) -> bool:
+    exec_cleanup_publish_native_outcome_v1(
+        _exec_mapping_cleanup_mailbox_v1, dispatch.ticket,
+        ExecCleanupNativeOutcomeKindV1.ConstructFailed)
+
+fn _exec_mapping_cleanup_slot_present_v1(token: i64) -> bool:
+    for slot in _exec_mapping_cleanup_state_v1.slots:
+        if slot.token == token:
+            return true
+    false
 
 fn exec_mapping_map_rx(label: text, code: [u8]) -> Result<i64, text>:
     val code_size = code.len() as i64
     if code_size <= 0:
         return Err("Cannot map empty code for symbol {label}")
 
+    _exec_mapping_cleanup_retry_drain_v1()
+    if not _exec_mapping_cleanup_enter_v1():
+        return Err("Executable cleanup gate unavailable for {label}")
+    val mapping_id = "exec-map-{_exec_mapping_cleanup_state_v1.next_token}"
+    val reserved = exec_cleanup_reserve_v1(
+        _exec_mapping_cleanup_state_v1, mapping_id, code_size)
+    if not reserved.ok:
+        _ = _exec_mapping_cleanup_exit_v1()
+        return Err("Executable cleanup reservation failed for {label}")
+    _exec_mapping_cleanup_state_v1 = reserved.state
+
     # native_alloc_exec_memory creates RW, never RWX. The mapping is not
     # returned to a caller until the complete byte range has been sealed RX.
     val address = native_alloc_exec_memory(code_size)
     if address == 0:
+        val aborted = exec_cleanup_complete_construct_v1(
+            _exec_mapping_cleanup_state_v1, reserved.token, false)
+        if aborted.ok:
+            _exec_mapping_cleanup_state_v1 = aborted.state
+        _ = _exec_mapping_cleanup_exit_v1()
         return Err("Executable allocation failed for {label} ({code_size} bytes)")
+    val constructing = exec_cleanup_begin_construct_v1(
+        _exec_mapping_cleanup_state_v1, reserved.token, address)
+    if not constructing.ok:
+        val retained = exec_cleanup_bind_failure_v1(
+            constructing.state, reserved.token, address)
+        if retained.ticket_present and
+                exec_cleanup_arm_native_dispatch_v1(
+                    _exec_mapping_cleanup_mailbox_v1, retained):
+            _exec_mapping_cleanup_state_v1 = retained.transition.state
+            if _exec_mapping_cleanup_exit_v1():
+                _ = _exec_mapping_cleanup_publish_release_v1(retained)
+        else:
+            # The failed transition already owns the exact allocated range.
+            _exec_mapping_cleanup_state_v1 = retained.transition.state
+            _ = _exec_mapping_cleanup_exit_v1()
+        return Err("Executable cleanup bind failed for {label}")
+    val construction_dispatch = exec_cleanup_construct_dispatch_v1(
+        constructing)
+    if not construction_dispatch.ticket_present or
+            not exec_cleanup_arm_native_dispatch_v1(
+                _exec_mapping_cleanup_mailbox_v1, construction_dispatch):
+        _exec_mapping_cleanup_state_v1 = constructing.state
+        _ = _exec_mapping_cleanup_exit_v1()
+        return Err("Executable cleanup construction mailbox unavailable for {label}")
+    _exec_mapping_cleanup_state_v1 = constructing.state
+    if not _exec_mapping_cleanup_exit_v1():
+        return Err("Executable cleanup gate release failed for {label}")
 
     val written = unsafe(capabilities: [raw_ptr]):
         native_write_exec_memory(address, code, 0)
     if written != code_size:
-        unsafe(capabilities: [raw_ptr]):
-            _ = native_free_exec_memory(address, code_size)
+        _ = _exec_mapping_cleanup_publish_construct_failure_v1(
+            construction_dispatch)
         return Err("Failed to copy executable bytes for {label}")
 
     val executable = unsafe(capabilities: [raw_ptr]):
         native_make_executable(address, code_size)
     if not executable:
-        unsafe(capabilities: [raw_ptr]):
-            _ = native_free_exec_memory(address, code_size)
+        _ = _exec_mapping_cleanup_publish_construct_failure_v1(
+            construction_dispatch)
         return Err("Failed to switch RW->RX for {label}")
 
     native_flush_icache(address, code_size)
     val function_pointer = unsafe(capabilities: [raw_ptr]):
         native_get_function_pointer(address)
     if function_pointer == 0:
-        unsafe(capabilities: [raw_ptr]):
-            _ = native_free_exec_memory(address, code_size)
+        _ = _exec_mapping_cleanup_publish_construct_failure_v1(
+            construction_dispatch)
         return Err("Failed to derive executable address for {label}")
-    Ok(function_pointer)
+    if not exec_cleanup_publish_native_outcome_v1(
+            _exec_mapping_cleanup_mailbox_v1,
+            construction_dispatch.ticket,
+            ExecCleanupNativeOutcomeKindV1.ConstructSucceeded):
+        return Err("Executable cleanup construction outcome refused for {label}")
+    # Publication authenticates caller ownership.  Accounting is committed by
+    # the next bounded owner drain; the native success path never reacquires
+    # the cleanup gate.
+    return Ok(function_pointer)
 
 fn exec_mapping_free(address: i64, size: i64) -> bool:
+    # Commit any deferred caller-transfer receipt before checking whether the
+    # explicit free range is still cleanup-owned.
+    _exec_mapping_cleanup_retry_drain_v1()
+    if not _exec_mapping_cleanup_enter_v1():
+        return false
+    val allowed = exec_cleanup_free_range_allowed_v1(
+        _exec_mapping_cleanup_state_v1, address, size)
+    if not _exec_mapping_cleanup_exit_v1():
+        return false
+    if not allowed:
+        return false
     unsafe(capabilities: [raw_ptr]):
         native_free_exec_memory(address, size)

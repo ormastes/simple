@@ -1,8 +1,10 @@
 # TLDR: Hosted WM Capture Lowering Failure
+## Obsolete 2026-09-16 — TLDR duplicate of same-named main entry; same symptom+area
 
-Status: DUPLICATE of hosted_wm_capture_put_pixel_lowering_2026-07-19.md
-Status re-verified 2026-08-17 by source inspection (triage shard 01).
+Reviewed in the 2026-09-16 bug-ledger normalization pass. Kept for history;
+the subject is removed, superseded, or duplicated elsewhere in the ledger.
 
 Canonical host capture is blocked before rendering because the self-hosted
 compiler loses `width` while lowering `HostedCaptureFramebuffer.put_pixel` and
 then reports `put_pixel` missing. No synthetic capture is accepted as evidence.
+

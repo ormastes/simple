@@ -1,0 +1,153 @@
+# Bounded parser for the exact llvm-objdump -d default raw-byte presentation.
+# It correlates each decoded row with readobj executable section bytes and
+# issues no authority or execution claim.
+use std.common.crypto.sha256.sha256_u8_hex
+use compiler.driver.parser_llvm_readobj_codec_v1.ParserLlvmReadobjSectionV1
+
+pub const PARSER_LLVM_OBJDUMP_MAX_TEXT_BYTES_V1: i64 = 67108864
+pub const PARSER_LLVM_OBJDUMP_MAX_INSTRUCTIONS_V1: i64 = 16777216
+
+pub enum ParserLlvmObjdumpCodecErrorV1:
+    InputLimit
+    SchemaMismatch
+    WrongObject
+    UnknownSection
+    DuplicateSection
+    InvalidInstruction
+    IncompleteSection
+    ByteMismatch
+
+pub struct ParserLlvmObjdumpInstructionV1:
+    section_index: i64
+    section_name: text
+    section_offset: i64
+    bytes: [u8]
+    byte_digest: text
+    opcode_identity: text
+    recognized: bool
+
+pub struct ParserLlvmObjdumpProjectionV1:
+    instructions: [ParserLlvmObjdumpInstructionV1]
+    executable_section_count: i64
+    instruction_count: i64
+
+fn _hex_digit_lod(c: char) -> i64:
+    if c >= '0' and c <= '9': return c.ord() - '0'.ord()
+    if c >= 'a' and c <= 'f': return c.ord() - 'a'.ord() + 10
+    if c >= 'A' and c <= 'F': return c.ord() - 'A'.ord() + 10
+    -1
+fn _hex_lod(value: text) -> i64?:
+    if value.len() == 0: return nil
+    var result = 0
+    for i in 0..value.len():
+        val digit = _hex_digit_lod(value.char_at(i))
+        if digit < 0 or result > 0x7ffffffffffffff / 16: return nil
+        result = result * 16 + digit
+    result
+fn _byte_lod(value: text) -> u8?:
+    if value.len() != 2: return nil
+    val high = _hex_digit_lod(value.char_at(0)); val low = _hex_digit_lod(value.char_at(1))
+    if high < 0 or low < 0: return nil
+    (high * 16 + low) as u8
+fn _exec_index_lod(sections: [ParserLlvmReadobjSectionV1], name: text) -> i64:
+    var found = -1
+    for section in sections:
+        if section.executable and section.name == name:
+            if found >= 0: return -2
+            found = section.section_index
+    found
+fn _section_lod(sections: [ParserLlvmReadobjSectionV1], index: i64
+) -> ParserLlvmReadobjSectionV1?:
+    for section in sections:
+        if section.section_index == index: return section
+    nil
+
+pub fn parser_llvm_objdump_decode_v1(text_output: text,
+    sections: [ParserLlvmReadobjSectionV1]
+) -> Result<ParserLlvmObjdumpProjectionV1, ParserLlvmObjdumpCodecErrorV1>:
+    if text_output.len() <= 0 or text_output.len() > PARSER_LLVM_OBJDUMP_MAX_TEXT_BYTES_V1:
+        return Err(ParserLlvmObjdumpCodecErrorV1.InputLimit)
+    var expected_exec = 0
+    for position in 0..sections.len():
+        val section = sections[position]
+        if section.section_index != position:
+            return Err(ParserLlvmObjdumpCodecErrorV1.SchemaMismatch)
+        if section.executable:
+            if (section.name == "" or section.name.contains("\n") or section.name.contains(":") or
+                section.name.contains(" ") or section.section_data_digest.len() != 64):
+                return Err(ParserLlvmObjdumpCodecErrorV1.SchemaMismatch)
+            expected_exec = expected_exec + 1
+    if expected_exec == 0: return Err(ParserLlvmObjdumpCodecErrorV1.SchemaMismatch)
+    val lines = text_output.split("\n")
+    var format_seen = false
+    var current_section = -1
+    var seen_sections: [i64] = []
+    var reconstructed: [[u8]] = []
+    for _ in 0..sections.len(): reconstructed.push([])
+    var instructions: [ParserLlvmObjdumpInstructionV1] = []
+    for raw_line in lines:
+        val line = raw_line.trim()
+        if line == "": pass
+        elif line == "<stdin>:\tfile format elf64-x86-64":
+            if format_seen: return Err(ParserLlvmObjdumpCodecErrorV1.WrongObject)
+            format_seen = true
+        elif line.contains("file format"):
+            return Err(ParserLlvmObjdumpCodecErrorV1.WrongObject)
+        elif line.starts_with("Disassembly of section ") and line.ends_with(":"):
+            if not format_seen: return Err(ParserLlvmObjdumpCodecErrorV1.WrongObject)
+            val prefix = "Disassembly of section "
+            val name = line[prefix.len()..(line.len() - 1)]
+            val index = _exec_index_lod(sections, name)
+            if index == -2: return Err(ParserLlvmObjdumpCodecErrorV1.DuplicateSection)
+            if index < 0: return Err(ParserLlvmObjdumpCodecErrorV1.UnknownSection)
+            for seen in seen_sections:
+                if seen == index: return Err(ParserLlvmObjdumpCodecErrorV1.DuplicateSection)
+            seen_sections.push(index); current_section = index
+        elif ((line.starts_with("<") and line.ends_with(":")) or
+              (line.contains(" <") and line.ends_with(">:"))):
+            if current_section < 0: return Err(ParserLlvmObjdumpCodecErrorV1.SchemaMismatch)
+        elif line.contains(":"):
+            if current_section < 0: return Err(ParserLlvmObjdumpCodecErrorV1.InvalidInstruction)
+            val colon = line.index_of(":")
+            val offset_opt = _hex_lod(line[0..colon].trim())
+            if offset_opt.is_none(): return Err(ParserLlvmObjdumpCodecErrorV1.InvalidInstruction)
+            val fields = line[(colon + 1)..].split("\t")
+            if fields.len() < 2: return Err(ParserLlvmObjdumpCodecErrorV1.InvalidInstruction)
+            var bytes: [u8] = []
+            for token in fields[0].split(" "):
+                if token != "":
+                    val byte = _byte_lod(token)
+                    if byte.is_none(): return Err(ParserLlvmObjdumpCodecErrorV1.InvalidInstruction)
+                    bytes.push(byte.unwrap())
+            val assembly = fields[1].trim()
+            if bytes.len() <= 0 or bytes.len() > 15 or assembly == "":
+                return Err(ParserLlvmObjdumpCodecErrorV1.InvalidInstruction)
+            if assembly.contains("<unknown>"):
+                return Err(ParserLlvmObjdumpCodecErrorV1.InvalidInstruction)
+            val section = _section_lod(sections, current_section)
+            if section.is_none(): return Err(ParserLlvmObjdumpCodecErrorV1.UnknownSection)
+            val current_bytes = reconstructed[current_section]
+            if offset_opt.unwrap() != current_bytes.len() or bytes.len() > section.unwrap().byte_count - current_bytes.len():
+                return Err(ParserLlvmObjdumpCodecErrorV1.IncompleteSection)
+            var next_section_bytes = reconstructed[current_section]
+            for byte in bytes: next_section_bytes.push(byte)
+            reconstructed[current_section] = next_section_bytes
+            val opcode = assembly.split(" ")[0].split("\t")[0]
+            instructions.push(ParserLlvmObjdumpInstructionV1(section_index: current_section,
+                section_name: section.unwrap().name, section_offset: offset_opt.unwrap(),
+                bytes: bytes, byte_digest: sha256_u8_hex(bytes), opcode_identity: opcode,
+                recognized: true))
+            if instructions.len() > PARSER_LLVM_OBJDUMP_MAX_INSTRUCTIONS_V1:
+                return Err(ParserLlvmObjdumpCodecErrorV1.InputLimit)
+        else:
+            return Err(ParserLlvmObjdumpCodecErrorV1.SchemaMismatch)
+    if not format_seen or seen_sections.len() != expected_exec:
+        return Err(ParserLlvmObjdumpCodecErrorV1.IncompleteSection)
+    for section in sections:
+        if section.executable:
+            if reconstructed[section.section_index].len() != section.byte_count:
+                return Err(ParserLlvmObjdumpCodecErrorV1.IncompleteSection)
+            if sha256_u8_hex(reconstructed[section.section_index]) != section.section_data_digest:
+                return Err(ParserLlvmObjdumpCodecErrorV1.ByteMismatch)
+    Ok(ParserLlvmObjdumpProjectionV1(instructions: instructions,
+        executable_section_count: seen_sections.len(), instruction_count: instructions.len()))

@@ -3,8 +3,7 @@
 - **Date:** 2026-07-01
 - **Area:** `src/compiler/90.tools/duplicate_check` (cosine mode)
 - **Severity:** medium (mode is usable only on small scopes)
-- Status: FIXED
-- Status re-verified 2026-08-17 by source inspection (triage shard 01).
+- **Status:** fixed (2026-07-04, task #89); re-verified 2026-07-17 (worker_O_dup_sanity), still fixed and now much faster.
 
 ## 2026-07-23 bounded-index update
 

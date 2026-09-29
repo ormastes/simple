@@ -1,0 +1,98 @@
+# @tag:in-development
+# Tracks: doc/08_tracking/bug/pr1870_pr1830_unreviewed_merge_fallout_2026-09-28.md
+# @req NFR-PSC-002 NFR-PSC-003
+# @cover src/lib/nogc_sync_mut/src/collections/adaptive_text_set.spl
+# @cover src/lib/nogc_sync_mut/src/collections/adaptive_text_map.spl
+# @cover src/lib/nogc_sync_mut/src/collections/adaptive_map.spl
+# @cover src/lib/nogc_sync_mut/src/collections/adaptive_set.spl
+# @cover src/lib/nogc_sync_mut/sffi/collection_capture.spl
+use std.spec.*
+use std.nogc_sync_mut.sffi.collection_capture.{collection_capture_begin, collection_capture_finish}
+use std.nogc_sync_mut.src.collections.adaptive_text_set.{
+    AdaptiveTextSet, AdaptiveSetAlgorithm, AdaptiveSetAttribute, AdaptiveSetProfile}
+use std.nogc_sync_mut.src.collections.adaptive_text_map.AdaptiveTextMap
+use std.nogc_sync_mut.src.collections.adaptive_map.AdaptiveMap
+use std.nogc_sync_mut.src.collections.adaptive_set.AdaptiveSet
+
+fn captured_hash_metric(body: text, site: text, name: text) -> i64:
+    for line in body.split("\n"):
+        if line.contains("site=" + site + ";") and
+                line.contains("name=" + name + ";value="):
+            val fields = line.split(";value=")
+            if fields.len() == 2:
+                return fields[1].to_i64() ?? -1
+    -1
+
+fn require_hash_site(body: text, site: text, expected_lookups: i64):
+    val lookups = captured_hash_metric(body, site, "lookup_count")
+    val probes = captured_hash_metric(body, site, "hash_probe_count")
+    val collisions = captured_hash_metric(body, site, "hash_collision_count")
+    expect(lookups).to_equal(expected_lookups)
+    expect(probes).to_be_greater_than(expected_lookups - 1)
+    expect(probes).to_be_less_than(expected_lookups * 8 + 1)
+    expect(collisions).to_be_greater_than(-1)
+    expect(collisions).to_be_less_than(probes + 1)
+
+describe "profile-switchable hash probe counts":
+    it "records bounded probes and collisions at n, 2n, 4n, and 8n":
+        val target = "x86_64-v3"
+        val policy = AdaptiveSetProfile(
+            linear_size_limit: 8, lookup_promotion_count: 32, allow_hash: true)
+        for size in [32, 64, 128, 256]:
+            expect(collection_capture_begin(target)).to_be(true)
+            val text_set_site = "ast://perf/hash/text-set/{size}#stable"
+            val text_map_site = "ast://perf/hash/text-map/{size}#stable"
+            val generic_map_site = "ast://perf/hash/generic-map/{size}#stable"
+            val generic_set_site = "ast://perf/hash/generic-set/{size}#stable"
+            var text_set = AdaptiveTextSet.with_site_and_target(policy, text_set_site, target)
+            var text_map = AdaptiveTextMap.with_site_and_target(policy, text_map_site, target)
+            var generic_map: AdaptiveMap<i64, i64> = AdaptiveMap.with_site_and_target(
+                policy, generic_map_site, target)
+            var generic_set: AdaptiveSet<i64> = AdaptiveSet.with_site_and_target(
+                policy, generic_set_site, target)
+            text_set.set_attribute(AdaptiveSetAttribute.Hash)
+            text_map.set_attribute(AdaptiveSetAttribute.Hash)
+            generic_map.set_attribute(AdaptiveSetAttribute.Hash)
+            generic_set.set_attribute(AdaptiveSetAttribute.Hash)
+            for key in 0..size:
+                text_set.insert("key-{key}")
+                text_map.put("key-{key}", "value-{key}")
+                generic_map.put(key as i64, key as i64)
+                generic_set.insert(key as i64)
+            expect(text_set.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Hash)
+            expect(text_map.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Hash)
+            expect(generic_map.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Hash)
+            expect(generic_set.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Hash)
+            var text_set_hits: i64 = 0
+            var text_map_hits: i64 = 0
+            var generic_map_hits: i64 = 0
+            var generic_set_hits: i64 = 0
+            var false_positives: i64 = 0
+            for key in 0..size:
+                if text_set.contains("key-{key}"):
+                    text_set_hits = text_set_hits + 1
+                if text_map.get("key-{key}") != nil:
+                    text_map_hits = text_map_hits + 1
+                if generic_map.contains_key(key as i64):
+                    generic_map_hits = generic_map_hits + 1
+                if generic_set.contains(key as i64):
+                    generic_set_hits = generic_set_hits + 1
+                if text_set.contains("missing-{key}"):
+                    false_positives = false_positives + 1
+                if text_map.contains_key("missing-{key}"):
+                    false_positives = false_positives + 1
+                if generic_map.contains_key((size + key) as i64):
+                    false_positives = false_positives + 1
+                if generic_set.contains((size + key) as i64):
+                    false_positives = false_positives + 1
+            expect(text_set_hits).to_equal(size)
+            expect(text_map_hits).to_equal(size)
+            expect(generic_map_hits).to_equal(size)
+            expect(generic_set_hits).to_equal(size)
+            expect(false_positives).to_equal(0)
+            val body = collection_capture_finish() ?? ""
+            val lookups = 2 * size
+            require_hash_site(body, text_set_site, lookups)
+            require_hash_site(body, text_map_site, lookups)
+            require_hash_site(body, generic_map_site, lookups)
+            require_hash_site(body, generic_set_site, lookups)

@@ -220,16 +220,30 @@ pub fn run_tracking(args: &[String]) -> i32 {
 /// Lightweight database sanity check used by hooks.
 pub fn run_check_dbs(args: &[String]) -> i32 {
     let strict = args.iter().any(|arg| arg == "--strict");
+    let filters: Vec<&str> = args
+        .iter()
+        .map(String::as_str)
+        .filter(|arg| !arg.starts_with("--"))
+        .collect();
     let mut issues = 0usize;
-    for (name, path, table) in [
-        ("bug", TRACKING_BUG_DB, "bugs"),
-        ("feature", TRACKING_FEATURE_DB, "features"),
-        ("task", TRACKING_TASK_DB, "tasks"),
-        ("todo", TRACKING_TODO_DB, "todos"),
-        ("test", "doc/08_tracking/test/test_db.sdn", "strings"),
+    for (name, plural, path, tables) in [
+        ("bug", "bugs", TRACKING_BUG_DB, &["bugs_active", "bugs"][..]),
+        ("feature", "features", TRACKING_FEATURE_DB, &["features"][..]),
+        ("task", "tasks", TRACKING_TASK_DB, &["tasks"][..]),
+        ("todo", "todos", TRACKING_TODO_DB, &["todos"][..]),
+        ("test", "tests", "doc/08_tracking/test/test_db.sdn", &["strings"][..]),
     ] {
-        if count_table_rows(path, table) == 0 && !table_exists(path, table) {
-            eprintln!("check-dbs: {} missing or invalid table {} in {}", name, table, path);
+        if !db_filter_selected(&filters, name, plural) {
+            continue;
+        }
+        let valid = db_has_any_table(path, tables);
+        if !valid {
+            eprintln!(
+                "check-dbs: {} missing or invalid table {} in {}",
+                name,
+                tables.join(" or "),
+                path
+            );
             issues += 1;
         } else {
             println!("check-dbs: {} ok", name);
@@ -251,6 +265,16 @@ pub fn run_check_dbs(args: &[String]) -> i32 {
     } else {
         1
     }
+}
+
+fn db_filter_selected(filters: &[&str], name: &str, plural: &str) -> bool {
+    filters.is_empty() || filters.iter().any(|filter| *filter == name || *filter == plural)
+}
+
+fn db_has_any_table(path: &str, tables: &[&str]) -> bool {
+    tables
+        .iter()
+        .any(|table| count_table_rows(path, table) > 0 || table_exists(path, table))
 }
 
 /// Lightweight traceability gate for hooks.
@@ -1131,4 +1155,35 @@ pub fn print_doc_gen_help() {
     eprintln!("  test-result-gen: doc/08_tracking/test/test_db.sdn -> doc/08_tracking/test/");
     eprintln!("  bug-add/update:  doc/08_tracking/bug/bug_db.sdn");
     eprintln!("  bug-gen:         doc/08_tracking/bug/bug_db.sdn -> doc/08_tracking/bug/");
+}
+
+#[cfg(test)]
+mod check_dbs_tests {
+    use super::{db_filter_selected, db_has_any_table};
+
+    #[test]
+    fn empty_filter_selects_every_database() {
+        assert!(db_filter_selected(&[], "bug", "bugs"));
+        assert!(db_filter_selected(&[], "test", "tests"));
+    }
+
+    #[test]
+    fn singular_and_plural_filters_select_only_the_requested_database() {
+        assert!(db_filter_selected(&["bug"], "bug", "bugs"));
+        assert!(db_filter_selected(&["tests"], "test", "tests"));
+        assert!(!db_filter_selected(&["test"], "bug", "bugs"));
+    }
+
+    #[test]
+    fn split_bug_database_accepts_the_active_table() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let path = temp.path().join("bug_db.sdn");
+        std::fs::write(&path, "bugs_active |id, status|\n    one, open\n")
+            .expect("write split bug database");
+
+        assert!(db_has_any_table(
+            path.to_str().expect("UTF-8 path"),
+            &["bugs_active", "bugs"]
+        ));
+    }
 }

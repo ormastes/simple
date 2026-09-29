@@ -1,0 +1,144 @@
+# codex-impl
+# Test-only Chromium primitive oracle ABI v1.
+#
+# One run call launches one pinned Electron/Chromium session that executes the
+# complete event sequence. It never spawns per event. CPU capturePage evidence
+# remains explicitly non-device-origin in the broker response.
+
+extern fn rt_ptr_read_u8(addr: i64, offset: i64) -> i64
+extern fn rt_ptr_write_u8(addr: i64, offset: i64, value: i64)
+extern fn rt_ptr_write_i64(addr: i64, offset: i64, value: i64) -> i64
+extern fn rt_bytes_to_text(data: [u8]) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_getpid() -> i64
+extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_process_run_bounded(cmd: text, args: [text], timeout_ms: i64,
+                                 max_output_bytes: i64) -> (text, text, i64)
+
+val ABI_VERSION: i64 = 1
+val MAX_REQUEST_BYTES: i64 = 1048576
+val MAX_RESPONSE_BYTES: i64 = 4194304
+val BROKER_TIMEOUT_MS: i64 = 30000
+val ELECTRON = "tools/electron-shell/node_modules/.bin/electron"
+val BROKER = "tools/web-render-backend/chromium_primitive_oracle_broker.js"
+
+val STATUS_OK: i64 = 0
+val STATUS_INVALID_REQUEST: i64 = 1
+val STATUS_UNSUPPORTED_PRIMITIVE: i64 = 2
+val STATUS_BUFFER_TOO_SMALL: i64 = 3
+val STATUS_ADAPTER_FAILURE: i64 = 4
+val STATUS_RELEASED_HANDLE: i64 = 5
+
+var _active: [bool] = []
+var _last_errors: [text] = []
+
+fn _valid_handle(handle: i64) -> bool:
+    handle > 0 and handle <= _active.len() and _active[handle - 1]
+
+fn _set_error(handle: i64, message: text):
+    if handle > 0 and handle <= _last_errors.len():
+        _last_errors[handle - 1] = message
+
+fn _read_bounded_text(address: i64, length: i64, maximum: i64) -> text:
+    if address == 0 or length <= 0 or length > maximum:
+        return ""
+    var bytes: [u8] = []
+    var i: i64 = 0
+    while i < length:
+        bytes.push((rt_ptr_read_u8(address, i) & 255) as u8)
+        i = i + 1
+    rt_bytes_to_text(bytes)
+
+fn _write_bounded_text(value: text, output: i64, capacity: i64, length_out: i64) -> bool:
+    val bytes = value.bytes()
+    if length_out == 0:
+        return false
+    rt_ptr_write_i64(length_out, 0, bytes.len())
+    if output == 0 or capacity < bytes.len():
+        return false
+    var i: i64 = 0
+    while i < bytes.len():
+        rt_ptr_write_u8(output, i, bytes[i] as i64)
+        i = i + 1
+    true
+
+fn _response_is_admitted(response: text) -> bool:
+    response.starts_with("{") and response.ends_with("}") and
+        response.contains("\"schema_version\":1") and
+        response.contains("\"oracle_identity\":\"electron=") and
+        response.contains("\"device_origin_readback\":false") and
+        response.contains("\"complete\":true") and
+        response.contains("\"web_input\"") and
+        response.contains("\"web_gpu\"")
+
+@export("C", name: "simple_chromium_oracle_abi_version")
+fn simple_chromium_oracle_abi_version() -> i64:
+    ABI_VERSION
+
+@export("C", name: "simple_chromium_oracle_create")
+fn simple_chromium_oracle_create(config: i64, config_len: i64) -> i64:
+    if config_len < 0 or config_len > MAX_REQUEST_BYTES:
+        return 0
+    if config_len > 0 and _read_bounded_text(config, config_len, MAX_REQUEST_BYTES) == "":
+        return 0
+    _active.push(true)
+    _last_errors.push("")
+    _active.len()
+
+@export("C", name: "simple_chromium_oracle_run_json_into")
+fn simple_chromium_oracle_run_json_into(handle: i64, request: i64, request_len: i64,
+                                  response: i64, response_capacity: i64,
+                                  response_len: i64) -> i64:
+    if not _valid_handle(handle):
+        return STATUS_RELEASED_HANDLE
+    val request_text = _read_bounded_text(request, request_len, MAX_REQUEST_BYTES)
+    if request_text == "" or not request_text.starts_with("{"):
+        _set_error(handle, "invalid-request")
+        return STATUS_INVALID_REQUEST
+
+    val temp_path = "/tmp/simple_chromium_oracle_{rt_getpid()}_{rt_time_now_unix_micros()}_{handle}.json"
+    if not rt_file_write_text(temp_path, request_text):
+        _set_error(handle, "request-write-failed")
+        return STATUS_ADAPTER_FAILURE
+
+    val (stdout, stderr, exit_code) = rt_process_run_bounded(
+        ELECTRON, ["--no-sandbox", BROKER, temp_path],
+        BROKER_TIMEOUT_MS, MAX_RESPONSE_BYTES)
+    rt_file_delete(temp_path)
+
+    if exit_code != 0:
+        val reason = if exit_code == -1 and stderr.contains("SIMPLE_PROCESS_TIMEOUT"):
+            "broker-timeout"
+        else:
+            "broker-failed:{exit_code}:{stderr.substring(0, if stderr.len() < 512 then stderr.len() else 512)}"
+        _set_error(handle, reason)
+        return STATUS_ADAPTER_FAILURE
+
+    val admitted = stdout.trim()
+    if not _response_is_admitted(admitted) or admitted.len() > MAX_RESPONSE_BYTES:
+        _set_error(handle, "malformed-or-untrusted-broker-response")
+        return STATUS_ADAPTER_FAILURE
+    if not _write_bounded_text(admitted, response, response_capacity, response_len):
+        _set_error(handle, "response-buffer-too-small")
+        return STATUS_BUFFER_TOO_SMALL
+    _set_error(handle, "")
+    STATUS_OK
+
+@export("C", name: "simple_chromium_oracle_last_error_into")
+fn simple_chromium_oracle_last_error_into(handle: i64, response: i64,
+                                    response_capacity: i64,
+                                    response_len: i64) -> i64:
+    if handle <= 0 or handle > _last_errors.len():
+        return STATUS_RELEASED_HANDLE
+    if not _write_bounded_text(_last_errors[handle - 1], response, response_capacity, response_len):
+        return STATUS_BUFFER_TOO_SMALL
+    STATUS_OK
+
+@export("C", name: "simple_chromium_oracle_destroy")
+fn simple_chromium_oracle_destroy(handle: i64) -> i64:
+    if not _valid_handle(handle):
+        return STATUS_RELEASED_HANDLE
+    _active[handle - 1] = false
+    _last_errors[handle - 1] = "released-handle"
+    STATUS_OK

@@ -1,0 +1,88 @@
+#!/bin/sh
+# Focused contract: every Stage-3/Stage-4 native build must declare the
+# package-index cold-init route in BOTH its recorded argument digest and its
+# transcribed command.
+#
+# WHY. The Stage-3 child runs under `env -i`
+# (bootstrap_stage3_run_transcribed), so it sees only the variables the step
+# lists. `driver_source_pipeline_loading.spl:202-227` fail-closes at phase 1
+# when neither SIMPLE_PACKAGE_INDEX_COLD_INIT=1 nor any SIMPLE_SCV_* authority
+# is present:
+#
+#   error: focused native-build: persistent package index admission failed:
+#   scv-authority-missing; run explicit cold initialization with
+#   SIMPLE_PACKAGE_INDEX_COLD_INIT=1
+#
+# Measured 2026-09-13 (BOOT-14, the first run in this lane series that ever
+# reached Stage 3): the real Stage-3 step died there in 3 seconds having
+# compiled nothing, while the one Stage-3-SHAPED invocation that does run --
+# check-bootstrap-stage2-struct-receiver.shs, the positional route probe --
+# works precisely because it sets the variable. Each Stage-3/4 step points at
+# a FRESH per-stage cache directory, so there is no persistent index to admit
+# and cold init is the correct route, not a relaxation.
+# See doc/08_tracking/bug/stage3_step_omits_package_index_cold_init_scv_authority_missing_2026-09-13.md
+#
+# Digest AND transcript are both checked because they are deliberately kept
+# byte-parallel: a variable present in only one of them changes the recorded
+# command identity without changing what runs, or the reverse.
+#
+# Verdict line is the LAST line of stdout:
+#   PASS  — <n> block(s) checked, ...    exit 0
+#   FAIL  — ...                          exit 1
+#   ERROR — nothing was checked (...)    exit 2
+# Zero blocks checked, or any block that extracts empty, is ERROR — a contract
+# that silently matched nothing is how this class of drift survives.
+set -u
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P) || exit 2
+producer="$root/scripts/bootstrap/bootstrap-from-scratch.sh"
+resume="$root/scripts/bootstrap/resume-stage3-from-admitted.sh"
+builder="$root/scripts/check/lib/bootstrap-stage3-candidate-builder.shs"
+verifier="$root/scripts/check/lib/bootstrap-stage3/manifest-verify.shs"
+knob='SIMPLE_PACKAGE_INDEX_COLD_INIT=1'
+
+checked=0
+failed=0
+failing=''
+
+check_block() {
+    label=$1; file=$2; range=$3
+    if [ ! -f "$file" ]; then
+        echo "ERROR — nothing was checked (missing file: $file)" >&2
+        exit 2
+    fi
+    block=$(sed -n "${range}p" "$file")
+    if [ -z "$block" ]; then
+        echo "ERROR — nothing was checked ($label extracted an empty block from $file)" >&2
+        exit 2
+    fi
+    checked=$((checked + 1))
+    if printf '%s\n' "$block" | grep -Fq "$knob"; then
+        return 0
+    fi
+    failed=$((failed + 1))
+    failing="$failing $label"
+}
+
+check_block stage3-digest "$producer" '/stage3_build_args_sha256=\$(/,/^  )$/'
+check_block stage3-transcript "$producer" '/# Stage 3: stage2 recompiles/,/stage3_status=\$?/'
+check_block stage4-native-build-main "$producer" '/^bootstrap_native_build_main() {/,/^}$/'
+check_block resume-stage3-digest "$resume" '/^stage3_args=\$(bootstrap_stage3_args_sha256/,/bootstrap_main\.spl)$/'
+check_block resume-stage3-transcript "$resume" '/^bootstrap_stage3_run_transcribed "\$stage3_transcript"/,/^status=\$?$/'
+check_block candidate-builder-digest "$builder" '/^stage3_args=\$(bootstrap_stage3_args_sha256/,/bootstrap_main\.spl)$/'
+check_block candidate-builder-transcript "$builder" '/^bootstrap_stage3_run_transcribed "\$stage3_transcript"/,/^status=\$?$/'
+# The verifier RECONSTRUCTS the same two vectors to check the recorded digest and
+# the transcript. A variable added to the producers but not here turns every
+# Stage-3 manifest verification into a mismatch, so it is part of the same pin.
+check_block manifest-verify-digest "$verifier" '/bootstrap_stage3_expected_stage3_args=\$(/,/src\/app\/cli\/bootstrap_main\.spl$/'
+check_block manifest-verify-transcript "$verifier" '/bootstrap_stage3_verify_command_transcript \\$/,/src\/app\/cli\/bootstrap_main\.spl/'
+
+if [ "$checked" -eq 0 ]; then
+    echo "ERROR — nothing was checked (no blocks extracted)" >&2
+    exit 2
+fi
+if [ "$failed" -ne 0 ]; then
+    echo "FAIL — $checked block(s) checked, $failed missing $knob:$failing"
+    exit 1
+fi
+echo "PASS — $checked block(s) checked, all declare $knob"

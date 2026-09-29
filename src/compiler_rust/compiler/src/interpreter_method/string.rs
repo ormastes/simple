@@ -47,12 +47,15 @@ if let Value::Str(ref s) = recv_val {
             // `start`, mirroring `rt_text_find` exactly so the interpreter and
             // the compiled lane agree: start < 0 clamps to 0; empty needle
             // returns min(start, len); start past the end returns -1;
-            // byte-indexed result, -1 for not-found. Scoped to `index_of`
-            // only — `find`/`find_str` keep their one-arg contract (extra
-            // args were and remain ignored) because the compiled lane lowers
-            // only two-arg `index_of`, and a wider interpreter would silently
-            // diverge from it.
-            if method == "index_of" && args.len() >= 2 {
+            // byte-indexed result, -1 for not-found. Applies to all three
+            // aliases: `find`/`find_str` used to IGNORE a second argument and
+            // return a match from position 0 — a plausible wrong answer that
+            // never crashed (`"abcabc".find("abc", 1)` answered 0, not 3), and
+            // which infinite-looped an advancing-position lint scan. The
+            // compiled lane now lowers two-arg `find`/`find_str` through the
+            // same `rt_text_find` as `index_of`, so widening the gate here
+            // keeps the interpreter and the compiled lane in agreement.
+            if args.len() >= 2 {
                 let start_raw = eval_arg_int(args, 1, 0, env, functions, classes, enums, impl_methods)?;
                 let start = start_raw.max(0) as usize;
                 let bytes = s.as_bytes();
@@ -453,6 +456,16 @@ if let Value::Str(ref s) = recv_val {
                 return Ok(Value::text(String::new()));
             }
             let idx = raw_idx as usize;
+            // Same ASCII-memo gate as `char_code_at` below: inside an ASCII
+            // string a character index IS a byte index, so answer straight
+            // out of the buffer instead of paying `chars().nth(idx)`'s O(idx)
+            // walk on every call.
+            if shared_text_is_ascii(s) {
+                return Ok(Value::text(match s.as_bytes().get(idx) {
+                    Some(b) => (*b as char).to_string(),
+                    None => String::new(),
+                }));
+            }
             match s.chars().nth(idx) {
                 Some(c) => return Ok(Value::text(c.to_string())),
                 None => return Ok(Value::text(String::new())),
@@ -615,11 +628,20 @@ if let Value::Str(ref s) = recv_val {
             // Unlike substring(start, end), this uses length
             let start = eval_arg_usize(args, 0, 0, env, functions, classes, enums, impl_methods)?;
             let length = eval_arg_usize(args, 1, s.len(), env, functions, classes, enums, impl_methods)?;
-            // Work with char indices for unicode safety
-            let chars: Vec<char> = s.chars().collect();
-            let start = start.min(chars.len());
-            let end = (start + length).min(chars.len());
-            let result: String = chars[start..end].iter().collect();
+            // CHARACTER indices, unicode-safe. `s.chars().collect()` used to
+            // allocate a Vec<char> of the WHOLE string on every call, which
+            // made a `while i < s.len(): s.substr(i, 1)` loop O(n^2). Same
+            // ASCII-memo gate as `char_code_at` above: inside an ASCII string
+            // a character index IS a byte index, so slice bytes directly.
+            // Otherwise walk `chars()` only as far as `start + length` needs,
+            // never collecting the whole string into a Vec<char>.
+            if shared_text_is_ascii(s) {
+                let len = s.len();
+                let start = start.min(len);
+                let end = (start + length).min(len);
+                return Ok(Value::text(s[start..end].to_string()));
+            }
+            let result: String = s.chars().skip(start).take(length).collect();
             return Ok(Value::text(result));
         }
         "find_all" | "find_indices" => {

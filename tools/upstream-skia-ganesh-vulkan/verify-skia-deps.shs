@@ -1,0 +1,157 @@
+#!/bin/sh
+# Attest the Git checkouts named by a pinned Skia DEPS file.
+#
+# usage: verify-skia-deps.shs <skia_root> <manifest>
+#
+# Port of the former verify-skia-deps.py (repo rule: .spl/.shs only).
+# Behaviour kept: every Git dependency in DEPS `deps` (cipd entries and
+# entries with condition 'False' are skipped) must be its own clean checkout
+# inside the Skia root, at the pinned revision (annotated-tag pins are peeled
+# to their commit), with sync-deps not disabled.  On success the compact
+# JSON manifest [{"path","revision","url"},...] (sorted by path, trailing
+# newline) is written to <manifest> and its sha256 is printed.  Any failure
+# prints "Skia dependency attestation failed: <reason>" and exits 2.
+#
+# DEPS is parsed with awk rather than evaluated.  The parser fails CLOSED:
+# any line in the `deps` block it does not recognise (e.g. a Var()
+# concatenation on a non-skipped entry) is an error, never silently dropped.
+set -u
+
+fail() {
+    echo "Skia dependency attestation failed: $1" >&2
+    exit 2
+}
+
+if [ "$#" -ne 2 ]; then
+    echo "usage: verify-skia-deps.shs <skia_root> <manifest>" >&2
+    exit 2
+fi
+manifest_out=$2
+
+sha256_of() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | cut -d ' ' -f 1
+    else
+        shasum -a 256 "$1" | cut -d ' ' -f 1
+    fi
+}
+
+root=$(CDPATH= cd -P -- "$1" 2>/dev/null && pwd -P) || fail "cannot resolve Skia root: $1"
+[ -f "$root/DEPS" ] || fail "cannot read $root/DEPS"
+
+tab=$(printf '\t')
+entries=$(awk '
+function strip_strings(s) { gsub(/"[^"]*"|'"'"'[^'"'"']*'"'"'/, "", s); return s }
+function unquote(s) { sub(/^[ \t]*["'"'"']/, "", s); sub(/["'"'"'][ \t]*,?[ \t]*$/, "", s); return s }
+function depth_delta(s,   t, o, c) {
+    t = strip_strings(s)
+    o = gsub(/[{[]/, "", t); t = strip_strings(s); c = gsub(/[]}]/, "", t)
+    return o - c
+}
+BEGIN { in_deps = 0; in_dict = 0; seen = 0 }
+/^deps[ \t]*=[ \t]*\{[ \t]*$/ { in_deps = 1; seen = 1; next }
+!in_deps { next }
+/^[ \t]*(#.*)?$/ { next }
+in_dict {
+    depth += depth_delta($0)
+    line = $0
+    if (line ~ /^[ \t]*["'"'"']dep_type["'"'"'][ \t]*:[ \t]*["'"'"']cipd["'"'"'][ \t]*,?[ \t]*$/) cipd = 1
+    if (line ~ /^[ \t]*["'"'"']condition["'"'"'][ \t]*:[ \t]*["'"'"']False["'"'"'][ \t]*,?[ \t]*$/) cond_false = 1
+    if (line ~ /^[ \t]*["'"'"']url["'"'"'][ \t]*:/) {
+        v = line; sub(/^[ \t]*["'"'"']url["'"'"'][ \t]*:[ \t]*/, "", v)
+        if (v ~ /^["'"'"'][^"'"'"']*["'"'"'][ \t]*,?[ \t]*$/) url = unquote(v); else url_bad = 1
+    }
+    if (depth <= 0) {
+        in_dict = 0
+        if (cipd || cond_false) next
+        if (url == "" || url_bad) { print "ERR\tunsupported Git dependency entry: '"'"'" name "'"'"'"; exit }
+        print "OK\t" name "\t" url
+    }
+    next
+}
+/^}[ \t]*$/ { in_deps = 0; next }
+/^[ \t]*["'"'"'][^"'"'"']*["'"'"'][ \t]*:[ \t]*["'"'"'][^"'"'"']*["'"'"'][ \t]*,?[ \t]*$/ {
+    k = $0; sub(/[ \t]*:.*$/, "", k); k = unquote(k)
+    v = $0; sub(/^[ \t]*["'"'"'][^"'"'"']*["'"'"'][ \t]*:[ \t]*/, "", v); v = unquote(v)
+    print "OK\t" k "\t" v
+    next
+}
+/^[ \t]*["'"'"'][^"'"'"']*["'"'"'][ \t]*:[ \t]*\{/ {
+    name = $0; sub(/[ \t]*:.*$/, "", name); name = unquote(name)
+    in_dict = 1; depth = depth_delta($0); cipd = 0; cond_false = 0; url = ""; url_bad = 0
+    next
+}
+{ print "ERR\tunsupported DEPS line: " $0; exit }
+END { if (!seen) print "ERR\tDEPS has no dependency map" }
+' "$root/DEPS") || fail "cannot parse $root/DEPS"
+
+err=$(printf '%s\n' "$entries" | awk -F '\t' '$1 == "ERR" { print $2; exit }')
+[ -z "$err" ] || fail "$err"
+[ -n "$entries" ] || fail "DEPS has no dependency map"
+
+sorted=$(printf '%s\n' "$entries" | cut -f 2- | LC_ALL=C sort -t "$tab" -k1,1)
+
+json=""
+count=0
+nl='
+'
+old_ifs=$IFS
+IFS=$nl
+for row in $sorted; do
+    IFS=$old_ifs
+    name=${row%%"$tab"*}
+    value=${row#*"$tab"}
+    case "$value" in
+        *@*) url=${value%@*}; expected=${value##*@} ;;
+        *) url=""; expected="" ;;
+    esac
+    if [ -z "$url" ] || ! printf '%s' "$expected" | grep -Eq '^[0-9a-f]{40}$'; then
+        fail "dependency has no pinned Git revision: $name"
+    fi
+    case "$name$url" in
+        *\"*|*\\*) fail "unsupported characters in dependency entry: $name" ;;
+    esac
+    if printf "%s" "$name$url" | LC_ALL=C grep -q "[^ -~]"; then
+        fail "unsupported characters in dependency entry: $name"
+    fi
+    case "$name" in
+        /*) fail "invalid dependency path: $name" ;;
+    esac
+    path=$(CDPATH= cd -P -- "$root/$name" 2>/dev/null && pwd -P) || fail "cannot resolve dependency path: $name"
+    case "$path" in
+        "$root"/*) ;;
+        *) fail "dependency escapes Skia root: $name" ;;
+    esac
+    case "/$name/" in
+        */../*) fail "invalid dependency path: $name" ;;
+    esac
+    top=$(git -C "$path" rev-parse --show-toplevel 2>/dev/null) || fail "git rev-parse --show-toplevel failed: $name"
+    top=$(CDPATH= cd -P -- "$top" 2>/dev/null && pwd -P) || fail "cannot resolve checkout toplevel: $name"
+    [ "$top" = "$path" ] || fail "dependency is not its own Git checkout: $name"
+    actual=$(git -C "$path" rev-parse HEAD 2>/dev/null) || fail "git rev-parse HEAD failed: $name"
+    # Skia DEPS pins may name an annotated tag object rather than the commit
+    # it points at (e.g. perfetto's "v26.1" amalgamation tag).  Compare
+    # commits on both sides; a pin that does not resolve locally keeps the
+    # raw comparison and fails with the same typed error.
+    if expected_commit=$(git -C "$path" rev-parse --verify "$expected^{commit}" 2>/dev/null); then
+        :
+    else
+        expected_commit=$expected
+    fi
+    [ "$actual" = "$expected_commit" ] || fail "dependency revision differs from DEPS: $name"
+    dirty=$(git -C "$path" status --porcelain --untracked-files=all 2>/dev/null) || fail "git status failed: $name"
+    [ -z "$dirty" ] || fail "dependency has local modifications: $name"
+    sync_disable=$(git -C "$path" config --get sync-deps.disable 2>/dev/null)
+    rc=$?
+    [ "$rc" -eq 0 ] || [ "$rc" -eq 1 ] || fail "cannot read Git config for $path"
+    [ "$(printf '%s' "$sync_disable" | tr 'A-Z' 'a-z')" != true ] || fail "dependency sync is disabled: $name"
+    [ "$count" -eq 0 ] || json="$json,"
+    json="$json{\"path\":\"$name\",\"revision\":\"$actual\",\"url\":\"$url\"}"
+    count=$((count + 1))
+    IFS=$nl
+done
+IFS=$old_ifs
+[ "$count" -gt 0 ] || fail "no Git dependencies verified"
+
+printf '[%s]\n' "$json" > "$manifest_out" || fail "cannot write $manifest_out"
+sha256_of "$manifest_out"

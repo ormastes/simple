@@ -1,0 +1,97 @@
+use common.kernel_plugin.ids.{KpfId128, KpfDigest256, kpf_id128_equal, kpf_digest256_equal, kpf_id128_zero, kpf_digest256_zero}
+use tooling_kernel.contract.model.*
+
+pub class ToolingDocumentStoreV1:
+    capacity: i64
+    active: [bool]
+    epochs: [u64]
+    document_ids: [KpfId128]
+    language_ids: [KpfId128]
+    revisions: [u64]
+    digests: [KpfDigest256]
+
+impl ToolingDocumentStoreV1:
+    pub static fn create(capacity: i64) -> ToolingDocumentStoreV1:
+        var active: [bool] = []
+        var epochs: [u64] = []
+        var document_ids: [KpfId128] = []
+        var language_ids: [KpfId128] = []
+        var revisions: [u64] = []
+        var digests: [KpfDigest256] = []
+        var index = 0
+        while index < capacity:
+            active.push(false)
+            epochs.push(0)
+            document_ids.push(kpf_id128_zero())
+            language_ids.push(kpf_id128_zero())
+            revisions.push(0)
+            digests.push(kpf_digest256_zero())
+            index = index + 1
+        ToolingDocumentStoreV1(capacity: capacity, active: active, epochs: epochs, document_ids: document_ids, language_ids: language_ids, revisions: revisions, digests: digests)
+
+    me open(snapshot: ToolingDocumentSnapshotV1) -> ToolingOpenDocumentResultV1:
+        var index = 0
+        while index < self.capacity:
+            if self.active[index] and kpf_id128_equal(self.document_ids[index], snapshot.document_id):
+                return ToolingOpenDocumentResultV1(status: ToolingStatusV1.RevisionStale, handle: tooling_invalid_document_handle_v1())
+            index = index + 1
+        index = 0
+        while index < self.capacity:
+            if not self.active[index]:
+                self.epochs[index] = self.epochs[index] + 1
+                self.active[index] = true
+                self.document_ids[index] = snapshot.document_id
+                self.language_ids[index] = snapshot.language_id
+                self.revisions[index] = snapshot.revision
+                self.digests[index] = snapshot.content_digest
+                return ToolingOpenDocumentResultV1(status: ToolingStatusV1.Ok, handle: ToolingDocumentHandleV1(slot: index, epoch: self.epochs[index]))
+            index = index + 1
+        ToolingOpenDocumentResultV1(status: ToolingStatusV1.CapacityExceeded, handle: tooling_invalid_document_handle_v1())
+
+    fn validate(handle: ToolingDocumentHandleV1) -> ToolingStatusV1:
+        if handle.slot < 0 or handle.slot >= self.capacity:
+            return ToolingStatusV1.DocumentNotFound
+        if not self.active[handle.slot] or self.epochs[handle.slot] != handle.epoch:
+            return ToolingStatusV1.DocumentNotFound
+        ToolingStatusV1.Ok
+
+    me update(handle: ToolingDocumentHandleV1, snapshot: ToolingDocumentSnapshotV1) -> ToolingStatusV1:
+        val status = self.validate(handle)
+        if status != ToolingStatusV1.Ok:
+            return status
+        if not kpf_id128_equal(self.document_ids[handle.slot], snapshot.document_id):
+            return ToolingStatusV1.DocumentNotFound
+        if not kpf_id128_equal(self.language_ids[handle.slot], snapshot.language_id):
+            return ToolingStatusV1.LanguageMismatch
+        if snapshot.revision <= self.revisions[handle.slot]:
+            return ToolingStatusV1.RevisionStale
+        self.revisions[handle.slot] = snapshot.revision
+        self.digests[handle.slot] = snapshot.content_digest
+        ToolingStatusV1.Ok
+
+    fn matches(handle: ToolingDocumentHandleV1, revision: u64, digest: KpfDigest256) -> ToolingStatusV1:
+        val status = self.validate(handle)
+        if status != ToolingStatusV1.Ok:
+            return status
+        if revision != self.revisions[handle.slot]:
+            return ToolingStatusV1.RevisionStale
+        if not kpf_digest256_equal(digest, self.digests[handle.slot]):
+            return ToolingStatusV1.SnapshotMismatch
+        ToolingStatusV1.Ok
+
+    fn language(handle: ToolingDocumentHandleV1) -> KpfId128:
+        if self.validate(handle) != ToolingStatusV1.Ok:
+            return kpf_id128_zero()
+        self.language_ids[handle.slot]
+
+    fn revision(handle: ToolingDocumentHandleV1) -> u64:
+        if self.validate(handle) != ToolingStatusV1.Ok:
+            return 0
+        self.revisions[handle.slot]
+
+    me close(handle: ToolingDocumentHandleV1) -> ToolingStatusV1:
+        val status = self.validate(handle)
+        if status != ToolingStatusV1.Ok:
+            return status
+        self.active[handle.slot] = false
+        ToolingStatusV1.Ok

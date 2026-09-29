@@ -1,0 +1,163 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-LIB
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+#
+# Native-vs-interpreter differential rows for Dict `set` -> `contains_key`
+# read-back, in the shapes the compiler's own memos use. Every compiler memo
+# that recursion depends on is one of these shapes, so a divergence here is a
+# self-hosting blocker, not a library curiosity. Drive with
+#   sh scripts/check/check-native-interp-differential.shs \
+#     --specs-file config/check/native_interp_differential_dict_shapes.txt
+
+use std.spec.step
+
+struct EnumLike:
+    tag: text
+
+class Holder:
+    memo: {text: bool}
+    owners: {text: text}
+    counts: {text: i64}
+    enums: {text: EnumLike}
+
+    me mark(k: text) -> bool:
+        if self.memo.contains_key(k):
+            return false
+        self.memo[k] = true
+        return true
+
+    me seen(k: text) -> bool:
+        return self.memo.contains_key(k)
+
+    me visit(n: i64, depth: i64) -> i64:
+        if not self.mark("m::{n}#enum"):
+            return 0
+        if depth >= 6:
+            return 1
+        return 1 + self.visit(n, depth + 1) + self.visit(n + 1, depth + 1)
+
+var g_memo: {text: bool} = {}
+
+fn terminal_identity(a: text, b: text, c: text) -> text:
+    return a + "::" + b + "#" + c
+
+fn rec(n: i64, depth: i64) -> i64:
+    val k = terminal_identity("m", n.to_text(), "enum")
+    if g_memo.contains_key(k):
+        return 0
+    g_memo[k] = true
+    if depth >= 6:
+        return 1
+    return 1 + rec(n, depth + 1) + rec(n + 1, depth + 1)
+
+fn callee_sees(d: {text: bool}, k: text) -> bool:
+    return d.contains_key(k)
+
+fn set_in_callee(d: {text: bool}, k: text) -> bool:
+    d[k] = true
+    return d.contains_key(k)
+
+describe "Dict set/contains_key read-back across native and interpreter lanes":
+    # @manual scenario evidence
+    it "reads back every key set in a plain loop past every rehash threshold":
+        # @req REQ-SSPEC-LIB
+        step("reads back every key set in a plain loop past every rehash threshold")
+        var d: {text: bool} = {}
+        var misses = 0
+        var i = 0
+        while i < 2000:
+            val k = "k" + i.to_text()
+            d[k] = true
+            if not d.contains_key(k):
+                misses = misses + 1
+            i = i + 1
+        var reread = 0
+        var j = 0
+        while j < 2000:
+            if not d.contains_key("k" + j.to_text()):
+                reread = reread + 1
+            j = j + 1
+        expect(misses).to_equal(0)  # oracle: 0 — every set key is immediately present
+        expect(reread).to_equal(0)  # oracle: 0 — still present after 8/16/64/1024 rehashes
+        expect(d.len()).to_equal(2000)  # oracle: 2000 — one entry per distinct key
+
+    # @manual scenario evidence
+    it "treats concatenated, interpolated and pure-function keys as one identity":
+        # @req REQ-SSPEC-LIB
+        step("treats concatenated, interpolated and pure-function keys as one identity")
+        var d: {text: i64} = {}
+        var misses = 0
+        var q = 0
+        while q < 300:
+            d[terminal_identity("mod", q.to_text(), "x")] = q
+            if not d.contains_key("mod" + "::" + q.to_text() + "#" + "x"):
+                misses = misses + 1
+            if not d.contains_key("mod::{q}#x"):
+                misses = misses + 1
+            q = q + 1
+        expect(misses).to_equal(0)  # oracle: 0 — key identity is by bytes, not provenance
+        expect(d.len()).to_equal(300)  # oracle: 300 — no spelling minted a second entry
+
+    # @manual scenario evidence
+    it "breaks recursion through a module-level mark-on-entry memo":
+        # @req REQ-SSPEC-LIB
+        step("breaks recursion through a module-level mark-on-entry memo")
+        # This is the compiler's `materialized_payload_origins` shape: a pure
+        # identity marked ON ENTRY. If `contains_key` under-reports, the visit
+        # count exceeds the number of distinct identities and the real compiler
+        # recurses until the stack guard page.
+        val visits = rec(0, 0)
+        expect(visits).to_equal(g_memo.len())  # oracle: equal — one visit per distinct identity, never more
+        expect(visits <= 7).to_equal(true)  # oracle: true — 7 distinct identities reachable at depth 6
+
+    # @manual scenario evidence
+    it "breaks recursion through a class-field memo written inside a method":
+        # @req REQ-SSPEC-LIB
+        step("breaks recursion through a class-field memo written inside a method")
+        # This is the compiler's `imported_enums` / `materialized_payload_origins`
+        # shape as it actually appears: a class FIELD dict, set inside a `me`
+        # method, immediately before the recursive descent.
+        var h = Holder(memo: {}, owners: {}, counts: {}, enums: {})
+        val visits = h.visit(0, 0)
+        expect(visits).to_equal(h.memo.len())  # oracle: equal — one visit per distinct identity
+        expect(visits <= 7).to_equal(true)  # oracle: true — same 7 identities as the module-var memo
+
+    # @manual scenario evidence
+    it "reads a class-field dict back by value and by membership after a method write":
+        # @req REQ-SSPEC-LIB
+        step("reads a class-field dict back by value and by membership after a method write")
+        var h = Holder(memo: {}, owners: {}, counts: {}, enums: {})
+        val k = "Kind"
+        h.enums[k] = EnumLike(tag: "enum-payload")
+        h.owners[k] = "mod_a"
+        h.counts[k] = 42
+        expect(h.owners.contains_key(k)).to_equal(true)  # oracle: true — the key was just set
+        expect(h.owners[k]).to_equal("mod_a")  # oracle: "mod_a" — text value, not a raw word
+        expect(h.counts[k]).to_equal(42)  # oracle: 42 — i64 value decoded
+        expect(h.enums[k].tag).to_equal("enum-payload")  # oracle: "enum-payload" — struct value field
+        var misses = 0
+        var bad = 0
+        var i = 0
+        while i < 1500:
+            h.counts["c{i}"] = i
+            i = i + 1
+        var j = 0
+        while j < 1500:
+            if not h.counts.contains_key("c{j}"):
+                misses = misses + 1
+            elif h.counts["c{j}"] != j:
+                bad = bad + 1
+            j = j + 1
+        expect(misses).to_equal(0)  # oracle: 0 — class-field dict membership survives growth
+        expect(bad).to_equal(0)  # oracle: 0 — and so does every value
+        expect(h.seen("nope")).to_equal(false)  # oracle: false — a method read of an absent key
+
+    # @manual scenario evidence
+    it "keeps one dict identity when the dict is passed as an argument":
+        # @req REQ-SSPEC-LIB
+        step("keeps one dict identity when the dict is passed as an argument")
+        var d: {text: bool} = {}
+        d["x"] = true
+        expect(callee_sees(d, "x")).to_equal(true)  # oracle: true — callee sees the caller's entries
+        expect(set_in_callee(d, "y")).to_equal(true)  # oracle: true — the callee sees its own write
+        expect(d.contains_key("y")).to_equal(true)  # oracle: true — and so does the caller

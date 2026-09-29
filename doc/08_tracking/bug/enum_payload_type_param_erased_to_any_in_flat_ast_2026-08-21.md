@@ -1,4 +1,9 @@
 # Enum type params dropped and payload `T` erased to `Any` by the flat AST
+## Closed 2026-09-16 — ...*Date:** 2026-08-21 **Status:** RESOLVED (2026-08-21) **Severity:** Medium (blocks generic
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-08-21
 **Status:** RESOLVED (2026-08-21)
@@ -115,3 +120,4 @@ Regression sweep, each run individually, all green:
 Schema registry: no compiler enum shape changed;
 `sh scripts/check/check-compiler-schema-fresh.shs` ->
 `PASS - 365 variant(s) across 12 enum(s), registry fresh`.
+

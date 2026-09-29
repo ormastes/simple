@@ -131,14 +131,22 @@ stub non-critical APIs with UV_ENOSYS, provide real impls for critical paths.
 
 Verify SimpleOS provides the minimum POSIX surface for libuv:
 - [ ] `open`, `read`, `write`, `close`, `stat`, `fstat`, `lstat`
-- [ ] `socket`, `connect`, `bind`, `listen`, `accept`, `send`, `recv`
-- [ ] `poll` (or `select` — libuv posix-poll.c needs one)
+- [x] `socket`, `connect`, `bind`, `listen`, `accept`, `send_to`, `recv_from` — verified src/os/kernel/abi/syscall_shim_net.spl:80 `spl_handle_net_socket` (bind :107, listen :128, connect :146, accept :166, send_to :190, recv_from :221); referenced from the handler-address sum src/os/kernel/abi/syscall_shim.spl:212 (dispatch table not located)
+  - divergence: planned plain `send`/`recv`; shipped datagram-style `net_send_to`/`net_recv_from` only.
+- [x] `poll` — verified src/os/kernel/abi/syscall_shim_file.spl:524 `spl_handle_poll`; referenced from the handler-address sum syscall_shim.spl:210 (dispatch table not located)
 - [ ] `pipe`, `dup2`, `fcntl` (O_NONBLOCK, F_GETFL, F_SETFL)
-- [ ] `mmap`, `mprotect`, `munmap` (for QuickJS memory)
+- [x] `mmap`, `mprotect`, `munmap` (for QuickJS memory) — verified src/os/kernel/abi/syscall_shim_g11g12g13.spl:164 `spl_handle_sys_mmap` (munmap :183), src/os/kernel/abi/syscall_shim_process.spl:286 `spl_handle_mprotect`; referenced from the handler-address sum syscall_shim.spl:168,240 (dispatch table not located)
 - [ ] `pthread_create`, `pthread_join`, `pthread_mutex_*`, `pthread_cond_*`
-- [ ] `clock_gettime`, `nanosleep`
+- [x] `clock_gettime`, `sleep` — verified src/os/kernel/abi/syscall_shim_time_log_sysinfo.spl:26 `spl_handle_clock_gettime`, :44 `spl_handle_sleep`; referenced from the handler-address sum syscall_shim.spl:202-203 (dispatch table not located)
+  - divergence: planned `nanosleep`; shipped a `sleep` syscall handler (no `nanosleep` symbol).
 - [ ] `getenv`, `getcwd`, `getpid`, `getuid`
-- [ ] Document gaps as concrete implementation tasks
+- [x] Gaps documented as the POSIX honesty matrix `doc/02_requirements/os/posix_profiles.md` (pthread_* rows :78-82 `ENOSYS` stubs in `src/os/libc/simpleos_pthread*.c`; getuid/getgid :55 stub) — verified doc/02_requirements/os/posix_profiles.md:78 `pthread_create/join/detach`
+  - divergence: planned "concrete implementation tasks"; shipped a per-call status matrix with owning files, not task tickets.
+- Refresh 2026-09-05: `pipe`/`dup2`/`fcntl` handlers exist
+  (`syscall_shim_file.spl:491/502/535`, F_GETFL/F_SETFL at :539) but no
+  `O_NONBLOCK` symbol appears in that file; `fstat`/`lstat`/`getuid` have no
+  kernel handler (`open/read/write/close/stat` do: `syscall_shim_file.spl:86-164`);
+  `getcwd`/`getpid` exist (`syscall_shim_file.spl:421`, `syscall_shim_process.spl:136`).
 
 ### Phase 1: QuickJS on SimpleOS (2 weeks)
 
@@ -189,7 +197,8 @@ Build minimal Node.js API compatibility on QuickJS + libuv:
 - [ ] Serial marker: `[ai-cli] cli-smoke:start app=claude`
 
 **Codex CLI (Track B):**
-- [ ] Add `x86_64-unknown-simpleos` Rust target (reuse stage1 sysroot)
+- [x] `x86_64-unknown-simpleos` Rust target spec landed — verified src/os/toolchain/rust/x86_64-unknown-simpleos.json (`ls`); crt0 src/os/libc/simpleos_crt0.S
+  - divergence: planned "reuse stage1 sysroot"; the target JSON carries no sysroot reference and no Codex cross-build consumes it yet.
 - [ ] Cross-compile Codex Rust binary
 - [ ] Test: `codex --version`
 - [ ] Add RISC-V and AArch64 targets
@@ -257,7 +266,16 @@ this still has not been integrated into the boot image flow or proven by guest
 serial markers.
 
 2026-06-01 split: real guest runtime execution and serial-marker validation are
-tracked as `doc/03_plan/agent_tasks/ai_cli_qemu_guest_validation_followup.md`.
+tracked as `doc/03_plan/app/misc/ai_cli_qemu_guest_validation_followup.md`.
+
+2026-09-05 refresh: no QuickJS or libuv sources exist under `src/runtime/vendor/`
+or `src/os/`; the runtime contract records
+`js_engine_strategy: "simple-js-engine-first-with-pluggable-jit-or-host-engine-later"`
+(`src/os/ai_cli_js_node_contract.spl:147`) and the lane blocker is still
+`blocked:no-full-node-v8-libuv-artifact-20260530` (:8) with `runtime_status`
+`blocked-runtime-artifact` (:497-518). Phases 1, 2, 4 (except the Rust target
+spec) and 6 remain open; the `[ai-cli] node-compat:ready` marker is not emitted
+(only `runtime:start`, `cli-smoke:start`, `hardening:ok`, :112-140).
 The current JS/WASM hardening goal keeps host-side provisioning readiness and
 does not mark QEMU guest validation complete.
 
@@ -321,3 +339,9 @@ getcwd, chdir, getenv, uname, getrandom
 - SerenityOS libuv port: github.com/SerenityOS/serenity/tree/master/Ports/libuv
 - Codex CLI npm: npmjs.com/package/@openai/codex
 - Gemini CLI: github.com/google-gemini/gemini-cli
+
+## Acceptance
+
+Runnable oracles for the remaining open boxes: `test/03_system/plan_acceptance/simpleos_nodejs_ai_cli_migration_spec.spl`
+(tagged `@tag:in-development`; one `it` per open box — see
+`doc/03_plan/agent_tasks/plan_remains_acceptance_2026-09-05.md`).

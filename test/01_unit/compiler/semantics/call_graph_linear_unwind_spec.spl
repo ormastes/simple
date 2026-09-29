@@ -1,19 +1,47 @@
 """
-Call-graph DFS unwind regression coverage.
+## Purpose and audience
 
-Pins the in-place, synchronized stack-frame removal that keeps deep compiler
-call graphs linear during cycle analysis. This is structural regression
-coverage; it makes no broader claim about call-graph warning semantics.
+Regression coverage for the in-place, synchronized stack-frame removal that
+keeps deep compiler call graphs linear during cycle analysis. Audience: the
+compiler frontend owners and anyone touching the DFS completion branch of
+call_graph.spl.
+
+## Operator workflow
+
+Run
+`./src/compiler_rust/target/bootstrap/simple run test/01_unit/compiler/semantics/call_graph_linear_unwind_spec.spl`.
+Both scenarios must pass.
+
+## Compatibility and limitations
+
+The first scenario is a source contract: no runtime API exposes frame
+unwinding, so it pins the shipped shape of the completion branch in
+src/compiler/10.frontend/core/call_graph.spl. It makes no broader claim
+about call-graph warning semantics.
+
+## Verification guidance and troubleshooting
+
+Rerun the command above. A first-scenario failure means the completion
+branch was reshaped (possibly reintroducing the O(N^2) prefix copies this
+spec guards against); a second-scenario failure means paired end-pop
+semantics regressed.
 """
-
 # @cover src/compiler/10.frontend/core/call_graph.spl
 # @tag: unit, compiler, semantics, performance
+# Lifecycle: doc/01_research/domain/sspec_documentization_maintenance.md ;
+# doc/03_plan/sspec_modernization_plan.md ;
+# doc/04_architecture/sspec_documentization_maintenance.md ;
+# doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+# @manual_section: call-graph-unwind
 
 use std.spec.*
 use std.io_runtime.{read_file_text}
 
 describe "Call graph linear DFS unwind":
     it "pops both explicit DFS frame arrays in the completion branch":
+        # @req REQ-SSPEC-COMPILER
+        # @capture(bit_table): completion-branch source contract pinned from call_graph.spl
+        step("Read the shipped call_graph source and locate the completion branch")
         val source = read_file_text(
             "src/compiler/10.frontend/core/call_graph.spl"
         ) ?? ""
@@ -30,9 +58,13 @@ describe "Call graph linear DFS unwind":
         val copied_prefix = "for j in range(0, depth):\n" +
             "                new_nodes.push(stack_nodes[j])\n" +
             "                new_positions.push(stack_positions[j])"
-        expect(source.contains(copied_prefix)).to_equal(false)
+        val no_copied_prefix = source.contains(copied_prefix)
+        expect(no_copied_prefix).to_equal(false)  # oracle: rebuilding each prefix inside the unwind loop is the O(N^2) copy regression this spec forbids
 
     it "paired end pops preserve frame order and synchronization":
+        # @req REQ-SSPEC-COMPILER
+        # @capture(bit_table): post-pop element layout of the paired frame arrays
+        step("Pop one frame from both arrays and compare the paired layout")
         var nodes: [i64] = [10, 20, 30, 40]
         var positions: [i64] = [1, 2, 3, 4]
 
@@ -40,10 +72,10 @@ describe "Call graph linear DFS unwind":
         positions.pop()
 
         expect(nodes.len()).to_equal(positions.len())
-        expect(nodes.len()).to_equal(3)
-        expect(nodes[0]).to_equal(10)
-        expect(nodes[1]).to_equal(20)
-        expect(nodes[2]).to_equal(30)
-        expect(positions[0]).to_equal(1)
-        expect(positions[1]).to_equal(2)
-        expect(positions[2]).to_equal(3)
+        expect(nodes.len()).to_equal(3)  # oracle: two paired pops from four-element frame arrays leave three synchronized frames
+        expect(nodes[0]).to_equal(10)  # oracle: end pops only remove the tail, so leading frame ids survive in order
+        expect(nodes[1]).to_equal(20)  # oracle: end pops only remove the tail, so leading frame ids survive in order
+        expect(nodes[2]).to_equal(30)  # oracle: the last surviving frame is the pre-pop second-to-last element
+        expect(positions[0]).to_equal(1)  # oracle: the position array pops in lockstep with the node array
+        expect(positions[1]).to_equal(2)  # oracle: the position array pops in lockstep with the node array
+        expect(positions[2]).to_equal(3)  # oracle: the position array pops in lockstep with the node array

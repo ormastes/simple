@@ -178,7 +178,6 @@ fn substitute_node_templates(node: &Node, const_bindings: &HashMap<String, Strin
             body: substitute_block_templates(&stmt.body, const_bindings),
             simd_requested: stmt.simd_requested,
             is_suspend: stmt.is_suspend,
-            auto_enumerate: stmt.auto_enumerate,
             invariants: stmt.invariants.clone(),
             label: stmt.label.clone(),
         }),
@@ -424,6 +423,7 @@ fn substitute_expr_templates(expr: &Expr, const_bindings: &HashMap<String, Strin
         },
         Expr::Spread(expr) => Expr::Spread(Box::new(substitute_expr_templates(expr, const_bindings))),
         Expr::DictSpread(expr) => Expr::DictSpread(Box::new(substitute_expr_templates(expr, const_bindings))),
+        Expr::StructSpread(expr) => Expr::StructSpread(Box::new(substitute_expr_templates(expr, const_bindings))),
         Expr::StructInit { name, fields, spread } => Expr::StructInit {
             name: name.clone(),
             fields: fields

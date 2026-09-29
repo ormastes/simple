@@ -498,6 +498,14 @@ pub(crate) fn resolve_runtime_symbol(name: &str) -> Option<usize> {
         "rt_transient_array_scope_pause" => value::rt_transient_array_scope_pause as *const () as usize,
         "rt_transient_heap_promote" => value::rt_transient_heap_promote as *const () as usize,
         "rt_transient_array_scope_end" => value::rt_transient_array_scope_end as *const () as usize,
+        // Diagnostic heap counters. Registered here as well as in
+        // codegen::runtime_sffi so a JIT-hosted call resolves to the real
+        // counter instead of silently returning nil (which is
+        // indistinguishable from a true 0 and has hidden defects before).
+        "rt_heap_live_bytes" => value::heap::rt_heap_live_bytes as *const () as usize,
+        "rt_heap_peak_bytes" => value::heap::rt_heap_peak_bytes as *const () as usize,
+        "rt_heap_alloc_count" => value::heap::rt_heap_alloc_count as *const () as usize,
+        "rt_heap_free_count" => value::heap::rt_heap_free_count as *const () as usize,
         // Receiver-polymorphic map (array or Option). See rt_map.
         "rt_map" => simple_runtime::rt_map as *const () as usize,
         "rt_array_all" => simple_runtime::rt_array_all as *const () as usize,
@@ -558,17 +566,21 @@ pub(crate) fn resolve_runtime_symbol(name: &str) -> Option<usize> {
         "rt_process_execute" => value::rt_process_execute as *const () as usize,
         "rt_exec" => value::rt_exec as *const () as usize,
         "spl_dlopen" => value::spl_dlopen as *const () as usize,
+        "spl_backend_plugin_run_v1" => value::spl_backend_plugin_run_v1 as *const () as usize,
         "spl_dlopen_checked" => value::spl_dlopen_checked as *const () as usize,
         "spl_dlsym" => value::spl_dlsym as *const () as usize,
         "spl_dlsym_checked" => value::spl_dlsym_checked as *const () as usize,
         "spl_dlsym_process_checked" => value::spl_dlsym_process_checked as *const () as usize,
+        "spl_dynlib_snapshot_linux" => value::spl_dynlib_snapshot_linux as *const () as usize,
         "spl_dlclose" => value::spl_dlclose as *const () as usize,
         "spl_wffi_call_i64" => value::spl_wffi_call_i64 as *const () as usize,
+        "spl_wffi_call_i32_i64_u32_u32_f64_bits" => value::spl_wffi_call_i32_i64_u32_u32_f64_bits as *const () as usize,
         "spl_wffi_call_bool0_checked" => value::spl_wffi_call_bool0_checked as *const () as usize,
         "spl_wffi_call_bool1_checked" => value::spl_wffi_call_bool1_checked as *const () as usize,
         "spl_wffi_call_f64_checked" => value::spl_wffi_call_f64_checked as *const () as usize,
         "spl_wffi_call_i64_checked" => value::spl_wffi_call_i64_checked as *const () as usize,
         "spl_wffi_try_call_i64_out" => value::spl_wffi_try_call_i64_out as *const () as usize,
+        "spl_wffi_call_i64_into_bytes" => value::spl_wffi_call_i64_into_bytes as *const () as usize,
         "spl_wffi_call_i64_with_bytes" => value::spl_wffi_call_i64_with_bytes as *const () as usize,
         "spl_wffi_call_i64_with_bytes_checked" => value::spl_wffi_call_i64_with_bytes_checked as *const () as usize,
         "spl_fonts_call_init_blob" => value::spl_fonts_call_init_blob as *const () as usize,
@@ -619,6 +631,7 @@ pub(crate) fn resolve_runtime_symbol(name: &str) -> Option<usize> {
         // Index/slice operations
         "rt_index_get" => simple_runtime::rt_index_get as *const () as usize,
         "rt_index_set" => simple_runtime::rt_index_set as *const () as usize,
+        "rt_collection_set" => simple_runtime::rt_collection_set as *const () as usize,
         "rt_slice" => simple_runtime::rt_slice as *const () as usize,
         "rt_contains" => value::rt_contains as *const () as usize,
 
@@ -661,6 +674,7 @@ pub(crate) fn resolve_runtime_symbol(name: &str) -> Option<usize> {
         // Enum operations
         "rt_enum_new" => simple_runtime::rt_enum_new as *const () as usize,
         "rt_enum_check_discriminant" => simple_runtime::rt_enum_check_discriminant as *const () as usize,
+        "rt_enum_check_variant" => simple_runtime::rt_enum_check_variant as *const () as usize,
         "rt_enum_id" => simple_runtime::rt_enum_id as *const () as usize,
         "rt_enum_discriminant" => simple_runtime::rt_enum_discriminant as *const () as usize,
         "rt_enum_payload" => simple_runtime::rt_enum_payload as *const () as usize,
@@ -813,6 +827,15 @@ pub(crate) fn resolve_runtime_symbol(name: &str) -> Option<usize> {
         }
         "rt_cranelift_new_aot_module_triple" => {
             crate::codegen::cranelift_sffi::rt_cranelift_new_aot_module_triple as *const () as usize
+        }
+        "spl_cranelift_new_aot_module_config_v2" => {
+            crate::codegen::cranelift_sffi::spl_cranelift_new_aot_module_config_v2 as *const () as usize
+        }
+        "spl_cranelift_aot_isa_feature_v2" => {
+            crate::codegen::cranelift_sffi::spl_cranelift_aot_isa_feature_v2 as *const () as usize
+        }
+        "spl_cranelift_aot_opt_level_v2" => {
+            crate::codegen::cranelift_sffi::spl_cranelift_aot_opt_level_v2 as *const () as usize
         }
         "rt_cranelift_finalize_module" => {
             crate::codegen::cranelift_sffi::rt_cranelift_finalize_module as *const () as usize
@@ -973,6 +996,8 @@ mod tests {
             "spl_fonts_call_init_blob",
             "spl_fonts_call_init_path",
             "spl_fonts_call_layout_text",
+            "spl_wffi_call_i64_into_bytes",
+            "spl_wffi_call_i32_i64_u32_u32_f64_bits",
             "spl_wffi_call_i64_with_bytes",
             "spl_wffi_call_i64_with_bytes_checked",
             "spl_wffi_call_i64_checked",
@@ -981,8 +1006,10 @@ mod tests {
             "spl_wffi_call_bool1_checked",
             "spl_wffi_call_f64_checked",
             "spl_dlopen_checked",
+            "spl_backend_plugin_run_v1",
             "spl_dlsym_checked",
             "spl_dlsym_process_checked",
+            "spl_dynlib_snapshot_linux",
         ] {
             assert!(resolve_runtime_symbol(symbol).unwrap_or(0) != 0, "{symbol}");
         }

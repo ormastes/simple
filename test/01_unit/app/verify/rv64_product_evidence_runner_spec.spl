@@ -1,0 +1,121 @@
+use std.spec
+use app.io.mod.{file_hash_sha256}
+use std.common.crypto.sha256.{sha256_text}
+use app.verify.rv64_product_evidence_runner.{Rv64ObservedInputV1,
+    Rv64ProductCommandV1, Rv64ProductRunnerConfigV1,
+    rv64_product_runner_config_error_v1,
+    rv64_product_runner_observed_inputs_error_v1,
+    rv64_product_runner_process_result_error_v1,
+    run_rv64_product_evidence_v1}
+use compiler.tools.verify.formal_product_gate_collectors.{Rv64ProductIdentityV1}
+
+fn runner_identity() -> Rv64ProductIdentityV1:
+    Rv64ProductIdentityV1(file_hash_sha256(proof_path(0)),
+        file_hash_sha256(proof_path(1)), file_hash_sha256(proof_path(2)),
+        file_hash_sha256("scripts/rtl/rtl_riscv64_linux_generated.shs"),
+        file_hash_sha256(proof_path(3)), file_hash_sha256(proof_path(4)))
+
+fn proof_path(index: i64) -> text:
+    match index:
+        case 0: "src/compiler/90.tools/verify/formal_product_gate_collectors.spl"
+        case 1: "src/compiler/90.tools/verify/formal_gate_collectors.spl"
+        case 2: "src/compiler/90.tools/verify/replay_runner.spl"
+        case 3: "src/compiler/90.tools/verify/riscv_delivery_gate_adapter.spl"
+        case _: "src/app/verify/riscv_scalar_runtime_pipeline_v9_formal_bundle.spl"
+
+fn observed_input(path: text) -> Rv64ObservedInputV1:
+    Rv64ObservedInputV1(path, file_hash_sha256(path))
+
+fn observed_inputs(index: i64) -> [Rv64ObservedInputV1]:
+    if index == 0:
+        return [observed_input(proof_path(0)), observed_input(proof_path(3)),
+            observed_input(proof_path(4))]
+    if index >= 1 and index <= 3:
+        return [observed_input(proof_path(0)), observed_input(proof_path(1)),
+            observed_input(proof_path(4))]
+    if index == 4:
+        return [observed_input(proof_path(1)), observed_input(proof_path(2)),
+            observed_input(proof_path(4))]
+    if index == 5:
+        return [observed_input(proof_path(1)),
+            observed_input("scripts/rtl/rtl_riscv64_linux_generated.shs"),
+            observed_input(proof_path(3))]
+    [observed_input(proof_path(0)),
+        observed_input("scripts/rtl/rtl_riscv64_linux_generated.shs"),
+        observed_input(proof_path(3)), observed_input(proof_path(4))]
+
+fn runner_row(index: i64) -> Rv64ProductCommandV1:
+    val witness = match index:
+        case 0: "FV2-RV64-SHARED-XLEN: PASS"
+        case 1: "FV2-RV64-PRIVILEGE-CSR: PASS"
+        case 2: "FV2-RV64-MMU-PAGE-WALK: PASS"
+        case 3: "FV2-RV64-PRECISE-TRAP-INTERRUPT: PASS"
+        case 4: "FV2-RV64-POST-SYNTHESIS-EQUIVALENCE: PASS"
+        case 5: "FV2-RV64-LINUX-BOOT: PASS"
+        case _: "FV2-RV64-INDEPENDENT-ISA-ORACLE: PASS"
+    Rv64ProductCommandV1("/bin/echo", file_hash_sha256("/bin/echo"),
+        [witness], 5000,
+        "unit-fake-row-" + index.to_string(),
+        observed_inputs(index),
+        if index < 5: proof_path(index) else: "")
+
+fn runner_config() -> Rv64ProductRunnerConfigV1:
+    var rows: [Rv64ProductCommandV1] = []
+    for index in 0..7: rows.push(runner_row(index))
+    Rv64ProductRunnerConfigV1(runner_identity(), rows)
+
+describe "FV2 RV64 receipt-owning production executor":
+    it "rejects caller-selected magic-witness executables":
+        val execution = run_rv64_product_evidence_v1(runner_config())
+        expect(execution.diagnostic).to_contain("AUTHORITY")
+        expect(execution.executed_receipts.len()).to_equal(0)
+        expect(execution.collection.gate_evidence.status.name()).to_equal("failed")
+
+    it "keeps absent reviewed row authorities as an explicit blocker":
+        var config = runner_config()
+        config.rows[0].executable_path =
+            "scripts/check/check-riscv-shared-xlen-refinement.shs"
+        config.rows[0].expected_executable_sha256 = sha256_text(
+            "absent-reviewed-row-authority")
+        config.rows[0].policy_name = "fv2-rv64-authority-row-0-v1"
+        expect(rv64_product_runner_config_error_v1(config)).to_contain(
+            "TOOL")
+
+    it "rejects input drift configurations before launching acceptance rows":
+        var config = runner_config()
+        config.rows[0].observed_inputs[0].expected_sha256 = sha256_text("drift")
+        expect(rv64_product_runner_observed_inputs_error_v1(
+            config.rows[0])).to_contain("INPUT-DRIFT")
+        config.rows[0].observed_inputs[0].path = ""
+        expect(rv64_product_runner_observed_inputs_error_v1(
+            config.rows[0])).to_contain("INPUT-MISSING")
+
+    it "rejects validation proof impersonation":
+        var impersonated = runner_config()
+        impersonated.rows[5].proof_material_path = proof_path(0)
+        expect(rv64_product_runner_config_error_v1(impersonated)).to_contain(
+            "VALIDATION")
+
+    it "rejects missing output witnesses and bounded execution timeouts":
+        expect(rv64_product_runner_process_result_error_v1(
+            2, "not-emitted", 0)).to_contain("WITNESS")
+        expect(rv64_product_runner_process_result_error_v1(
+            2, "[TIMEOUT: 5000ms]", -1)).to_contain("TIMEOUT")
+        expect(rv64_product_runner_process_result_error_v1(
+            2, "tool rejected product", 2)).to_contain("REJECTED")
+        expect(rv64_product_runner_process_result_error_v1(
+            2, "FV2-RV64-MMU-PAGE-WALK: PASS", 0)).to_equal("")
+        expect(rv64_product_runner_process_result_error_v1(
+            7, "", 0)).to_contain("ROW")
+
+    it "rejects incomplete schedules and unbounded commands":
+        var incomplete = runner_config()
+        incomplete.rows.pop()
+        expect(rv64_product_runner_config_error_v1(incomplete)).to_contain("COUNT")
+        var missing_tool = runner_config()
+        missing_tool.rows[0].executable_path = ""
+        expect(rv64_product_runner_config_error_v1(missing_tool)).to_contain(
+            "TOOL")
+        var unbounded = runner_config()
+        unbounded.rows[4].timeout_ms = 0
+        expect(rv64_product_runner_config_error_v1(unbounded)).to_contain("TIMEOUT")

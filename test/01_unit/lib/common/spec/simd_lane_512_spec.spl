@@ -1,0 +1,179 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-LIB
+#
+# 512-bit (AVX-512 width) lane primitives in pure Simple.
+#
+# WHY THESE ARE STANDALONE AND NOT @dual_pair TWINS. Every other SIMD lane
+# spec in this directory pins a pure-Simple twin against a live rt_simd_*
+# oracle. That is impossible here and the reason is mechanical, not a
+# shortcut: src/runtime/runtime_simd_dispatch.c has no 512-bit kernel at all
+# (grep it for __AVX512 and you get nothing; the widest forms are
+# RT_SIMD_F64X4_BINOP / U64X4_BINOP / F32X8_BINOP, i.e. 256-bit). With no
+# registered extern there is no oracle to compare against, and declaring one
+# would be a hard `semantic: unknown extern function`.
+#
+# So these cases pin the SEMANTICS against hand-computed exact values. They do
+# NOT yet pin them against a second independent implementation. The moment a
+# 512-bit kernel lands in runtime_simd_dispatch.c these should be promoted to
+# @dual_pair entries, at which point the reference below becomes the twin.
+#
+# Everything asserted here is EXACT — integer arithmetic, bit manipulation and
+# comparisons. No float arithmetic appears, for the reason recorded in the
+# tranche E header: a rounding-sensitive twin either diverges on ordinary
+# inputs or has to be tested on contrived values.
+#
+# These functions are OS- and ARCH-INDEPENDENT by construction: ordinary
+# Simple over [i64]/u64, no intrinsic and no target gate, so the expected
+# values below hold identically on x86_64, aarch64 and riscv64 under any OS.
+
+use std.spec.step
+
+use std.spec.{describe, it, assert_true, assert_equal}
+use std.common.simd_lane_pure.{cmpeq_u8x64_mask_pure, mask_first_lane_pure, mask_lane_count_pure, shuffle_u8x64_pure, add_i64x8_pure, sub_i64x8_pure, hmax_i64x8_pure, hmin_i64x8_pure}
+
+fn ramp64() -> [i64]:
+    var v: [i64] = []
+    var i = 0
+    while i < 64:
+        v.push(i)
+        i = i + 1
+    return v
+
+fn filled64(x: i64) -> [i64]:
+    var v: [i64] = []
+    var i = 0
+    while i < 64:
+        v.push(x)
+        i = i + 1
+    return v
+
+describe "512-bit lane primitives (pure Simple, OS-independent)":
+
+    it "cmpeq_u8x64_mask sets one bit per equal lane and is unsigned at bit 63":
+        # @req REQ-SSPEC-LIB
+        step("cmpeq_u8x64_mask sets one bit per equal lane and is unsigned at bit 63")
+        val a = ramp64()
+        # All 64 lanes equal -> every bit set. The value is the point: an
+        # inferred (signed) accumulator would print -1 here instead.
+        assert_equal(cmpeq_u8x64_mask_pure(a, a).to_string(), "18446744073709551615")
+        # No lane equal -> empty mask. ramp is 0..63, so +100 shares no value.
+        var far: [i64] = []
+        var i = 0
+        while i < 64:
+            far.push(i + 100)
+            i = i + 1
+        assert_equal(cmpeq_u8x64_mask_pure(a, far).to_string(), "0")
+        # Comparison is on the LOW BYTE only: 300 & 255 == 44.
+        var wrapped = ramp64()
+        wrapped[44] = 300
+        assert_true(mask_lane_count_pure(cmpeq_u8x64_mask_pure(a, wrapped)) == 64)
+
+    it "cmpeq_u8x64_mask clears exactly the lanes that differ, including lane 63":
+        # @req REQ-SSPEC-LIB
+        step("cmpeq_u8x64_mask clears exactly the lanes that differ, including lane 63")
+        val a = ramp64()
+        var b = ramp64()
+        b[0] = 200
+        b[63] = 200
+        # 2^64-1 minus bit 0 minus bit 63. Lane 63 is the one a signed shift
+        # would get wrong, so it is asserted explicitly.
+        val m = cmpeq_u8x64_mask_pure(a, b)
+        assert_equal(m.to_string(), "9223372036854775806")
+        assert_equal(mask_lane_count_pure(m), 62)
+        assert_equal(mask_first_lane_pure(m), 1)
+
+    it "mask_first_lane returns the lowest set lane and 64 for an empty mask":
+        # @req REQ-SSPEC-LIB
+        step("mask_first_lane returns the lowest set lane and 64 for an empty mask")
+        val a = ramp64()
+        # Empty mask -> 64, matching u64::trailing_zeros, NOT -1.
+        assert_equal(mask_first_lane_pure(cmpeq_u8x64_mask_pure(a, filled64(200))), 64)
+        # Only lane 0 matches: filled64(0) equals ramp only at lane 0.
+        assert_equal(mask_first_lane_pure(cmpeq_u8x64_mask_pure(a, filled64(0))), 0)
+        # Only lane 63 matches.
+        assert_equal(mask_first_lane_pure(cmpeq_u8x64_mask_pure(a, filled64(63))), 63)
+        assert_equal(mask_lane_count_pure(cmpeq_u8x64_mask_pure(a, filled64(63))), 1)
+
+    it "mask_lane_count counts set lanes across the full 64-lane width":
+        # @req REQ-SSPEC-LIB
+        step("mask_lane_count counts set lanes across the full 64-lane width")
+        val a = ramp64()
+        assert_equal(mask_lane_count_pure(cmpeq_u8x64_mask_pure(a, a)), 64)
+        assert_equal(mask_lane_count_pure(cmpeq_u8x64_mask_pure(a, filled64(200))), 0)
+        # Exactly one lane differs -> 63 set.
+        var one = ramp64()
+        one[7] = 200
+        assert_equal(mask_lane_count_pure(cmpeq_u8x64_mask_pure(a, one)), 63)
+
+    it "shuffle_u8x64 permutes within each 128-bit lane and never across them":
+        # @req REQ-SSPEC-LIB
+        step("shuffle_u8x64 permutes within each 128-bit lane and never across them")
+        # This is the trap the reference exists for. Unlike 128-bit PSHUFB the
+        # AVX-512 form takes ONE source, indexes with the low FOUR bits, and
+        # does not cross a 16-byte lane. Asking every lane for index 0 must
+        # therefore yield the FIRST BYTE OF EACH 16-BYTE LANE (0,16,32,48) --
+        # not byte 0 of the whole vector four times over.
+        val a = ramp64()
+        val want_zero = shuffle_u8x64_pure(a, filled64(0))
+        assert_equal(want_zero[0], 0)
+        assert_equal(want_zero[16], 16)
+        assert_equal(want_zero[32], 32)
+        assert_equal(want_zero[48], 48)
+        # Index 15 -> last byte of each lane.
+        val want_15 = shuffle_u8x64_pure(a, filled64(15))
+        assert_equal(want_15[0], 15)
+        assert_equal(want_15[16], 31)
+        assert_equal(want_15[63], 63)
+        # A 5-bit index (the 128-bit convention) would let 16 reach the next
+        # lane. Here 16 & 15 == 0, so it must alias index 0 instead.
+        val want_16 = shuffle_u8x64_pure(a, filled64(16))
+        assert_equal(want_16[0], 0)
+        assert_equal(want_16[32], 32)
+        # Bit 7 set zeroes the byte, whatever the low bits say.
+        val zeroed = shuffle_u8x64_pure(a, filled64(128))
+        assert_equal(zeroed[0], 0)
+        assert_equal(zeroed[63], 0)
+        assert_equal(shuffle_u8x64_pure(a, filled64(255))[20], 0)
+
+    it "add/sub_i64x8 keep every lane independent with no carry across lanes":
+        # @req REQ-SSPEC-LIB
+        step("add/sub_i64x8 keep every lane independent with no carry across lanes")
+        val x: [i64] = [1, 2, 3, 4, 5, 6, 7, 8]
+        val y: [i64] = [10, 20, 30, 40, 50, 60, 70, 80]
+        # Asserted lane by lane rather than through a formatted string: `array`
+        # has no `to_string` method here, and per-lane checks name the failing
+        # lane directly instead of diffing one long rendered line.
+        val sum = add_i64x8_pure(x, y)
+        val diff = sub_i64x8_pure(y, x)
+        var i = 0
+        while i < 8:
+            assert_equal(sum[i], x[i] + y[i])
+            assert_equal(diff[i], y[i] - x[i])
+            i = i + 1
+        assert_equal(sum[0], 11)
+        assert_equal(sum[7], 88)
+        assert_equal(diff[3], 36)
+        assert_equal(diff[7], 72)
+        # Lane independence: a huge value in one lane must not disturb others.
+        val big: [i64] = [0, 0, 0, 9007199254740993, 0, 0, 0, 0]
+        val ones: [i64] = [1, 1, 1, 1, 1, 1, 1, 1]
+        val got = add_i64x8_pure(big, ones)
+        assert_equal(got[3], 9007199254740994)
+        assert_equal(got[2], 1)
+        assert_equal(got[4], 1)
+
+    it "hmax/hmin_i64x8 reduce eight lanes exactly, including negatives":
+        # @req REQ-SSPEC-LIB
+        step("hmax/hmin_i64x8 reduce eight lanes exactly, including negatives")
+        val v: [i64] = [3, -7, 100, 0, 42, -9, 8, 5]
+        assert_equal(hmax_i64x8_pure(v), 100)
+        assert_equal(hmin_i64x8_pure(v), -9)
+        # Extremum in the last lane must still be seen (loop bound check).
+        val last: [i64] = [1, 1, 1, 1, 1, 1, 1, 999]
+        assert_equal(hmax_i64x8_pure(last), 999)
+        val lastmin: [i64] = [1, 1, 1, 1, 1, 1, 1, -999]
+        assert_equal(hmin_i64x8_pure(lastmin), -999)
+        # All-equal input returns that value from both.
+        val flat: [i64] = [7, 7, 7, 7, 7, 7, 7, 7]
+        assert_equal(hmax_i64x8_pure(flat), 7)
+        assert_equal(hmin_i64x8_pure(flat), 7)

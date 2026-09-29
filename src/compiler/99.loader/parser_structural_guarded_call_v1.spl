@@ -1,0 +1,151 @@
+# One guarded 32-byte parser structural-mask invocation.
+use compiler.loader.parser_structural_mask_mapper_v1.{ParserStructuralMapperOwnerV1,
+    ParserStructuralMappedKernelV1, parser_structural_mapper_call_retain_v1,
+    parser_structural_mapper_call_release_v1, parser_structural_mapper_resolve_retained_private_v1}
+use compiler.loader.parser_structural_source_buffer_v1.{ParserStructuralSourceBufferOwnerV1,
+    ParserStructuralNativeSourceLeaseV1, parser_structural_source_call_retain_v1,
+    parser_structural_source_call_release_v1,
+    parser_structural_source_buffer_resolve_retained_private_v1}
+use compiler.loader.parser_mask_call_native_v1.parser_mask_call_native_v1
+use compiler.loader.parser_structural_mask_mapping_authorization_v1.ParserStructuralMappingAuthorizationV1
+use compiler.driver.parser_simd_execution_capability_v1.{ParserSimdExecutionCapabilityReceiptV1,
+    parser_simd_execution_capability_validate_with_affinity_v1}
+use compiler.driver.execution_domain_affinity_lease_v1.{ExecutionDomainAffinityLeaseOwnerV1,
+    ExecutionDomainAffinityLeaseV1, execution_domain_affinity_call_enter_v1,
+    execution_domain_affinity_call_exit_v1}
+use std.nogc_sync_mut.composition.environment_variants.contracts_v1.EnvironmentSnapshotV1
+use std.nogc_sync_mut.composition.environment_variants.provider_generation_v2.{
+    ProviderGenerationManagerV2, ProviderGenerationPinV2, provider_generation_pin_live_v2,
+    provider_generation_pin_release_v2}
+use compiler.loader.parser_structural_provider_activation_v2.{
+    ParserStructuralProviderActivationOwnerV2, ParserStructuralProviderActivationV2,
+    parser_structural_provider_pin_v2}
+use compiler.loader.parser_structural_guarded_scope_v1.*
+
+pub enum ParserStructuralGuardedCallErrorV1:
+    CapabilityRejected
+    KernelRejected
+    SourceRejected
+    GenerationMismatch
+    NativeCallFailed
+    ProviderPinRejected
+    ReleaseFailed
+
+pub struct ParserStructuralGuardedMaskV1:
+    mask: u32
+    source_offset: u64
+    provider_generation: u64
+    executed_provider: bool
+
+fn _same_digest(a: std.nogc_sync_mut.composition.environment_variants.contracts_v1.EnvironmentDigest256V1,
+                b: std.nogc_sync_mut.composition.environment_variants.contracts_v1.EnvironmentDigest256V1) -> bool:
+    a.w0 == b.w0 and a.w1 == b.w1 and a.w2 == b.w2 and a.w3 == b.w3
+
+pub fn parser_structural_guarded_mask_call_v1(
+    mapper_owner: ParserStructuralMapperOwnerV1,
+    mapped: ParserStructuralMappedKernelV1,
+    generation_owner: ProviderGenerationManagerV2,
+    activation_owner: ParserStructuralProviderActivationOwnerV2,
+    activation: ParserStructuralProviderActivationV2,
+    source_owner: ParserStructuralSourceBufferOwnerV1,
+    source: ParserStructuralNativeSourceLeaseV1,
+    affinity_owner: ExecutionDomainAffinityLeaseOwnerV1,
+    affinity: ExecutionDomainAffinityLeaseV1,
+    snapshot: EnvironmentSnapshotV1, feature_words: [u64],
+    authorization: ParserStructuralMappingAuthorizationV1,
+    capability: ParserSimdExecutionCapabilityReceiptV1,
+    offset: u64, first: u8, second: u8
+) -> Result<ParserStructuralGuardedMaskV1, ParserStructuralGuardedCallErrorV1>:
+    if mapped.provider_generation != authorization.provider_generation or
+       not _same_digest(mapped.artifact_digest, authorization.artifact_digest):
+        return Err(ParserStructuralGuardedCallErrorV1.GenerationMismatch)
+    val scopes = ParserStructuralGuardedScopeOwnerV1.create()
+    val scoped = parser_structural_guarded_scope_begin_v1(scopes, mapper_owner, mapped,
+        generation_owner, activation_owner, activation, source_owner, source,
+        affinity_owner, affinity, snapshot, feature_words, authorization, capability)
+    if scoped.is_err(): return Err(ParserStructuralGuardedCallErrorV1.CapabilityRejected)
+    val mask = parser_structural_guarded_scope_call_block_v1(scopes, mapper_owner,
+        source_owner, scoped.unwrap(), offset, first, second)
+    val ended = parser_structural_guarded_scope_end_v1(scopes, mapper_owner,
+        generation_owner, source_owner, affinity_owner, scoped.unwrap())
+    if ended.is_err(): return Err(ParserStructuralGuardedCallErrorV1.ReleaseFailed)
+    if mask.is_err(): return Err(ParserStructuralGuardedCallErrorV1.NativeCallFailed)
+    return Ok(ParserStructuralGuardedMaskV1(mask: mask.unwrap(), source_offset: offset,
+        provider_generation: authorization.provider_generation, executed_provider: true))
+    val kernel_token = match parser_structural_mapper_call_retain_v1(
+            mapper_owner, mapped, authorization):
+        case Ok(value): value
+        case Err(_): return Err(ParserStructuralGuardedCallErrorV1.KernelRejected)
+    val source_token = match parser_structural_source_call_retain_v1(source_owner, source):
+        case Ok(value): value
+        case Err(_):
+            if not parser_structural_mapper_call_release_v1(mapper_owner, kernel_token):
+                return Err(ParserStructuralGuardedCallErrorV1.ReleaseFailed)
+            return Err(ParserStructuralGuardedCallErrorV1.SourceRejected)
+    val pin = match parser_structural_provider_pin_v2(activation_owner, generation_owner,
+            mapper_owner, activation, authorization, mapped):
+        case Ok(value): value
+        case Err(_):
+            val b = parser_structural_source_call_release_v1(source_owner, source_token)
+            val c = parser_structural_mapper_call_release_v1(mapper_owner, kernel_token)
+            if not b or not c: return Err(ParserStructuralGuardedCallErrorV1.ReleaseFailed)
+            return Err(ParserStructuralGuardedCallErrorV1.ProviderPinRejected)
+    if not provider_generation_pin_live_v2(generation_owner, pin) or
+       not _same_digest(pin.provider_identity, authorization.provider_identity) or
+       not _same_digest(pin.variant_identity, authorization.variant_identity):
+        val a = provider_generation_pin_release_v2(generation_owner, pin).is_ok()
+        val b = parser_structural_source_call_release_v1(source_owner, source_token)
+        val c = parser_structural_mapper_call_release_v1(mapper_owner, kernel_token)
+        if not a or not b or not c: return Err(ParserStructuralGuardedCallErrorV1.ReleaseFailed)
+        return Err(ParserStructuralGuardedCallErrorV1.ProviderPinRejected)
+    # Revalidate policy/capability first; the runtime-owned call window below
+    # then keeps this exact current-thread singleton affinity lease unreleasable
+    # across private address resolution and native entry/return.
+    if parser_simd_execution_capability_validate_with_affinity_v1(capability,
+            snapshot, feature_words, authorization, affinity_owner, affinity).is_err():
+        val a = provider_generation_pin_release_v2(generation_owner, pin).is_ok()
+        val b = parser_structural_source_call_release_v1(source_owner, source_token)
+        val c = parser_structural_mapper_call_release_v1(mapper_owner, kernel_token)
+        if not a or not b or not c: return Err(ParserStructuralGuardedCallErrorV1.ReleaseFailed)
+        return Err(ParserStructuralGuardedCallErrorV1.CapabilityRejected)
+    val call_window = match execution_domain_affinity_call_enter_v1(
+            affinity_owner, snapshot, affinity):
+        case Ok(value): value
+        case Err(_):
+            val a = provider_generation_pin_release_v2(generation_owner, pin).is_ok()
+            val b = parser_structural_source_call_release_v1(source_owner, source_token)
+            val c = parser_structural_mapper_call_release_v1(mapper_owner, kernel_token)
+            if not a or not b or not c: return Err(ParserStructuralGuardedCallErrorV1.ReleaseFailed)
+            return Err(ParserStructuralGuardedCallErrorV1.CapabilityRejected)
+    val function_address = match parser_structural_mapper_resolve_retained_private_v1(
+            mapper_owner, mapped, kernel_token):
+        case Ok(value): value
+        case Err(_):
+            val w = execution_domain_affinity_call_exit_v1(affinity_owner, affinity, call_window).is_ok()
+            val a = provider_generation_pin_release_v2(generation_owner, pin).is_ok()
+            val b = parser_structural_source_call_release_v1(source_owner, source_token)
+            val c = parser_structural_mapper_call_release_v1(mapper_owner, kernel_token)
+            if not w or not a or not b or not c: return Err(ParserStructuralGuardedCallErrorV1.ReleaseFailed)
+            return Err(ParserStructuralGuardedCallErrorV1.KernelRejected)
+    val source_address = match parser_structural_source_buffer_resolve_retained_private_v1(
+            source_owner, source, source_token, offset, 32u64):
+        case Ok(value): value
+        case Err(_):
+            val w = execution_domain_affinity_call_exit_v1(affinity_owner, affinity, call_window).is_ok()
+            val a = provider_generation_pin_release_v2(generation_owner, pin).is_ok()
+            val b = parser_structural_source_call_release_v1(source_owner, source_token)
+            val c = parser_structural_mapper_call_release_v1(mapper_owner, kernel_token)
+            if not w or not a or not b or not c: return Err(ParserStructuralGuardedCallErrorV1.ReleaseFailed)
+            return Err(ParserStructuralGuardedCallErrorV1.SourceRejected)
+    val called = parser_mask_call_native_v1(function_address, source_address, first, second)
+    val window_released = execution_domain_affinity_call_exit_v1(
+        affinity_owner, affinity, call_window).is_ok()
+    val pin_released = provider_generation_pin_release_v2(generation_owner, pin).is_ok()
+    val source_released = parser_structural_source_call_release_v1(source_owner, source_token)
+    val kernel_released = parser_structural_mapper_call_release_v1(mapper_owner, kernel_token)
+    if not window_released or not pin_released or not source_released or not kernel_released:
+        return Err(ParserStructuralGuardedCallErrorV1.ReleaseFailed)
+    if called.is_err(): return Err(ParserStructuralGuardedCallErrorV1.NativeCallFailed)
+    Ok(ParserStructuralGuardedMaskV1(mask: (called.unwrap() as u64 & 0xffffffffu64) as u32,
+        source_offset: offset, provider_generation: pin.generation,
+        executed_provider: true))

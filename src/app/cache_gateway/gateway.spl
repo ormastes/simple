@@ -1,0 +1,340 @@
+# Cache gateway — SERVER-SIDE namespace authority.
+#
+# Design: doc/05_design/compiler/semantic_incremental_build_cache_aop_formal_2026-08-09.md §15.2 (Mode A), §15.4
+# Contract: doc/03_plan/compiler/cache/c0_schema_freeze_2026-08-09.md
+#
+# THE ONE PROPERTY THIS FILE EXISTS FOR:
+#
+#   A client cannot reach the main namespace by hand-building a path.
+#
+# It is enforced structurally, three ways, not by validation of a client string:
+#
+#   1. `GatewayWriteRequest` HAS NO PATH FIELD and no namespace-digest field.
+#      There is nothing for a client to forge. The client names a namespace
+#      *kind* ("main" / "branch" / ...) as an intent; the gateway derives the
+#      actual storage path from its OWN principal registry.
+#   2. `gateway_resolve_namespace` builds the CacheNamespace — including `trust`
+#      and `repository_id` — from the authenticated principal, never from the
+#      request. A client asking for kind "main" while holding a developer
+#      credential is resolved to a policy that cannot write main.
+#   3. The write still goes through C2's `remote_put_action`, which re-checks
+#      `namespace_policy_may_write`. Two independent checks, both server-side.
+#
+# CAS digest verification does NOT substitute for provenance: `gateway_put_blob`
+# accepts content-addressed bytes from anyone whose digest matches, and that
+# grants NO action-mapping authority whatsoever. Only `gateway_put_action` /
+# `gateway_promote` mint mappings, and only under an attested role.
+
+use compiler.driver.cache.remote.namespace_policy.{
+    CacheNamespace, NamespacePolicy,
+    namespace_policy_developer_default, namespace_policy_for_attestation,
+    namespace_policy_may_write, namespace_policy_can_ever_write_main,
+    NS_MAIN, NS_BRANCH,
+    TRUST_TRUSTED_MAIN_CI, TRUST_TRUSTED_BRANCH_CI, TRUST_MACHINE_LOCAL
+}
+use compiler.driver.cache.remote.remote_client.{
+    RemoteCacheClient, RemoteActionEntry,
+    remote_get_action, remote_put_blob, remote_put_action,
+    remote_action_entry_missing
+}
+use compiler.driver.cache.promotion.promotion_gate.{
+    PromotionAttestation, promotion_gate_admit
+}
+use compiler.driver.cache.promotion.promotion_receipt.{
+    PromotionReceipt, TrustedBuilder, promotion_receipt_digest
+}
+use compiler.driver.cache.promotion.git_provenance.{GitProvenanceFacts}
+use app.cache_gateway.quota.{
+    GatewayQuota, gateway_quota_admit, gateway_quota_record
+}
+use app.cache_gateway.metrics.{
+    GatewayMetrics, metrics_record_read, metrics_record_write_reject,
+    metrics_record_promotion, metrics_record_quarantine
+}
+use std.common.crypto.sha256.{sha256_text}
+
+# ============================================================================
+# Principals — the gateway's own registry. Never client-supplied.
+# ============================================================================
+
+# `secret_digest` is sha256 of the shared secret; the plaintext never lives here.
+# `attested_builder_id` / `attested_workflow_digest` are what the gateway KNOWS
+# about this credential from out-of-band enrolment. A developer credential is
+# enrolled with both empty, which collapses it to a developer role in
+# `producer_role_from_attestation` — that is why a developer is read-only on
+# main structurally rather than by a flag.
+struct GatewayPrincipal:
+    token_id: text
+    secret_digest: text
+    display_name: text
+    requested_role: text
+    attested_builder_id: text
+    attested_workflow_digest: text
+    workflow_is_approved: bool
+    branch_namespace_enabled: bool
+    repository_id: text
+    target_profile: text
+    schema_version: i64
+    branch_identity: text
+
+fn gateway_principal_developer(token_id: text, secret_digest: text, display_name: text, repository_id: text, target_profile: text, schema_version: i64) -> GatewayPrincipal:
+    GatewayPrincipal(
+        token_id: token_id,
+        secret_digest: secret_digest,
+        display_name: display_name,
+        requested_role: "",
+        attested_builder_id: "",
+        attested_workflow_digest: "",
+        workflow_is_approved: false,
+        branch_namespace_enabled: false,
+        repository_id: repository_id,
+        target_profile: target_profile,
+        schema_version: schema_version,
+        branch_identity: ""
+    )
+
+fn gateway_principal_lookup(principals: [GatewayPrincipal], token_id: text) -> GatewayPrincipal?:
+    for p in principals:
+        if p.token_id == token_id:
+            return p
+    nil
+
+# ============================================================================
+# Requests — note the fields that are ABSENT
+# ============================================================================
+
+# NO `path`. NO `namespace_digest`. NO `trust`. NO `repository_id`.
+# `namespace_kind` is an INTENT, resolved against the principal, not a location.
+struct GatewayWriteRequest:
+    token_id: text
+    presented_secret: text
+    namespace_kind: text
+    action_digest: text
+    result_manifest_digest: text
+    receipt_digest: text
+    payload_bytes: i64
+
+struct GatewayReadRequest:
+    token_id: text
+    presented_secret: text
+    namespace_kind: text
+    action_digest: text
+
+# ============================================================================
+# Authentication
+# ============================================================================
+
+struct GatewayAuth:
+    ok: bool
+    reason: text
+    policy: NamespacePolicy
+    principal: GatewayPrincipal
+
+fn gateway_auth_deny(reason: text) -> GatewayAuth:
+    GatewayAuth(
+        ok: false,
+        reason: reason,
+        policy: namespace_policy_developer_default("anonymous"),
+        principal: gateway_principal_developer("", "", "anonymous", "", "", 0)
+    )
+
+# An unauthenticated caller gets the DEVELOPER default policy, which is
+# read_only: true. Failure mode is least privilege, never "no policy".
+fn gateway_authenticate(principals: [GatewayPrincipal], token_id: text, presented_secret: text) -> GatewayAuth:
+    if token_id == "" or presented_secret == "":
+        return gateway_auth_deny("missing credential")
+    # `if val` is required here: a bare `if found:` leaves `found` an Option and
+    # every field read on it is a semantic error, which would turn an unknown
+    # token into a crash instead of a denial.
+    if val p = gateway_principal_lookup(principals, token_id):
+        if sha256_text(presented_secret) != p.secret_digest:
+            return gateway_auth_deny("credential does not match enrolled secret")
+        # worktree_dirty is false: the gateway builds nothing. Role still
+        # collapses to a developer role unless the enrolled attestation is
+        # non-empty AND approved.
+        val policy = namespace_policy_for_attestation(
+            requested_role: p.requested_role,
+            user_name: p.display_name,
+            attested_builder_id: p.attested_builder_id,
+            attested_workflow_digest: p.attested_workflow_digest,
+            workflow_is_approved: p.workflow_is_approved,
+            worktree_dirty: false,
+            branch_namespace_enabled: p.branch_namespace_enabled
+        )
+        return GatewayAuth(ok: true, reason: "", policy: policy, principal: p)
+    gateway_auth_deny("unknown token")
+
+# ============================================================================
+# Namespace resolution — the anti-path-forgery step
+# ============================================================================
+
+# Trust is a function of the resolved ROLE, not of anything the client said.
+fn gateway_trust_for(role: text, kind: text) -> text:
+    if kind == NS_MAIN:
+        return TRUST_TRUSTED_MAIN_CI
+    if kind == NS_BRANCH:
+        return TRUST_TRUSTED_BRANCH_CI
+    TRUST_MACHINE_LOCAL
+
+# Builds the namespace the request will actually touch. Every identity field
+# comes from `auth`, so two clients cannot collide and no client can address a
+# namespace it was not enrolled for.
+fn gateway_resolve_namespace(auth: GatewayAuth, kind: text) -> CacheNamespace:
+    val p = auth.principal
+    var branch = ""
+    if kind == NS_BRANCH:
+        branch = p.branch_identity
+    CacheNamespace(
+        kind: kind,
+        repository_id: p.repository_id,
+        trust: gateway_trust_for(auth.policy.role, kind),
+        target_profile: p.target_profile,
+        schema_version: p.schema_version,
+        branch_identity: branch,
+        workspace_id: ""
+    )
+
+# The gateway serves ONLY shared namespaces. workspace/machine are local tiers
+# and are not reachable over the wire at all.
+fn gateway_kind_is_servable(kind: text) -> bool:
+    kind == NS_MAIN or kind == NS_BRANCH
+
+# ============================================================================
+# Responses
+# ============================================================================
+
+struct GatewayResponse:
+    ok: bool
+    status: text            # ok | denied | miss | quota | error
+    reason: text
+    entry: RemoteActionEntry
+    quota: GatewayQuota
+    metrics: GatewayMetrics
+
+fn gateway_response_denied(reason: text, quota: GatewayQuota, metrics: GatewayMetrics) -> GatewayResponse:
+    GatewayResponse(ok: false, status: "denied", reason: reason, entry: remote_action_entry_missing(), quota: quota, metrics: metrics)
+
+fn gateway_response_miss(quota: GatewayQuota, metrics: GatewayMetrics) -> GatewayResponse:
+    GatewayResponse(ok: false, status: "miss", reason: "", entry: remote_action_entry_missing(), quota: quota, metrics: metrics)
+
+fn gateway_response_ok(entry: RemoteActionEntry, quota: GatewayQuota, metrics: GatewayMetrics) -> GatewayResponse:
+    GatewayResponse(ok: true, status: "ok", reason: "", entry: entry, quota: quota, metrics: metrics)
+
+# ============================================================================
+# Read
+# ============================================================================
+
+fn gateway_get_action(client: RemoteCacheClient, principals: [GatewayPrincipal], quota: GatewayQuota, metrics: GatewayMetrics, req: GatewayReadRequest, now: i64) -> GatewayResponse:
+    val auth = gateway_authenticate(principals, req.token_id, req.presented_secret)
+    if not auth.ok:
+        return gateway_response_denied(auth.reason, quota, metrics)
+    if not gateway_kind_is_servable(req.namespace_kind):
+        return gateway_response_denied("namespace kind " + req.namespace_kind + " is not served remotely", quota, metrics)
+    val ns = gateway_resolve_namespace(auth, req.namespace_kind)
+    val served = RemoteCacheClient(backend: client.backend, root: client.root, policy: auth.policy)
+    val entry = remote_get_action(served, ns, req.action_digest)
+    if not entry.found:
+        return gateway_response_miss(quota, metrics_record_read(metrics, req.namespace_kind, false))
+    # A main-namespace mapping without a receipt handle is unusable provenance.
+    # Serving it would be exactly the "digest verification substitutes for
+    # provenance" error. Quarantine instead of serve.
+    if req.namespace_kind == NS_MAIN and entry.receipt_digest == "":
+        val m = metrics_record_quarantine(metrics, "main mapping missing receipt: " + req.action_digest, now)
+        return gateway_response_denied("mapping quarantined: no promotion receipt", quota, m)
+    # TTL: branch entries expire. The mapping body carries no timestamp, so the
+    # C3 GC lane (`gc_retention.branch_ttl_seconds`) is the single authority for
+    # removing them; the gateway does not second-guess it on the read path. An
+    # expired entry is therefore simply absent, i.e. a miss.
+    gateway_response_ok(entry, quota, metrics_record_read(metrics, req.namespace_kind, true))
+
+# ============================================================================
+# Write — CAS blob
+# ============================================================================
+
+# Content-addressed. Anyone authenticated may contribute bytes; this grants NO
+# mapping authority. The blob is verified by digest, and digest verification is
+# the ONLY claim being made about it.
+fn gateway_put_blob(client: RemoteCacheClient, principals: [GatewayPrincipal], quota: GatewayQuota, metrics: GatewayMetrics, token_id: text, presented_secret: text, digest: text, content: text, now: i64) -> GatewayResponse:
+    val auth = gateway_authenticate(principals, token_id, presented_secret)
+    if not auth.ok:
+        return gateway_response_denied(auth.reason, quota, metrics)
+    if sha256_text(content) != digest:
+        val m = metrics_record_quarantine(metrics, "blob content does not match claimed digest " + digest, now)
+        return gateway_response_denied("digest mismatch", quota, m)
+    val decision = gateway_quota_admit(quota, "cas", content.len(), now)
+    if not decision.accepted:
+        return GatewayResponse(ok: false, status: "quota", reason: decision.reason, entry: remote_action_entry_missing(), quota: decision.quota, metrics: metrics)
+    val served = RemoteCacheClient(backend: client.backend, root: client.root, policy: auth.policy)
+    val res = remote_put_blob(served, digest, content)
+    if not res.ok:
+        # BEST-EFFORT: a failed upload is reported, never fatal to a build.
+        return GatewayResponse(ok: false, status: "error", reason: res.reason, entry: remote_action_entry_missing(), quota: decision.quota, metrics: metrics)
+    val q = gateway_quota_record(decision.quota, "cas", content.len(), now)
+    gateway_response_ok(remote_action_entry_missing(), q, metrics)
+
+# ============================================================================
+# Write — action mapping
+# ============================================================================
+
+fn gateway_put_action(client: RemoteCacheClient, principals: [GatewayPrincipal], quota: GatewayQuota, metrics: GatewayMetrics, req: GatewayWriteRequest, now: i64) -> GatewayResponse:
+    val auth = gateway_authenticate(principals, req.token_id, req.presented_secret)
+    if not auth.ok:
+        return gateway_response_denied(auth.reason, quota, metrics_record_write_reject(metrics, req.namespace_kind))
+    if not gateway_kind_is_servable(req.namespace_kind):
+        return gateway_response_denied("namespace kind " + req.namespace_kind + " is not served remotely", quota, metrics_record_write_reject(metrics, req.namespace_kind))
+    # Check 1 of 2, here. Check 2 of 2 is inside remote_put_action.
+    if not namespace_policy_may_write(auth.policy, req.namespace_kind):
+        return gateway_response_denied(
+            "role " + auth.policy.role + " may not write the " + req.namespace_kind + " namespace",
+            quota,
+            metrics_record_write_reject(metrics, req.namespace_kind)
+        )
+    val decision = gateway_quota_admit(quota, req.namespace_kind, req.payload_bytes, now)
+    if not decision.accepted:
+        return GatewayResponse(ok: false, status: "quota", reason: decision.reason, entry: remote_action_entry_missing(), quota: decision.quota, metrics: metrics)
+    val ns = gateway_resolve_namespace(auth, req.namespace_kind)
+    val served = RemoteCacheClient(backend: client.backend, root: client.root, policy: auth.policy)
+    val entry = RemoteActionEntry(
+        found: true,
+        action_digest: req.action_digest,
+        result_manifest_digest: req.result_manifest_digest,
+        receipt_digest: req.receipt_digest
+    )
+    val res = remote_put_action(served, ns, entry)
+    if not res.ok:
+        return GatewayResponse(ok: false, status: "error", reason: res.reason, entry: remote_action_entry_missing(), quota: decision.quota, metrics: metrics_record_write_reject(metrics, req.namespace_kind))
+    val q = gateway_quota_record(decision.quota, req.namespace_kind, req.payload_bytes, now)
+    gateway_response_ok(entry, q, metrics)
+
+# ============================================================================
+# Promotion endpoint
+# ============================================================================
+
+# Mode A publishes mappings the trusted-main job built itself, so this endpoint
+# exists to run C2's gate server-side for the ONE case that reaches it: a
+# main-CI job publishing what it just rebuilt. It never relabels a branch result
+# without the full attestation — that is Mode B and is out of scope here.
+fn gateway_promote(client: RemoteCacheClient, principals: [GatewayPrincipal], quota: GatewayQuota, metrics: GatewayMetrics, token_id: text, presented_secret: text, source: CacheNamespace, facts: GitProvenanceFacts, receipt: PromotionReceipt, builders: [TrustedBuilder], attestation: PromotionAttestation, now: i64) -> GatewayResponse:
+    val auth = gateway_authenticate(principals, token_id, presented_secret)
+    if not auth.ok:
+        return gateway_response_denied(auth.reason, quota, metrics_record_promotion(metrics, false, auth.reason))
+    if not namespace_policy_can_ever_write_main(auth.policy):
+        val why = "role " + auth.policy.role + " can never hold main"
+        return gateway_response_denied(why, quota, metrics_record_promotion(metrics, false, why))
+    val target = gateway_resolve_namespace(auth, NS_MAIN)
+    val admission = promotion_gate_admit(auth.policy, target, facts, receipt, builders, attestation)
+    if not admission.admitted:
+        return gateway_response_denied(admission.reason, quota, metrics_record_promotion(metrics, false, admission.reason))
+    val req = GatewayWriteRequest(
+        token_id: token_id,
+        presented_secret: presented_secret,
+        namespace_kind: NS_MAIN,
+        action_digest: receipt.action_digest,
+        result_manifest_digest: receipt.result_manifest_digest,
+        receipt_digest: promotion_receipt_digest(receipt),
+        payload_bytes: 0
+    )
+    val out = gateway_put_action(client, principals, quota, metrics, req, now)
+    if not out.ok:
+        return GatewayResponse(ok: false, status: out.status, reason: out.reason, entry: out.entry, quota: out.quota, metrics: metrics_record_promotion(out.metrics, false, out.reason))
+    GatewayResponse(ok: true, status: "ok", reason: "", entry: out.entry, quota: out.quota, metrics: metrics_record_promotion(out.metrics, true, ""))

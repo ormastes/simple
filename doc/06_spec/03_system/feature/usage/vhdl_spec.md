@@ -1,19 +1,16 @@
 # VHDL Process-Facade Toolchain Acceptance
 
-> Operator manual mirrored from
-> `test/03_system/feature/usage/vhdl_spec.spl`. It verifies the exact
-> pure-Simple process-facade lane used by the GHDL/Yosys wrappers.
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
 
-| Field | Value |
-|---|---|
-| Feature | `#VHDL-002` |
-| Requirement | `REQ-VHDL-SFFI-001` |
-| Evidence class | qualified host-tool execution |
-| Executable scenarios | 3 |
-| Runtime status, 2026-08-16 | `TEST_BLOCKED` — no admitted full CLI with `test`, `spipe-docgen`, and `sspec-maintain` is available |
-| Manual status | manually synchronized; docgen must replace/confirm it when an admitted CLI is available |
 
-## Purpose and audience
+- carries exit code and both streams through VhdlToolResult
+- a tool result is a faithful record of what the tool reported
+   - Expected: ok.exit_code equals `0`
+   - Expected: ok.stdout equals `analysis complete`
+   - Expected: ok.stderr equals ``
+- a failure keeps its nonzero code and its diagnostic text
+   - Expected: bad.exit_code equals `1`
 
 This manual is for compiler and hardware-tooling maintainers validating that
 `std.nogc_async_mut.io.vhdl_sffi` reaches the canonical
@@ -121,62 +118,15 @@ use std.nogc_async_mut.io.vhdl_sffi.{
     vhdl_tool_result, vhdl_write_file, vhdl_read_file, vhdl_file_exists
 }
 
-fn qualified_vhdl_environment_status() -> text:
-    val status = test_env_require("SIMPLE_VHDL_TEST")
-    if status != "ready":
-        print("TEST_BLOCKED: set SIMPLE_VHDL_TEST=1 and provide admitted GHDL/Yosys tooling")
-    status
+<!-- sspec-maintain:traceability:start -->
+## Traceability
 
-describe "REQ-VHDL-SFFI-001: canonical captured process results":
-    it "should analyze valid VHDL through the qualified process facade":
-        step("Require the qualified VHDL toolchain environment")
-        val environment_status = qualified_vhdl_environment_status()
-        expect(environment_status).to_equal("ready")
-        if environment_status != "ready": return
-        step("Demand truthful GHDL and Yosys availability probes")
-        expect(ghdl_available()).to_equal(true)
-        expect(yosys_available()).to_equal(true)
-        step("Create an isolated GHDL work directory and valid VHDL source")
-        expect(dir_create_all("/tmp/ghdl_work")).to_equal(true)
-        val path = "/tmp/simple_vhdl_process_facade_positive.vhd"
-        val source = "entity process_facade_positive is end entity; architecture rtl of process_facade_positive is begin end architecture;"
-        expect(vhdl_write_file(path, source)).to_equal(true)
-        expect(vhdl_file_exists(path)).to_equal(true)
-        expect(vhdl_read_file(path).unwrap()).to_equal(source)
-        step("Analyze the source and preserve the successful exit result")
-        val result = ghdl_analyze(path)
-        expect(result.success).to_equal(true)
-        expect(result.exit_code).to_equal(0)
+Requirements covered by the scenarios in this manual:
 
-    it "should preserve exact edge-case streams in VhdlToolResult":
-        step("Construct a zero-exit result with intentionally empty streams")
-        val quiet = vhdl_tool_result(0, "", "")
-        expect(quiet.success).to_equal(true)
-        expect(quiet.exit_code).to_equal(0)
-        expect(quiet.stdout).to_equal("")
-        expect(quiet.stderr).to_equal("")
-        step("Construct a nonzero result with output on both captured streams")
-        val noisy = vhdl_tool_result(7, "partial output", "analysis error")
-        expect(noisy.success).to_equal(false)
-        expect(noisy.exit_code).to_equal(7)
-        expect(noisy.stdout).to_equal("partial output")
-        expect(noisy.stderr).to_contain("analysis error")
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
 
-    it "should reject invalid VHDL with a nonzero code and captured diagnostic":
-        step("Require the qualified VHDL toolchain environment")
-        val environment_status = qualified_vhdl_environment_status()
-        expect(environment_status).to_equal("ready")
-        if environment_status != "ready": return
-        step("Write deliberately invalid VHDL without substituting a mock tool")
-        expect(dir_create_all("/tmp/ghdl_work")).to_equal(true)
-        val path = "/tmp/simple_vhdl_process_facade_error.vhd"
-        expect(vhdl_write_file(path, "this is not valid VHDL at all;")).to_equal(true)
-        step("Demand fail-closed status, nonzero exit, and retained diagnostics")
-        val result = ghdl_analyze(path)
-        expect(result.success).to_equal(false)
-        expect(result.exit_code).to_be_greater_than(0)
-        val diagnostic = result.stdout + result.stderr
-        expect(diagnostic.len()).to_be_greater_than(0)
-```
+<!-- sspec-maintain:provenance:start -->
+## Generation history
 
 </details>

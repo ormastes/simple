@@ -1,4 +1,9 @@
 # `struct` source through `parse_full_frontend` under `bin/simple test` — "function `Field` not found"
+## Closed 2026-09-16 — NOT REPRODUCIBLE; already fixed upstream by 3eb2635ea5c (Field->ParserField rename); repros PASS
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Lane:** FIELD1 (mission-critical hardening campaign, 2026-07-30/31)
 **Status:** NOT REPRODUCIBLE in current tree — already fixed upstream by commit `3eb2635ea5c`, landed *before* the workaround commit that still describes it as open. VSL1's workaround (`4c1175bac2e`) and its docstring are now stale documentation for a bug that no longer exists at that call site.
@@ -165,3 +170,4 @@ touched.
 
 - `/tmp/claude-1000/-home-ormastes-dev-pub-simple/79b2040e-4c78-4cc4-bdcb-deac69deb1a8/scratchpad/field1_repro_spec.spl` — parse-only repro
 - `/tmp/claude-1000/-home-ormastes-dev-pub-simple/79b2040e-4c78-4cc4-bdcb-deac69deb1a8/scratchpad/field1_repro_spec2.spl` — parse + HIR-lowering repro
+

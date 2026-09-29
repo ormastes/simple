@@ -1,0 +1,40 @@
+#!/usr/bin/env perl
+use strict;
+use warnings;
+use Fcntl qw(:DEFAULT :flock F_GETFD FD_CLOEXEC);
+
+@ARGV == 1 or die "payload lock check: expected one lock path\n";
+my ($lock_path) = @ARGV;
+$lock_path =~ m{\A/} && -f $lock_path && !-l $lock_path
+    or die "payload lock check: invalid lock path\n";
+
+my @expected_env = qw(HOME LANG LC_ALL PATH TMPDIR);
+join("\0", sort keys %ENV) eq join("\0", @expected_env)
+    or die "payload lock check: service environment is not exact\n";
+$ENV{LC_ALL} eq 'C' && $ENV{LANG} eq 'C' &&
+    $ENV{HOME} =~ m{\A/} && $ENV{TMPDIR} =~ m{\A/} &&
+    $ENV{PATH} eq '/usr/bin'
+    or die "payload lock check: service environment values mismatch\n";
+
+sysopen(my $probe, $lock_path, O_RDWR | O_CREAT, 0600)
+    or die "payload lock check: open lock: $!\n";
+my $flags = fcntl($probe, F_GETFD, 0);
+defined($flags) && ($flags & FD_CLOEXEC)
+    or die "payload lock check: probe descriptor lacks close-on-exec\n";
+flock($probe, LOCK_EX | LOCK_NB) and
+    die "payload lock check: supervisor lock was not held\n";
+
+my @probe_stat = stat($probe);
+opendir(my $fds, '/proc/self/fd')
+    or die "payload lock check: open descriptor inventory: $!\n";
+my $probe_fd = fileno($probe);
+for my $entry (grep { /\A[0-9]+\z/ } readdir($fds)) {
+    next if $entry == $probe_fd || $entry == fileno($fds);
+    my @st = stat("/proc/self/fd/$entry");
+    next unless @st;
+    !($st[0] == $probe_stat[0] && $st[1] == $probe_stat[1])
+        or die "payload lock check: inherited heavy-lock descriptor $entry\n";
+}
+closedir($fds) or die "payload lock check: close descriptor inventory: $!\n";
+close($probe) or die "payload lock check: close probe: $!\n";
+exit 0;

@@ -1,45 +1,46 @@
-# Stage 2 driver const-fold import resolves relative to `80.driver`
+# Stage 2 stale HIR const-fold import
+## Closed 2026-09-16 — Fixed on branch 2df527fe598; focused quarantine spec PASS, retry passed E1034
 
-**Status:** Initial fix submitted as PR #25; dependent Stage 2 closure admitted locally
-**Observed:** 2026-08-26
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
-**Affected revision:** `67fac9ed179` (also present on fetched `origin/main` at `e35d34f9eeda1b899abd439c56aa8ecec674a1cf`)
+**Status:** Fixed on isolated work branch; protected integration pending  
+**Observed:** 2026-08-26  
+**Fix commit:** `2df527fe598`
 
-## Failure
+## Root cause
 
-The sanctioned receipt-free recovery command reached Stage 2 but did not admit
-a compiler. The Rust seed compiled
-`src/compiler/80.driver/driver_hir_pipeline_lowering.spl` and rejected import
-`compiler.semantics.const_fold` with E1034. Resolution incorrectly searched
-below `src/compiler/80.driver/compiler`.
+Commit `828bdb1a152` intentionally deleted the discarded no-op HIR constant-fold
+pass and routed resolved HIR directly. Snapshot commit `4edef8fab8e` later
+resurrected only the driver import and call, without restoring the deleted
+module. Stage 2 therefore failed E1034 while compiling
+`driver_hir_pipeline_lowering.spl`.
 
-Evidence is retained under:
+The module resolver is not at fault. Two independent reviews confirmed that
+`compiler.semantics.*` uses the canonical numbered compiler mapping and that
+neighboring imports resolve through the same mechanism.
 
-```text
-build/bootstrap/release-hardening-stage2/logs/x86_64-unknown-linux-gnu/stage2-native-build.log
-build/bootstrap/release-hardening-stage2/stage3/x86_64-unknown-linux-gnu/stage2-command.transcript
-```
+## Fix and evidence
 
-## Main/release convergence check
+- Removed the stale import and `run_const_fold_pass` call.
+- Routed `resolved_module` directly into both bootstrap collections.
+- Repaired the existing quarantine spec's unsupported negated-string matcher.
+- Focused quarantine spec: PASS, 2/2.
+- Working and staged direct-environment guards: PASS.
+- One bounded receipt-free Stage 2 retry passed the former E1034 boundary.
 
-A bounded fetch-only check found no corresponding fix on current `origin/main`;
-the affected file has no `HEAD..origin/main` diff. Repair must therefore start
-as an isolated reviewed `main` fix. If the active release line also contains
-the defect, backport that exact reviewed fix through a separate release-targeted
-work branch. Do not merge or repoint either protected branch.
+The retry did **not** admit Stage 2. It later failed at link on independent
+unresolved symbols including `aspect_module_identity_index`,
+`safetychecker_flag_static_reference`, `mir_type_probe_text`,
+`MirToLlvm.emit_panic_trap_ir`, and `interp_enum_discriminant_raw`. Those are
+separate failure roots and are not evidence against this focused correction.
 
-## Acceptance criteria
+## Integration policy
 
-- [x] Remove the accidentally resurrected import/call rather than changing the
-  correct resolver or restoring the deleted no-op HIR pass.
-- [x] Focused quarantine regression test passes 2/2.
-- [x] One receipt-free Stage 2 retry passes the former E1034 boundary.
-- [x] A private integration stack repairs the subsequently exposed snapshot
-  regressions and admits Stage 2 at exact commit `9c0e666fc9c`. Provenance and
-  sanity receipts passed; admitted artifact SHA-256 is
-  `7e2ee2daa645306cd2ce6636a62cecc4d280afb6efe98897b90da115b0f68e8e`.
-- [ ] Publish the dependent stack after PR #26 restores the clean-tree
-  pre-push gate. The first publication attempt was correctly blocked because
-  current `main` could not parse multiline lint conditions; bypass was refused.
-- [ ] PR #25 lands on protected `main` through integration authority and is
-  backported only when the release-line comparison proves it is required.
+Submit this exact fix through the protected `main` integration authority. If a
+release-line comparison proves the stale references are also present there,
+backport the integrated fix through a separate release-targeted work branch
+with renewed evidence. Never repoint or merge the whole release branch into
+`main`.
+

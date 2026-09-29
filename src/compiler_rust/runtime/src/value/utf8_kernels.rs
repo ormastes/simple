@@ -163,10 +163,51 @@ pub(crate) fn neon_find_invalid(bytes: &[u8]) -> i64 {
     scalar_find_invalid(bytes)
 }
 
+// AVX-512 variants. Each widens the existing AVX2 "ASCII-prefix" trick (skip
+// over a leading run of pure-ASCII bytes with SIMD, then hand the remainder
+// to the scalar implementation) to 64-byte lanes instead of 32. This keeps
+// the AVX-512 result byte-for-byte identical to the scalar result for every
+// input, including malformed UTF-8 — the naive "count/skip bytes that are
+// not continuation bytes" formulation is NOT equivalent to
+// `scalar_count_codepoints` on malformed input (a stray continuation byte,
+// or a would-be lead byte sitting where a continuation byte was expected,
+// makes the two diverge), so it is deliberately not used here. See
+// `avx512_ascii_prefix_len` below.
+pub(crate) fn avx512_count_codepoints(bytes: &[u8]) -> i64 {
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        if std::is_x86_feature_detected!("avx512f") && std::is_x86_feature_detected!("avx512bw") {
+            return avx512_count_codepoints_impl(bytes);
+        }
+    }
+    avx2_count_codepoints(bytes)
+}
+
+pub(crate) fn avx512_validate(bytes: &[u8]) -> bool {
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        if std::is_x86_feature_detected!("avx512f") && std::is_x86_feature_detected!("avx512bw") {
+            return avx512_validate_impl(bytes);
+        }
+    }
+    avx2_validate(bytes)
+}
+
+pub(crate) fn avx512_find_invalid(bytes: &[u8]) -> i64 {
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        if std::is_x86_feature_detected!("avx512f") && std::is_x86_feature_detected!("avx512bw") {
+            return avx512_find_invalid_impl(bytes);
+        }
+    }
+    avx2_find_invalid(bytes)
+}
+
 pub(crate) fn count_codepoints_for_tier(simd_tier: SimdTier, bytes: &[u8]) -> i64 {
     match simd_tier {
         SimdTier::X86_64Sse2 => scalar_count_codepoints(bytes),
-        SimdTier::X86_64Avx2 | SimdTier::X86_64Avx512 => avx2_count_codepoints(bytes),
+        SimdTier::X86_64Avx2 => avx2_count_codepoints(bytes),
+        SimdTier::X86_64Avx512 => avx512_count_codepoints(bytes),
         SimdTier::Aarch64Neon | SimdTier::Aarch64Sve | SimdTier::Aarch64Sve2 => neon_count_codepoints(bytes),
         SimdTier::Riscv64Rvv | SimdTier::Wasm128 | SimdTier::Scalar => scalar_count_codepoints(bytes),
     }
@@ -175,7 +216,8 @@ pub(crate) fn count_codepoints_for_tier(simd_tier: SimdTier, bytes: &[u8]) -> i6
 pub(crate) fn validate_for_tier(simd_tier: SimdTier, bytes: &[u8]) -> bool {
     match simd_tier {
         SimdTier::X86_64Sse2 => scalar_validate(bytes),
-        SimdTier::X86_64Avx2 | SimdTier::X86_64Avx512 => avx2_validate(bytes),
+        SimdTier::X86_64Avx2 => avx2_validate(bytes),
+        SimdTier::X86_64Avx512 => avx512_validate(bytes),
         SimdTier::Aarch64Neon | SimdTier::Aarch64Sve | SimdTier::Aarch64Sve2 => neon_validate(bytes),
         SimdTier::Riscv64Rvv | SimdTier::Wasm128 | SimdTier::Scalar => scalar_validate(bytes),
     }
@@ -184,7 +226,8 @@ pub(crate) fn validate_for_tier(simd_tier: SimdTier, bytes: &[u8]) -> bool {
 pub(crate) fn find_invalid_for_tier(simd_tier: SimdTier, bytes: &[u8]) -> i64 {
     match simd_tier {
         SimdTier::X86_64Sse2 => scalar_find_invalid(bytes),
-        SimdTier::X86_64Avx2 | SimdTier::X86_64Avx512 => avx2_find_invalid(bytes),
+        SimdTier::X86_64Avx2 => avx2_find_invalid(bytes),
+        SimdTier::X86_64Avx512 => avx512_find_invalid(bytes),
         SimdTier::Aarch64Neon | SimdTier::Aarch64Sve | SimdTier::Aarch64Sve2 => neon_find_invalid(bytes),
         SimdTier::Riscv64Rvv | SimdTier::Wasm128 | SimdTier::Scalar => scalar_find_invalid(bytes),
     }
@@ -386,13 +429,64 @@ unsafe fn neon_find_invalid_impl(bytes: &[u8]) -> i64 {
     }
 }
 
+// The load goes through `read_unaligned` rather than `_mm512_loadu_si512`
+// deliberately — see the comment in `byte_kernels.rs` (that intrinsic's
+// pointer type has changed across Rust releases; `read_unaligned` compiles
+// to the same `vmovdqu64` regardless).
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f,avx512bw")]
+unsafe fn avx512_ascii_prefix_len(bytes: &[u8]) -> usize {
+    use std::arch::x86_64::{__m512i, _mm512_set1_epi8, _mm512_test_epi8_mask};
+
+    let high_bit = _mm512_set1_epi8(0x80u8 as i8);
+    let mut idx = 0usize;
+    while idx + 64 <= bytes.len() {
+        let chunk = std::ptr::read_unaligned(bytes.as_ptr().add(idx) as *const __m512i);
+        // Bit i of the mask is set exactly where byte i has its high bit
+        // set, i.e. is non-ASCII. Any set bit ends the ASCII prefix.
+        let mask = _mm512_test_epi8_mask(chunk, high_bit);
+        if mask != 0 {
+            break;
+        }
+        idx += 64;
+    }
+    idx
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f,avx512bw")]
+unsafe fn avx512_count_codepoints_impl(bytes: &[u8]) -> i64 {
+    let prefix = avx512_ascii_prefix_len(bytes);
+    prefix as i64 + scalar_count_codepoints(&bytes[prefix..])
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f,avx512bw")]
+unsafe fn avx512_validate_impl(bytes: &[u8]) -> bool {
+    let prefix = avx512_ascii_prefix_len(bytes);
+    scalar_validate(&bytes[prefix..])
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f,avx512bw")]
+unsafe fn avx512_find_invalid_impl(bytes: &[u8]) -> i64 {
+    let prefix = avx512_ascii_prefix_len(bytes);
+    let invalid = scalar_find_invalid(&bytes[prefix..]);
+    if invalid < 0 {
+        -1
+    } else {
+        prefix as i64 + invalid
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        avx2_count_codepoints, avx2_find_invalid, avx2_validate, count_codepoints_for_tier, find_invalid_for_tier,
-        neon_count_codepoints, neon_find_invalid, neon_validate, rt_swi_build, rt_swi_byte_to_char,
-        rt_swi_char_to_byte, rt_swi_free, rt_text_count_codepoints, rt_utf8_count_codepoints, rt_utf8_find_invalid,
-        rt_utf8_validate, scalar_count_codepoints, validate_for_tier,
+        avx2_count_codepoints, avx2_find_invalid, avx2_validate, avx512_count_codepoints, avx512_find_invalid,
+        avx512_validate, count_codepoints_for_tier, find_invalid_for_tier, neon_count_codepoints, neon_find_invalid,
+        neon_validate, rt_swi_build, rt_swi_byte_to_char, rt_swi_char_to_byte, rt_swi_free, rt_text_count_codepoints,
+        rt_utf8_count_codepoints, rt_utf8_find_invalid, rt_utf8_validate, scalar_count_codepoints,
+        scalar_find_invalid, scalar_validate, validate_for_tier,
     };
     use crate::value::{rt_array_new, rt_array_push, rt_string_new, RuntimeValue};
     use simple_simd::SimdTier;
@@ -418,8 +512,10 @@ mod tests {
             assert_eq!(count_codepoints_for_tier(SimdTier::Scalar, bytes), expected);
             assert_eq!(count_codepoints_for_tier(SimdTier::X86_64Sse2, bytes), expected);
             assert_eq!(count_codepoints_for_tier(SimdTier::X86_64Avx2, bytes), expected);
+            assert_eq!(count_codepoints_for_tier(SimdTier::X86_64Avx512, bytes), expected);
             assert_eq!(count_codepoints_for_tier(SimdTier::Aarch64Neon, bytes), expected);
             assert_eq!(avx2_count_codepoints(bytes), expected);
+            assert_eq!(avx512_count_codepoints(bytes), expected);
             assert_eq!(neon_count_codepoints(bytes), expected);
         }
     }
@@ -431,21 +527,75 @@ mod tests {
         assert!(validate_for_tier(SimdTier::Scalar, valid));
         assert!(validate_for_tier(SimdTier::X86_64Sse2, valid));
         assert!(validate_for_tier(SimdTier::X86_64Avx2, valid));
+        assert!(validate_for_tier(SimdTier::X86_64Avx512, valid));
         assert!(validate_for_tier(SimdTier::Aarch64Neon, valid));
         assert!(!validate_for_tier(SimdTier::Scalar, invalid));
         assert!(!validate_for_tier(SimdTier::X86_64Sse2, invalid));
         assert!(!validate_for_tier(SimdTier::X86_64Avx2, invalid));
+        assert!(!validate_for_tier(SimdTier::X86_64Avx512, invalid));
         assert!(!validate_for_tier(SimdTier::Aarch64Neon, invalid));
         assert_eq!(find_invalid_for_tier(SimdTier::Scalar, invalid), 2);
         assert_eq!(find_invalid_for_tier(SimdTier::X86_64Sse2, invalid), 2);
         assert_eq!(find_invalid_for_tier(SimdTier::X86_64Avx2, invalid), 2);
+        assert_eq!(find_invalid_for_tier(SimdTier::X86_64Avx512, invalid), 2);
         assert_eq!(find_invalid_for_tier(SimdTier::Aarch64Neon, invalid), 2);
         assert!(avx2_validate(valid));
         assert!(!avx2_validate(invalid));
+        assert!(avx512_validate(valid));
+        assert!(!avx512_validate(invalid));
         assert!(neon_validate(valid));
         assert!(!neon_validate(invalid));
         assert_eq!(avx2_find_invalid(invalid), 2);
+        assert_eq!(avx512_find_invalid(invalid), 2);
         assert_eq!(neon_find_invalid(invalid), 2);
+    }
+
+    // These stay correct on a host without AVX-512: the dispatchers fall
+    // back to the AVX2 kernel, which falls back to scalar/NEON as
+    // appropriate. That is the point — the tier must never change the
+    // ANSWER, only how fast it is reached.
+    #[test]
+    fn avx512_utf8_kernels_match_scalar_across_lane_boundaries() {
+        // Sizes chosen to straddle the 64-byte AVX-512 lane: under one
+        // lane, exactly one, just over, and several with a partial tail —
+        // plus 0/1 for degenerate input.
+        for filler in [0usize, 1, 63, 64, 65, 127, 128, 200] {
+            // A pure-ASCII run of `filler` bytes, then multibyte and
+            // malformed content so the scalar tail path is exercised too.
+            let mut bytes = vec![b'a'; filler];
+            bytes.extend_from_slice("A€😀".as_bytes());
+            bytes.extend_from_slice(&[0x80, 0x61, 0xF0, 0x9F, 0x92]);
+            bytes.extend_from_slice(&vec![b'z'; 9]);
+
+            let expected_count = scalar_count_codepoints(&bytes);
+            let expected_validate = scalar_validate(&bytes);
+            let expected_find_invalid = scalar_find_invalid(&bytes);
+
+            assert_eq!(
+                avx512_count_codepoints(&bytes),
+                expected_count,
+                "count mismatch: filler={filler}"
+            );
+            assert_eq!(
+                avx512_validate(&bytes),
+                expected_validate,
+                "validate mismatch: filler={filler}"
+            );
+            assert_eq!(
+                avx512_find_invalid(&bytes),
+                expected_find_invalid,
+                "find_invalid mismatch: filler={filler}"
+            );
+        }
+
+        // Empty and all-ASCII degenerate cases.
+        assert_eq!(avx512_count_codepoints(&[]), scalar_count_codepoints(&[]));
+        assert!(avx512_validate(&[]));
+        assert_eq!(avx512_find_invalid(&[]), -1);
+        let all_ascii = vec![b'x'; 200];
+        assert_eq!(avx512_count_codepoints(&all_ascii), scalar_count_codepoints(&all_ascii));
+        assert!(avx512_validate(&all_ascii));
+        assert_eq!(avx512_find_invalid(&all_ascii), -1);
     }
 
     #[test]

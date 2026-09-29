@@ -1,0 +1,97 @@
+"""
+## Purpose and audience
+Behavioral specification for the LightUniform wire format in
+`std.nogc_sync_mut.engine.render.gpu_lighting3d`.
+
+`gpu_lighting_upload` uploaded a ZEROED buffer, so every light reached the GPU
+as a black, zero-intensity point light at the origin regardless of what the
+caller passed. These cases pin the real little-endian std140 packing.
+
+Audience: renderer and runtime developers.
+"""
+# @req: REQ-LIB-RENDER_GPU_LIGHTING3D-002
+
+use std.spec
+use std.nogc_sync_mut.engine.render.gpu_lighting3d.{
+    LightUniform, light_uniform_to_bytes, lights_to_bytes, LIGHT_UNIFORM_STRIDE
+}
+
+fn _sample_light() -> LightUniform:
+    LightUniform(
+        position_x: 1.0 as f32,
+        position_y: 0.0 as f32,
+        position_z: 2.0 as f32,
+        light_type: 2,
+        color_r: 0.5 as f32,
+        color_g: 0.0 as f32,
+        color_b: 1.0 as f32,
+        intensity: 2.0 as f32
+    )
+
+describe "gpu_lighting3d — LightUniform wire format (nogc_sync_mut)":
+
+    it "packs one light into the declared 64-byte stride":
+        expect(light_uniform_to_bytes(_sample_light()).len()).to_equal(64)
+
+    it "declares a 64-byte stride constant":
+        expect(LIGHT_UNIFORM_STRIDE).to_equal(64)
+
+    it "packs position_x = 1.0f32 at offset 0 (0x3F800000 LE)":
+        val b = light_uniform_to_bytes(_sample_light())
+        expect(b[0]).to_equal(0)
+        expect(b[1]).to_equal(0)
+        expect(b[2]).to_equal(128)
+        expect(b[3]).to_equal(63)
+
+    it "packs position_z = 2.0f32 at offset 8":
+        val b = light_uniform_to_bytes(_sample_light())
+        expect(b[11]).to_equal(64)
+
+    it "packs light_type as a little-endian u32 at offset 12":
+        val b = light_uniform_to_bytes(_sample_light())
+        expect(b[12]).to_equal(2)
+        expect(b[13]).to_equal(0)
+        expect(b[14]).to_equal(0)
+        expect(b[15]).to_equal(0)
+
+    it "packs color_r = 0.5f32 at offset 16 (0x3F000000 LE)":
+        val b = light_uniform_to_bytes(_sample_light())
+        expect(b[18]).to_equal(0)
+        expect(b[19]).to_equal(63)
+
+    it "packs intensity = 2.0f32 at offset 28":
+        val b = light_uniform_to_bytes(_sample_light())
+        expect(b[31]).to_equal(64)
+
+    it "zero-fills the std140 tail padding":
+        val b = light_uniform_to_bytes(_sample_light())
+        var tail_nonzero = 0
+        var i = 32
+        while i < 64:
+            if b[i] != 0:
+                tail_nonzero = tail_nonzero + 1
+            i = i + 1
+        expect(tail_nonzero).to_equal(0)
+
+    it "is not a zero-filled placeholder":
+        val b = light_uniform_to_bytes(_sample_light())
+        var nonzero = 0
+        var i = 0
+        while i < b.len():
+            if b[i] != 0:
+                nonzero = nonzero + 1
+            i = i + 1
+        expect(nonzero > 0).to_equal(true)
+
+describe "gpu_lighting3d — lights_to_bytes (nogc_sync_mut)":
+
+    it "concatenates at the 64-byte stride":
+        expect(lights_to_bytes([_sample_light(), _sample_light()]).len()).to_equal(128)
+
+    it "repeats the same packing for the second light":
+        val b = lights_to_bytes([_sample_light(), _sample_light()])
+        expect(b[64 + 12]).to_equal(2)
+        expect(b[64 + 3]).to_equal(63)
+
+    it "returns an empty buffer for no lights":
+        expect(lights_to_bytes([]).len()).to_equal(0)

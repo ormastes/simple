@@ -16,19 +16,46 @@
 # symbol. The class name and two-field constructor are preserved so out-of-tree
 # importers compile unchanged.
 #
-# The simpleos_fat32_* externs/exports below are a separate (unrelated) FAT32
-# path-read bridge surface still re-exported by vfs_boot_init; they are left in
-# place (unused → DCE) and are not part of the NVMe link error this change fixes.
+# The old `simpleos_fat32_*` path reader is a *platform C bridge*, not a
+# filesystem API.  RV64 has no implementation of that ABI.  Its real boot
+# provider is `Riscv64VirtioBlkAdapter` plus `SharedFat32Driver`.  This module
+# deliberately defines *all* historical compatibility names locally and
+# fail-closed.  Do not put those definitions behind `@cfg`: an entry closure
+# can import a cfg-selected public item but then fail to lower the selected
+# provider, turning the call into a lenient unresolved global at link time.
+#
+# There is no supported platform C implementation of `simpleos_fat32_*` in
+# the freestanding runtime.  Keeping a claimed x86/ARM provider here would be
+# ambient authority as well as a phantom link dependency.  The only live boot
+# route is the mounted block-device FAT32 provider; callers must select it via
+# `vfs_boot_storage_is_pure_simple()` before these compatibility names can be
+# considered.  The wrappers below are therefore concrete, target-independent
+# denial functions rather than omitted declarations or unbacked C calls.
 
 use os.services.block_device.{BlockDevice}
 
-extern fn simpleos_fat32_path_read_buffer_addr() -> u64
-extern fn simpleos_fat32_read_path(path: text) -> i64
-extern fn simpleos_fat32_read_path_size(path: text) -> i64
-extern fn simpleos_fat32_read_path_array(path: text) -> [u8]
+# Single owner of the retired C FAT32 path-reader names. VFS callers use these
+# `c_fat32_*` names and gate every call on `c_fat32_bridge_backed()` (plus
+# `not vfs_boot_storage_is_pure_simple()`). Per the design above the bridge
+# is denied on every target: no `simpleos_fat32_*` extern is declared here, so
+# no entry closure that imports VFS inherits an unresolved C import. Live
+# roots come from a mounted block-device FAT32 provider in the canonical
+# MountTable; these names only report "absent" so fallback paths fail closed.
+pub fn c_fat32_bridge_backed() -> bool: false
 
-# Fixed C compatibility bridge cap, aligned with the pure-Simple reader.
-val FAT32_PATH_READ_BUFFER_MAX: u64 = 33554432
+pub fn c_fat32_path_read_buffer_addr() -> u64:
+    0
+
+pub fn c_fat32_read_path(path: text) -> i64:
+    -1
+
+pub fn c_fat32_read_path_size(path: text) -> i64:
+    -1
+
+pub fn c_fat32_read_path_array(path: text) -> [u8]:
+    []
+
+val FAT32_PATH_READ_BUFFER_MAX: u64 = 4194304
 
 class CNvmeBlockAdapter:
     """Vestigial block adapter; C NVMe bridge is unavailable (link-clean stub)."""

@@ -1,0 +1,106 @@
+@allow(primitive_api)
+# Digest-bound Linux dynamic-library admission with a non-fatal symbol probe.
+# The sealed snapshot is hashed before loading, and its descriptor is reserved
+# for the process lifetime so /proc/self/fd/<number> cannot name different
+# admitted artifacts. The `rt_host_dynlib_*` family answers a symbol miss with
+# zero, allowing the caller to refuse it. This module owns the raw runtime ABI;
+# environment-variant consumers import its wrappers.
+#
+# The top-level artifact is bound here. Dependency-closure admission and
+# backend execution evidence remain separate requirements.
+
+extern fn rt_host_dynlib_open(path: text, mode: i64) -> i64
+extern fn rt_host_dynlib_symbol(handle: i64, name: text) -> i64
+extern fn rt_host_dynlib_close(handle: i64) -> i64
+extern fn spl_dynlib_snapshot_linux(path: text) -> i64
+extern fn rt_file_close(fd: i32) -> bool
+extern fn rt_file_hash_sha256(path: text) -> text
+
+use std.io_runtime.{file_exists, file_size, platform_name}
+use std.nogc_sync_mut.sffi.dynlib_snapshot_registry_v1.{
+    dynlib_snapshot_pin_process_v1
+}
+
+# RTLD_NOW: resolve every relocation at load time rather than discovering a
+# missing dependency at the first call.
+pub val DYNLIB_ADMIT_RESOLVE_NOW_V1: i64 = 2
+
+pub enum DynlibAdmissionErrorV1:
+    PlatformUnavailable
+    ArtifactAbsent
+    DigestUnreadable
+    DigestMismatch
+    LoadFailed
+    SwappedDuringLoad
+
+# SHA-256 of the artifact's bytes on disk. Empty when the file cannot be read.
+pub fn dynlib_artifact_digest_hex_v1(path: text) -> text:
+    if path == "" or not file_exists(path):
+        return ""
+    rt_file_hash_sha256(path)
+
+# Size in bytes, or -1 when the artifact cannot be sized. Carried alongside the
+# digest because the two are read in one pass and a size change is the cheapest
+# possible witness that the bytes behind the path are not the bytes that were
+# admitted.
+pub fn dynlib_artifact_size_v1(path: text) -> i64:
+    if path == "" or not file_exists(path):
+        return -1
+    file_size(path)
+
+# Does the artifact behind `path` still have exactly the size and digest it had
+# when it was admitted? Public because a long-lived mapping is re-checked when
+# its provider generation is re-pinned, not only at admission.
+pub fn dynlib_artifact_unchanged_v1(
+    path: text, expected_digest_hex: text, expected_size: i64
+) -> bool:
+    dynlib_artifact_size_v1(path) == expected_size and
+        expected_size >= 0 and expected_digest_hex.len() == 64 and
+        dynlib_artifact_digest_hex_v1(path) == expected_digest_hex
+
+# A sealed Linux snapshot is hashed before dlopen runs any constructor. Its
+# descriptor is then pinned for the rest of the process, so the loader name
+# /proc/self/fd/<number> cannot be reused for another artifact while an old
+# mapping may remain cached. This binds the top-level mapped bytes; admitting
+# the dependency closure is separate work and is not implied by this digest.
+@unsafe(reason: "maps an unverified foreign artifact once its digest is bound", capabilities: [ffi])
+pub fn dynlib_admit_exact_v1(
+    path: text, expected_digest_hex: text
+) -> Result<i64, DynlibAdmissionErrorV1>:
+    if platform_name() != "linux":
+        return Err(DynlibAdmissionErrorV1.PlatformUnavailable)
+    if path == "" or not file_exists(path):
+        return Err(DynlibAdmissionErrorV1.ArtifactAbsent)
+    val fd = spl_dynlib_snapshot_linux(path)
+    if fd < 0:
+        return Err(DynlibAdmissionErrorV1.DigestUnreadable)
+    val fd_i32 = fd.to_i32()
+    val descriptor_path = "/proc/self/fd/{fd}"
+    val actual = rt_file_hash_sha256(descriptor_path)
+    if actual.len() != 64:
+        rt_file_close(fd_i32)
+        return Err(DynlibAdmissionErrorV1.DigestUnreadable)
+    if actual != expected_digest_hex:
+        rt_file_close(fd_i32)
+        return Err(DynlibAdmissionErrorV1.DigestMismatch)
+    if not dynlib_snapshot_pin_process_v1(fd):
+        rt_file_close(fd_i32)
+        return Err(DynlibAdmissionErrorV1.LoadFailed)
+    val handle = rt_host_dynlib_open(descriptor_path, DYNLIB_ADMIT_RESOLVE_NOW_V1)
+    if handle <= 0:
+        return Err(DynlibAdmissionErrorV1.LoadFailed)
+    Ok(handle)
+
+# Address of `name` in the admitted artifact, or 0 when it is not exported.
+# Never raises on a miss — that is the whole reason this wrapper exists.
+@unsafe(reason: "returns a raw foreign address from an admitted artifact", capabilities: [ffi, raw_ptr])
+pub fn dynlib_symbol_address_v1(handle: i64, name: text) -> i64:
+    if handle <= 0 or name == "":
+        return 0
+    rt_host_dynlib_symbol(handle, name)
+
+@unsafe(reason: "unmaps an admitted foreign artifact", capabilities: [ffi])
+pub fn dynlib_admitted_close_v1(handle: i64) -> bool:
+    if handle <= 0:
+        return false
+    rt_host_dynlib_close(handle) == 0

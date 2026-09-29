@@ -1,4 +1,8 @@
 # HIR: generic impl methods still gated on the native path — `async/poll.spl` (2026-08-22)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status: OPEN** (filed; not fixed). Class 3 of the stage1-closure HIR fatals.
 
@@ -57,3 +61,4 @@ failure stays loud and attributed to poll.spl.
 `Poll<T>` has 3 methods and every closure call site could be rewritten
 non-generically (`match p: case Poll.Ready(_)`), or the impl could be moved
 out of the closure; both change stdlib API shape and were not done here.
+

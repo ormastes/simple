@@ -1,0 +1,47 @@
+use std.spec.{describe, it, expect}
+use std.io_runtime.{dir_create_all, file_write, file_delete, process_run}
+use std.nogc_sync_mut.io_runtime.{dir_remove}
+use std.scv.compile_source_inventory.{
+    compile_source_inventory_read_pointer_content_v1,
+    compile_source_inventory_read_current_v1
+}
+use app.compiler_entrypoint.inventory_events.{compiler_inventory_refresh_v1}
+
+extern fn rt_getpid() -> i64
+
+describe "compiler inventory untracked membership integrity":
+    it "rejects a corrupt membership record without replacing CURRENT":
+        val root = "build/test-artifacts/scv-membership-corrupt-{rt_getpid()}"
+        val cache_root = root + "/build/scv"
+        dir_remove(root, true)
+        expect(dir_create_all(root + "/src")).to_equal(true)
+        expect(file_write(root + "/src/a.spl", "export fn a(): 1\n")).to_equal(true)
+        val (_, _, init_code) = process_run("git", ["-C", root, "init", "-q"])
+        expect(init_code).to_equal(0)
+        val (_, _, add_code) = process_run("git", ["-C", root, "add", "src/a.spl"])
+        expect(add_code).to_equal(0)
+        val (_, _, commit_code) = process_run("git", ["-C", root,
+            "-c", "user.name=Simple Test", "-c", "user.email=test@example.invalid",
+            "-c", "commit.gpgsign=false", "commit", "-qm", "seed"])
+        expect(commit_code).to_equal(0)
+        expect(file_write(root + "/src/untracked.spl",
+            "export fn untracked(): 2\n")).to_equal(true)
+        val cold = compiler_inventory_refresh_v1(root, cache_root, ["src"], true)
+        expect(cold.valid).to_equal(true)
+        val pointer = compile_source_inventory_read_pointer_content_v1(cache_root) ?? ""
+        val marker = "untracked_membership_digest="
+        val start = pointer.index_of(marker)
+        expect(start > 0).to_equal(true)
+        val digest = pointer.substring(start + marker.len())
+        val record = cache_root + "/compile-events/untracked/{digest}.paths"
+        expect(file_write(record, "corrupt")).to_equal(true)
+        expect(file_delete(root + "/src/untracked.spl")).to_equal(true)
+        val rejected = compiler_inventory_refresh_v1(root, cache_root, ["src"], false)
+        expect(rejected.valid).to_equal(false)
+        expect(rejected.reason).to_contain("untracked-membership-record-invalid")
+        expect(compile_source_inventory_read_pointer_content_v1(cache_root) ?? "").to_equal(pointer)
+        val retained = compile_source_inventory_read_current_v1(cache_root)
+        expect(retained.valid).to_equal(true)
+        if retained.valid:
+            expect(retained.inventory!.entries.len()).to_equal(2)
+        dir_remove(root, true)

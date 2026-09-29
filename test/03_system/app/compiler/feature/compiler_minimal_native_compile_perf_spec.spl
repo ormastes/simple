@@ -1,0 +1,189 @@
+# codex-system-test
+# @req REQ-CMNCP-001 REQ-CMNCP-002 REQ-CMNCP-003 REQ-CMNCP-004 NFR-CMNCP-001 NFR-CMNCP-002 NFR-CMNCP-003
+"""# Minimal Native-Compile Performance Admission
+
+The deterministic cases prove every fail-closed decision boundary. The final
+case runs one five-sample campaign and intentionally fails unless a qualified
+pure-Simple compiler, its admission receipt, and recorded baseline are supplied.
+"""
+
+use std.spec.*
+use std.nogc_sync_mut.io.env_ops.{env_get}
+use app.compiler_perf.minimal_native_compile_perf.{
+    MinimalCompileCampaignRequest,
+    minimal_compile_admission_decision,
+    minimal_compile_artifact_decision,
+    minimal_compile_budget_decision,
+    run_minimal_native_compile_campaign
+}
+
+val FIXTURE = "test/03_system/app/compiler/feature/fixtures/minimal_native_compile_main.spl"
+val SHA_A = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+val SHA_B = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+fn admitted_receipt(compiler_path: text, sha256: text) -> text:
+    [
+        "schema=compiler-minimal-native-compile-admission-v1",
+        "runtime=pure-simple-self-hosted",
+        "runtime_probe=pass",
+        "rust_seed_used=false",
+        "compiler_path=" + compiler_path,
+        "compiler_sha256=" + sha256
+    ].join("\n") + "\n"
+
+fn env_i64(name: text, fallback: i64) -> i64:
+    val raw = env_get(name).trim()
+    if raw == "":
+        return fallback
+    raw.to_int() ?? fallback
+
+fn blocked_preflight_request(run_count: i64) -> MinimalCompileCampaignRequest:
+    MinimalCompileCampaignRequest(
+        compiler_path: "",
+        admission_receipt_path: "",
+        expected_compiler_sha256: "",
+        fixture_path: FIXTURE,
+        work_dir: "",
+        time_path: "/usr/bin/time",
+        timeout_ms: 1,
+        run_count: run_count,
+        baseline_p50_us: 1,
+        baseline_p95_us: 1,
+        baseline_max_rss_kb: 1
+    )
+
+describe "minimal native-compile performance admission":
+    # covers: REQ-CMNCP-001
+    it "should reject an absent compiler identity before measurement":
+        step("Admit an exact pure-Simple compiler identity")
+        val decision = minimal_compile_admission_decision(
+            "", SHA_A, SHA_A, "simple self-hosted", ""
+        )
+        expect(decision.accepted).to_be(false)
+        expect(decision.reason).to_equal("compiler-path-missing")
+
+    # covers: REQ-CMNCP-001
+    it "should reject a Rust bootstrap seed even with matching file identity":
+        step("Reject every Rust-seed provenance path")
+        val path = "/qualified/simple"
+        val decision = minimal_compile_admission_decision(
+            path, SHA_A, SHA_A, "Simple Rust bootstrap seed",
+            admitted_receipt(path, SHA_A)
+        )
+        expect(decision.accepted).to_be(false)
+        expect(decision.reason).to_equal("rust-seed-rejected")
+
+    # covers: REQ-CMNCP-001
+    it "should admit only a receipt bound to the observed compiler":
+        step("Bind the admission receipt to path and SHA-256")
+        val path = "/qualified/simple"
+        val mismatch = minimal_compile_admission_decision(
+            path, SHA_A, SHA_B, "simple self-hosted", admitted_receipt(path, SHA_A)
+        )
+        val accepted = minimal_compile_admission_decision(
+            path, SHA_A, SHA_A, "simple self-hosted", admitted_receipt(path, SHA_A)
+        )
+        expect(mismatch.accepted).to_be(false)
+        expect(mismatch.reason).to_equal("compiler-sha256-mismatch")
+        expect(accepted.accepted).to_be(true)
+        expect(accepted.reason).to_equal("admitted")
+
+    # covers: REQ-CMNCP-002
+    it "should reject a failed native build before artifact inspection":
+        step("Require a successful native-build result")
+        val decision = minimal_compile_artifact_decision(70, false, -1, "", -1)
+        expect(decision.accepted).to_be(false)
+        expect(decision.reason).to_equal("native-build-failed")
+
+    # covers: REQ-CMNCP-002
+    it "should reject missing and trivially small output artifacts":
+        step("Require a nontrivial emitted executable")
+        val missing = minimal_compile_artifact_decision(0, false, -1, "", -1)
+        val small = minimal_compile_artifact_decision(0, true, 300, SHA_A, 0)
+        expect(missing.reason).to_equal("artifact-missing")
+        expect(small.reason).to_equal("artifact-too-small")
+        expect(small.accepted).to_be(false)
+
+    # covers: REQ-CMNCP-002
+    it "should admit an executable artifact with exact hash evidence":
+        step("Execute and hash the emitted artifact")
+        val decision = minimal_compile_artifact_decision(0, true, 301, SHA_A, 0)
+        expect(decision.accepted).to_be(true)
+        expect(decision.reason).to_equal("artifact-admitted")
+
+    # covers: REQ-CMNCP-003
+    it "should reject absent baseline measurements":
+        step("Require a positive admitted baseline")
+        val decision = minimal_compile_budget_decision(0, 1, 1, 1, 1, 1)
+        expect(decision.accepted).to_be(false)
+        expect(decision.reason).to_equal("baseline-invalid")
+
+    # covers: REQ-CMNCP-003
+    it "should reject wall-time and RSS regressions above their exact ceilings":
+        step("Apply the 120 percent time and 110 percent RSS ceilings")
+        val p50_regression = minimal_compile_budget_decision(
+            100, 100, 100, 121, 100, 100
+        )
+        val rss_regression = minimal_compile_budget_decision(
+            100, 100, 100, 100, 100, 111
+        )
+        expect(p50_regression.reason).to_equal("p50-regression")
+        expect(rss_regression.reason).to_equal("rss-regression")
+
+    # covers: REQ-CMNCP-003
+    it "should admit observations on both regression boundaries":
+        step("Accept measurements exactly on every budget boundary")
+        val decision = minimal_compile_budget_decision(
+            100, 100, 100, 120, 120, 110
+        )
+        expect(decision.accepted).to_be(true)
+        expect(decision.reason).to_equal("within-budget")
+
+    # covers: REQ-CMNCP-004
+    it "should block a noncanonical sample count before filesystem access":
+        step("Reject a campaign that is not exactly five samples")
+        val result = run_minimal_native_compile_campaign(
+            blocked_preflight_request(4)
+        )
+        expect(result.status).to_equal("blocked")
+        expect(result.reason).to_equal("run-count-must-be-five")
+        expect(result.sample_count).to_equal(0)
+
+    # covers: REQ-CMNCP-004
+    it "should block a missing compiler before reading other campaign inputs":
+        step("Reject an unavailable compiler without fallback")
+        val result = run_minimal_native_compile_campaign(
+            blocked_preflight_request(5)
+        )
+        expect(result.status).to_equal("blocked")
+        expect(result.reason).to_equal("compiler-missing")
+        expect(result.sample_count).to_equal(0)
+
+    # covers: REQ-CMNCP-004
+    it "should run one fail-closed five-sample campaign in a qualified environment":
+        step("Load the qualified compiler receipt and baseline")
+        val request = MinimalCompileCampaignRequest(
+            compiler_path: env_get("SIMPLE_CMNCP_COMPILER"),
+            admission_receipt_path: env_get("SIMPLE_CMNCP_ADMISSION_RECEIPT"),
+            expected_compiler_sha256: env_get("SIMPLE_CMNCP_COMPILER_SHA256"),
+            fixture_path: FIXTURE,
+            work_dir: env_get("SIMPLE_CMNCP_WORK_DIR"),
+            time_path: "/usr/bin/time",
+            timeout_ms: env_i64("SIMPLE_CMNCP_TIMEOUT_MS", 120000),
+            run_count: 5,
+            baseline_p50_us: env_i64("SIMPLE_CMNCP_BASELINE_P50_US", 0),
+            baseline_p95_us: env_i64("SIMPLE_CMNCP_BASELINE_P95_US", 0),
+            baseline_max_rss_kb: env_i64("SIMPLE_CMNCP_BASELINE_MAX_RSS_KB", 0)
+        )
+
+        step("Compile and execute the minimal fixture five times")
+        val result = run_minimal_native_compile_campaign(request)
+
+        step("Verify timing RSS artifact and regression evidence")
+        expect(result.status).to_equal("pass")
+        expect(result.reason).to_equal("within-budget")
+        expect(result.sample_count).to_equal(5)
+        expect(result.p50_us).to_be_greater_than(0)
+        expect(result.p95_us).to_be_greater_than(0)
+        expect(result.max_rss_kb).to_be_greater_than(0)
+        expect(result.artifact_sha256.len()).to_equal(64)

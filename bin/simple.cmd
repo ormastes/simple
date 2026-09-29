@@ -33,23 +33,26 @@ for %%P in (
 
 if /I "%~1"=="lint" if defined BOOTSTRAP_BIN (
     "%BOOTSTRAP_BIN%" %*
-    exit /b %ERRORLEVEL%
+    goto :done
 )
 
 if /I "%~x1"==".spl" if defined CURRENT_DRIVER_BIN (
     "%CURRENT_DRIVER_BIN%" %*
-    exit /b %ERRORLEVEL%
+    goto :done
 )
 
 if defined RELEASE_BIN (
     "%RELEASE_BIN%" %*
-    exit /b %ERRORLEVEL%
+    goto :done
 )
 
 if defined BOOTSTRAP_BIN (
     "%BOOTSTRAP_BIN%" %*
-    exit /b %ERRORLEVEL%
+    goto :done
 )
 
 echo error: no Simple runtime found 1>&2
 exit /b 1
+
+:done
+exit /b %ERRORLEVEL%

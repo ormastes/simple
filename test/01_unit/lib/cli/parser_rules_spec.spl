@@ -1,0 +1,287 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+#
+# CLI argument-parsing rules (GNU getopt_long convention, owner-approved 2026-09-24).
+#
+# Pins the rule for BOTH stdlib argument parsers:
+#   - std.cli.cli_parser        (parse_cli_args + validate_args)
+#   - std.cli.simple_parser_api (SimpleParser.parse -> Result)
+#
+# Rule:
+#   - required-value option: `--opt=value` AND `--opt value` (and `-o value`, `-ovalue`)
+#   - required-value option with no value (last arg, or next token is itself an
+#     option): error; the following `--option` is never consumed as the value
+#   - unknown option: error naming it (never silently ignored)
+#   - `--help` succeeds; `--` ends option parsing; repeated option: last wins
+#   - a flag (zero-value option) never swallows the next word; `--flag=x` is an error
+#   - `--no-flag` negation is not supported by either parser: it is an unknown option
+#   - optional-value options (`--opt[=v]`, `=` form only) are NOT modelled by
+#     either parser; the zero-value flag rows are the nearest guard: a word after
+#     a flag stays a positional.
+#
+# The cases are GENERATED per declared option kind (see `rule_cases`), so every
+# option declared in the fixture spec is covered by construction, and a parser
+# change that regresses any case for any option kind fails here.
+
+use std.spec
+use std.spec.step
+use std.io_runtime.{file_read}
+use std.cli.cli_parser.{cli_spec, cli_spec_flag, cli_spec_option, cli_spec_positional,
+    parse_cli_args, parsed_flag, parsed_option, parsed_positional, validate_args}
+use std.cli.simple_parser_api.{simple_parser}
+use std.cli.cli_util.{get_flag_value}
+
+# ---------------------------------------------------------------------------
+# Case table
+# ---------------------------------------------------------------------------
+
+struct RuleCase:
+    label: text
+    args: [text]
+    ok: bool
+    check_kind: text   # "opt", "flag", "pos", or "" (outcome only)
+    check_key: text
+    want: text
+
+fn rc(label: text, args: [text], ok: bool, check_kind: text, check_key: text, want: text) -> RuleCase:
+    RuleCase(label: label, args: args, ok: ok, check_kind: check_kind, check_key: check_key, want: want)
+
+struct OptDecl:
+    long: text
+    short: text
+    default: text
+    sample: text
+
+struct FlagDecl:
+    long: text
+    short: text
+
+fn fixture_options() -> [OptDecl]:
+    [
+        OptDecl(long: "jobs", short: "j", default: "1", sample: "4"),
+        OptDecl(long: "mode", short: "", default: "fast", sample: "full")
+    ]
+
+fn fixture_flags() -> [FlagDecl]:
+    [FlagDecl(long: "verbose", short: "v")]
+
+fn required_value_cases(o: OptDecl, flag: FlagDecl) -> [RuleCase]:
+    val L = "--{o.long}"
+    var cs: [RuleCase] = [
+        rc("{L}=v accepted", ["{L}={o.sample}"], true, "opt", o.long, o.sample),
+        rc("{L} v accepted", [L, o.sample], true, "opt", o.long, o.sample),
+        rc("{L} last arg is an error", [L], false, "", "", ""),
+        rc("{L} --{flag.long} is an error", [L, "--{flag.long}"], false, "", "", ""),
+        rc("{L} -{flag.short} is an error", [L, "-{flag.short}"], false, "", "", ""),
+        rc("{L} repeated: last wins", ["{L}={o.default}", L, o.sample], true, "opt", o.long, o.sample),
+        rc("{L} negative number is a value", [L, "-5"], true, "opt", o.long, "-5"),
+        rc("{L} - (stdin) is a value", [L, "-"], true, "opt", o.long, "-"),
+        rc("{L} untouched keeps default", [], true, "opt", o.long, o.default)
+    ]
+    if o.short != "":
+        val S = "-{o.short}"
+        cs = cs + [
+            rc("{S} v accepted", [S, o.sample], true, "opt", o.long, o.sample),
+            rc("{S}VALUE attached accepted", ["{S}{o.sample}"], true, "opt", o.long, o.sample),
+            rc("{S} last arg is an error", [S], false, "", "", ""),
+            rc("{S} --{flag.long} is an error", [S, "--{flag.long}"], false, "", "", "")
+        ]
+    cs
+
+fn flag_cases(f: FlagDecl) -> [RuleCase]:
+    val L = "--{f.long}"
+    var cs: [RuleCase] = [
+        rc("{L} sets flag", [L], true, "flag", f.long, "true"),
+        rc("{L} word: word stays positional", [L, "word"], true, "pos", "0", "word"),
+        rc("{L}=x is an error", ["{L}=x"], false, "", "", ""),
+        rc("{L} repeated is fine", [L, L], true, "flag", f.long, "true"),
+        rc("--no-{f.long} is unknown", ["--no-{f.long}"], false, "", "", "")
+    ]
+    if f.short != "":
+        cs = cs + [rc("-{f.short} sets flag", ["-{f.short}"], true, "flag", f.long, "true")]
+    cs
+
+fn general_cases(f: FlagDecl) -> [RuleCase]:
+    [
+        rc("unknown --bogus is an error", ["--bogus"], false, "", "", ""),
+        rc("unknown --bogus=1 is an error", ["--bogus=1"], false, "", "", ""),
+        rc("unknown -z is an error", ["-z"], false, "", "", ""),
+        rc("--help succeeds", ["--help"], true, "flag", "help", "true"),
+        rc("-h succeeds", ["-h"], true, "flag", "help", "true"),
+        rc("-- ends options", ["--", "--{f.long}"], true, "pos", "0", "--{f.long}"),
+        rc("-- leaves flag unset", ["--", "--{f.long}"], true, "flag", f.long, "false"),
+        rc("--jobs full (the 2026-09-24 incident shape)", ["--jobs", "full"], true, "opt", "jobs", "full")
+    ]
+
+fn rule_cases() -> [RuleCase]:
+    val flag = fixture_flags()[0]
+    var cs: [RuleCase] = []
+    for o in fixture_options():
+        cs = cs + required_value_cases(o, flag)
+    for f in fixture_flags():
+        cs = cs + flag_cases(f)
+    cs + general_cases(flag)
+
+fn case_args_text(c: RuleCase) -> text:
+    "[" + c.args.join(" ") + "]"
+
+# ---------------------------------------------------------------------------
+# Adapter: std.cli.cli_parser
+# ---------------------------------------------------------------------------
+
+fn cli_parser_fixture():
+    var spec = cli_spec()
+    for f in fixture_flags():
+        spec = cli_spec_flag(spec, f.long, f.short, "flag {f.long}")
+    for o in fixture_options():
+        spec = cli_spec_option(spec, o.long, o.short, "option {o.long}", o.default, [])
+    cli_spec_positional(spec, "input", "input", false)
+
+fn cli_parser_choice_fixture():
+    cli_spec_option(cli_spec(), "mode", "m", "option mode", "fast", ["fast", "full"])
+
+fn cli_parser_failures() -> [text]:
+    val spec = cli_parser_fixture()
+    var failures: [text] = []
+    for c in rule_cases():
+        val parsed = parse_cli_args(spec, c.args)
+        val (ok, err) = validate_args(spec, parsed)
+        if ok != c.ok:
+            failures.push("{c.label} {case_args_text(c)}: ok={ok} want {c.ok} ({err})")
+        elif c.ok:
+            var got = ""
+            if c.check_kind == "opt":
+                got = parsed_option(parsed, c.check_key)
+            elif c.check_kind == "flag":
+                got = if parsed_flag(parsed, c.check_key): "true" else: "false"
+            elif c.check_kind == "pos":
+                got = parsed_positional(parsed, c.check_key.to_i64())
+            if c.check_kind != "" and got != c.want:
+                failures.push("{c.label} {case_args_text(c)}: got '{got}' want '{c.want}'")
+    failures
+
+# ---------------------------------------------------------------------------
+# Adapter: std.cli.simple_parser_api
+# ---------------------------------------------------------------------------
+
+fn simple_parser_fixture():
+    var p = simple_parser("tool", "rule fixture")
+    for f in fixture_flags():
+        p = p.flag(f.long, f.short, "flag {f.long}")
+    for o in fixture_options():
+        p = p.optional_option(o.long, o.short, "option {o.long}", o.default)
+    p.positional("input", "input", false)
+
+fn simple_parser_failures() -> [text]:
+    val p = simple_parser_fixture()
+    var failures: [text] = []
+    for c in rule_cases():
+        match p.parse(c.args):
+            case Ok(r):
+                if not c.ok:
+                    failures.push("{c.label} {case_args_text(c)}: ok=true want false")
+                else:
+                    var got = ""
+                    if c.check_kind == "opt":
+                        got = r.get_option_or(c.check_key, "")
+                    elif c.check_kind == "flag":
+                        got = if r.get_flag(c.check_key): "true" else: "false"
+                    elif c.check_kind == "pos":
+                        got = r.get_positional_at(c.check_key.to_i64()) ?? ""
+                    if c.check_kind != "" and got != c.want:
+                        failures.push("{c.label} {case_args_text(c)}: got '{got}' want '{c.want}'")
+            case Err(message):
+                if c.ok:
+                    failures.push("{c.label} {case_args_text(c)}: ok=false want true ({message})")
+    failures
+
+# ---------------------------------------------------------------------------
+# Specs
+# ---------------------------------------------------------------------------
+
+describe "CLI parser rules":
+    """GNU getopt_long argument rules for the stdlib CLI parsers."""
+    it "generates rule cases for every declared option and flag":
+        # @req REQ-SSPEC-UNIT
+        step("every fixture option/flag contributes at least one generated case")
+        val labels = rule_cases().map(\c: c.label)
+        for o in fixture_options():
+            var hits = 0
+            for l in labels:
+                if l.contains("--{o.long}"):
+                    hits = hits + 1
+            expect(hits > 0).to_equal(true)
+        for f in fixture_flags():
+            var hits = 0
+            for l in labels:
+                if l.contains("--{f.long}"):
+                    hits = hits + 1
+            expect(hits > 0).to_equal(true)
+
+    it "std.cli.cli_parser follows every rule case":
+        # @req REQ-SSPEC-UNIT
+        step("run the generated case table through parse_cli_args + validate_args")
+        val failures = cli_parser_failures()
+        for f in failures:
+            print "cli_parser FAIL: {f}"
+        expect(failures).to_equal([])
+
+    it "std.cli.cli_parser rejects a value outside declared choices":
+        # @req REQ-SSPEC-UNIT
+        step("--mode=slow / --mode slow / -mslow are not in choices fast|full")
+        val spec = cli_parser_choice_fixture()
+        for args in [["--mode=slow"], ["--mode", "slow"], ["-mslow"]]:
+            val parsed = parse_cli_args(spec, args)
+            val (ok, err) = validate_args(spec, parsed)
+            expect(ok).to_equal(false)
+            expect(err).to_contain("slow")
+            expect(parsed_option(parsed, "mode")).to_equal("fast")
+        val (good, _) = validate_args(spec, parse_cli_args(spec, ["--mode", "full"]))
+        expect(good).to_equal(true)
+
+    it "std.cli.cli_parser error names the offending option":
+        # @req REQ-SSPEC-UNIT
+        step("unknown and missing-value errors quote the option")
+        val spec = cli_parser_fixture()
+        val (_, unknown_err) = validate_args(spec, parse_cli_args(spec, ["--bogus"]))
+        expect(unknown_err).to_contain("--bogus")
+        val (_, missing_err) = validate_args(spec, parse_cli_args(spec, ["--jobs", "--verbose"]))
+        expect(missing_err).to_contain("--jobs")
+        expect(missing_err).to_contain("requires a value")
+
+    it "std.cli.cli_parser keeps unknown tokens in remaining for passthrough":
+        # @req REQ-SSPEC-UNIT
+        step("unknown -z is reported AND preserved in remaining (compat contract)")
+        val spec = cli_parser_fixture()
+        val parsed = parse_cli_args(spec, ["-z"])
+        expect(parsed.remaining).to_equal(["-z"])
+
+    it "std.cli.simple_parser_api follows every rule case":
+        # @req REQ-SSPEC-UNIT
+        step("run the generated case table through SimpleParser.parse")
+        val failures = simple_parser_failures()
+        for f in failures:
+            print "simple_parser FAIL: {f}"
+        expect(failures).to_equal([])
+
+    it "std.cli.cli_util.get_flag_value follows the value rules":
+        # @req REQ-SSPEC-UNIT
+        step("hand-rolled-CLI helper: = form, space form, never an option as value")
+        expect(get_flag_value(["--jobs=4"], "--jobs")).to_equal("4")
+        expect(get_flag_value(["--jobs", "full"], "--jobs")).to_equal("full")
+        expect(get_flag_value(["--jobs", "--verbose"], "--jobs")).to_equal("")
+        expect(get_flag_value(["--jobs", "-v"], "--jobs")).to_equal("")
+        expect(get_flag_value(["--jobs"], "--jobs")).to_equal("")
+        expect(get_flag_value(["--jobs", "-5"], "--jobs")).to_equal("-5")
+        expect(get_flag_value(["--jobsx=4"], "--jobs")).to_equal("")
+
+    it "keeps every tier copy of the parsers byte-identical":
+        # @req REQ-SSPEC-UNIT
+        step("std.cli resolves to different tier dirs per loader; copies must not drift")
+        for name in ["cli_parser.spl", "simple_parser_api.spl"]:
+            val canonical = file_read("src/lib/nogc_sync_mut/cli/{name}")
+            expect(canonical.len() > 0).to_equal(true)
+            for tier in ["nogc_async_mut", "gc_async_mut"]:
+                val copy = file_read("src/lib/{tier}/cli/{name}")
+                expect("{tier}/{name} identical: {copy == canonical}").to_equal("{tier}/{name} identical: true")

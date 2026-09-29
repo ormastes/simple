@@ -1,0 +1,71 @@
+# Shared-WM TUI route
+#
+# The TUI product has two routes:
+#   ordinary  -> app.ui.tui.async_app.run_async_tui  (terminal only)
+#   shared WM -> run_shared_wm_tui                   (host compositor client)
+#
+# Only the shared-WM route needs `os.compositor.host_compositor_entry`, whose
+# static import closure drags in os/drivers, os/kernel and lib/skia. Simple
+# imports are static, so the selection cannot be made inside the ordinary
+# module without the ordinary module paying for the heavy one. The split is
+# therefore at the module boundary and the dependency points ONE way:
+#
+#   shared_wm_route  ->  async_app        (heavy imports light)
+#   async_app        -/->  shared_wm_route (never)
+#
+# A caller that wants the ordinary route only imports `async_app`; a caller
+# that must honour `--shared-wm` / `SIMPLE_UI_TUI_SHARED_WM` imports this
+# module and calls `run_tui_routed`. See REQ-UI-SLIM-004 / REQ-UI-SLIM-009 and
+# doc/03_plan/ui/slim_kernel_plugin/plan.md.
+
+use os.compositor.host_compositor_entry.{HostBackendKind, HostWmConfig, HostWmHandle, init_host_wm}
+use common.window_protocol.geometry.{Size}
+use app.io.env_ops.{env_get}
+use std.io_runtime.{get_args}
+use app.ui.tui.async_app.{run_async_tui}
+
+fn shared_wm_requested_tui(args: [text], env_val: text) -> bool:
+    """True when --shared-wm was passed or SIMPLE_UI_TUI_SHARED_WM is 1."""
+    for a in args:
+        if a == "--shared-wm":
+            return true
+    env_val == "1"
+
+fn shared_wm_backend_kind_tui() -> HostBackendKind:
+    """Host WM backend kind this entrypoint hands to the compositor."""
+    HostBackendKind.Tui
+
+fn _shared_wm_requested(args: [text]) -> bool:
+    val env_val = env_get("SIMPLE_UI_TUI_SHARED_WM")
+    shared_wm_requested_tui(args, env_val)
+
+fn run_shared_wm_tui(title: text) -> i64:
+    """Run the TUI as a client of the shared host window manager."""
+    val config = HostWmConfig(
+        backend: shared_wm_backend_kind_tui(),
+        initial_size: Size.wh(80, 24),
+        title: title
+    )
+    val handle = init_host_wm(config)
+    if handle == nil:
+        print "Error: failed to initialise shared WM (TUI backend)"
+        return 1
+    # Destructure: a `me` method called through an OPTION-typed binding mutates
+    # a discarded temporary. See doc/08_tracking/bug/
+    # me_method_mutation_through_optional_binding_discarded_2026-08-04.md
+    if val Some(wm) = handle:
+        wm.tick_forever()
+    return 0
+
+fn run_tui_routed(file_path: text) -> i64:
+    """Select the shared-WM route or the ordinary async TUI route.
+
+    This is the entrypoint that preserves the previous behaviour of
+    `run_async_tui`, which used to make this choice itself. Callers that never
+    want the shared-WM route should call `app.ui.tui.async_app.run_async_tui`
+    directly and keep the compositor out of their import closure.
+    """
+    val args = get_args()
+    if _shared_wm_requested(args):
+        return run_shared_wm_tui("simple tui")
+    run_async_tui(file_path)

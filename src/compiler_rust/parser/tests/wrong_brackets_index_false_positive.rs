@@ -52,8 +52,5 @@ fn index_with_qualified_key_is_not_a_generic() {
 fn real_bracket_generics_are_still_reported() {
     // The detector must keep its teeth: `List[T]` is the actual mistake.
     let hints = generic_bracket_hints("fn f(xs: List[T]):\n    pass_dn\n");
-    assert!(
-        !hints.is_empty(),
-        "the genuine List[T] mistake was no longer reported"
-    );
+    assert!(!hints.is_empty(), "the genuine List[T] mistake was no longer reported");
 }

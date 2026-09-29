@@ -1,4 +1,9 @@
 # A `T?` value bound to a `bool` parameter is neither presence-coerced nor rejected — it arrives as the raw payload (2026-08-04)
+## Closed 2026-09-16 — Status ALREADY-FIXED, re-verified 2026-08-09 (present_value_as_bool_arg in arg_binding.rs)
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** ALREADY-FIXED (re-verified 2026-08-09)
 **Found:** 2026-08-04
@@ -484,3 +489,4 @@ SIMPLE_TIMEOUT_SECONDS=0 /abs/path/to/simple test --no-cache --no-cover-check <s
 Pin the tree, use absolute binary paths, and verify the binary actually contains
 the change (`grep` the symbol in the source it was built from) before labelling
 either arm.
+

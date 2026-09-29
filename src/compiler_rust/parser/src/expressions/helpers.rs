@@ -12,7 +12,11 @@ impl<'a> Parser<'a> {
     /// backslash-lambda form (`\x, y: body`) uses a bare trailing `:` to end
     /// the parameter list and start the body, so a per-param `: Type` there
     /// would be ambiguous with that terminator and must stay disabled.
-    pub(super) fn parse_remaining_lambda_params(&mut self, params: &mut Vec<LambdaParam>, allow_types: bool) -> Result<(), ParseError> {
+    pub(super) fn parse_remaining_lambda_params(
+        &mut self,
+        params: &mut Vec<LambdaParam>,
+        allow_types: bool,
+    ) -> Result<(), ParseError> {
         while self.check(&TokenKind::Comma) {
             self.advance();
             // Support wildcard parameter: \x, _: or |x, _|
@@ -80,7 +84,7 @@ impl<'a> Parser<'a> {
                 return Ok(Some(Expr::Lambda {
                     params: vec![],
                     body: Box::new(Expr::Tuple(vec![])),
-                    move_mode: MoveMode::Copy,
+                    move_mode: MoveMode::ColonBlock,
                     capture_all: false,
                 }));
             }
@@ -101,7 +105,7 @@ impl<'a> Parser<'a> {
             return Ok(Some(Expr::Lambda {
                 params: vec![],
                 body: Box::new(Expr::Tuple(vec![])),
-                move_mode: MoveMode::Copy,
+                move_mode: MoveMode::ColonBlock,
                 capture_all: false,
             }));
         }
@@ -138,7 +142,7 @@ impl<'a> Parser<'a> {
         Ok(Some(Expr::Lambda {
             params: vec![],
             body: Box::new(block_expr),
-            move_mode: MoveMode::Copy,
+            move_mode: MoveMode::ColonBlock,
             capture_all: false, // Do-block wrapping doesn't auto-capture
         }))
     }
@@ -203,12 +207,33 @@ impl<'a> Parser<'a> {
             // "expected Indent, found Dedent", so `val x = if <multi-line
             // cond>:` could not be written at all.
             self.drain_available_deferred_dedents();
+            let deferred_before = self.deferred_dedent_count;
+            self.deferred_dedent_count = 0;
 
             // Empty then-branch: `if cond:\nelse: ...` or `if cond:\nelif ...:`
             if self.check(&TokenKind::Else) || self.check(&TokenKind::Elif) {
+                // Nothing was consumed on behalf of the pending dedent(s);
+                // put them back for whatever parses the else/elif next.
+                self.deferred_dedent_count = deferred_before;
                 Expr::Tuple(vec![]) // unit value
             } else {
-                self.expect(&TokenKind::Indent)?;
+                // Equal-column shape (see `parse_condition_block` /
+                // `header_continuation_is_equal_column`): when the
+                // condition's trailing-operator continuation line sits at
+                // the SAME column as this body, the lexer emits no fresh
+                // `Indent` here — the continuation's pseudo-INDENT already
+                // opened this level. `expect(Indent)` then failed outright
+                // ("expected Indent, found <first body token>"), so
+                // `val x = if <multi-line cond>:\n    body` (continuation
+                // and body columns equal) could never be written as an
+                // if-EXPRESSION even though the equivalent `if` STATEMENT
+                // already handles this shape via `parse_condition_block`.
+                // See doc/08_tracking/bug/
+                // backslash_lambda_multiline_inline_body_dedent_2026-08-28.md.
+                let equal_column = self.header_continuation_is_equal_column(deferred_before);
+                if !equal_column {
+                    self.expect(&TokenKind::Indent)?;
+                }
 
                 let mut statements = Vec::new();
                 while !self.check(&TokenKind::Dedent) && !self.is_at_end() {
@@ -232,6 +257,18 @@ impl<'a> Parser<'a> {
                     self.advance();
                 }
 
+                // Equal-column shape: the terminating Dedent just consumed
+                // above IS the continuation's compensating one, so it must
+                // not be counted again — mirrors
+                // `header_continuation_dedents_to_reconcile`'s
+                // `saturating_sub(1)`.
+                let deferred = if equal_column {
+                    deferred_before.saturating_sub(1)
+                } else {
+                    deferred_before
+                };
+                self.deferred_dedent_count += deferred;
+
                 Expr::DoBlock(statements)
             } // close else for empty-then-branch check
         } else if self.check(&TokenKind::Return) || self.check(&TokenKind::Break) || self.check(&TokenKind::Continue) {
@@ -240,7 +277,21 @@ impl<'a> Parser<'a> {
             Expr::DoBlock(vec![stmt])
         } else {
             // Inline form: parse as expression
-            self.parse_expression()?
+            let expr = self.parse_expression()?;
+            // A multi-line CONDITION's trailing-operator continuation
+            // (`if a == x and\n    b == y: ...`) can leave a compensating
+            // pseudo-DEDENT queued in `deferred_dedent_count` (see
+            // `drain_available_deferred_dedents` above). The block-form
+            // then-branch drains it via that call; an INLINE then-branch
+            // never introduces a competing Indent of its own, so the
+            // deferred dedent is still pending right here and must be
+            // reconciled the same way `parse_inline_or_block` does for the
+            // statement-form `if`, or the next thing this expression-form
+            // `if` returns to sees an orphaned Dedent it never expects.
+            // See doc/08_tracking/bug/
+            // backslash_lambda_multiline_inline_body_dedent_2026-08-28.md.
+            self.reconcile_inline_body_deferred_dedents();
+            expr
         };
 
         // Peek through newlines/indents to check for elif/else continuation.
@@ -322,7 +373,18 @@ impl<'a> Parser<'a> {
                     Expr::DoBlock(vec![stmt])
                 } else {
                     // Inline form: parse as expression
-                    self.parse_expression()?
+                    let e = self.parse_expression()?;
+                    // Same reconciliation as the inline then-branch above: the
+                    // condition's deferred pseudo-dedent may still be pending
+                    // here (an inline then-branch followed immediately by
+                    // `else:` on the same source line never gave the earlier
+                    // reconcile call a Dedent to consume — `else` was the
+                    // next token, not a Newline/Dedent). Reconcile again now
+                    // that the whole inline if/else expression is done, or
+                    // the leftover dedent surfaces as an orphaned Dedent in
+                    // whatever follows this expression.
+                    self.reconcile_inline_body_deferred_dedents();
+                    e
                 };
 
                 Some(Box::new(else_expr))
@@ -389,81 +451,126 @@ impl<'a> Parser<'a> {
             // Record start position for span
             let arg_start = self.current.span;
 
+            // ROOT FIX (bug struct_spread_paren_form_parses_as_range_2026-08-30):
+            // PAREN-form struct spread `S(..base, field: v)`.
+            //
+            // Before this, `..` here fell through to `parse_expression` ->
+            // `parse_range`, producing `Expr::Range { start: None, end: base }`
+            // which lowers to `rt_range(0, <tagged object pointer>)` — a range
+            // of billions of elements, i.e. a compiler/runtime HANG. All 110
+            // spread sites in `src/` use this form; zero use the brace form the
+            // parser half-supported.
+            //
+            // Containment: this is the ONLY place prefix `..` is reinterpreted.
+            // `parse_range` is untouched, so `a..b`, `0..n`, `arr[..n]`, `x..`,
+            // `for i in 0..n` and `f(1..5)` all still parse as ranges. A bare
+            // `f(..)` (full range) and `f(..=x)` also still reach `parse_range`,
+            // because we only fire when `..` is followed by a token that can
+            // actually start an expression.
+            //
+            // A genuine prefix-range ARGUMENT (`f(..n)`) is the one shape this
+            // reinterprets; HIR rejects `StructSpread` in a non-constructor call
+            // with a hard error, so that case becomes a loud diagnostic rather
+            // than silent wrongness.
+            let is_struct_spread = self.check(&TokenKind::DoubleDot)
+                && !matches!(
+                    self.peek_next().kind,
+                    TokenKind::RParen
+                        | TokenKind::RBracket
+                        | TokenKind::RBrace
+                        | TokenKind::Comma
+                        | TokenKind::Colon
+                        | TokenKind::Semicolon
+                        | TokenKind::Newline
+                        | TokenKind::Dedent
+                        | TokenKind::Eof
+                );
+            if is_struct_spread {
+                self.advance(); // consume '..'
+            }
+
             // Check for named argument with '=' or ':' syntax
             // Also support keywords as named argument names (e.g., type="model", default=true)
             let mut name = None;
-            let maybe_name = match &self.current.kind {
-                TokenKind::Identifier { name: id, .. } => Some(id.clone()),
-                // Allow keywords as named argument names
-                TokenKind::Type => Some("type".to_string()),
-                TokenKind::Default => Some("default".to_string()),
-                TokenKind::Result => Some("result".to_string()),
-                TokenKind::From => Some("from".to_string()),
-                TokenKind::To => Some("to".to_string()),
-                TokenKind::In => Some("in".to_string()),
-                TokenKind::Is => Some("is".to_string()),
-                TokenKind::As => Some("as".to_string()),
-                TokenKind::Match => Some("match".to_string()),
-                TokenKind::Use => Some("use".to_string()),
-                TokenKind::Alias => Some("alias".to_string()),
-                TokenKind::Bounds => Some("bounds".to_string()),
-                TokenKind::Outline => Some("outline".to_string()),
-                TokenKind::By => Some("by".to_string()),
-                TokenKind::Into => Some("into".to_string()),
-                TokenKind::Onto => Some("onto".to_string()),
-                TokenKind::With => Some("with".to_string()),
-                // Additional keywords used as named argument names in Simple source
-                TokenKind::Loop => Some("loop".to_string()),
-                TokenKind::Unit => Some("unit".to_string()),
-                TokenKind::Sync => Some("sync".to_string()),
-                TokenKind::Async => Some("async".to_string()),
-                TokenKind::Kernel => Some("kernel".to_string()),
-                TokenKind::Val => Some("val".to_string()),
-                TokenKind::Literal => Some("literal".to_string()),
-                TokenKind::Repr => Some("repr".to_string()),
-                TokenKind::Extern => Some("extern".to_string()),
-                TokenKind::Static => Some("static".to_string()),
-                TokenKind::Const => Some("const".to_string()),
-                TokenKind::Shared => Some("shared".to_string()),
-                TokenKind::Dyn => Some("dyn".to_string()),
-                TokenKind::Macro => Some("macro".to_string()),
-                TokenKind::Mixin => Some("mixin".to_string()),
-                TokenKind::Actor => Some("actor".to_string()),
-                TokenKind::Ghost => Some("ghost".to_string()),
-                TokenKind::Gen => Some("gen".to_string()),
-                TokenKind::Impl => Some("impl".to_string()),
-                TokenKind::Gpu => Some("gpu".to_string()),
-                // FR-DRIVER-0001: `class` is reserved but must work as a
-                // named-arg inside @driver(class = DriverClass.Block, ...).
-                TokenKind::Class => Some("class".to_string()),
-                TokenKind::Vec => Some("vec".to_string()),
-                TokenKind::Context => Some("context".to_string()),
-                TokenKind::Feature => Some("feature".to_string()),
-                TokenKind::Scenario => Some("scenario".to_string()),
-                TokenKind::Given => Some("given".to_string()),
-                TokenKind::When => Some("when".to_string()),
-                TokenKind::Then => Some("then".to_string()),
-                TokenKind::On => Some("on".to_string()),
-                TokenKind::Bind => Some("bind".to_string()),
-                TokenKind::New => Some("new".to_string()),
-                TokenKind::Old => Some("old".to_string()),
-                TokenKind::Out => Some("out".to_string()),
-                TokenKind::Var => Some("var".to_string()),
-                TokenKind::Lazy => Some("lazy".to_string()),
-                TokenKind::Skip => Some("skip".to_string()),
-                TokenKind::Exists => Some("exists".to_string()),
-                // Grid is a keyword for 2D matrix literals, but must be usable as a
-                // named constructor/function argument (e.g., P(grid: 0), LaunchShape(grid: ..., block: ...)).
-                // expect_identifier already handles TokenKind::Grid for field access (p.grid).
-                TokenKind::Grid => Some("grid".to_string()),
-                // `examples` is a Gherkin data-table soft keyword; it must still
-                // work as a named-arg/field label (e.g. K(examples: "ok")).
-                TokenKind::Examples => Some("examples".to_string()),
-                // `and_then` is a Gherkin chained-step soft keyword; same rule
-                // as `examples` — it must still work as a named-arg/field label
-                // (e.g. K(and_then: "ok")).
-                TokenKind::AndThen => Some("and_then".to_string()),
-                _ => None,
+            let maybe_name = if is_struct_spread {
+                None
+            } else {
+                match &self.current.kind {
+                    TokenKind::Identifier { name: id, .. } => Some(id.clone()),
+                    // Allow keywords as named argument names
+                    TokenKind::Type => Some("type".to_string()),
+                    TokenKind::Default => Some("default".to_string()),
+                    TokenKind::Result => Some("result".to_string()),
+                    TokenKind::From => Some("from".to_string()),
+                    TokenKind::To => Some("to".to_string()),
+                    TokenKind::In => Some("in".to_string()),
+                    TokenKind::Is => Some("is".to_string()),
+                    TokenKind::As => Some("as".to_string()),
+                    TokenKind::Match => Some("match".to_string()),
+                    TokenKind::Use => Some("use".to_string()),
+                    TokenKind::Alias => Some("alias".to_string()),
+                    TokenKind::Bounds => Some("bounds".to_string()),
+                    TokenKind::Outline => Some("outline".to_string()),
+                    TokenKind::By => Some("by".to_string()),
+                    TokenKind::Into => Some("into".to_string()),
+                    TokenKind::Onto => Some("onto".to_string()),
+                    TokenKind::With => Some("with".to_string()),
+                    // Additional keywords used as named argument names in Simple source
+                    TokenKind::Loop => Some("loop".to_string()),
+                    TokenKind::Unit => Some("unit".to_string()),
+                    TokenKind::Sync => Some("sync".to_string()),
+                    TokenKind::Async => Some("async".to_string()),
+                    TokenKind::Kernel => Some("kernel".to_string()),
+                    TokenKind::Val => Some("val".to_string()),
+                    TokenKind::Literal => Some("literal".to_string()),
+                    TokenKind::Repr => Some("repr".to_string()),
+                    TokenKind::Extern => Some("extern".to_string()),
+                    TokenKind::Static => Some("static".to_string()),
+                    TokenKind::Const => Some("const".to_string()),
+                    TokenKind::Shared => Some("shared".to_string()),
+                    TokenKind::Dyn => Some("dyn".to_string()),
+                    TokenKind::Macro => Some("macro".to_string()),
+                    TokenKind::Mixin => Some("mixin".to_string()),
+                    TokenKind::Actor => Some("actor".to_string()),
+                    TokenKind::Ghost => Some("ghost".to_string()),
+                    TokenKind::Gen => Some("gen".to_string()),
+                    TokenKind::Impl => Some("impl".to_string()),
+                    TokenKind::Gpu => Some("gpu".to_string()),
+                    // FR-DRIVER-0001: `class` is reserved but must work as a
+                    // named-arg inside @driver(class = DriverClass.Block, ...).
+                    TokenKind::Class => Some("class".to_string()),
+                    TokenKind::Vec => Some("vec".to_string()),
+                    TokenKind::Context => Some("context".to_string()),
+                    TokenKind::Feature => Some("feature".to_string()),
+                    TokenKind::Scenario => Some("scenario".to_string()),
+                    TokenKind::Given => Some("given".to_string()),
+                    TokenKind::When => Some("when".to_string()),
+                    TokenKind::Then => Some("then".to_string()),
+                    TokenKind::On => Some("on".to_string()),
+                    TokenKind::Bind => Some("bind".to_string()),
+                    TokenKind::New => Some("new".to_string()),
+                    TokenKind::Old => Some("old".to_string()),
+                    TokenKind::Out => Some("out".to_string()),
+                    TokenKind::Var => Some("var".to_string()),
+                    TokenKind::Lazy => Some("lazy".to_string()),
+                    TokenKind::Skip => Some("skip".to_string()),
+                    TokenKind::Exists => Some("exists".to_string()),
+                    // Grid is a keyword for 2D matrix literals, but must be usable as a
+                    // named constructor/function argument (e.g., P(grid: 0), LaunchShape(grid: ..., block: ...)).
+                    // expect_identifier already handles TokenKind::Grid for field access (p.grid).
+                    TokenKind::Grid => Some("grid".to_string()),
+                    // `examples` is a Gherkin data-table soft keyword; it must still
+                    // work as a named-arg/field label (e.g. K(examples: "ok")).
+                    TokenKind::Examples => Some("examples".to_string()),
+                    // `and_then` is a Gherkin chained-step soft keyword; same rule
+                    // as `examples` — it must still work as a named-arg/field label
+                    // (e.g. K(and_then: "ok")).
+                    TokenKind::AndThen => Some("and_then".to_string()),
+                    // `auto` is a hard keyword (auto modules); it must still work as a
+                    // named-arg/field label (e.g. FrontendOffloadSwitch(auto: true)).
+                    TokenKind::Auto => Some("auto".to_string()),
+                    _ => None,
+                }
             };
             if let Some(id_clone) = maybe_name {
                 // Peek ahead for '=' or ':' without consuming the stream
@@ -492,6 +599,10 @@ impl<'a> Parser<'a> {
             if self.check(&TokenKind::Ellipsis) {
                 self.advance(); // consume ...
                 value = Expr::Spread(Box::new(value));
+            }
+
+            if is_struct_spread {
+                value = Expr::StructSpread(Box::new(value));
             }
 
             // Create span from start to current position
@@ -599,6 +710,7 @@ impl<'a> Parser<'a> {
                         // "expected comma before argument '<name>'".
                         | TokenKind::Examples
                         | TokenKind::AndThen
+                        | TokenKind::Auto
                         | TokenKind::Grid
                         | TokenKind::Outline
                         | TokenKind::Class
@@ -817,9 +929,23 @@ impl<'a> Parser<'a> {
             self.lexer.disable_forced_indentation();
             Expr::DoBlock(statements)
         } else {
-            // Inline expression - disable forced indentation after parsing
-            let expr = self.parse_expression()?;
+            // Inline expression (body starts on the same line as the colon, e.g.
+            // `\row: row == 1 and\n    row == 2`). Forced indentation was enabled
+            // above only so a genuine block body gets real Indent/Dedent tokens;
+            // an inline expression that merely *continues* onto later lines (a
+            // trailing binary operator such as `and`/`or`) is not a block and
+            // must NOT see Indent/Dedent tokens for its continuation lines --
+            // normal bracket-depth newline suppression already keeps it on one
+            // logical line. Disabling forced indentation must happen BEFORE
+            // parsing, not after: parse_expression() itself consumes the
+            // continuation lines, so disabling afterward is too late and the
+            // lexer emits an Indent/Dedent pair mid-expression, which
+            // parse_expression() cannot consume, surfacing as "Unexpected
+            // token: expected expression, found Dedent" at the caller's
+            // closing bracket. See doc/08_tracking/bug/
+            // backslash_lambda_multiline_inline_body_dedent_2026-08-28.md
             self.lexer.disable_forced_indentation();
+            let expr = self.parse_expression()?;
             expr
         };
 

@@ -1,4 +1,5 @@
 use std.spec
+use os.userlib.server_startup.{server_startup_result_admitted_v1}
 
 extern fn rt_file_read_text(path: text) -> text
 
@@ -22,6 +23,12 @@ describe "SimpleOS current-task server startup evidence":
         expect(user).to_contain(
             "syscall(116u64, 0u64, 0u64, 0u64, 0u64, 0u64)")
 
+    it "interprets only the exact ABI success result as admission":
+        expect(server_startup_result_admitted_v1(1)).to_equal(true)
+        expect(server_startup_result_admitted_v1(0)).to_equal(false)
+        expect(server_startup_result_admitted_v1(-1)).to_equal(false)
+        expect(server_startup_result_admitted_v1(2)).to_equal(false)
+
     it "blocks secrets DBFS and listeners until canonical consumption":
         val dbd = rt_file_read_text("src/os/apps/dbd/dbd.spl")
         val server = rt_file_read_text("src/os/apps/servers_user/main.spl")
@@ -34,16 +41,43 @@ describe "SimpleOS current-task server startup evidence":
         expect(legacy_constructor.index_of(
             "server_startup_evidence_consume_v1()")).to_equal(-1)
         expect(dbd).to_contain("if not self.startup_evidence_consumed")
+        val consume = server.index_of(
+            "val startup_admission = server_startup_admission_consume_v1()")
         val construct = server.index_of(
-            "var db_server = DbdServer.new_filesystem_launched_v1()")
+            "var db_server = DbdServer.new_combined_filesystem_launched_v1(")
         val startup = server.index_of("startup_evidence_ready_v1()", construct)
         val secret = server.index_of("provision_database_service(db_server)", construct)
         val dbfs = server.index_of("simpleos_database_dbfs_vfs_caps()", construct)
         val listener = server.index_of("bind_listener(HTTP_PORT)", construct)
+        expect(consume).to_be_greater_than(-1)
+        expect(consume).to_be_less_than(construct)
         expect(construct).to_be_less_than(startup)
         expect(startup).to_be_less_than(secret)
         expect(secret).to_be_less_than(dbfs)
         expect(dbfs).to_be_less_than(listener)
+
+    it "hands one opaque package admission to DBD without re-consuming":
+        val user = rt_file_read_text("src/os/userlib/server_startup.spl")
+        val dbd = rt_file_read_text("src/os/apps/dbd/dbd.spl")
+        val server = rt_file_read_text("src/os/apps/servers_user/main.spl")
+        expect(user).to_contain(
+            "pub(package) class ServerStartupAdmissionV1:")
+        expect(user).to_contain(
+            "pub(package) fn server_startup_admission_consume_v1(")
+        expect(user.index_of("pub class ServerStartupAdmissionV1:")).to_equal(-1)
+        expect(user.index_of(
+            "pub fn server_startup_admission_consume_v1(")).to_equal(-1)
+        val combined = dbd.split(
+            "pub(package) static fn new_combined_filesystem_launched_v1")[1].split(
+                "pub fn startup_evidence_ready_v1")[0]
+        expect(combined).to_contain(
+            "server_startup_admission_ready_v1(admission)")
+        expect(combined.index_of(
+            "server_startup_evidence_consume_v1()")).to_equal(-1)
+        expect(server.split(
+            "server_startup_admission_consume_v1()").len()).to_equal(2)
+        expect(server.index_of(
+            "server_startup_evidence_consume_v1()")).to_equal(-1)
 
     it "routes every filesystem-server ISA through the canonical evidence handler":
         val state = rt_file_read_text("src/os/kernel/ipc/syscall.spl")

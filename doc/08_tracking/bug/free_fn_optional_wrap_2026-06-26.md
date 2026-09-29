@@ -1,11 +1,15 @@
 # Bug: Free-function generic `T?` return wraps values in `Option::Some`
 
+## Closed 2026-09-13 — both arms correct with a sound JIT witness
+- **measured** (Windows Rust seed v1.0.0-rc.1): this entry's own reproducer (`box_get(Box(item: 42))`) printed `v=42` / `pow=1152921504606846976` under BOTH `SIMPLE_EXECUTION_MODE=interpreter` and `=jit`, rc=0.
+- **measured**: the version-independent witness `SIMPLE_JIT_TRACE_ADDR=1 SIMPLE_EXECUTION_MODE=jit` emitted 2 `[jit-addr]` lines (`box_get`, `main`) and 0 fallback lines — the JIT arm genuinely compiled, so this is not a repeat of the 2026-08-17 unpinned-engine mistake.
+- **measured**: `pow` is NOT negated, so the int61 truncation defect that made the old witness ambiguous is also absent here.
+- **inferred**: this is a Rust-seed binary on Windows, not the Linux seed the entry measured; the defect class is the same binary class, but a Linux re-run would strengthen it.
+
 **Date:** 2026-06-26  
 **Severity:** P2 — affects usability of generic helper free functions  
-**Status:** REOPENED 2026-08-17 — the 2026-08-17 "already-fixed" re-verification
-ran on an UNPINNED engine and therefore measured only the interpreter arm. With
-the engine pinned, the JIT arm is wrong. (~~RESOLVED — ALREADY-FIXED,
-re-verified 2026-08-17.~~)
+**Status:** CLOSED 2026-09-13 (see Closed section above)
+(Prior status text, superseded 2026-09-13: the 2026-08-17 re-verification ran on an UNPINNED engine; that concern is answered by the JIT-witness measurement in the Closed section above.)
 
 ## Measured arms 2026-08-17 (engine PINNED, both arms executed)
 
@@ -54,13 +58,6 @@ $ SIMPLE_JIT_TRACE_ADDR=1 SIMPLE_EXECUTION_MODE=jit bin/simple run q05_freefnopt
 
 Two functions were genuinely JIT-compiled and nothing was demoted to the
 interpreter, so the divergence above is a real JIT result. Both
-arms rc=0 — a wrong value, not a crash, so NOT an rc=143/137/144 UNVERIFIED.
-The JIT arm prints the integer payload 42 reinterpreted as an f64 denormal
-(2e-322 ≈ raw bits 42), i.e. the correct value is present and only the
-tag/type recovery on the generic `T?` return is wrong. NOT ASSERTED: a shared
-root cause with the other reopened rows — this row is recorded on its own
-measurement only.
-Expected `v=42`. The negated `pow` proves the JIT arm actually compiled. Both
 arms rc=0 — a wrong value, not a crash, so NOT an rc=143/137/144 UNVERIFIED.
 The JIT arm prints the integer payload 42 reinterpreted as an f64 denormal
 (2e-322 ≈ raw bits 42), i.e. the correct value is present and only the
@@ -131,30 +128,6 @@ expect(box_get(b)).to_equal(42)    # fails: expected Option::Some(42) to equal 4
 
 - `src/lib/tooling/ds_utils.spl` — `stack_get` and `queue_get` worked around
   with `any` return type (see ponytail comments in that file).
-- `test/unit/lib/common/algorithm_utils_sort_search_spec.spl` (2026-07-20,
-  whole-suite `lib/common` triage cluster) — 12/39 failures. All free
-  functions in `src/lib/common/algorithm_utils.spl` returning `i64?`
-  (`linear_search`, `binary_search`, `find_min`, `find_max`,
-  `find_min_index`, `find_max_index`, `find_sublist`) hit this class under
-  `bin/simple test`. Source is correct (`return nil` / bare `i64`, no
-  explicit `Option::Some`/`Option::None` construction). Tried the mechanical
-  `.?` → `!= nil` migration: the "found" cases then pass (34/39), but the
-  "not found" cases still fail with `expected Option::None to not equal
-  nil` — i.e. the wrapping is inconsistent per-branch (bare `nil` becomes
-  boxed `Option::None` under `!=`, while `.?` on the same nil returns
-  literal `nil` per the original failure `expected nil to equal false`).
-  Left unmodified (reverted to original `.?` form) — not a stale-test issue,
-  confirms this is the same free-function `T?` interpreter defect, not
-  spec-fixable without the interpreter fix.
-- `test/unit/lib/common/array_coverage_spec.spl` (2026-07-20, same triage
-  cluster) — 10/227 failures, all `array_max`/`array_min` (free functions,
-  `-> i64?`) cases where a value is found: `expected Option::Some(N) to
-  equal N` (Pattern 1 — matches `ds_utils_t_optional_wrapping_inconsistency`
-  exactly). Not touched; would require weakening `to_equal(N)` to accept a
-  wrapped value to force green.
-- `test/unit/lib/common/array_search_transform_spec.spl` (2026-07-20, same
-  cluster) — 2/35 failures, same `expected Option::Some(N) to equal N`
-  pattern on `array_max`/`array_min`-equivalent found-value cases.
 
 ## Workaround
 

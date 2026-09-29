@@ -1,4 +1,8 @@
 # Const-generic argument rejected in constructor-call position
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## RESOLUTION 2026-08-17 — diagnostic fixed; layer 1 below was WRONG
 
@@ -45,9 +49,6 @@ Reproduce-first evidence, deployed pre-fix binary: `2 examples, 1 failure` and
 deployed binary older than 2026-08-17 still reports the stale
 `Unexpected token: expected expression, found Comma`.
 
-- Status: OPEN (P3)
-- Status re-verified 2026-08-17 by source inspection (triage shard 00).
-- Status: FIXED (diagnostic); const generics themselves remain unimplemented by design
 - Status: STILL-OPEN (P3) — layer 1 (diagnostic) FIXED **and now deployed**;
   layer 2 (const generic parameters) unimplemented by recorded design decision.
 - Status re-verified 2026-08-17 by source inspection (triage shard 00), then by
@@ -165,3 +166,11 @@ therefore stays blocked. No code change made in this pass.
 
 (Incidental, unrelated to this bug and not investigated here: the seed prints
 `v=$7` rather than `v=7` — an interpolation artifact of the deployed seed.)
+
+## Triage 2026-09-13
+
+Reconfirmed unchanged: Layer 1 (diagnostic naming the construct) is closed
+and deployed; Layer 2 (const generics themselves) is a deliberate,
+documented design decision not to implement, not an open defect. No action
+needed; correctly diagnosed already.
+

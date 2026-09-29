@@ -10,7 +10,7 @@ interpreter, and loader work does not drift back into Rust-seed tooling.
 
 | Mode | Default | Build shape | Owner |
 |------|---------|-------------|-------|
-| `dynload` | yes | Reusable per-module native/SMF cache plus staged bootstrap artifacts; the wrapper skips the full CLI relink unless explicitly requested | `src/app/io/_CliCompile/compile_targets.spl`, `src/compiler/80.driver` |
+| `dynload` | yes | Native executable plus SMF cache artifacts where the current driver supports `OutputFormat.Both` | `src/app/io/_CliCompile/compile_targets.spl`, `src/compiler/80.driver` |
 | `one-binary` | no | Monolithic native executable path using `OutputFormat.Native` | `src/app/io/_CliCompile/compile_targets.spl`, `src/compiler/70.backend` |
 
 `scripts/bootstrap/bootstrap-from-scratch.sh` defaults to `dynload`, reuses the
@@ -20,12 +20,6 @@ relinking requires `--full-cli`, `--deploy`, or `--mode=one-binary`.
 `--full-bootstrap` controls only Rust seed/runtime freshness and still stops
 after the dynload stages unless combined with a full-CLI option. The Rust seed
 is a bootstrap input, not the production toolchain.
-
-A full bootstrap is a completion gate only for changes to the compiler,
-interpreter, bootstrap machinery, or bootstrap/runtime implementation. App,
-IDE, Office, ordinary tooling, documentation, and test-only changes complete
-with focused checks against the existing deployed pure-Simple runtime; they do
-not require a bootstrap solely because they are ready to finish.
 
 ## Dependency Tracing
 
@@ -47,23 +41,11 @@ precision than the compiler resolver can prove.
 
 The broader refactor lane is
 `doc/03_plan/agent_tasks/bootstrap_compiler_interpreter_loader_arch_refactor.md`.
-The native-build cache owns source-level invalidation and recompiles changed
-modules from their source fingerprints. The wrapper invalidates the whole
-cache only when platform/backend/mode or AOP/MDSOC/weaving/loader build context
-changes, or when `--fresh-cache` is explicit. Use `--fresh-cache` after a
-compiler code-generation semantic change or dependency-interface change that
-the current per-module metadata cannot prove safe.
-
-## Platform Contract
-
-- macOS uses `shasum -a 256` when GNU `sha256sum` is absent, accepts `gtimeout`
-  when installed, and derives Homebrew library paths from `brew --prefix`.
-- Windows runs through `bootstrap-windows.cmd` or `bootstrap-windows.sh`, emits
-  `.exe`/`.lib` artifacts, and selects `windows-gnu` for MinGW/UCRT or
-  `windows-msvc` otherwise.
-- FreeBSD runs this same wrapper inside a FreeBSD host. Linux-host verification
-  uses `scripts/check/check-freebsd-bootstrap-qemu.shs`; it does not dispatch
-  to a separate seed script.
+Until resolver-backed cache keys include source hash, options hash, dependency
+interface hashes, and AOP/MDSOC configuration hash, `dynload` cache reuse stays
+conservative: bootstrap scripts clear cache on changes under `src/compiler`,
+`src/app`, or `src/lib`, and any AOP/MDSOC/weaving environment change is treated
+as a broad invalidation.
 
 ## Rust Seed Warning
 

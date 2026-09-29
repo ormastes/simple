@@ -1,0 +1,160 @@
+"""A4 — production-native CPU DrawIR frame receipt.
+
+Plan: doc/03_plan/ui/perf/render_perf_redesign_plan_2026-08-06.md § 0-B, item A4
+("a non-seed pure-Simple artifact must execute the retained CPU DrawIR workload
+with backend identity, considered and culled command counts, p50/p95, max RSS,
+checksum, readback source/count, and fail-closed fallback/completion fields").
+
+HONESTY CONTRACT. The A4 receipt describes work a SEPARATE, deployed, non-seed
+pure-Simple artifact actually performed. This module resolves and EXECUTES that
+artifact and parses what it printed; it never rasterises in-process and stamps
+`cpu-drawir` on the result. When no admissible artifact is deployed — plan
+blocker B1, "the deployed non-seed launcher exits `missing command`" — nothing
+runs, `producer_receipt_selected_backend` stays `none`, `producer_receipt_
+completion_known` is `false` and `producer_receipt_fallback_used` is `unknown`.
+An absent carrier is absence of evidence, never a pass.
+
+Provenance rule mirrors the committed campaign contract in
+scripts/check/check-render-perf-8k80-container.shs (`compiler_kind=
+pure-simple-stage4`): an artifact whose own `--version` identifies the Rust
+bootstrap seed, or the bootstrap-only CLI, is REJECTED, not accepted with a
+caveat.
+"""
+
+use app.wm_compare_host.io_runtime.{process_run, file_exists, env_get}
+
+pub val PRODUCTION_NATIVE_CPU_DRAW_IR_WORKLOAD: text = "drawir-cpu-retained-damage-v1"
+pub val PRODUCTION_NATIVE_CPU_DRAW_IR_BACKEND: text = "cpu-drawir"
+
+fn _bool_text(value: bool) -> text:
+    if value: return "true"
+    "false"
+
+# Candidate carriers, in the order the plan's own resume row names them.
+pub fn production_native_cpu_draw_ir_frame_candidates() -> [text]:
+    val override_path = env_get("RENDER_PERF_A4_ARTIFACT") ?? ""
+    var candidates: [text] = []
+    if override_path != "":
+        candidates.push(override_path)
+    candidates.push("build/render_perf/8k80_container/current/evidence/drawir_cpu_frame_producer")
+    candidates.push("bin/simple_native")
+    candidates
+
+# First candidate that exists on disk. "" when none is deployed.
+pub fn production_native_cpu_draw_ir_frame_artifact() -> text:
+    for candidate in production_native_cpu_draw_ir_frame_candidates():
+        if file_exists(candidate):
+            return candidate
+    ""
+
+# A `--version` banner that identifies the Rust seed or the bootstrap-only CLI
+# is inadmissible for A4: neither is the production-native pure-Simple artifact.
+pub fn production_native_cpu_draw_ir_frame_provenance_admissible(version_banner: text) -> bool:
+    if version_banner == "":
+        return false
+    if version_banner.contains("bootstrap seed"):
+        return false
+    if version_banner.contains("simple-bootstrap"):
+        return false
+    true
+
+# Reads one `key=value` line out of a receipt the carrier printed.
+pub fn production_native_cpu_draw_ir_frame_field(receipt: text, key: text) -> text:
+    val prefix = key + "="
+    val lines = receipt.split("\n")
+    for line in lines:
+        if line.len() >= prefix.len() and line.slice(0, prefix.len()) == prefix:
+            return line.slice(prefix.len(), line.len())
+    ""
+
+pub fn production_native_cpu_draw_ir_frame_receipt_values(
+    status: text, reason: text, artifact: text, compiler_kind: text,
+    selected_backend: text, width: i32, height: i32, sample_count: i32,
+    commands_considered: i64, commands_culled: i64, p50_ns: i64, p95_ns: i64,
+    max_rss_kib: i64, checksum: i64, readback_source: text,
+    readback_count: i64, completion_known: bool, fallback_used: text
+) -> text:
+    "producer_receipt_status=" + status + "\n" +
+        "producer_receipt_reason=" + reason + "\n" +
+        "producer_receipt_artifact=" + artifact + "\n" +
+        "producer_receipt_compiler_kind=" + compiler_kind + "\n" +
+        "producer_receipt_workload_identity=" + PRODUCTION_NATIVE_CPU_DRAW_IR_WORKLOAD + "\n" +
+        "producer_receipt_selected_backend=" + selected_backend + "\n" +
+        "producer_receipt_surface_width=" + width.to_string() + "\n" +
+        "producer_receipt_surface_height=" + height.to_string() + "\n" +
+        "producer_receipt_sample_count=" + sample_count.to_string() + "\n" +
+        "producer_receipt_commands_considered=" + commands_considered.to_string() + "\n" +
+        "producer_receipt_commands_culled=" + commands_culled.to_string() + "\n" +
+        "producer_receipt_p50_ns=" + p50_ns.to_string() + "\n" +
+        "producer_receipt_p95_ns=" + p95_ns.to_string() + "\n" +
+        "producer_receipt_max_rss_kib=" + max_rss_kib.to_string() + "\n" +
+        "producer_receipt_checksum=" + checksum.to_string() + "\n" +
+        "producer_receipt_readback_source=" + readback_source + "\n" +
+        "producer_receipt_readback_count=" + readback_count.to_string() + "\n" +
+        "producer_receipt_completion_known=" + _bool_text(completion_known) + "\n" +
+        "producer_receipt_fallback_used=" + fallback_used + "\n"
+
+# The blocked receipt: no admissible carrier ran, so every measured field is 0,
+# the backend is `none`, and `fallback_used` is the third state `unknown` — not
+# `false`, which would read as a proven no-fallback run.
+fn _blocked(reason: text, artifact: text, width: i32, height: i32, sample_count: i32) -> text:
+    production_native_cpu_draw_ir_frame_receipt_values(
+        "blocked", reason, artifact, "unknown", "none", width, height,
+        sample_count, 0, 0, 0, 0, 0, 0, "none", 0, false, "unknown")
+
+fn _i64_field(receipt: text, key: text) -> i64:
+    production_native_cpu_draw_ir_frame_field(receipt, key).parse_int() ?? 0
+
+pub fn production_native_cpu_draw_ir_frame_receipt(
+    width: i32, height: i32, sample_count: i32
+) -> text:
+    if width <= 0 or height <= 0 or sample_count <= 0:
+        return _blocked("invalid-workload", "", width, height, sample_count)
+    val artifact = production_native_cpu_draw_ir_frame_artifact()
+    if artifact == "":
+        return _blocked("self-hosted-artifact-unavailable", "", width, height, sample_count)
+    val (version_out, version_err, version_rc) = process_run(artifact, ["--version"])
+    if version_rc != 0:
+        return _blocked("artifact-version-probe-failed", artifact, width, height, sample_count)
+    val banner = version_out + version_err
+    if not production_native_cpu_draw_ir_frame_provenance_admissible(banner):
+        return _blocked("artifact-provenance-rejected", artifact, width, height, sample_count)
+    val (run_out, _run_err, run_rc) = process_run(artifact, [
+        "--width", width.to_string(),
+        "--height", height.to_string(),
+        "--sample-count", sample_count.to_string()])
+    if run_rc != 0:
+        return _blocked("artifact-execution-failed", artifact, width, height, sample_count)
+    val compiler_kind = production_native_cpu_draw_ir_frame_field(run_out, "compiler_kind")
+    if compiler_kind != "pure-simple-stage4":
+        return _blocked("compiler-kind-rejected", artifact, width, height, sample_count)
+    val selected_backend = production_native_cpu_draw_ir_frame_field(run_out, "selected_backend")
+    val p50_ns = _i64_field(run_out, "p50_ns")
+    val p95_ns = _i64_field(run_out, "p95_ns")
+    val max_rss_kib = _i64_field(run_out, "max_rss_kib")
+    val checksum = _i64_field(run_out, "checksum")
+    val readback_count = _i64_field(run_out, "readback_count")
+    val commands_considered = _i64_field(run_out, "commands_considered_total")
+    val commands_culled = _i64_field(run_out, "commands_culled_total")
+    val readback_source = production_native_cpu_draw_ir_frame_field(run_out, "readback_source")
+    val fallback_raw = production_native_cpu_draw_ir_frame_field(run_out, "fallback")
+    val completion_known = production_native_cpu_draw_ir_frame_field(run_out, "completion") == "known"
+    val measured = (selected_backend == PRODUCTION_NATIVE_CPU_DRAW_IR_BACKEND and
+        p50_ns > 0 and p95_ns > 0 and max_rss_kib > 0 and checksum != 0 and
+        readback_count > 0 and commands_considered > 0 and
+        readback_source != "" and completion_known and fallback_raw == "false")
+    val status = if measured: "pass" else: "failed"
+    val reason = if measured: "pass" else: "carrier-receipt-rejected"
+    production_native_cpu_draw_ir_frame_receipt_values(
+        status, reason, artifact, compiler_kind, selected_backend, width, height,
+        sample_count, commands_considered, commands_culled, p50_ns, p95_ns,
+        max_rss_kib, checksum, readback_source, readback_count,
+        completion_known, if fallback_raw == "": "unknown" else: fallback_raw)
+
+export PRODUCTION_NATIVE_CPU_DRAW_IR_WORKLOAD, PRODUCTION_NATIVE_CPU_DRAW_IR_BACKEND
+export production_native_cpu_draw_ir_frame_candidates
+export production_native_cpu_draw_ir_frame_artifact
+export production_native_cpu_draw_ir_frame_provenance_admissible
+export production_native_cpu_draw_ir_frame_field
+export production_native_cpu_draw_ir_frame_receipt_values
+export production_native_cpu_draw_ir_frame_receipt

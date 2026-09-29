@@ -1,4 +1,8 @@
 # FAT32 transactional mount owner is blocked on device and operation ownership
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Status: OPEN / three unsafe drafts reverted
 - Scope: production kernel FAT32 mount publication and teardown
@@ -117,3 +121,4 @@ not make caller-supplied block I/O authenticated.
 8. Only then replace legacy publication and add lifecycle/race acceptance for
    duplicate mount, rollback, copied session aliases, stale generations,
    capability gating, flush failure, and successful remount.
+

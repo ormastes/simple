@@ -20,7 +20,7 @@ Operator drives agent sessions and worktrees from the LLM Caret command line.
 | Category | Application |
 | Status | Active |
 | Source | `test/03_system/app/llm_caret/workspace_cli_system_spec.spl` |
-| Updated | 2026-08-25 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 Operator drives agent sessions and worktrees from the LLM Caret command line.
@@ -39,13 +39,23 @@ so the verdict is about the shipped command surface, not the library.
 
 #### prints usage and exits 2 when no command is given
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- prints usage and exits 2 when no command is given
+   - Expected: r.code equals `2`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("prints usage and exits 2 when no command is given")
 val r = _cli("", cwd(), [])
 expect(r.code).to_equal(2)
 expect(r.out).to_contain("Usage: llm_caret workspace")
@@ -56,6 +66,7 @@ expect(r.out).to_contain("broadcast <cmd...>")
 
 #### attaches three agents, isolates their worktrees, broadcasts, and tears down
 
+- attaches three agents, isolates their worktrees, broadcasts, and tears down
 - Attach agent-1, agent-2, agent-3 through the CLI
    - Expected: r.code equals `0`
 - status lists one worktree and one pane per agent
@@ -79,10 +90,12 @@ expect(r.out).to_contain("broadcast <cmd...>")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 53 lines folded for reproduction.
+Runnable source: 55 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("attaches three agents, isolates their worktrees, broadcasts, and tears down")
 if not tmux_available():
     pending("BLOCKED: tmux not installed on this host")
     return
@@ -142,13 +155,19 @@ dir_remove_all(root)
 
 #### reports a failing worktree operation with a non-zero exit
 
+- reports a failing worktree operation with a non-zero exit
+   - Expected: r.code equals `1`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("reports a failing worktree operation with a non-zero exit")
 val r = _cli("cli-bad", "/nonexistent/repo", ["add", "agent-x"])
 expect(r.code).to_equal(1)
 expect(r.out).to_contain("error worktree_add_failed")
@@ -158,6 +177,7 @@ expect(r.out).to_contain("error worktree_add_failed")
 
 #### refuses a nested suite launch from a workspace-launched child
 
+- refuses a nested suite launch from a workspace-launched child
 - The child inherits LLM_CARET_WORKSPACE_DEPTH=1 from its launcher
    - Expected: r.code equals `1`
 
@@ -165,10 +185,12 @@ expect(r.out).to_contain("error worktree_add_failed")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("refuses a nested suite launch from a workspace-launched child")
 if not tmux_available():
     pending("BLOCKED: tmux not installed on this host")
     return
@@ -195,3 +217,54 @@ expect(session_alive(agent_workspace("cli-nested", cwd(), ""))).to_be(false)
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `60cf500222d5ff1135b2f44e19ec6d0237e6c7215ec5540663747486472a2929`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `60cf500222d5ff1135b2f44e19ec6d0237e6c7215ec5540663747486472a2929`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `60cf500222d5ff1135b2f44e19ec6d0237e6c7215ec5540663747486472a2929`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
+
+SSpec documentization score: 86/100
+source: test/03_system/app/llm_caret/workspace_cli_system_spec.spl
+mirror: doc/06_spec/03_system/app/llm_caret/workspace_cli_system_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/app/llm_caret/workspace_cli_system_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/app/llm_caret/workspace_cli_system_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/app/llm_caret/workspace_cli_system_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 14 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/app/llm_caret/workspace_cli_system_spec.spl:58:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'prints usage and exits 2 when no command is given' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/llm_caret/workspace_cli_system_spec.spl:66:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'attaches three agents, isolates their worktrees, broadcasts, and tears down' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/llm_caret/workspace_cli_system_spec.spl:123:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'reports a failing worktree operation with a non-zero exit' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

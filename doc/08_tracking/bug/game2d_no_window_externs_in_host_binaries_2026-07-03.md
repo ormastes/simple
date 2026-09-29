@@ -1,7 +1,8 @@
 # Gap: deployed bin/simple lacks window externs — game2d wrapper uses gui-feature driver when available
+## Open 2026-09-16 — needs owner triage
 
-Status: FIXED
-Status re-verified 2026-08-17 by source inspection (triage shard 01).
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-03
 **Component:** interpreter extern surface (`src/compiler_rust/compiler/src/interpreter_extern/`),
@@ -61,3 +62,4 @@ Deploy a self-hosted `bin/simple` or CI binary with the `gui` feature, or keep
 using the wrapper's gui-feature driver fallback for local evidence. Register
 the `rt_sdl2_*` set in the interpreter only if SDL2 becomes the chosen window
 surface again.
+

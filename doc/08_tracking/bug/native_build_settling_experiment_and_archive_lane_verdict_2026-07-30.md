@@ -1,7 +1,9 @@
 # Settling experiment + archive-lane final verdict (2026-07-30)
+## Closed 2026-09-16 — ...N_MODE=interpret SIMPLE_BINARY=<resolved> SIMPLE_NATIVE_BUILD_TRACE_CLOSURE=1`) — this str
 
-Status: CLOSED (not reproducible)
-Status re-verified 2026-08-17 by source inspection (triage shard 02).
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 Assignment: (1) settle whether the 07-29 6-CPU-hour rebuild arc was
 "blind but legitimate" or a real defect, by re-running with
@@ -176,3 +178,4 @@ confirms `timeout` wrapping the top-level `native-build` CLI is
 insufficient to bound the actual worker; future bounded attempts should
 either pass `--timeout` through to the tool itself or explicitly track
 and kill the worker PID, not just the wrapper.
+

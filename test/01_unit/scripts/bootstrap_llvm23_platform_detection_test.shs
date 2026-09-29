@@ -1,0 +1,81 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+detector="$root/scripts/setup/platform-detect.shs"
+bootstrap="$root/scripts/bootstrap/bootstrap-from-scratch.sh"
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/llvm23-platform-detect.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+fail() { echo "FAIL: $*" >&2; exit 1; }
+
+make_prefix() {
+  prefix=$1
+  version=$2
+  mkdir -p "$prefix/bin" "$prefix/lib"
+  cat >"$prefix/bin/llvm-config" <<EOF
+#!/bin/sh
+case "\${1-}" in
+  --version) printf '%s\n' '$version' ;;
+  --prefix) printf '%s\n' '$prefix' ;;
+  *) exit 2 ;;
+esac
+EOF
+  chmod +x "$prefix/bin/llvm-config"
+  case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) printf dll >"$prefix/bin/LLVM-C.dll" ;;
+    Darwin) printf shared >"$prefix/lib/libLLVM.dylib" ;;
+    *) printf shared >"$prefix/lib/libLLVM-23.so" ;;
+  esac
+  # The same fixture also exercises a simulated FreeBSD host below.
+  printf shared >"$prefix/lib/libLLVM-23.so"
+  # Keep the simulated macOS version check independent of library presence.
+  printf shared >"$prefix/lib/libLLVM.dylib"
+}
+
+make_prefix "$tmp/llvm23" 23.1.1
+make_prefix "$tmp/llvm232" 23.1.2
+make_prefix "$tmp/llvm233" 23.1.3
+make_prefix "$tmp/llvm230" 23.1.0
+make_prefix "$tmp/llvm18" 18.1.8
+
+(
+  unset LLVM_VERSIONS LLVM_SYS_230_PREFIX
+  LLVM_SYS_231_PREFIX="$tmp/llvm23"
+  export LLVM_SYS_231_PREFIX
+  . "$detector"
+  [ "$LLVM_VERSIONS" = 23 ] || fail default-is-not-23
+  [ "$LLVM_FOUND" = 1 ] || fail llvm23-not-found
+  [ "$LLVM_VERSION" = 23 ] || fail wrong-version
+  [ "$LLVM_PREFIX" = "$tmp/llvm23" ] || fail wrong-prefix
+  [ "$LLVM_SYS_231_PREFIX" = "$tmp/llvm23" ] || fail wrong-rust-prefix
+  LLVM_FOUND=0
+  PLATFORM_UNAME=Linux
+  PLATFORM_OS=linux
+  if _llvm_try_prefix "$tmp/llvm230" 23; then fail older-23-admitted; fi
+  _llvm_try_prefix "$tmp/llvm232" 23 || fail linux-llvm23-patch-rejected
+  if _llvm_try_prefix "$tmp/llvm233" 23; then fail future-patch-admitted; fi
+  if _llvm_try_prefix "$tmp/llvm18" 23; then fail llvm18-admitted; fi
+  PLATFORM_UNAME=Darwin
+  PLATFORM_OS=freebsd
+  if _llvm_try_prefix "$tmp/llvm232" 23; then fail cross-target-override-admitted-freebsd-patch; fi
+  PLATFORM_UNAME=FreeBSD
+  _llvm_try_prefix "$tmp/llvm232" 23 || fail freebsd-llvm23-patch-rejected
+  if _llvm_try_prefix "$tmp/llvm233" 23; then fail freebsd-future-patch-admitted; fi
+  PLATFORM_UNAME=Darwin
+  PLATFORM_OS=macos
+  if _llvm_try_prefix "$tmp/llvm232" 23; then fail macos-llvm23-patch-admitted; fi
+)
+
+grep -Fq 'if [ "$LLVM_VERSION" != 23 ]; then' "$bootstrap" ||
+  fail bootstrap-does-not-reject-other-major
+grep -Fq '! _llvm23_version_admitted "${rust_llvm_version}"' "$bootstrap" ||
+  fail bootstrap-does-not-check-rust-llvm-patch
+grep -Fq 'admitted LLVM 23.1.1 (native Linux/FreeBSD: 23.1.2) not found' "$bootstrap" ||
+  fail bootstrap-error-not-pinned
+# The Rust seed's aya-llvm-sys build script must admit the same host-scoped patch.
+aya_build="$root/src/compiler_rust/vendor/aya-llvm-sys/build.rs"
+grep -Fq 'POSIX_ADMITTED_LLVM_VERSION: &str = "23.1.2"' "$aya_build" ||
+  fail aya-llvm-sys-posix-patch-not-admitted
+grep -Fq 'cfg!(any(target_os = "linux", target_os = "freebsd"))' "$aya_build" ||
+  fail aya-llvm-sys-posix-admission-not-host-scoped
+echo 'bootstrap_llvm23_platform_detection_test: PASS'

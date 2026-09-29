@@ -5,6 +5,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use simple_parser::ast::{
     Argument, Capability, ConstStmt, Effect, Expr, FunctionDef, ImplBlock, ImportTarget, Module, Node, Type, UseStmt,
@@ -18,7 +19,7 @@ use crate::interpreter::{
     flatten_owner_mangled_name, normalize_path_key, tag_function_module_owner, FLATTEN_GLOBAL_OWNER_MARKER_PREFIX,
     FLATTEN_IMPORT_BINDING_MARKER_PREFIX, FLATTEN_MODULE_OWNER_ATTR_PREFIX,
 };
-use crate::stdlib_variant::stdlib_root_candidates;
+use crate::stdlib_variant::stdlib_root_candidates_present;
 use crate::CompileError as _;
 
 fn prefer_package_init_for_member_import(resolved: PathBuf, use_stmt: &UseStmt) -> PathBuf {
@@ -325,6 +326,47 @@ fn is_project_stdlib_import(parts: &[String]) -> bool {
         .unwrap_or(false)
 }
 
+/// Nearest ancestor of `path` (inclusive) that looks like a project root:
+/// it holds a `src/` directory or a `Cargo.toml`. Same rule as
+/// `pipeline::execution::find_project_root_hint` and the interpreter's
+/// `interpreter_module::path_resolution::find_project_root`.
+fn project_root_ancestor(path: &Path) -> Option<PathBuf> {
+    let mut current = path.to_path_buf();
+    loop {
+        if p_is_dir(&current.join("src")) || p_is_file(&current.join("Cargo.toml")) {
+            return Some(current);
+        }
+        if !current.pop() {
+            return None;
+        }
+    }
+}
+
+/// Last-resort resolution of a NON-stdlib import against an explicit project
+/// root (its `src/` first, then the root itself), for an importer that has no
+/// project root of its own. Stdlib imports are never resolved here — they have
+/// their own project-rooted search (see `is_project_stdlib_import`).
+fn resolve_parts_from_project_root(root: &Path, parts: &[String], use_stmt: &UseStmt) -> Option<PathBuf> {
+    if is_project_stdlib_import(parts) {
+        return None;
+    }
+    let src = root.join("src");
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if p_is_dir(&src) {
+        candidates.push(src);
+    }
+    candidates.push(root.to_path_buf());
+    for candidate in &candidates {
+        if let Some(resolved) = resolve_parts_from_root(candidate, parts, use_stmt) {
+            return Some(resolved);
+        }
+        if let Some(resolved) = resolve_numbered_parts_from_root(candidate, parts, use_stmt) {
+            return Some(resolved);
+        }
+    }
+    None
+}
+
 fn resolve_parts_with_search_roots(base: &Path, parts: &[String], use_stmt: &UseStmt) -> Option<PathBuf> {
     // Stdlib imports never resolve relative to the importing file — see
     // is_project_stdlib_import. The caller falls through to the project-rooted
@@ -438,17 +480,22 @@ fn resolve_from_stdlib_root(root: &Path, parts: &[String], use_stmt: &UseStmt) -
             continue;
         }
 
-        let stdlib_parts: Vec<String> = if !parts.is_empty() && (parts[0] == "std" || parts[0] == "std_lib") {
-            parts[1..].to_vec()
-        } else {
-            parts.to_vec()
-        };
+        // `lib.x` is the same stdlib root as `std.x` (module_resolver/resolution.rs
+        // and the interpreter's path_resolution.rs both strip it); without this
+        // the 109 `use lib.common...` sites resolve to a non-existent
+        // `src/lib/lib/...` under `compile` and surface as undefined identifiers.
+        let stdlib_parts: Vec<String> =
+            if !parts.is_empty() && (parts[0] == "std" || parts[0] == "std_lib" || parts[0] == "lib") {
+                parts[1..].to_vec()
+            } else {
+                parts.to_vec()
+            };
 
         if stdlib_parts.is_empty() {
             continue;
         }
 
-        for stdlib_root in stdlib_root_candidates(&stdlib_candidate) {
+        for stdlib_root in stdlib_root_candidates_present(&stdlib_candidate) {
             if stdlib_parts.len() == 1 && stdlib_parts[0] == "io" {
                 let compat_init = stdlib_root.join("nogc_sync_mut").join("io").join("__init__.spl");
                 if p_exists(&compat_init) && p_is_file(&compat_init) {
@@ -626,6 +673,7 @@ fn append_flattened_import_binding_markers(
             ty: None,
             value: Expr::Nil,
             visibility: Visibility::Private,
+            attributes: vec![],
         }));
     };
     match &use_stmt.target {
@@ -720,6 +768,7 @@ fn strip_flattened_import_nodes(module: Module, module_path: &Path) -> Module {
                         ty: None,
                         value: Expr::Nil,
                         visibility: Visibility::Private,
+                        attributes: vec![],
                     }));
                 }
                 items.push(declaration);
@@ -911,7 +960,7 @@ fn display_parser_hints(parser: &Parser, source: &str, path: &Path) {
         };
 
         eprintln!("{}: {}", level_str, hint.message);
-        eprintln!("  --> {}:{}:{}", path.display(), hint.span.line, hint.span.column);
+        eprintln!("  --> {}:{}:{}", crate::display_path::display_path(path), hint.span.line, hint.span.column);
 
         // Show source line with caret
         if let Some(line) = hint.span.line.checked_sub(1).and_then(|i| source_lines.get(i)) {
@@ -1320,6 +1369,21 @@ pub fn check_import_compatibility(
 /// Naive resolver for `use foo` when running single-file programs from the CLI.
 ///
 /// Recursively loads sibling modules and flattens their items into the root module.
+/// Fail a module that assigns a captured enclosing local from a nested fn or
+/// lambda (see `simple_parser::capture_write_check`). The message is shared
+/// verbatim with the pure-Simple twin in
+/// `src/compiler/10.frontend/core/interpreter/resolve.spl`.
+pub fn reject_captured_local_writes(module: &Module, path: &Path) -> Result<(), CompileError> {
+    match simple_parser::capture_write_check::find_captured_local_writes(module).into_iter().next() {
+        Some(write) => Err(CompileError::semantic(format!(
+            "in {}: {}",
+            crate::display_path::display_path(path),
+            write.message()
+        ))),
+        None => Ok(()),
+    }
+}
+
 pub fn load_module_with_imports(path: &Path, visited: &mut HashSet<PathBuf>) -> Result<Module, CompileError> {
     load_module_with_imports_for_target(path, visited, simple_common::target::TargetArch::host())
 }
@@ -1986,7 +2050,7 @@ pub fn collect_direct_imported_module_paths(path: &Path) -> Result<Vec<PathBuf>,
     let mut parser = simple_parser::Parser::new(&source);
     let mut module = parser
         .parse()
-        .map_err(|e| CompileError::Parse(format!("in {:?}: {e}", path)))?;
+        .map_err(|e| CompileError::Parse(format!("in {}: {e}", crate::display_path::display_path(&path))))?;
     crate::pipeline::cfg_strip::strip_inactive_cfg_arch_fns_for_host(&mut module);
     display_parser_hints(&parser, &source, &path);
 
@@ -2038,7 +2102,7 @@ fn collect_imported_module_paths_internal(
     let mut parser = simple_parser::Parser::new(&source);
     let mut module = parser
         .parse()
-        .map_err(|e| CompileError::Parse(format!("in {:?}: {e}", path)))?;
+        .map_err(|e| CompileError::Parse(format!("in {}: {e}", crate::display_path::display_path(&path))))?;
     crate::pipeline::cfg_strip::strip_inactive_cfg_arch_fns_for_host(&mut module);
     display_parser_hints(&parser, &source, &path);
 
@@ -2179,6 +2243,91 @@ fn collect_matching_package_sibling_paths(
     Ok(sibling_files)
 }
 
+thread_local! {
+    /// Physical-file source cache for `load_module_with_imports_internal`,
+    /// keyed by the canonicalized path -- the same key this function already
+    /// computes for `visited`.
+    ///
+    /// The `visited`-based de-dup a few lines below only short-circuits when
+    /// `flatten_imports` is true; for a non-flattened `use` (the common case
+    /// for a plain member import, not a glob/nested-flatten) every call falls
+    /// straight through to a fresh `fs::read_to_string`, with no memo at all.
+    /// A package `__init__.spl` imported by many sibling submodules is
+    /// therefore re-read from disk once per submodule that imports it, not
+    /// once per process. Measured on `simple lint <2-line file>`
+    /// (SIMPLE_EXECUTION_MODE=interpret): `fix/rules/impl_/__init__.spl`
+    /// opened 28 times through THIS call site (28 -> 2 after this fix -- the
+    /// residual 2 is a DIFFERENT, cross-lane duplication: one open per path
+    /// SPELLING of a symlinked directory, `src/compiler/90.tools/...` via
+    /// this function vs `src/compiler/tools/...` -- `tools` is a symlink to
+    /// `90.tools` -- via `module_cache::shared_source`'s independent
+    /// cross-lane cache; not fixed here, see the bug record below).
+    /// `variants/__init__.spl` opened 76 times via an entirely different,
+    /// unrelated call site (`var_overlay::compute_var_roots`, in the
+    /// interpreter's own module resolver) that already has its own
+    /// process-level memo (`VAR_ROOTS_CACHE`) on `origin/main` -- the
+    /// DEPLOYED seed binary measured against simply predates that memo; see
+    /// doc/08_tracking/bug/deployed_seed_binary_missing_var_roots_cache_fix_2026-09-13.md.
+    /// Full attribution, including the residual-2 backtrace:
+    /// doc/08_tracking/bug/pipeline_module_loader_reads_unflattened_import_source_every_call_2026-09-13.md.
+    ///
+    /// This cache only replaces the disk READ (CRLF-normalized raw text,
+    /// before the per-call `target_arch` cfg-strip and the `SIMPLE_BOOTSTRAP`
+    /// textual leniency rewrite below, both of which stay per-call so a
+    /// process that loads the same file for two different `target_arch`
+    /// values still gets a correct, per-arch-stripped result). It does not
+    /// cache the parsed `Module` or the capability-validated return value, so
+    /// behaviour for `flatten_imports=false` revisits is unchanged: a real,
+    /// non-empty `Module` is still parsed and returned every call.
+    ///
+    /// Stamp policy: none, per process -- the same policy `VAR_ROOTS_CACHE`
+    /// (`module_resolver/var_overlay.rs`) and `PARSED_SOURCE_CACHE`
+    /// (`module_cache.rs`) already use. Dropped by `clear_module_cache()` /
+    /// `clear_module_cache_selective()` (`module_cache.rs`), right next to
+    /// `clear_parsed_source_cache()`, so a caller that already resets module
+    /// state for a fresh file also drops this memo. As of this change the
+    /// only callers found (`grep -rn clear_module_cache`) are `#[cfg(test)]`
+    /// fixtures within this crate's own test suite -- `mem_trace.rs` records
+    /// that `lint` and `native-build` never reach `clear_module_cache` today,
+    /// so this wiring currently protects the test harness, not a live
+    /// MCP/LSP staleness path. It is still the right boundary to hook: any
+    /// future long-lived caller (a `Compiler` reused across a multi-file
+    /// `native-build`, an MCP/LSP session) that adopts the existing
+    /// `clear_module_cache*` convention gets this cache invalidated for free,
+    /// the same way it already gets `PARSED_SOURCE_CACHE` and
+    /// `PROBE_SOURCE_CACHE` invalidated. A short-lived one-shot process
+    /// (`simple lint <file>`, `simple run <file>`) never calls
+    /// `clear_module_cache` and behaves exactly as if this cache did not
+    /// exist.
+    static MODULE_SOURCE_TEXT_CACHE: RefCell<HashMap<PathBuf, Rc<str>>> = RefCell::new(HashMap::new());
+}
+
+/// Clear the module-source-text cache. Mirrors
+/// `clear_pipeline_dir_listing_cache` above: long-lived processes that reset
+/// module state must also drop this memo so an edited file is re-read, not
+/// served stale.
+pub fn clear_module_source_text_cache() {
+    MODULE_SOURCE_TEXT_CACHE.with(|c| c.borrow_mut().clear());
+}
+
+/// Read `path` (already canonicalized by the caller) once per process,
+/// CRLF-normalized. See `MODULE_SOURCE_TEXT_CACHE`.
+fn read_module_source_text_cached(path: &Path) -> Result<String, CompileError> {
+    if let Some(hit) = MODULE_SOURCE_TEXT_CACHE.with(|c| c.borrow().get(path).cloned()) {
+        return Ok(hit.to_string());
+    }
+    let mut source = fs::read_to_string(path).map_err(|e| CompileError::Io(format!("Cannot read {:?}: {e}", path)))?;
+    // Normalize CRLF → LF so indentation-sensitive parsing works on all platforms
+    if source.contains('\r') {
+        source = source.replace('\r', "");
+    }
+    let cached: Rc<str> = Rc::from(source.as_str());
+    MODULE_SOURCE_TEXT_CACHE.with(|c| {
+        c.borrow_mut().insert(path.to_path_buf(), cached);
+    });
+    Ok(source)
+}
+
 fn load_module_with_imports_internal(
     path: &Path,
     visited: &mut HashSet<PathBuf>,
@@ -2194,11 +2343,7 @@ fn load_module_with_imports_internal(
         });
     }
 
-    let mut source = fs::read_to_string(&path).map_err(|e| CompileError::Io(format!("Cannot read {:?}: {e}", path)))?;
-    // Normalize CRLF → LF so indentation-sensitive parsing works on all platforms
-    if source.contains('\r') {
-        source = source.replace('\r', "");
-    }
+    let mut source = read_module_source_text_cached(&path)?;
 
     // Bootstrap leniency: older sources use optional `text?` types which the
     // current parser treats as a bare identifier. During early bootstrap we
@@ -2230,8 +2375,14 @@ fn load_module_with_imports_internal(
     let mut parser = simple_parser::Parser::new(&source);
     let mut module = parser
         .parse()
-        .map_err(|e| CompileError::Parse(format!("in {:?}: {e}", path)))?;
+        .map_err(|e| CompileError::Parse(format!("in {}: {e}", crate::display_path::display_path(&path))))?;
     crate::pipeline::cfg_strip::strip_inactive_cfg_arch_fns(&mut module, target_arch);
+
+    // Closures capture enclosing locals by value and are read-only
+    // (.claude/rules/language.md:22, owner ruling 2026-09-27): a nested fn or
+    // lambda assigning an enclosing local used to lose the write silently.
+    // Reject it for every loaded module (entry and imports) so the loss is loud.
+    reject_captured_local_writes(&module, &path)?;
 
     // Display error hints (warnings, etc.) from parser
     display_parser_hints(&parser, &source, &path);
@@ -2544,12 +2695,27 @@ fn resolve_use_to_path(use_stmt: &UseStmt, base: &Path) -> Option<PathBuf> {
             current = parent.to_path_buf();
         }
 
-        resolve_from_stdlib_fallbacks(
+        if let Some(resolved) = resolve_from_stdlib_fallbacks(
             std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             Path::new(env!("CARGO_MANIFEST_DIR")),
             parts,
             use_stmt,
-        )
+        ) {
+            return Some(resolved);
+        }
+
+        // Importer outside any project tree (a test-runner wrapper written to
+        // $TMPDIR is the live case): every strategy above is importer-relative
+        // or stdlib-only, so a project import such as `compiler.x.y` had no
+        // root to resolve against at all. The interpreter already falls back to
+        // the cwd's project root for exactly this (interpreter_module/
+        // path_resolution.rs); mirror it so `compile` and `run` agree.
+        if project_root_ancestor(base).is_none() {
+            if let Some(cwd_root) = std::env::current_dir().ok().and_then(|cwd| project_root_ancestor(&cwd)) {
+                return resolve_parts_from_project_root(&cwd_root, parts, use_stmt);
+            }
+        }
+        None
     };
 
     if let Some(resolved) = resolve_parts(&parts) {
@@ -2573,6 +2739,85 @@ mod tests {
     use std::collections::HashSet;
     use std::path::Path;
     use std::sync::{Mutex, OnceLock};
+
+    #[test]
+    fn module_source_text_is_read_from_disk_once_per_process() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("pkg_init.spl");
+        fs::write(&path, "val a = 1\n").unwrap();
+        let canonical = path.canonicalize().unwrap();
+        clear_module_source_text_cache();
+
+        let first = read_module_source_text_cached(&canonical).unwrap();
+        assert_eq!(first, "val a = 1\n");
+
+        // Rewriting the file must NOT change the answer within the process:
+        // the memo is the documented per-process policy (same as
+        // `VAR_ROOTS_CACHE`), and proving it here is what keeps a re-read
+        // from silently coming back once this cache exists.
+        fs::write(&path, "val a = 2\n").unwrap();
+        assert_eq!(read_module_source_text_cached(&canonical).unwrap(), first);
+
+        clear_module_source_text_cache();
+        assert_eq!(read_module_source_text_cached(&canonical).unwrap(), "val a = 2\n");
+    }
+
+    #[test]
+    fn module_source_text_cache_is_keyed_by_path_not_shared_across_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let a = temp.path().join("a.spl");
+        let b = temp.path().join("b.spl");
+        fs::write(&a, "val a = 1\n").unwrap();
+        fs::write(&b, "val b = 2\n").unwrap();
+        clear_module_source_text_cache();
+
+        assert_eq!(
+            read_module_source_text_cached(&a.canonicalize().unwrap()).unwrap(),
+            "val a = 1\n"
+        );
+        assert_eq!(
+            read_module_source_text_cached(&b.canonicalize().unwrap()).unwrap(),
+            "val b = 2\n"
+        );
+    }
+
+    #[test]
+    fn unflattened_repeat_import_of_the_same_package_init_reads_disk_once() {
+        // Replays the shape measured on `simple lint <2-line file>`:
+        // `fix/rules/impl_/__init__.spl`, a real package imported by many
+        // sibling submodules, was re-read from disk once per submodule
+        // because `load_module_with_imports_internal`'s `visited`-based
+        // de-dup only fires when `flatten_imports` is true, and a plain
+        // (non-glob, non-nested-flatten) member import passes
+        // `flatten_imports=false` for the recursive call that loads the
+        // imported package. Two independent, unflattened loads of the SAME
+        // physical `__init__.spl` (as two different sibling submodules would
+        // each trigger) must both still return a real, non-empty, correctly
+        // parsed `Module` -- the fix must not change that -- while the
+        // second load must come from the cache, not a second disk read.
+        let temp = tempfile::tempdir().unwrap();
+        let init_path = temp.path().join("__init__.spl");
+        fs::write(&init_path, "val marker = 1\n").unwrap();
+        clear_module_source_text_cache();
+
+        let arch = simple_common::target::TargetArch::host();
+        let mut visited_one = HashSet::new();
+        let first = load_module_with_imports_internal(&init_path, &mut visited_one, None, false, arch).unwrap();
+        assert!(!first.items.is_empty(), "first load must return real content, not the flatten-revisit empty Module");
+
+        // Overwrite the file between loads -- if the second call still hit
+        // disk, it would observe this new content instead of the cached one.
+        fs::write(&init_path, "val marker = 2\nval extra = 3\n").unwrap();
+
+        let mut visited_two = HashSet::new();
+        let second = load_module_with_imports_internal(&init_path, &mut visited_two, None, false, arch).unwrap();
+        assert!(!second.items.is_empty(), "second load must also return real content (non-flatten semantics preserved)");
+        assert_eq!(
+            second.items.len(),
+            first.items.len(),
+            "second load must be byte-identical to the first: it came from the source-text cache, not the rewritten file"
+        );
+    }
 
     #[test]
     fn flattened_export_use_emits_global_binding_markers_for_reexport_facades() {
@@ -2795,6 +3040,79 @@ mod tests {
         }
     }
 
+    /// Replays the MC/DC test lane: the runner writes a wrapped spec to $TMPDIR
+    /// (no `src/` ancestor) whose `use compiler.common.diagnostics.span.{Span}`
+    /// must resolve against the cwd project, including a numbered layer dir.
+    #[test]
+    fn project_import_from_importer_outside_any_project_resolves_via_cwd_project_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("proj");
+        let span_file = project.join("src/compiler/00.common/diagnostics/span.spl");
+        fs::create_dir_all(span_file.parent().unwrap()).unwrap();
+        fs::write(&span_file, "struct Span:\n    line: i64\n").unwrap();
+        let scratch = temp.path().join("scratch/tmp");
+        fs::create_dir_all(&scratch).unwrap();
+
+        // The importer's own tree has no project root at all.
+        assert_eq!(project_root_ancestor(&scratch), None);
+        assert_eq!(
+            project_root_ancestor(&project.join("src/compiler")),
+            Some(project.clone())
+        );
+
+        let parts: Vec<String> = ["compiler", "common", "diagnostics", "span"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let import = use_stmt(
+            &["compiler", "common", "diagnostics", "span"],
+            ImportTarget::Group(vec![ImportTarget::Single("Span".to_string())]),
+        );
+        assert_eq!(
+            resolve_parts_from_project_root(&project, &parts, &import),
+            Some(span_file)
+        );
+
+        // Stdlib imports keep their own project-rooted search; never served here.
+        let std_parts: Vec<String> = ["std", "io"].iter().map(|s| s.to_string()).collect();
+        let std_import = use_stmt(&["std", "io"], ImportTarget::Glob);
+        fs::create_dir_all(project.join("src/std")).unwrap();
+        fs::write(project.join("src/std/io.spl"), "fn x():\n    1\n").unwrap();
+        assert_eq!(resolve_parts_from_project_root(&project, &std_parts, &std_import), None);
+    }
+
+    /// `use lib.common.env_access.model.{...}` (109 sites in src/) names the
+    /// same stdlib root as `std.`; the loader used to keep the `lib` segment
+    /// and probe `src/lib/lib/common/...`, so the import silently vanished.
+    #[test]
+    fn lib_prefixed_import_resolves_from_stdlib_root_like_std() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("proj");
+        let model = root.join("src/lib/common/env_access/model.spl");
+        fs::create_dir_all(model.parent().unwrap()).unwrap();
+        fs::write(&model, "fn env_scenario_selection_error() -> i64:\n    1\n").unwrap();
+
+        let lib_parts: Vec<String> = ["lib", "common", "env_access", "model"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let lib_import = use_stmt(
+            &["lib", "common", "env_access", "model"],
+            ImportTarget::Group(vec![ImportTarget::Single("env_scenario_selection_error".to_string())]),
+        );
+        assert_eq!(
+            resolve_from_stdlib_root(&root, &lib_parts, &lib_import),
+            Some(model.clone())
+        );
+
+        let std_parts: Vec<String> = ["std", "common", "env_access", "model"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let std_import = use_stmt(&["std", "common", "env_access", "model"], ImportTarget::Glob);
+        assert_eq!(resolve_from_stdlib_root(&root, &std_parts, &std_import), Some(model));
+    }
+
     #[test]
     fn stdlib_fallback_prefers_runtime_worktree_over_seed_build_worktree() {
         let temp = tempfile::tempdir().unwrap();
@@ -2812,16 +3130,13 @@ mod tests {
 
         let parts = ["std".to_string(), "probe".to_string()];
         let import = use_stmt(&["std", "probe"], ImportTarget::Glob);
-        assert_eq!(resolve_from_stdlib_root(&runtime_root, &parts, &import), Some(runtime_module.clone()));
+        assert_eq!(
+            resolve_from_stdlib_root(&runtime_root, &parts, &import),
+            Some(runtime_module.clone())
+        );
         assert_eq!(resolve_from_stdlib_root(&seed_root, &parts, &import), Some(seed_module));
 
-        let resolved = resolve_from_stdlib_fallbacks(
-            runtime_root,
-            &seed_manifest,
-            &parts,
-            &import,
-        )
-        .unwrap();
+        let resolved = resolve_from_stdlib_fallbacks(runtime_root, &seed_manifest, &parts, &import).unwrap();
 
         assert_eq!(resolved, runtime_module);
     }

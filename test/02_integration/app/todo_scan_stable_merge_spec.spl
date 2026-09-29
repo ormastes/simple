@@ -1,0 +1,116 @@
+"""
+## Purpose and audience
+Purpose: pin the non-destructive committed-db merge of the todo-scan command:
+curated rows (statuses, blocked reasons, closed history) and their ids survive
+a rescan, vanished open markers flip to closed without renumbering, line drift
+re-points instead of duplicating, two consecutive scans produce a byte-identical
+db, and the command exits 0 writing both artifacts. Regression spec for
+doc/08_tracking/bug/todo_scan_segfaults_after_db_write_and_renumbers_ids_2026-09-12.md.
+Audience: tooling engineers maintaining src/app/todo_scan/main.spl.
+## Operator workflow
+Run this spec with
+`SIMPLE_LIB=src bin/simple test test/02_integration/app/todo_scan_stable_merge_spec.spl --mode=interpreter`
+and read the per-scenario verdict lines; a failing scenario pinpoints the
+regressed merge behavior.
+## Compatibility and limitations
+Spawns real `bin/simple` processes against a fixture tree under /tmp; each
+scenario rebuilds the fixture from scratch, so scenarios are independent and
+order-free.
+## Verification guidance and troubleshooting
+A failure names the exact merge behavior that regressed; re-run this spec and
+inspect the fixture db at /tmp/simple_todo_scan_stable_merge_fixture to
+reproduce locally.
+"""
+# Regression spec for doc/08_tracking/bug/todo_scan_segfaults_after_db_write_and_renumbers_ids_2026-09-12.md
+# @manual_section: todo-scan-stable-merge
+
+use std.spec.{describe, it, expect}
+use std.spec.step
+
+use app.io.mod (file_read, file_exists)
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+val FIXTURE_DIR = "/tmp/simple_todo_scan_stable_merge_fixture"
+
+fn _setup_fixture():
+    val (_o, _e, _c) = rt_process_run("/bin/sh", [
+        "-c",
+        "rm -rf " + FIXTURE_DIR + " && mkdir -p " + FIXTURE_DIR + "/src " + FIXTURE_DIR + "/doc/08_tracking/todo && cat > " + FIXTURE_DIR + "/src/a.spl <<'EOF'\n# TODO: [runtime][P1] live alpha todo\nfn main() -> i64:\n    0\nEOF\ncat > " + FIXTURE_DIR + "/src/b.spl <<'EOF'\n# TODO: [compiler][P2] live beta todo [#7]\nfn other() -> i64:\n    1\nEOF\ncat > " + FIXTURE_DIR + "/doc/08_tracking/todo/todo_db.sdn <<'EOF'\ntodos |id, keyword, area, priority, description, file, line, issue, blocked, status, valid|\n    5, TODO, general, P3, \"curated backlog note\", src/notes.spl, 1, , \"\", open, true\n    9, TODO, runtime, P1, \"hand closed item\", src/old.spl, 3, , \"\", closed, true\n    12, TODO, stdlib, P2, \"curated blocked item\", src/wip.spl, 9, , \"external reason\", blocked, true\nEOF"
+    ])
+
+fn _run_scan() -> (text, text, i64):
+    rt_process_run("/bin/sh", [
+        "-c",
+        "REPO=$(pwd); cd " + FIXTURE_DIR + " && SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/todo_scan/main.spl\" --no-progress"
+    ])
+
+fn _read_db() -> text:
+    file_read(FIXTURE_DIR + "/doc/08_tracking/todo/todo_db.sdn") ?? ""
+
+fn _sh(command: text):
+    rt_process_run("/bin/sh", ["-c", command])
+
+describe "todo-scan committed-db merge":
+    it "preserves curated rows and ids instead of renumbering":
+        # @req REQ-SSPEC-APP
+        # Regression: the old write_todo_db rebuilt the db from the fresh scan
+        # alone, renumbering every id and dropping every hand-maintained row.
+        step("Scan a fixture whose committed db holds curated rows with ids 5, 9, 12")
+        _setup_fixture()
+        val (_out, _err, code) = _run_scan()
+        expect(code).to_equal(0)  # oracle: 0 is the CLI success exit code for a completed scan
+        expect(file_exists(FIXTURE_DIR + "/doc/TODO.md")).to_equal(true)
+        val db = _read_db()
+        # Curated blocked and closed rows survive with id and status intact.
+        expect(db).to_contain("12, TODO, stdlib, P2, \"curated blocked item\", src/wip.spl, 9, , \"external reason\", blocked, true")
+        expect(db).to_contain("9, TODO, runtime, P1, \"hand closed item\", src/old.spl, 3, , \"\", closed, true")
+        # An open row whose marker is not in source is closed, not deleted and
+        # not renumbered.
+        expect(db).to_contain("5, TODO, general, P3, \"curated backlog note\", src/notes.spl, 1, , \"\", closed, true")
+        # New markers get fresh ids past the committed max (12 -> 13, 14).
+        expect(db).to_contain("13, TODO, runtime, P1, \"live alpha todo\", src/a.spl, 1, , \"\", open, true")
+        expect(db).to_contain("14, TODO, compiler, P2, \"live beta todo\", src/b.spl, 1, 7, \"\", open, true")
+
+    it "yields a byte-identical db across two consecutive scans":
+        # @req REQ-SSPEC-APP
+        step("Run two consecutive scans over an unchanged fixture and compare the db bytes")
+        _setup_fixture()
+        val (_o1, _e1, c1) = _run_scan()
+        expect(c1).to_equal(0)
+        val db1 = _read_db()
+        val (_o2, _e2, c2) = _run_scan()
+        expect(c2).to_equal(0)
+        val db2 = _read_db()
+        expect(db2).to_equal(db1)
+        # Ids assigned on the first scan are stable on the second.
+        expect(db2).to_contain("13, TODO, runtime, P1, \"live alpha todo\"")
+
+    it "closes a vanished open marker on rescan without renumbering":
+        # @req REQ-SSPEC-APP
+        step("Remove a marker between scans and rescan")
+        _setup_fixture()
+        val (_o1, _e1, c1) = _run_scan()
+        expect(c1).to_equal(0)
+        _sh("grep -v 'live alpha todo' " + FIXTURE_DIR + "/src/a.spl > /tmp/todo_scan_stable_merge_a.spl && mv /tmp/todo_scan_stable_merge_a.spl " + FIXTURE_DIR + "/src/a.spl")
+        val (_o2, _e2, c2) = _run_scan()
+        expect(c2).to_equal(0)
+        val db = _read_db()
+        expect(db).to_contain("13, TODO, runtime, P1, \"live alpha todo\", src/a.spl, 1, , \"\", closed, true")
+        # The surviving marker is untouched.
+        expect(db).to_contain("14, TODO, compiler, P2, \"live beta todo\", src/b.spl, 1, 7, \"\", open, true")
+
+    it "re-points a drifted marker line and keeps its id":
+        # @req REQ-SSPEC-APP
+        step("Move a marker within its file and rescan")
+        _setup_fixture()
+        val (_o1, _e1, c1) = _run_scan()
+        expect(c1).to_equal(0)
+        _sh("printf '# header comment\\n\\n# another line\\n' | cat - " + FIXTURE_DIR + "/src/a.spl > /tmp/todo_scan_stable_merge_a.spl && mv /tmp/todo_scan_stable_merge_a.spl " + FIXTURE_DIR + "/src/a.spl")
+        val (_o2, _e2, c2) = _run_scan()
+        expect(c2).to_equal(0)
+        val db = _read_db()
+        # The marker drifted from line 1 to line 4: the row is re-pointed, not
+        # duplicated, and keeps its id.
+        expect(db).to_contain("13, TODO, runtime, P1, \"live alpha todo\", src/a.spl, 4, , \"\", open, true")
+        expect(db.split("live alpha todo").len()).to_equal(2)

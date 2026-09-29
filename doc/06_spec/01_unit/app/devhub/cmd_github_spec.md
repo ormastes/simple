@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 30 | 30 | 0 | 0 |
+| 21 | 21 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -20,7 +20,7 @@ Purpose: Prove that itf github (fake-binary fixture).
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/devhub/cmd_github_spec.spl` |
-| Updated | 2026-08-27 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Purpose and audience
@@ -35,6 +35,7 @@ Audience: compiler and tooling engineers who maintain this spec.
 
 #### exits 0 and forwards the default --json fields to gh
 
+- exits 0 and forwards the default --json fields to gh
 - Verify: exits 0 and forwards the default --json fields to gh
    - Expected: code equals `0`
    - Expected: log contains `issue list --json number,title,state,author,updatedAt`
@@ -43,10 +44,12 @@ Audience: compiler and tooling engineers who maintain this spec.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("exits 0 and forwards the default --json fields to gh")
 step("Verify: exits 0 and forwards the default --json fields to gh")
 # @req: REQ-APP-DEVHUB-001
 val dir = install_fake_gh(FAKE_GH_LIST_OK)
@@ -59,6 +62,7 @@ expect(log.contains("issue list --json number,title,state,author,updatedAt")).to
 
 #### forwards extra gh-native flags (e.g. --state, --limit) verbatim
 
+- forwards extra gh-native flags (e.g. --state, --limit) verbatim
 - Verify: forwards extra gh-native flags (e.g. --state, --limit) verbatim
    - Expected: code equals `0`
    - Expected: log contains `--state open --limit 5`
@@ -67,10 +71,12 @@ expect(log.contains("issue list --json number,title,state,author,updatedAt")).to
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("forwards extra gh-native flags (e.g. --state, --limit) verbatim")
 step("Verify: forwards extra gh-native flags (e.g. --state, --limit) verbatim")
 val dir = install_fake_gh(FAKE_GH_LIST_OK)
 val (code, log) = run_github_with_fake_gh(dir, ["issue", "list", "--state", "open", "--limit", "5"])
@@ -84,6 +90,7 @@ expect(log.contains("--state open --limit 5")).to_equal(true)
 
 #### exits 0 on an empty array (no issues/PRs is not an error)
 
+- exits 0 on an empty array (no issues/PRs is not an error)
 - Verify: exits 0 on an empty array (no issues/PRs is not an error)
    - Expected: code equals `0`
 
@@ -91,10 +98,12 @@ expect(log.contains("--state open --limit 5")).to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("exits 0 on an empty array (no issues/PRs is not an error)")
 step("Verify: exits 0 on an empty array (no issues/PRs is not an error)")
 val dir = install_fake_gh(FAKE_GH_LIST_OK)
 val (code, _log) = run_github_with_fake_gh(dir, ["pr", "list"])
@@ -107,6 +116,7 @@ expect(code).to_equal(0)  # oracle: 0 — named expected value from the requirem
 
 #### exits 1 with an actionable 'not found' error (never a bare crash)
 
+- exits 1 with an actionable 'not found' error (never a bare crash)
 - Verify: exits 1 with an actionable 'not found' error (never a bare crash)
    - Expected: code equals `1`
 
@@ -114,10 +124,12 @@ expect(code).to_equal(0)  # oracle: 0 — named expected value from the requirem
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("exits 1 with an actionable 'not found' error (never a bare crash)")
 step("Verify: exits 1 with an actionable 'not found' error (never a bare crash)")
 val dir = install_fake_gh(FAKE_GH_NOT_FOUND)
 val (code, _log) = run_github_with_fake_gh(dir, ["issue", "list"])
@@ -130,6 +142,7 @@ expect(code).to_equal(1)  # oracle: 1 — named expected value from the requirem
 
 #### exits 1 and does not fall through to a bare exit code
 
+- exits 1 and does not fall through to a bare exit code
 - Verify: exits 1 and does not fall through to a bare exit code
    - Expected: code equals `1`
    - Expected: log contains `issue list`
@@ -138,10 +151,12 @@ expect(code).to_equal(1)  # oracle: 1 — named expected value from the requirem
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("exits 1 and does not fall through to a bare exit code")
 step("Verify: exits 1 and does not fall through to a bare exit code")
 val dir = install_fake_gh(FAKE_GH_UNAUTHED)
 val (code, log) = run_github_with_fake_gh(dir, ["issue", "list"])
@@ -155,6 +170,7 @@ expect(log.contains("issue list")).to_equal(true)
 
 #### exits 0 and forwards the number and flags verbatim to gh
 
+- exits 0 and forwards the number and flags verbatim to gh
 - Verify: exits 0 and forwards the number and flags verbatim to gh
    - Expected: code equals `0`
    - Expected: log contains `issue edit 123 --add-label bug`
@@ -163,10 +179,12 @@ expect(log.contains("issue list")).to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("exits 0 and forwards the number and flags verbatim to gh")
 step("Verify: exits 0 and forwards the number and flags verbatim to gh")
 val dir = install_fake_gh(FAKE_GH_PASSTHROUGH_OK)
 val (code, log) = run_github_with_fake_gh(dir, ["issue", "edit", "123", "--add-label", "bug"])
@@ -180,6 +198,7 @@ expect(log.contains("issue edit 123 --add-label bug")).to_equal(true)
 
 #### exits 0 and forwards the repo name and directory verbatim to gh
 
+- exits 0 and forwards the repo name and directory verbatim to gh
 - Verify: exits 0 and forwards the repo name and directory verbatim to gh
    - Expected: code equals `0`
    - Expected: log contains `repo clone owner/name dest`
@@ -188,10 +207,12 @@ expect(log.contains("issue edit 123 --add-label bug")).to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("exits 0 and forwards the repo name and directory verbatim to gh")
 step("Verify: exits 0 and forwards the repo name and directory verbatim to gh")
 val dir = install_fake_gh(FAKE_GH_PASSTHROUGH_OK)
 val (code, log) = run_github_with_fake_gh(dir, ["repo", "clone", "owner/name", "dest"])
@@ -205,6 +226,7 @@ expect(log.contains("repo clone owner/name dest")).to_equal(true)
 
 #### exits 0 and forwards --title/--body/--base verbatim to gh
 
+- exits 0 and forwards --title/--body/--base verbatim to gh
 - Verify: exits 0 and forwards --title/--body/--base verbatim to gh
    - Expected: code equals `0`
    - Expected: log contains `pr create --title T --body B --base main`
@@ -213,10 +235,12 @@ expect(log.contains("repo clone owner/name dest")).to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("exits 0 and forwards --title/--body/--base verbatim to gh")
 step("Verify: exits 0 and forwards --title/--body/--base verbatim to gh")
 val dir = install_fake_gh(FAKE_GH_PASSTHROUGH_OK)
 val (code, log) = run_github_with_fake_gh(dir, ["pr", "create", "--title", "T", "--body", "B", "--base", "main"])
@@ -226,145 +250,29 @@ expect(log.contains("pr create --title T --body B --base main")).to_equal(true)
 
 </details>
 
-#### pr review — protected self-review redirect
+#### pr review — passthrough
 
-#### detects the same author before provider approval and does not submit APPROVED
+#### exits 0 and forwards the number and review flag verbatim to gh
 
-- Verify: detects the same author before provider approval and does not submit APPROVED
-   - Expected: code equals `2`
-   - Expected: log contains `pr view 42 --json number,author,url`
-   - Expected: log does not contain `pr review 42 --approve`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 6 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-step("Verify: detects the same author before provider approval and does not submit APPROVED")
-val dir = install_fake_gh(FAKE_GH_SAME_AUTHOR)
-val (code, log) = run_github_with_fake_gh(dir, ["pr", "review", "42", "--approve"])
-expect(code).to_equal(2)
-expect(log.contains("pr view 42 --json number,author,url")).to_equal(true)
-expect(log.contains("pr review 42 --approve")).to_equal(false)
-```
-
-</details>
-
-#### recognizes -a and resolves an omitted selector from the current branch
-
-- Verify: recognizes -a and resolves an omitted selector from the current branch
-   - Expected: code equals `2`
-   - Expected: log contains `pr view --json number,author,url`
-   - Expected: log does not contain `pr review -a`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 6 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-step("Verify: recognizes -a and resolves an omitted selector from the current branch")
-val dir = install_fake_gh(FAKE_GH_SAME_AUTHOR)
-val (code, log) = run_github_with_fake_gh(dir, ["pr", "review", "-a"])
-expect(code).to_equal(2)
-expect(log.contains("pr view --json number,author,url")).to_equal(true)
-expect(log.contains("pr review -a")).to_equal(false)
-```
-
-</details>
-
-#### resolves a URL selector and uses the returned PR number
-
-- Verify: resolves a URL selector and uses the returned PR number
-   - Expected: code equals `2`
-   - Expected: log contains `pr view https://github.com/ormastes/simple/pull/42 --json number,author,url`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 5 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-step("Verify: resolves a URL selector and uses the returned PR number")
-val dir = install_fake_gh(FAKE_GH_SAME_AUTHOR)
-val (code, log) = run_github_with_fake_gh(dir, ["pr", "review", "https://github.com/ormastes/simple/pull/42", "--approve"])
-expect(code).to_equal(2)
-expect(log.contains("pr view https://github.com/ormastes/simple/pull/42 --json number,author,url")).to_equal(true)
-```
-
-</details>
-
-#### finds a selector placed after the approval flag
-
-- Verify: finds a selector placed after the approval flag
-   - Expected: code equals `2`
-   - Expected: log contains `pr view 64 --json number,author,url`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 5 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-step("Verify: finds a selector placed after the approval flag")
-val dir = install_fake_gh(FAKE_GH_SAME_AUTHOR)
-val (code, log) = run_github_with_fake_gh(dir, ["pr", "review", "--approve", "64"])
-expect(code).to_equal(2)
-expect(log.contains("pr view 64 --json number,author,url")).to_equal(true)
-```
-
-</details>
-
-#### binds a leading repository flag to the same resolution query
-
-- Verify: binds a leading repository flag to the same resolution query
-   - Expected: code equals `2`
-   - Expected: log contains `pr view 64 --repo ormastes/simple --json number,author,url`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 5 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-step("Verify: binds a leading repository flag to the same resolution query")
-val dir = install_fake_gh(FAKE_GH_SAME_AUTHOR)
-val (code, log) = run_github_with_fake_gh(dir, ["pr", "review", "-R", "ormastes/simple", "-a", "64"])
-expect(code).to_equal(2)
-expect(log.contains("pr view 64 --repo ormastes/simple --json number,author,url")).to_equal(true)
-```
-
-</details>
-
-#### prints the same workflow after GitHub rejects author approval
-
-- Verify: prints the same workflow after GitHub rejects author approval
-   - Expected: code equals `1`
+- exits 0 and forwards the number and review flag verbatim to gh
+- Verify: exits 0 and forwards the number and review flag verbatim to gh
+   - Expected: code equals `0`
    - Expected: log contains `pr review 42 --approve`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("Verify: prints the same workflow after GitHub rejects author approval")
-val dir = install_fake_gh(FAKE_GH_AUTHOR_REJECTION)
+# @req REQ-SSPEC-APP
+step("exits 0 and forwards the number and review flag verbatim to gh")
+step("Verify: exits 0 and forwards the number and review flag verbatim to gh")
+val dir = install_fake_gh(FAKE_GH_PASSTHROUGH_OK)
 val (code, log) = run_github_with_fake_gh(dir, ["pr", "review", "42", "--approve"])
-expect(code).to_equal(1)
+expect(code).to_equal(0)  # oracle: 0 — named expected value from the requirement
 expect(log.contains("pr review 42 --approve")).to_equal(true)
 ```
 
@@ -374,6 +282,7 @@ expect(log.contains("pr review 42 --approve")).to_equal(true)
 
 #### exits 1 and surfaces an actionable auth error, not a bare crash
 
+- exits 1 and surfaces an actionable auth error, not a bare crash
 - Verify: exits 1 and surfaces an actionable auth error, not a bare crash
    - Expected: code equals `1`
    - Expected: log contains `issue edit 123 --add-label bug`
@@ -382,10 +291,12 @@ expect(log.contains("pr review 42 --approve")).to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("exits 1 and surfaces an actionable auth error, not a bare crash")
 step("Verify: exits 1 and surfaces an actionable auth error, not a bare crash")
 val dir = install_fake_gh(FAKE_GH_UNAUTHED)
 val (code, log) = run_github_with_fake_gh(dir, ["issue", "edit", "123", "--add-label", "bug"])
@@ -399,6 +310,7 @@ expect(log.contains("issue edit 123 --add-label bug")).to_equal(true)
 
 #### exits 1 for an unknown top-level command without touching gh
 
+- exits 1 for an unknown top-level command without touching gh
 - Verify: exits 1 for an unknown top-level command without touching gh
    - Expected: handle_github(["bogus"]) equals `1`
 
@@ -406,10 +318,12 @@ expect(log.contains("issue edit 123 --add-label bug")).to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("exits 1 for an unknown top-level command without touching gh")
 step("Verify: exits 1 for an unknown top-level command without touching gh")
 expect(handle_github(["bogus"])).to_equal(1)
 ```
@@ -418,6 +332,7 @@ expect(handle_github(["bogus"])).to_equal(1)
 
 #### exits 1 for an unknown issue subcommand
 
+- exits 1 for an unknown issue subcommand
 - Verify: exits 1 for an unknown issue subcommand
    - Expected: handle_github(["issue", "bogus"]) equals `1`
 
@@ -425,10 +340,12 @@ expect(handle_github(["bogus"])).to_equal(1)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("exits 1 for an unknown issue subcommand")
 step("Verify: exits 1 for an unknown issue subcommand")
 expect(handle_github(["issue", "bogus"])).to_equal(1)
 ```
@@ -437,6 +354,7 @@ expect(handle_github(["issue", "bogus"])).to_equal(1)
 
 #### exits 1 for an unknown pr subcommand
 
+- exits 1 for an unknown pr subcommand
 - Verify: exits 1 for an unknown pr subcommand
    - Expected: handle_github(["pr", "bogus"]) equals `1`
 
@@ -444,10 +362,12 @@ expect(handle_github(["issue", "bogus"])).to_equal(1)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("exits 1 for an unknown pr subcommand")
 step("Verify: exits 1 for an unknown pr subcommand")
 expect(handle_github(["pr", "bogus"])).to_equal(1)
 ```
@@ -456,6 +376,7 @@ expect(handle_github(["pr", "bogus"])).to_equal(1)
 
 #### exits 1 for an unknown repo subcommand
 
+- exits 1 for an unknown repo subcommand
 - Verify: exits 1 for an unknown repo subcommand
    - Expected: handle_github(["repo", "bogus"]) equals `1`
 
@@ -463,10 +384,12 @@ expect(handle_github(["pr", "bogus"])).to_equal(1)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("exits 1 for an unknown repo subcommand")
 step("Verify: exits 1 for an unknown repo subcommand")
 expect(handle_github(["repo", "bogus"])).to_equal(1)
 ```
@@ -475,109 +398,11 @@ expect(handle_github(["repo", "bogus"])).to_equal(1)
 
 ### cmd_github pure JSON-extraction helpers
 
-#### self-review discoverability
-
-#### recognizes provider author-approval rejection variants
-
-- Verify: recognizes provider author-approval rejection variants
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-step("Verify: recognizes provider author-approval rejection variants")
-expect(_github_author_approval_rejected("cannot approve your own pull request")).to_be(true)
-expect(_github_author_approval_rejected("ordinary validation error")).to_be(false)
-```
-
-</details>
-
-#### exposes exact review dispatch poll steps for common agent searches
-
-- Verify: exposes exact review dispatch poll steps for common agent searches
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 13 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-step("Verify: exposes exact review dispatch poll steps for common agent searches")
-val steps = _self_review_steps("42", "ormastes/simple")
-expect(steps[0]).to_contain("APPROVED")
-expect(steps[1]).to_contain("--repo ormastes/simple")
-expect(steps[2]).to_contain("high/xhigh/max/ultra")
-expect(steps[3]).to_contain("P0=0")
-expect(steps[5]).to_contain("pull_request_number=42")
-expect(steps[5]).to_contain("self_attestation='PASS:0:0'")
-expect(steps[5]).to_contain("expected_head_sha=\"$HEAD_SHA\"")
-expect(steps[6]).to_contain("$HEAD_SHA")
-expect(steps[7]).to_contain("evaluate privilege first")
-expect(steps[8]).to_contain("not GitHub provider APPROVED")
-expect(steps[9]).to_contain("spipe self-review-guide")
-```
-
-</details>
-
-#### never redirects another repository's same-number PR to Simple
-
-- Verify: never redirects another repository's same-number PR to Simple
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 6 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-step("Verify: never redirects another repository's same-number PR to Simple")
-val steps = _self_review_steps("42", "ormastes/Spipe")
-expect(steps[1]).to_contain("ormastes/Spipe")
-expect(steps[2]).to_contain("Do not dispatch ormastes/simple")
-expect(steps[3]).to_contain("spipe_self_review_privilege_evaluate")
-expect(steps[4]).to_contain("fail closed")
-```
-
-</details>
-
-#### parses review selectors while skipping flags and their values
-
-- Verify: parses review selectors while skipping flags and their values
-   - Expected: _github_review_selector(["--approve", "64"]) equals `64`
-   - Expected: _github_review_selector(["-R", "ormastes/simple", "-a", "feature/head"]) equals `feature/head`
-   - Expected: _github_review_selector(["--body", "looks good", "-a"]) equals ``
-   - Expected: _github_review_repo_args(["--repo=ormastes/simple", "-a", "64"])[1] equals `ormastes/simple`
-   - Expected: _github_pr_repository(json_parse("{\"url\":\"https://github.com/ormastes/simple/pull/64\"}")) equals `ormastes/simple`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 6 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-step("Verify: parses review selectors while skipping flags and their values")
-expect(_github_review_selector(["--approve", "64"])).to_equal("64")
-expect(_github_review_selector(["-R", "ormastes/simple", "-a", "feature/head"])).to_equal("feature/head")
-expect(_github_review_selector(["--body", "looks good", "-a"])).to_equal("")
-expect(_github_review_repo_args(["--repo=ormastes/simple", "-a", "64"])[1]).to_equal("ormastes/simple")
-expect(_github_pr_repository(json_parse("{\"url\":\"https://github.com/ormastes/simple/pull/64\"}"))).to_equal("ormastes/simple")
-```
-
-</details>
-
 #### _gh_field
 
 #### extracts a string field, stripping quotes
 
+- extracts a string field, stripping quotes
 - Verify: extracts a string field, stripping quotes
    - Expected: _gh_field(obj, "title") equals `hello`
 
@@ -585,10 +410,12 @@ expect(_github_pr_repository(json_parse("{\"url\":\"https://github.com/ormastes/
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("extracts a string field, stripping quotes")
 step("Verify: extracts a string field, stripping quotes")
 val obj = json_parse("{\"title\":\"hello\"}")
 expect(_gh_field(obj, "title")).to_equal("hello")
@@ -598,6 +425,7 @@ expect(_gh_field(obj, "title")).to_equal("hello")
 
 #### extracts a numeric field as text
 
+- extracts a numeric field as text
 - Verify: extracts a numeric field as text
    - Expected: _gh_field(obj, "number") equals `42`
 
@@ -605,10 +433,12 @@ expect(_gh_field(obj, "title")).to_equal("hello")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("extracts a numeric field as text")
 step("Verify: extracts a numeric field as text")
 val obj = json_parse("{\"number\":42}")
 expect(_gh_field(obj, "number")).to_equal("42")
@@ -618,6 +448,7 @@ expect(_gh_field(obj, "number")).to_equal("42")
 
 #### returns empty text for a missing field
 
+- returns empty text for a missing field
 - Verify: returns empty text for a missing field
    - Expected: _gh_field(obj, "missing") equals ``
 
@@ -625,10 +456,12 @@ expect(_gh_field(obj, "number")).to_equal("42")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("returns empty text for a missing field")
 step("Verify: returns empty text for a missing field")
 val obj = json_parse("{\"title\":\"hello\"}")
 expect(_gh_field(obj, "missing")).to_equal("")
@@ -640,6 +473,7 @@ expect(_gh_field(obj, "missing")).to_equal("")
 
 #### extracts the nested login field gh uses for author/assignee
 
+- extracts the nested login field gh uses for author/assignee
 - Verify: extracts the nested login field gh uses for author/assignee
    - Expected: _gh_login(obj, "author") equals `alice`
 
@@ -647,10 +481,12 @@ expect(_gh_field(obj, "missing")).to_equal("")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("extracts the nested login field gh uses for author/assignee")
 step("Verify: extracts the nested login field gh uses for author/assignee")
 # NOTE: braces must be doubled ({{/}}) here even though this is a
 # plain val, not a print — Simple's string-interpolation scanner
@@ -667,6 +503,7 @@ expect(_gh_login(obj, "author")).to_equal("alice")
 
 #### returns empty text when the nested object is absent
 
+- returns empty text when the nested object is absent
 - Verify: returns empty text when the nested object is absent
    - Expected: _gh_login(obj, "author") equals ``
 
@@ -674,10 +511,12 @@ expect(_gh_login(obj, "author")).to_equal("alice")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("returns empty text when the nested object is absent")
 step("Verify: returns empty text when the nested object is absent")
 val obj = json_parse("{}")
 expect(_gh_login(obj, "author")).to_equal("")
@@ -689,6 +528,7 @@ expect(_gh_login(obj, "author")).to_equal("")
 
 #### uses the pr field set (includes headRefName) for entity=pr
 
+- uses the pr field set (includes headRefName) for entity=pr
 - Verify: uses the pr field set (includes headRefName) for entity=pr
    - Expected: _default_fields("pr") equals `number,title,state,author,headRefName,updatedAt`
 
@@ -696,10 +536,12 @@ expect(_gh_login(obj, "author")).to_equal("")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("uses the pr field set (includes headRefName) for entity=pr")
 step("Verify: uses the pr field set (includes headRefName) for entity=pr")
 expect(_default_fields("pr")).to_equal("number,title,state,author,headRefName,updatedAt")
 ```
@@ -708,6 +550,7 @@ expect(_default_fields("pr")).to_equal("number,title,state,author,headRefName,up
 
 #### uses the issue field set for entity=issue
 
+- uses the issue field set for entity=issue
 - Verify: uses the issue field set for entity=issue
    - Expected: _default_fields("issue") equals `number,title,state,author,updatedAt`
 
@@ -715,10 +558,12 @@ expect(_default_fields("pr")).to_equal("number,title,state,author,headRefName,up
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("uses the issue field set for entity=issue")
 step("Verify: uses the issue field set for entity=issue")
 expect(_default_fields("issue")).to_equal("number,title,state,author,updatedAt")
 ```
@@ -729,11 +574,63 @@ expect(_default_fields("issue")).to_equal("number,title,state,author,updatedAt")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 30 |
-| Active scenarios | 30 |
+| Total scenarios | 21 |
+| Active scenarios | 21 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-APP`
+- `REQ-APP-DEVHUB-001`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `d2f3eac4405558bd28ae21ae3ac3db15a82866c758cc73c06b5fc2d2c0bfdb87`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `d2f3eac4405558bd28ae21ae3ac3db15a82866c758cc73c06b5fc2d2c0bfdb87`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `d2f3eac4405558bd28ae21ae3ac3db15a82866c758cc73c06b5fc2d2c0bfdb87`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
+
+SSpec documentization score: 86/100
+source: test/01_unit/app/devhub/cmd_github_spec.spl
+mirror: doc/06_spec/01_unit/app/devhub/cmd_github_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/app/devhub/cmd_github_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/app/devhub/cmd_github_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/app/devhub/cmd_github_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 4 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/01_unit/app/devhub/cmd_github_spec.spl:92:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'exits 0 and forwards the default --json fields to gh' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/devhub/cmd_github_spec.spl:102:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'forwards extra gh-native flags (e.g. --state, --limit) verbatim' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/devhub/cmd_github_spec.spl:113:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'exits 0 on an empty array (no issues/PRs is not an error)' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

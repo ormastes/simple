@@ -1,4 +1,8 @@
 # Stage 3 frontier: one `unresolved name` whose name and location disagree (2026-08-25)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -115,3 +119,4 @@ false at origin/main. Do not act on it.
 NOT verified here: why the third importer fails while the other two succeed, and
 whether the 19-line span offset is specific to this diagnostic or general to
 `unresolved name`.
+

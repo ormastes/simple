@@ -15,47 +15,17 @@ Canonical plan:
 - `Trace implemented CSS properties through canonical rendering`
 - `Classify unsupported CSS properties without false implementation claims`
 
-Fieldset/legend bounded lane:
-
-- `Parse fieldset and legend as a semantic parent-child pair`
-- `Apply selected user-agent defaults before authored CSS`
-- `Lower authored fieldset and legend boxes to exact Draw IR geometry`
-- `Rasterize exact component pixels against an unstyled control`
-
-Definition-list bounded lane:
-
-- `Parse omitted dt and dd end tags as definition-list siblings`
-- `Apply definition-list user-agent defaults before authored CSS`
-- `Lower authored definition-list boxes to exact Draw IR geometry`
-- `Rasterize exact definition-list pixels against a plain control`
-
-Small-element bounded lane:
-
-- `Parse small as an inline body child`
-- `Apply the small user-agent font size`
-- `Lower small text to exact Draw IR geometry`
-- `Rasterize absolute small-element pixels`
-
-Frozen helpers:
-
-- `_small_node_index`
-- `_small_command`
-- `_small_text_command`
-- `_small_style`
-- `_small_geometry`
-
-## Completed audit and bounded implementation lanes
+## Completed read-only sidecars
 
 | Lane | Result |
 |---|---|
-| HTML element traceability | RED: 12 Full, 64 Partial remaining, 16 bounded selected-profile rows (`hr`,`fieldset`,`legend`,`dl`,`dt`,`dd`,`article`,`blockquote`,`header`,`details`,`summary`,`figure`,`menu`,`small`,`abbr`,`time`), 11 unsupported, 2 inventory-only, 8 checker omissions; no double-count |
+| HTML element traceability | RED: 12 Full, 80 Partial, 11 unsupported, 2 inventory-only, 8 checker omissions |
 | Implemented CSS traceability | RED: self-satisfying 284 count, unrecognized and metadata-only claims |
 | Unsupported CSS classification | 92 production, 23 speech/aural, 1 deprecated, 1 false scrape |
 | SSpec/manual quality | FAIL: missing plan/REQs, stale manuals/counts, no executed evidence |
 | Closed checker | Landed in `fc73115d0214`; behavioral counts remain zero without independent admission |
 | Inert/media/form/caption/animation | Bounded source/spec/manual work landed; qualified execution and corpus accounting remain open |
-| Iframe | Inert `srcdoc` DrawIR flattening, focused spec, and manual landed; five legacy pixel callers, exact qualified parity, and child script/network/input authority remain RED |
-| Direct-host CORS | Credentialless `omit`/cross-origin `same-origin` now stage OPTIONS→actual through FetchEngine with filtered headers and zero cookie ownership; `include`, qualified execution, and broader resource modes remain RED |
+| Iframe | Design landed in `771dfb23835b`; TDD regeneration and implementation remain open |
 | HTML `hr` | Current bounded lane: native UA defaults plus exact `0`/`0px`/`none`/`hidden` and mixed-invalid/missing border cascade controls through semantic Web layout, DrawIR, and exact Engine2D pixels; qualified execution remains open |
 | Fieldset/legend selected profile | Current bounded lane: canonical UA defaults, four-side authored border clearing, semantic/style/exact DrawIR/pixel SSpec, and handwritten draft mirror; special legend formatting/cutout, disabled propagation, admitted docgen, and qualified execution remain open |
 | Definition-list selected profile | Current bounded lane: cross-kind omitted-end-tag repair, canonical `dl`/`dt`/`dd` UA defaults and authored overrides, semantic/style/exact DrawIR/pixel SSpec, and handwritten draft mirror; admitted docgen, qualified execution, and corpus accounting remain open |
@@ -97,37 +67,8 @@ Frozen helpers:
    - cannot declare executable PASS.
 
 Current next lanes are the independently admitted runner/manual workflow,
-iframe legacy-caller parity/migration, and per-row corpus accounting. Do not
+fresh bounded iframe TDD regeneration, and per-row corpus accounting. Do not
 reopen landed bounded behavior unless its focused evidence regresses.
-
-## Batch 22/23 bounded rendering addendum (2026-07-31)
-
-| Lane | Result | Status |
-|---|---|---|
-| CSS flex column-gap wrap | Landed in `d620217fb0c`: row wrapping counts column gap before admitting the next item and traces exact rectangles through canonical Draw IR and Engine2D pixels. | STATIC/EVIDENCE-HELD; qualified execution/docgen unavailable |
-| Finite animation terminal cache | Landed in `1671c187b9f`: terminal animation artifacts remain timed and reusable while untimed static entries cannot satisfy terminal requests. | STATIC/EVIDENCE-HELD; qualified execution/docgen/performance unavailable |
-
-These bounded rows do not change HTML/CSS inventory counts. Iframe work must
-first define the child sandbox-origin and broker-capability contract; the
-current Draw IR embedding design explicitly leaves child script sharing,
-navigation, and input unsupported. That architecture lane remains RED before
-fresh TDD or implementation.
-
-## Batch 24/25 bounded rendering addendum (2026-07-31)
-
-| Lane | Result | Status |
-|---|---|---|
-| Collapsed table border precedence | Landed in `d01ff82c92a`: competing collapsed borders prefer width before style and retain exact canonical Draw IR/Engine2D controls. | STATIC/EVIDENCE-HELD; qualified execution unavailable |
-| Resolved image opacity cache | Landed in `7fa1a11ff3c`: the shared Engine2D resource caches one bounded opaque/translucent classification while preserving repeated blend pixels and rejecting malformed data. | STATIC/PERF-EVIDENCE-HELD; no numeric runtime claim |
-| Viewport-fixed positioning | The replacement lane is ACTIVE/UNCOMMITTED; predecessor `98ec2f997eb` is rejected because style ownership, layout dispatch, paint partitioning, and `z-index:auto` semantics are unsound. | RED; no accepted implementation or execution |
-
-Animation lifecycle candidate `47df593f600` remains REJECTED/DO-NOT-MERGE:
-path-only target identity, scalar animation state, lossy millisecond
-arithmetic, unbounded stale tasks, and missing cancellation/restart/detachment
-coverage require a new design after the atomic DOM-route dependency. Iframe is
-DESIGN-GO only and implementation RED until the broker owns frame identity,
-origin, and capability state. These rows do not change inventory counts or
-admit runtime, docgen, performance, aggregate HTML/CSS, or goal PASS.
 
 ## Serialized source lanes
 
@@ -165,16 +106,3 @@ mark a behavior covered.
 - qualified execution provenance;
 - independent review;
 - rebase/file-count safety and GitHub push.
-
-## Reviewed bounded reconciliation (2026-07-31)
-
-This addendum is additive: earlier inventory, RED, FAIL, and execution-held
-rows remain authoritative outside the bounded cases below.
-
-| Lane | Reviewed result | Status |
-|---|---|---|
-| CSS gap declaration winners | `be08f84be5c` + `1d16db5e149` + `dc55d6dffde` + `ca91c19d7f8` retain a valid `gap` winner across supported `N`/`Npx`, duplicate, `initial`, `unset`, and default-parent-inherit cases. | STATIC REVIEW PASS; nonzero `inherit` and `revert-layer` remain RED; qualified execution/docgen held |
-| Layout keyframe work | `f57d9bc4600` skips unused layout keyframes and `782477146a9` preserves an empty final keyframe. | STATIC REVIEW PASS / PERF-EVIDENCE-HELD; lifecycle and multi-list behavior remain RED |
-
-These rows do not promote aggregate HTML/CSS coverage or a production runtime
-claim.

@@ -1,7 +1,10 @@
 # BUG: baremetal externs have no interpreter binding — `unsafe_addr_of` and `rt_x86_syscall` fail closed in hosted unit specs
+## Open 2026-09-16 — needs owner triage
 
-Status: OPEN (P2)
-Status re-verified 2026-08-17 by source inspection (triage shard 02).
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
+
+**Status:** OPEN
 **Found:** 2026-08-04
 **Severity:** medium — 3 confirmed failing examples in
 `test/01_unit/os/posix/`. The failure is a hard error, so the affected
@@ -147,3 +150,8 @@ off-limits per repo rules. The prior blanket justification was wrong in
 general but happens to be correct for this specific bug, now backed by
 grep evidence rather than assumption. Status unchanged: **OPEN —
 ARCHITECTURAL for the 2 confirmed names, verified 2026-08-10**.
+
+## Triage 2026-09-13
+
+Already marked "OPEN -- ARCHITECTURAL for the 2 confirmed names" (`unsafe_addr_of`, `rt_x86_syscall`), registry gap is in `src/compiler_rust/compiler/src/interpreter_extern/mod.rs`, off-limits per repo rules for this pass. No new evidence gathered. Leaving OPEN.
+

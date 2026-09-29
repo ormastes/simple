@@ -59,3 +59,21 @@ and object generation. It reports the exact failing stage and retains generated
 bitcode/object files. Never treat replay success as Stage 4 success: build the
 pure-Simple executable, run its sanity command and essential-tool smoke, then
 deploy that executable.
+
+## Close recovery with the Phase 4 system gate
+
+After an admitted pure-Simple Stage 3 produces a current-source full CLI, use
+the exact candidate and adjacent provenance with
+`test/03_system/compiler/phase4_compiler_debug_recovery_spec.spl`. Configure
+`PHASE4_DEBUG_CANDIDATE`, `PHASE4_DEBUG_PROVENANCE`,
+`PHASE4_DEBUG_DEPLOYED`, and a lane-owned `PHASE4_DEBUG_ARTIFACT_ROOT` as
+documented in
+`doc/03_plan/sys_test/phase4_compiler_debug_recovery.md`.
+
+The system gate reuses the post-bootstrap admission checker, then checks the
+compiler, library, MCP, and LSP trees; executes the MCP stdio integration;
+native-builds the C5 character ABI fixture and requires exit `42`; requires an
+explicit canonical DAP PASS and rejects SKIP; and proves the installed binary
+hash equals the admitted candidate. Missing Stage 4 authority is
+`TEST_BLOCKED`. Never run this acceptance surface with the Rust seed or count a
+diagnostic replay as runtime PASS.

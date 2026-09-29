@@ -270,7 +270,13 @@ impl CommonMistake {
             Self::DictInsteadOfStruct => "Use struct literal: Type(field: value) or Type { field: value }".to_string(),
             Self::MissingIndentAfterColon => "Add indentation after colon".to_string(),
             Self::WrongIndentLevel => "Fix indentation level".to_string(),
-            _ => "See error message for details".to_string(),
+            Self::RustLifetime => "Remove the lifetime annotation ('a) — Simple has no lifetime syntax".to_string(),
+            Self::RustTurbofish => "Use <T> directly instead of ::<T>".to_string(),
+            Self::CppTemplate => "Put generic parameters after the name: Name<T>, not template<T>".to_string(),
+            Self::CppNamespace => "Use 'mod' instead of 'namespace'".to_string(),
+            Self::TsArrowFunction => "Use ':' for function bodies; '=>' is for lambdas only".to_string(),
+            Self::CSemicolon => "Remove the semicolon (optional in Simple except for same-line statements)".to_string(),
+            Self::SemicolonAfterBlock => "Remove the semicolon after the closing brace".to_string(),
         }
     }
 
@@ -341,8 +347,19 @@ pub fn detect_common_mistake_lookahead(
     next: Option<&Token>,
     after_next: Option<&Token>,
 ) -> Option<CommonMistake> {
-    // Check for Python-style 'def'
-    if current.lexeme == "def" && matches!(current.kind, TokenKind::Identifier { .. }) {
+    // Check for Python-style 'def'.
+    //
+    // `def` is NOT a Simple keyword, so it is a perfectly legal identifier — e.g.
+    // `var def = GenericTypeDef.new(name)` in
+    // src/compiler_rust/lib/std/src/verification/lean/auto_gen.spl. Firing on the
+    // bare token flagged those uses as Python-isms. Python's `def` is always
+    // immediately followed by the function NAME (`def add(a, b):`), so require an
+    // identifier in `next` before reporting. Same spirit as the `void`/`new`
+    // position guards below.
+    if current.lexeme == "def"
+        && matches!(current.kind, TokenKind::Identifier { .. })
+        && matches!(next.map(|t| &t.kind), Some(TokenKind::Identifier { .. }))
+    {
         return Some(CommonMistake::PythonDef);
     }
 
@@ -381,9 +398,21 @@ pub fn detect_common_mistake_lookahead(
     // Check for 'void' (Java/C++) - but NOT when used as a type annotation after ->
     // In Simple, -> void is a valid (but verbose) way to say "no return value"
     // Only flag Java-style "void foo()" pattern, not "fn foo() -> void"
+    // The Arrow guard alone only covers a bare `-> void`. `void` is also a legal
+    // Simple type in two more positions that this rule was flagging:
+    //   * inside a generic argument list — `-> Result<void, FileError>` (previous
+    //     is `<` or `,`), and
+    //   * as a pointee — `*void` (previous is `*`), e.g.
+    //     `fn sys_mmap(addr: *void, ...)` in std's file/__init__.spl.
+    //   * as the unit VALUE in a call argument — `return Ok(void)` for a
+    //     `Result<void, E>` function (previous is `(`).
+    // Java's `void foo()` never has any of these to its left.
     if current.lexeme == "void"
         && matches!(current.kind, TokenKind::Identifier { .. })
-        && !matches!(previous.kind, TokenKind::Arrow)
+        && !matches!(
+            previous.kind,
+            TokenKind::Arrow | TokenKind::Lt | TokenKind::Comma | TokenKind::Star | TokenKind::LParen
+        )
     {
         return Some(CommonMistake::JavaVoid);
     }
@@ -396,7 +425,12 @@ pub fn detect_common_mistake_lookahead(
     // - Variable names in patterns (e.g., val (saved_path, new, diff) = ...)
     // - After comma in destructuring (e.g., val (x, new, y) = ...)
     // - After opening paren in patterns (e.g., val (new, ...) = ...)
-    // - After operators (e.g., is_new or new)
+    // - After operators (e.g., is_new or new), comparison operators included
+    //   (e.g. `old.raw == new.raw`) — this allow-list previously carried the
+    //   arithmetic/logical operators only and missed every comparison, so
+    //   `x == new.y` (and !=, <, >, <=, >=) raised a bogus JavaNew hint even
+    //   though `x + new.y` did not. See
+    //   doc/08_tracking/bug/java_new_hint_fires_after_comparison_operators_2026-09-13.md.
     // Only flag standalone 'new Type()' pattern as a mistake
     if matches!(current.kind, TokenKind::New)
         && !matches!(
@@ -415,7 +449,24 @@ pub fn detect_common_mistake_lookahead(
                 | TokenKind::Minus
                 | TokenKind::Star
                 | TokenKind::Slash
+                | TokenKind::Eq
+                | TokenKind::NotEq
+                | TokenKind::Lt
+                | TokenKind::Gt
+                | TokenKind::LtEq
+                | TokenKind::GtEq
         )
+        // Positive lookahead, mirroring the `function` check below: the Java
+        // mistake is `new Type(...)`, so it is only a mistake when a TYPE NAME
+        // follows. Without this, the previous-token denylist had to enumerate
+        // every position `new` can legally appear in as an ordinary
+        // identifier, and it silently missed several — `for new in [...]`
+        // (previous = `for`), `new` as a loop/collection element, `f(new)`
+        // after a non-listed token — turning a *hint* into a hard parse
+        // failure for valid programs. Requiring the following token to be an
+        // identifier keeps every real `new Type(...)` diagnosis and drops
+        // exactly the false positives.
+        && next.is_some_and(|token| matches!(token.kind, TokenKind::Identifier { .. }))
     {
         return Some(CommonMistake::JavaNew);
     }
@@ -475,10 +526,18 @@ pub fn detect_common_mistake_lookahead(
         }
     }
 
-    // Check for TypeScript arrow function: ) =>
-    if matches!(current.kind, TokenKind::FatArrow) && matches!(previous.kind, TokenKind::RParen) {
-        return Some(CommonMistake::TsArrowFunction);
-    }
+    // NOTE: the `) =>` shape used to be reported here as
+    // `CommonMistake::TsArrowFunction` ("'=>' is not used"). That is no longer
+    // true: `() => e`, `(x) => e` and `(x, y) => e` are supported arrow-lambda
+    // productions (see `try_arrow_lambda_from_paren_list`,
+    // expressions/primary/collections.rs), and the documented syntax reference
+    // uses the form. `) =>` matched EXACTLY the now-valid production and
+    // nothing else, so the rule can only misfire on correct code; it is
+    // removed rather than narrowed. The `TsArrowFunction` variant itself is
+    // kept — it still carries the guidance text for the BARE `x => e` form,
+    // which remains unimplemented in both parsers.
+    // doc/08_tracking/bug/
+    // seed_parser_arrow_lambda_block_expr_wrapped_return_type_2026-08-23.md
 
     // Check for wrong brackets in generics: identifier[
     //
@@ -646,8 +705,184 @@ mod tests {
         );
         let prev = Token::new(TokenKind::Newline, Span::new(0, 0, 1, 1), "".to_string());
 
-        let mistake = detect_common_mistake(&token, &prev, None);
+        // Python's `def` is always followed by the function NAME. This test used to
+        // pass `None` for `next`; it now supplies that name, because PythonDef is
+        // only reported in definition position (see the identifier regression test
+        // below). Strengthened, not relaxed: the Python shape must still be caught.
+        let name = ident_token("add");
+        let mistake = detect_common_mistake(&token, &prev, Some(&name));
         assert_eq!(mistake, Some(CommonMistake::PythonDef));
+    }
+
+    /// Build a bare identifier token with the given lexeme.
+    fn ident_token(name: &str) -> Token {
+        Token::new(
+            TokenKind::Identifier {
+                name: name.to_string(),
+                pattern: NamePattern::detect(name),
+            },
+            Span::new(0, name.len(), 1, 1),
+            name.to_string(),
+        )
+    }
+
+    /// `def` is not a Simple keyword, so it is a legal identifier. Regression for
+    /// the suite rows on `var def = GenericTypeDef.new(name)` in
+    /// src/compiler_rust/lib/std/src/verification/lean/auto_gen.spl, which were
+    /// reported as Python-isms. Fails before the definition-position guard.
+    #[test]
+    fn test_def_as_identifier_is_not_a_python_mistake() {
+        let def = ident_token("def");
+        let var = Token::new(TokenKind::Var, Span::new(0, 3, 1, 1), "var".to_string());
+        let assign = Token::new(TokenKind::Assign, Span::new(4, 5, 1, 5), "=".to_string());
+
+        // `var def = ...` — assignment target, not a definition.
+        assert_eq!(detect_common_mistake(&def, &var, Some(&assign)), None);
+        // `def = def.add_nested_field(field)` — reassignment, prev is a newline.
+        let nl = Token::new(TokenKind::Newline, Span::new(0, 0, 1, 1), "".to_string());
+        assert_eq!(detect_common_mistake(&def, &nl, Some(&assign)), None);
+    }
+
+    /// `void` is a legal Simple type inside a generic argument list and behind a
+    /// pointer sigil. Regression for the suite rows on
+    /// `fn sys_munmap(...) -> Result<void, FileError>` and `addr: *void` in
+    /// src/compiler_rust/lib/std/src/file/__init__.spl. Fails before the
+    /// position guard, which previously excluded only a bare `-> void`.
+    #[test]
+    fn test_void_in_type_position_is_not_a_java_mistake() {
+        let void = ident_token("void");
+        let comma = Token::new(TokenKind::Comma, Span::new(0, 1, 1, 1), ",".to_string());
+
+        for prev_kind in [
+            TokenKind::Lt,
+            TokenKind::Comma,
+            TokenKind::Star,
+            TokenKind::Arrow,
+            TokenKind::LParen,
+        ] {
+            let prev = Token::new(prev_kind, Span::new(0, 1, 1, 1), "".to_string());
+            assert_eq!(
+                detect_common_mistake(&void, &prev, Some(&comma)),
+                None,
+                "void in a type position must not be flagged"
+            );
+        }
+    }
+
+    /// The positive cases must keep firing — the guards above narrow position,
+    /// they must not disable either rule.
+    #[test]
+    fn test_java_void_declaration_still_detected() {
+        let void = ident_token("void");
+        let nl = Token::new(TokenKind::Newline, Span::new(0, 0, 1, 1), "".to_string());
+        let name = ident_token("foo");
+        assert_eq!(
+            detect_common_mistake(&void, &nl, Some(&name)),
+            Some(CommonMistake::JavaVoid)
+        );
+    }
+
+    /// `new` is a legal Simple identifier after a comparison operator, not just
+    /// after the arithmetic/logical ones. Regression for the suite rows on
+    /// `if old.raw == new.raw:` in
+    /// src/lib/nogc_async_mut/fs_driver/fat32_stub.spl, which turned a style
+    /// hint into a hard parse ERROR and cost every importing spec its whole
+    /// run. See
+    /// doc/08_tracking/bug/java_new_hint_fires_after_comparison_operators_2026-09-13.md.
+    #[test]
+    fn test_new_after_comparison_operator_is_not_a_java_mistake() {
+        let new_tok = Token::new(TokenKind::New, Span::new(0, 3, 1, 1), "new".to_string());
+        let name = ident_token("raw");
+
+        for prev_kind in [
+            TokenKind::Eq,
+            TokenKind::NotEq,
+            TokenKind::Lt,
+            TokenKind::Gt,
+            TokenKind::LtEq,
+            TokenKind::GtEq,
+        ] {
+            let prev = Token::new(prev_kind, Span::new(0, 1, 1, 1), "".to_string());
+            assert_eq!(
+                detect_common_mistake(&new_tok, &prev, Some(&name)),
+                None,
+                "`new` after a comparison operator must not be flagged"
+            );
+        }
+    }
+
+    /// The positive case must keep firing — the fix above narrows the
+    /// allow-list, it must not disable the rule for the pattern it exists to
+    /// catch.
+    #[test]
+    fn test_java_new_declaration_still_detected() {
+        let new_tok = Token::new(TokenKind::New, Span::new(0, 3, 1, 1), "new".to_string());
+        let nl = Token::new(TokenKind::Newline, Span::new(0, 0, 1, 1), "".to_string());
+        let name = ident_token("Foo");
+        assert_eq!(
+            detect_common_mistake(&new_tok, &nl, Some(&name)),
+            Some(CommonMistake::JavaNew)
+        );
+    }
+
+    /// `suggestion()` is what the compiler actually prints — `format!("Common
+    /// mistake detected: {}", mistake.suggestion())` at
+    /// parser_helpers.rs:92 and parser_impl/core.rs:157 — so a variant with no
+    /// explicit arm in `suggestion()`'s match silently produced "Common
+    /// mistake detected: See error message for details": an ERROR-severity
+    /// diagnostic that names no mistake at all. 7 of 32 variants
+    /// (RustLifetime, RustTurbofish, CppTemplate, CppNamespace,
+    /// TsArrowFunction, CSemicolon, SemicolonAfterBlock) fell through the old
+    /// `_ => "See error message for details"` wildcard. The wildcard is now
+    /// removed entirely, so a FUTURE variant added without a `suggestion()`
+    /// arm fails to COMPILE (match no longer exhaustive) rather than
+    /// silently producing the useless generic text again — this test is a
+    /// second, explicit guard for the same property. See
+    /// doc/08_tracking/bug/common_mistake_generic_suggestion_fallback_2026-09-14.md.
+    #[test]
+    fn test_no_common_mistake_variant_has_the_generic_suggestion() {
+        let all = [
+            CommonMistake::PythonDef,
+            CommonMistake::PythonTrue,
+            CommonMistake::PythonFalse,
+            CommonMistake::PythonElif,
+            CommonMistake::RustLetMut,
+            CommonMistake::RustFnMut,
+            CommonMistake::RustLifetime,
+            CommonMistake::RustMacro,
+            CommonMistake::RustTurbofish,
+            CommonMistake::JavaPublicClass,
+            CommonMistake::JavaVoid,
+            CommonMistake::JavaNew,
+            CommonMistake::JavaThis,
+            CommonMistake::CppTemplate,
+            CommonMistake::CppNamespace,
+            CommonMistake::TsFunction,
+            CommonMistake::TsConst,
+            CommonMistake::TsLet,
+            CommonMistake::TsInterface,
+            CommonMistake::TsArrowFunction,
+            CommonMistake::CSemicolon,
+            CommonMistake::CTypeFirst,
+            CommonMistake::MissingColon,
+            CommonMistake::WrongBrackets,
+            CommonMistake::ExplicitSelf,
+            CommonMistake::VerboseReturnType,
+            CommonMistake::SemicolonAfterBlock,
+            CommonMistake::MissingCommaInArgs,
+            CommonMistake::MissingColonBeforeBlock,
+            CommonMistake::DictInsteadOfStruct,
+            CommonMistake::MissingIndentAfterColon,
+            CommonMistake::WrongIndentLevel,
+        ];
+        for m in &all {
+            let s = m.suggestion();
+            assert_ne!(
+                s, "See error message for details",
+                "{:?} has no specific suggestion() arm",
+                m
+            );
+        }
     }
 
     #[test]

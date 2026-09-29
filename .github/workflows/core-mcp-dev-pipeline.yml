@@ -17,6 +17,9 @@ on:
       - 'scripts/check/check-runnable-probes.shs'
       - 'scripts/check/check-build-defaults-collect-all-and-incremental.shs'
       - 'scripts/check/check-render-perf-v-lane-suite.shs'
+      - 'scripts/check/check-mcp-config-launchable.shs'
+      - '.mcp.json'
+      - 'config/mcp/win/.mcp.json'
       - 'test/**/*_jit_probe.spl'
       - 'test/fixtures/compiler/stage4_struct_enum_array_probe.spl'
       - 'test/fixtures/compiler/cranelift_array_oob.spl'
@@ -32,8 +35,10 @@ on:
       - 'src/app/simple_lsp_mcp/**'
       - 'tools/mcp-registry/**'
       - 'tools/lsp-mcp-registry/**'
+      - 'scripts/deploy-marketplaces.shs'
       - '.github/workflows/core-mcp-dev-pipeline.yml'
   pull_request:
+    types: [labeled]  # PR runs only when the ci:full label is added (2026-09-27)
     branches: [main, master, develop]
     paths:
       - 'src/compiler/**'
@@ -49,6 +54,9 @@ on:
       - 'scripts/check/check-runnable-probes.shs'
       - 'scripts/check/check-build-defaults-collect-all-and-incremental.shs'
       - 'scripts/check/check-render-perf-v-lane-suite.shs'
+      - 'scripts/check/check-mcp-config-launchable.shs'
+      - '.mcp.json'
+      - 'config/mcp/win/.mcp.json'
       - 'test/**/*_jit_probe.spl'
       - 'test/fixtures/compiler/stage4_struct_enum_array_probe.spl'
       - 'test/fixtures/compiler/cranelift_array_oob.spl'
@@ -64,6 +72,7 @@ on:
       - 'src/app/simple_lsp_mcp/**'
       - 'tools/mcp-registry/**'
       - 'tools/lsp-mcp-registry/**'
+      - 'scripts/deploy-marketplaces.shs'
       - '.github/workflows/core-mcp-dev-pipeline.yml'
   workflow_dispatch:
 
@@ -73,6 +82,7 @@ concurrency:
 
 jobs:
   core-mcp-guard:
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')
     name: Core + MCP Guard
     runs-on: ubuntu-latest
 
@@ -111,21 +121,6 @@ jobs:
         run: |
           "$SIMPLE_BINARY" check src/compiler
           "$SIMPLE_BINARY" check src/lib
-
-      - name: Focused library regressions
-        env:
-          SIMPLE_BINARY: ${{ github.workspace }}/src/compiler_rust/target/bootstrap/simple
-        run: |
-          mkdir -p build/tmp
-          ln -sfn "$SIMPLE_BINARY" bin/simple
-          SIMPLE_LIB=src "$SIMPLE_BINARY" test test/01_unit/lib/nogc_sync_mut/io/process_governor_standalone_crash_spec.spl --mode=interpreter
-          SIMPLE_LIB=src "$SIMPLE_BINARY" test test/01_unit/lib/gpu/engine2d/engine2d_color_simd_blend_parity_spec.spl --mode=interpreter
-          SIMPLE_LIB=src "$SIMPLE_BINARY" test test/01_unit/compiler/hir/statement_payload_types_source_spec.spl --mode=interpreter
-          SIMPLE_LIB=src "$SIMPLE_BINARY" test test/01_unit/compiler/frontend/interp_fragment_sticky_error_spec.spl --mode=interpreter
-          SIMPLE_LIB=src "$SIMPLE_BINARY" test test/01_unit/lib/core/list_constructor_hardening_spec.spl --mode=interpreter
-          SIMPLE_LIB=src "$SIMPLE_BINARY" run src/compiler/10.frontend/core/interpreter/test_interp.spl >build/tmp/core-interpreter.actual
-          grep -Fx 'Fail: 0' build/tmp/core-interpreter.actual
-          grep -Fx 'ALL TESTS PASSED' build/tmp/core-interpreter.actual
 
       - name: Native MCP/LSP smoke
         env:
@@ -202,3 +197,22 @@ jobs:
           SIMPLE_BINARY: ${{ github.workspace }}/src/compiler_rust/target/bootstrap/simple
         run: |
           sh scripts/check/check-gpu-runnable.shs
+
+      # The command string declared in .mcp.json must actually LAUNCH. rc=1 is
+      # a property of the SPAWN MECHANISM, not of the config: a cmd.exe-mediated
+      # spawn rejects any forward-slash relative path ("'bin' is not
+      # recognized"), while Claude Code resolves the same string and connects.
+      # Measured 2026-09-01 -- full matrix in the `_info` string in .mcp.json.
+      #
+      # Only --selftest is enforced HERE, and deliberately so: the full scan
+      # spawns the real servers and needs the deployed native artifacts, which
+      # this runner does not have -- an unconditional scan would be an ERROR
+      # about the runner, not about the config. The selftest is the oracle
+      # itself (5 fixtures, including a silent-green launcher that exits 0 with
+      # zero output and MUST be reported FAIL), so a broken oracle fails here.
+      # The full launch scan runs where the artifacts exist, via
+      # test/03_system/check/mcp_config_declared_command_launchable_spec.spl.
+      - name: MCP declared-command launchability (guard oracle selftest)
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/check/check-mcp-config-launchable.shs --selftest

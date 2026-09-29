@@ -4,11 +4,13 @@
 use std.cli.cli_util (get_cli_args)
 use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
 use std.log.{error}
+use std.common.json.serializer.{json_escape_string}
+use app.remote_test.binary_placement.{remote_simple_binary_path}
 
 val TOOL_NAME = "Simple Remote Test"
 val TOOL_VERSION = "0.1.0"
 val DEFAULT_CONFIG_PATH = "config/t32/t32_terminal.sdn"
-val DEFAULT_REMOTE_SIMPLE_BIN = "bin/simple"
+val DEFAULT_REMOTE_SIMPLE_BIN = "auto"
 
 fn main() -> i64:
     val raw_args = get_cli_args()
@@ -52,9 +54,15 @@ fn main() -> i64:
         return 1
 
     val config_path = remote_option_value(args, "--config", DEFAULT_CONFIG_PATH)
-    val simple_bin = remote_option_value(args, "--simple-bin", DEFAULT_REMOTE_SIMPLE_BIN)
+    val remote_os = remote_option_value(args, "--remote-os", "linux")
+    val simple_bin_result = remote_simple_binary_path(remote_os, remote_option_value(args, "--simple-bin", DEFAULT_REMOTE_SIMPLE_BIN))
+    val simple_bin = match simple_bin_result:
+        case Ok(path): path
+        case Err(message):
+            remote_print_error(log_opts.log_mode, message)
+            return 1
     if log_opts.log_mode == "json":
-        print "{\"command\":\"remote-test\",\"status\":\"planned\",\"terminal\":\"{terminal_name}\",\"test_path\":\"{test_path}\",\"config\":\"{config_path}\",\"remote_simple_bin\":\"{simple_bin}\"}"
+        print "{\"command\":\"remote-test\",\"status\":\"planned\",\"terminal\":\"{json_escape_string(terminal_name)}\",\"test_path\":\"{json_escape_string(test_path)}\",\"config\":\"{json_escape_string(config_path)}\",\"remote_os\":\"{json_escape_string(remote_os)}\",\"remote_simple_bin\":\"{json_escape_string(simple_bin)}\"}"
     else:
         val progress = render_progress(log_opts.progress, 1, 1, "remote-test-plan")
         if progress != "":
@@ -62,6 +70,7 @@ fn main() -> i64:
         print "Remote test terminal: {terminal_name}"
         print "Test path: {test_path}"
         print "Config: {config_path}"
+        print "Remote OS: {remote_os}"
         print "Remote simple binary: {simple_bin}"
     0
 
@@ -78,7 +87,8 @@ fn print_help():
     print "  -h, --help              Show this help message"
     print "  -v, --version           Show version information"
     print "  --config <PATH>         Terminal config path (default: {DEFAULT_CONFIG_PATH})"
-    print "  --simple-bin <PATH>     Remote simple binary (default: {DEFAULT_REMOTE_SIMPLE_BIN})"
+    print "  --remote-os <OS>        Remote OS: linux, windows, simpleos (default: linux)"
+    print "  --simple-bin <PATH>     Remote simple binary (default: target-aware auto placement)"
     print ""
     print "Shared log options:"
     for line in log_options_help():
@@ -112,9 +122,9 @@ fn remote_positional_arg(args: [text], index: i64) -> text:
     var i = 0
     while i < args.len():
         val arg = args[i]
-        if arg == "--config" or arg == "--simple-bin":
+        if arg == "--config" or arg == "--simple-bin" or arg == "--remote-os":
             i = i + 2
-        elif arg.starts_with("--config=") or arg.starts_with("--simple-bin="):
+        elif arg.starts_with("--config=") or arg.starts_with("--simple-bin=") or arg.starts_with("--remote-os="):
             i = i + 1
         elif arg.starts_with("-"):
             i = i + 1
@@ -129,9 +139,9 @@ fn remote_first_unknown_option(args: [text]) -> text:
     var i = 0
     while i < args.len():
         val arg = args[i]
-        if arg == "--config" or arg == "--simple-bin":
+        if arg == "--config" or arg == "--simple-bin" or arg == "--remote-os":
             i = i + 2
-        elif arg.starts_with("--config=") or arg.starts_with("--simple-bin="):
+        elif arg.starts_with("--config=") or arg.starts_with("--simple-bin=") or arg.starts_with("--remote-os="):
             i = i + 1
         elif arg.starts_with("-"):
             return arg
@@ -159,3 +169,5 @@ fn remote_clean_log_args(args: [text]) -> [text]:
             cleaned.push(arg)
         i = i + 1
     cleaned
+
+export remote_simple_binary_path

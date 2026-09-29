@@ -1,0 +1,127 @@
+use std.spec.*
+use std.nogc_sync_mut.composition.provider_generation.*
+use std.nogc_sync_mut.composition.environment_variants.contracts_v1.*
+use std.nogc_sync_mut.composition.environment_variants.binding_runtime_v1.*
+
+fn digest(value: u64) -> EnvironmentDigest256V1:
+    EnvironmentDigest256V1(w0: value, w1: 0u64, w2: 0u64, w3: 0u64)
+
+fn candidate_v1(implementation: u64) -> ProviderActivationCandidateV1:
+    ProviderActivationCandidateV1(
+        provider_handle: 41u64, provider_identity_digest: 257u64,
+        implementation_digest: implementation, abi_digest: 771u64,
+        expected_artifact_digest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        artifact_digest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        query_symbol_address: 4096, admitted: true, process_callable: true)
+
+fn binding_v1(generation: u64) -> VariantFacetBindingV1:
+    VariantFacetBindingV1(
+        facet_id: ENV_FACET_FRONTEND_V1, interface_major: 1u16,
+        interface_minor: 0u16, slot_index: 0u32,
+        provider_identity: digest(257u64), variant_identity: digest(513u64),
+        provider_generation: generation, interface_handle: 100u64,
+        provider_context: 0u64)
+
+fn rejection_v1() -> VariantRejectionV1:
+    VariantRejectionV1(
+        provider_identity: digest(700u64), variant_identity: digest(701u64),
+        reason_code: 9u32, phase_code: 6u16)
+
+fn plan_v1(publication: u64, generation: u64, rejection_count: u32) -> BindingPlanV1:
+    BindingPlanV1(
+        descriptor_size: 224u32, schema_version: ENV_VARIANT_SCHEMA_V1,
+        plan_digest: digest(publication + 1000u64), environment_identity: digest(1u64),
+        environment_generation: 1u64, catalog_digest: digest(2u64),
+        catalog_generation: publication, policy_digest: digest(3u64),
+        dependency_lock_digest: digest(4u64), publication_generation: publication,
+        facet_bindings: EnvironmentArenaRangeV1(offset: 0u32, count: 1u32),
+        selected_variant_identities: EnvironmentArenaRangeV1(offset: 0u32, count: 1u32),
+        rejections: EnvironmentArenaRangeV1(offset: 0u32, count: rejection_count))
+
+describe "generation-pinned environment binding runtime V1":
+    it "pins a coarse session, cuts over new sessions, and drains the old generation":
+        val manager = ProviderGenerationManagerV1.create()
+        val first = provider_generation_activate_v1(manager, candidate_v1(101u64))
+        val runtime = BindingRuntimeV1.create()
+        val published = binding_runtime_publish_plan_v1(
+            runtime, manager, plan_v1(1u64, first.generation, 1u32), [binding_v1(first.generation)],
+            [digest(513u64)], [rejection_v1()], [41u64])
+        expect(published.status).to_equal(BINDING_RUNTIME_OK_V1)
+        expect(runtime.active_selected_variant_identities.len()).to_equal(1)
+        expect(runtime.active_selected_variant_identities[0].w0).to_equal(513u64)
+        expect(runtime.active_rejections.len()).to_equal(1)
+        expect(runtime.active_rejections[0].reason_code).to_equal(9u32)
+        val old_session = binding_runtime_open_session_v1(runtime, manager)
+        expect(old_session.status).to_equal(BINDING_RUNTIME_OK_V1)
+        expect(old_session.facet_bindings.len()).to_equal(1)
+        expect(binding_runtime_validate_session_v1(runtime, manager, old_session)).to_equal(BINDING_RUNTIME_OK_V1)
+
+        val second = provider_generation_activate_v1(manager, candidate_v1(202u64))
+        val replacement = binding_runtime_publish_plan_v1(
+            runtime, manager, plan_v1(2u64, second.generation, 0u32), [binding_v1(second.generation)],
+            [digest(513u64)], [], [41u64])
+        expect(replacement.status).to_equal(BINDING_RUNTIME_OK_V1)
+        val new_session = binding_runtime_open_session_v1(runtime, manager)
+        expect(new_session.status).to_equal(BINDING_RUNTIME_OK_V1)
+        expect(new_session.publication_generation).to_equal(2u64)
+        expect(binding_runtime_validate_session_v1(runtime, manager, old_session)).to_equal(BINDING_RUNTIME_OK_V1)
+        expect(binding_runtime_release_session_v1(runtime, manager, old_session).status).to_equal(BINDING_RUNTIME_OK_V1)
+        expect(binding_runtime_drain_v1(runtime, manager)).to_equal(1)
+        expect(binding_runtime_validate_session_v1(runtime, manager, new_session)).to_equal(BINDING_RUNTIME_OK_V1)
+        expect(binding_runtime_release_session_v1(runtime, manager, new_session).status).to_equal(BINDING_RUNTIME_OK_V1)
+
+    it "fails closed for stale plans and stale provider generations":
+        val manager = ProviderGenerationManagerV1.create()
+        val active = provider_generation_activate_v1(manager, candidate_v1(101u64))
+        val runtime = BindingRuntimeV1.create()
+        val first = binding_runtime_publish_plan_v1(
+            runtime, manager, plan_v1(1u64, active.generation, 0u32), [binding_v1(active.generation)],
+            [digest(513u64)], [], [41u64])
+        expect(first.status).to_equal(BINDING_RUNTIME_OK_V1)
+        val stale_plan = binding_runtime_publish_plan_v1(
+            runtime, manager, plan_v1(1u64, active.generation, 0u32), [binding_v1(active.generation)],
+            [digest(513u64)], [], [41u64])
+        expect(stale_plan.status).to_equal(BINDING_RUNTIME_STALE_PLAN_V1)
+        val stale_generation = binding_runtime_publish_plan_v1(
+            runtime, manager, plan_v1(2u64, active.generation + 1u64, 0u32),
+            [binding_v1(active.generation + 1u64)], [digest(513u64)], [], [41u64])
+        expect(stale_generation.status).to_equal(BINDING_RUNTIME_STALE_GENERATION_V1)
+        expect(runtime.active_publication_generation).to_equal(1u64)
+
+    it "rejects forged session metadata and duplicate release":
+        val manager = ProviderGenerationManagerV1.create()
+        val active = provider_generation_activate_v1(manager, candidate_v1(101u64))
+        val runtime = BindingRuntimeV1.create()
+        binding_runtime_publish_plan_v1(
+            runtime, manager, plan_v1(1u64, active.generation, 0u32), [binding_v1(active.generation)],
+            [digest(513u64)], [], [41u64])
+        val session = binding_runtime_open_session_v1(runtime, manager)
+        var forged = BindingRuntimeSessionV1(
+            status: session.status, session_id: session.session_id,
+            plan_digest: session.plan_digest,
+            publication_generation: session.publication_generation,
+            facet_bindings: session.facet_bindings,
+            provider_handles: session.provider_handles, reason: session.reason)
+        forged.plan_digest = digest(999u64)
+        expect(binding_runtime_validate_session_v1(runtime, manager, forged)).to_equal(BINDING_RUNTIME_STALE_PLAN_V1)
+        expect(binding_runtime_release_session_v1(runtime, manager, session).status).to_equal(BINDING_RUNTIME_OK_V1)
+        expect(binding_runtime_release_session_v1(runtime, manager, session).status).to_equal(BINDING_RUNTIME_SESSION_UNKNOWN_V1)
+
+    it "prevalidates every pin before a transactional release":
+        val manager = ProviderGenerationManagerV1.create()
+        val active = provider_generation_activate_v1(manager, candidate_v1(101u64))
+        val runtime = BindingRuntimeV1.create()
+        binding_runtime_publish_plan_v1(
+            runtime, manager, plan_v1(1u64, active.generation, 0u32), [binding_v1(active.generation)],
+            [digest(513u64)], [], [41u64])
+        val session = binding_runtime_open_session_v1(runtime, manager)
+        var damaged_generation = manager.generations[0]
+        damaged_generation.pin_count = 0u64
+        manager.generations[0] = damaged_generation
+        val failed = binding_runtime_release_session_v1(runtime, manager, session)
+        expect(failed.status).to_equal(BINDING_RUNTIME_STALE_GENERATION_V1)
+        expect(runtime.sessions.len()).to_equal(1)
+        expect(manager.pins.len()).to_equal(1)
+        damaged_generation.pin_count = 1u64
+        manager.generations[0] = damaged_generation
+        expect(binding_runtime_release_session_v1(runtime, manager, session).status).to_equal(BINDING_RUNTIME_OK_V1)

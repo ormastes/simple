@@ -1,0 +1,45 @@
+#!/bin/sh
+# Caller contract: only Windows frontend native-build probes select root-exit
+# cleanup, and the bounded receipt must attest that exact policy.
+set -u
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P) || exit 2
+. "$root/scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs"
+work=$(mktemp -d "${TMPDIR:-/tmp}/frontend-job-policy.XXXXXX") || exit 2
+trap 'rm -rf "$work"' EXIT
+build_log=$work/build.log
+CANDIDATE_FRONTEND_CAPTURE_PARENT=$work
+CANDIDATE_FRONTEND_CAPTURE_KIND=windows-job
+BOOTSTRAP_STAGE3_WINDOWS_COLLECTOR_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+COMPILER_CHECK_KILL_GRACE_SECONDS=1
+
+candidate_frontend_collect() {
+    policy=missing
+    for arg do
+        case $arg in --root-exit-policy=*) policy=${arg#*=} ;; esac
+    done
+    [ "$policy" = terminate-job ] || return 126
+    log=$work/build.log
+    receipt=$log.bounded.env
+    printf 'fixture build completed\n' >"$log"
+    {
+        echo schema=simple-bounded-process-log-v1
+        echo reason=child-exit
+        echo raw_status=0
+        echo process_group=windows-job
+        echo root_exit_policy=${RECEIPT_POLICY:-terminate-job}
+        echo helper_sha256=$BOOTSTRAP_STAGE3_WINDOWS_COLLECTOR_SHA
+        echo log_sha256=$(candidate_frontend_hash_file "$log")
+    } >"$receipt"
+}
+
+candidate_frontend_bounded_build p2_add /bin/true native-build || {
+    echo 'FAIL: Windows build policy was not passed or attested' >&2; exit 1;
+}
+RECEIPT_POLICY=wait-job
+export RECEIPT_POLICY
+rm -f "$build_log" "$build_log.bounded.env"
+if candidate_frontend_bounded_build p2_add /bin/true native-build; then
+    echo 'FAIL: incorrect Windows root policy was admitted' >&2
+    exit 1
+fi
+echo 'PASS: frontend Windows job policy and receipt binding'

@@ -1,0 +1,265 @@
+"""
+nvme_multiblock_witness_check — the NON-VACUITY WITNESS for MULTI-BLOCK I/O.
+
+Why this file exists: `payload_widening_witness_check.spl` proves one block is a
+full 4096-byte page rather than one machine word. It says nothing about N. Every
+command it issues has `nblocks = 1`, so a controller that carries a real page for
+block 0 and drops blocks 1..N-1 passes it — which is exactly what this firmware
+did before this change.
+
+So every command here is genuinely multi-block, and the payload of each block is
+DISTINCT: `mb_page(base, i)` tags word 0, word 1, word 255 and word 511 with `i`.
+A path that carried block 0 N times, or carried N copies of the same page, fails
+on the very first per-block comparison. The check is built to go red on a
+block-0-only path.
+
+SEMANTICS THIS FILE PINS
+
+  1. N pages for nblocks = N. Each block is written to its OWN LBA (lba + i)
+     and read back from it. `NvmeCmd.pages` / `NvmeCpl.pages` carry them; the
+     old `.page` field remains the block-0 compat view.
+
+  2. PARTIAL FAILURE — blocks transfer in ascending LBA order, the first failing
+     block STOPS the transfer, its status becomes the command's status, and
+     `cpl.pages` holds exactly the blocks that DID transfer. If block 3 of 5
+     fails the completion says "2 blocks transferred, status = SC_MEDIA_ERR".
+     It never reports SC_SUCCESS for a range it did not finish, and it never
+     pads the result out to nblocks with zero pages, which would be a silent
+     claim that unreadable media read back as zeros.
+
+  3. MDTS — a transfer larger than the advertised maximum is REJECTED with
+     SC_INVALID_FIELD before any block moves. Section D proves it is rejected
+     rather than silently truncated to MDTS blocks, by requiring that ZERO
+     blocks came back and that the target LBAs were never written.
+
+Run: SIMPLE_TIMEOUT_SECONDS=0 bin/simple run \
+       examples/09_embedded/simpleos_nvme_fw/fw/nvme_multiblock_witness_check.spl
+     (from the REPO ROOT. `SIMPLE_TIMEOUT_SECONDS=0` is REQUIRED: anything under
+      examples/ gets a 10 s watchdog, and section E's Vt-physics fixture — 65
+      emulated page programs plus a 100-year retention advance — runs past it.
+      Without it the run is KILLED MID-FILE and prints no verdict line; a
+      missing verdict is a truncated run, never a pass.)
+Gate: prints "NVME MULTIBLOCK WITNESS OK".
+(Do NOT assert on the process exit code: bug
+ doc/08_tracking/bug/simple_run_exit_code_garbage_for_unit_main_2026-09-01.md.)
+"""
+
+use nvme_types.*
+use nvme_payload.*
+use nvme_admin_types.*
+use nvme_admin.*
+use nvme_controller.*
+use ftl.*
+
+# Local assertion helpers, same idiom as fw/nvme_emu_recovery_check.spl (they are
+# per-check helpers, not part of the frozen nvme_types interface).
+fn expect_ne(got: i64, unwanted: i64, label: text) -> i64:
+    if got != unwanted:
+        print "  PASS: {label} ({got} != {unwanted})"
+        return 0
+    print "  FAIL: {label} -- expected anything but {unwanted}, got {got}"
+    1
+
+fn expect_gt(got: i64, floor: i64, label: text) -> i64:
+    if got > floor:
+        print "  PASS: {label} ({got} > {floor})"
+        return 0
+    print "  FAIL: {label} -- expected > {floor}, got {got}"
+    1
+
+# One block's payload. `i` is folded into FOUR widely separated words, so a path
+# that carries only the first codeword, or only block 0, cannot pass by accident.
+fn mb_page(base: i64, i: i64) -> PageData:
+    var p: PageData = page_zero()
+    p.words[0]   = base + i
+    p.words[1]   = base + 0x1000 + i * 7
+    p.words[255] = base + 0x2000 + i * 13
+    p.words[511] = base + 0x3000 + i * 29
+    p
+
+fn mb_pages(base: i64, n: i64) -> [PageData]:
+    var ps: [PageData] = []
+    var i: i64 = 0
+    while i < n:
+        ps.push(mb_page(base, i))
+        i = i + 1
+    ps
+
+fn expect_mb(got: PageData, base: i64, i: i64, label: text) -> i64:
+    var f: i64 = 0
+    f = f + expect_eq(page_word(got, 0),   base + i,                "{label}[{i}]: word 0")
+    f = f + expect_eq(page_word(got, 1),   base + 0x1000 + i * 7,   "{label}[{i}]: word 1")
+    f = f + expect_eq(page_word(got, 255), base + 0x2000 + i * 13,  "{label}[{i}]: word 255")
+    f = f + expect_eq(page_word(got, 511), base + 0x3000 + i * 29,  "{label}[{i}]: word 511 (last)")
+    f
+
+fn open_io_queue(c: NvmeController) -> NvmeController:
+    var d: NvmeController = c
+    d.admin_submit(admin_create_cq_cmd(2, 1, MAX_QUEUE_SIZE))
+    d.admin_submit(admin_create_sq_cmd(3, 1, MAX_QUEUE_SIZE, 1))
+    d.admin_process()
+    d.admin_reap()
+    d.admin_reap()
+    d
+
+fn main():
+    var fail: i64 = 0
+    val N: i64 = 5
+
+    print "-- 0. the fixture is non-vacuous: the blocks really do differ --"
+    val ps: [PageData] = mb_pages(0x500, N)
+    fail = fail + expect_eq(ps.len(), N, "the fixture supplies {N} pages")
+    # If every block were the same page, a block-0-only controller would pass
+    # this whole file. Prove they differ before asserting anything about them.
+    fail = fail + expect_eq(bool_to_int(page_eq(ps[0], ps[1])), 0, "block 0 and block 1 are DIFFERENT pages")
+    fail = fail + expect_eq(bool_to_int(page_eq(ps[0], ps[N - 1])), 0, "block 0 and the last block are DIFFERENT pages")
+    fail = fail + expect_eq(bool_to_int(page_eq(ps[2], ps[3])), 0, "adjacent middle blocks differ too")
+
+    print "-- A. the SQ ring carries ALL {N} pages, not just block 0 --"
+    var c: NvmeController = nvme_controller_new()
+    c = open_io_queue(c)
+    c.io_submit(1, cmd_make_pages(20, OP_WRITE, 100, N, mb_pages(0x500, N)))
+    val fetched: NvmeCmd = c.qset.sq_fetch(1)
+    fail = fail + expect_eq(fetched.cid, 20, "SQ ring returns the submitted command")
+    fail = fail + expect_eq(fetched.nblocks, N, "SQ ring preserves nblocks")
+    fail = fail + expect_eq(bool_to_int(fetched.has_page), 1, "SQ ring preserves has_page")
+    fail = fail + expect_eq(fetched.pages.len(), N, "WITNESS: SQ ring preserves ALL {N} payload pages")
+    fail = fail + expect_eq(bool_to_int(cmd_pages_cover_blocks(fetched)), 1, "the buffer covers every block")
+    var i: i64 = 0
+    while i < N:
+        fail = fail + expect_mb(cmd_page_at(fetched, i), 0x500, i, "SQ ring")
+        i = i + 1
+    fail = fail + expect_mb(fetched.page, 0x500, 0, "SQ ring compat .page view is block 0")
+
+    print "-- B. multi-block WRITE lands {N} distinct pages on {N} distinct LBAs --"
+    var w: NvmeController = nvme_controller_new()
+    w = open_io_queue(w)
+    w.io_submit(1, cmd_make_pages(21, OP_WRITE, 100, N, mb_pages(0x600, N)))
+    w.io_process()
+    val wc: NvmeCpl = w.io_reap(1)
+    fail = fail + expect_eq(wc.status, SC_SUCCESS, "the {N}-block write completes")
+    # Read each LBA back INDIVIDUALLY: this is the assertion that fails if the
+    # controller wrote block 0's page to every LBA, or wrote only LBA 100.
+    i = 0
+    while i < N:
+        w.io_submit(1, cmd_make(30 + i, OP_READ, 100 + i, 1, 0))
+        w.io_process()
+        val r1: NvmeCpl = w.io_reap(1)
+        fail = fail + expect_eq(r1.status, SC_SUCCESS, "single-block read-back of LBA {100 + i}")
+        fail = fail + expect_mb(r1.page, 0x600, i, "per-LBA read-back")
+        i = i + 1
+
+    print "-- C. multi-block READ returns {N} pages, each from its own LBA --"
+    w.io_submit(1, cmd_make(40, OP_READ, 100, N, 0))
+    w.io_process()
+    val rc: NvmeCpl = w.io_reap(1)
+    fail = fail + expect_eq(rc.status, SC_SUCCESS, "the {N}-block read completes")
+    fail = fail + expect_eq(cpl_blocks_transferred(rc), N, "WITNESS: the completion carries ALL {N} blocks")
+    i = 0
+    while i < N:
+        fail = fail + expect_mb(cpl_page_at(rc, i), 0x600, i, "multi-block read")
+        i = i + 1
+    fail = fail + expect_mb(rc.page, 0x600, 0, "compat .page view is block 0")
+    # Belt and braces: the returned blocks are distinct from one another, so a
+    # completion that duplicated block 0 N times cannot pass section C either.
+    fail = fail + expect_eq(bool_to_int(page_eq(cpl_page_at(rc, 0), cpl_page_at(rc, N - 1))), 0,
+                            "WITNESS: the returned blocks are DISTINCT, not block 0 repeated")
+
+    print "-- D. MDTS: a transfer above the advertised maximum is REJECTED, not truncated --"
+    var m: NvmeController = nvme_controller_new()
+    m = open_io_queue(m)
+    val over: i64 = MDTS_BLOCKS + 1
+    m.io_submit(1, cmd_make_pages(50, OP_WRITE, 200, over, mb_pages(0x700, over)))
+    m.io_process()
+    val mc: NvmeCpl = m.io_reap(1)
+    fail = fail + expect_eq(mc.status, SC_INVALID_FIELD, "an over-MDTS write is rejected with SC_INVALID_FIELD")
+    # NOT TRUNCATED: if the controller had clipped the transfer to MDTS_BLOCKS it
+    # would have written the first MDTS_BLOCKS LBAs. They must still read as an
+    # unwritten zero page.
+    m.io_submit(1, cmd_make(51, OP_READ, 200, 1, 0))
+    m.io_process()
+    val mr: NvmeCpl = m.io_reap(1)
+    fail = fail + expect_eq(mr.status, SC_SUCCESS, "the first target LBA is readable")
+    fail = fail + expect_eq(page_word(mr.page, 0), 0, "WITNESS: over-MDTS write moved NO data (not truncated)")
+    fail = fail + expect_eq(page_word(mr.page, 511), 0, "WITNESS: and none of the later words either")
+    # A transfer of exactly MDTS_BLOCKS is accepted, so the bound is the real one.
+    m.io_submit(1, cmd_make_pages(52, OP_WRITE, 300, MDTS_BLOCKS, mb_pages(0x800, MDTS_BLOCKS)))
+    m.io_process()
+    val ec: NvmeCpl = m.io_reap(1)
+    fail = fail + expect_eq(ec.status, SC_SUCCESS, "a transfer of exactly MDTS_BLOCKS is accepted")
+    m.io_submit(1, cmd_make(53, OP_READ, 300, MDTS_BLOCKS, 0))
+    m.io_process()
+    val er: NvmeCpl = m.io_reap(1)
+    fail = fail + expect_eq(cpl_blocks_transferred(er), MDTS_BLOCKS, "and reads back all MDTS_BLOCKS blocks")
+    fail = fail + expect_mb(cpl_page_at(er, MDTS_BLOCKS - 1), 0x800, MDTS_BLOCKS - 1, "MDTS-sized read, last block")
+
+    print "-- E. PARTIAL FAILURE: block 3 of 5 fails -> the completion says so --"
+    # Built on the Vt-physics emulator so the failure is REAL media damage, not a
+    # mocked status. Fault injection goes through the typed emu_* seam only.
+    #
+    # Layout trick: LBA 202 is written FIRST so it lands alone at the head of
+    # block 0; 64 filler writes then fill that block, so LBAs 200/201/203/204
+    # land in a LATER block. Damaging LBA 202's block therefore damages exactly
+    # ONE of the five blocks of the range — index 2, i.e. the third block.
+    #
+    # WORKAROUND, not a weakening: the emu backend truncates page word 0 to 8
+    # bits (bug doc/08_tracking/bug/nvme_emu_media_truncates_page_word0_to_one_byte_2026-09-01.md,
+    # reproduced on the unmodified tree). So this section keeps its word-0
+    # sentinel inside one byte — base 0x10 gives 0x10..0x14 — and does its block
+    # discrimination on words 1 / 255 / 511, which round-trip intact. Remove the
+    # base override when that bug is fixed; sections A-D already use the full
+    # 0x500/0x600/0x700/0x800 sentinels on the behavioural backend.
+    val EB: i64 = 0x10
+    var e: NvmeController = nvme_controller_new_emu()
+    e = open_io_queue(e)
+    e.ftl.write_page(202, mb_page(EB, 2))
+    i = 0
+    while i < 64:
+        e.ftl.write_page(900 + i, page_fill(0x99))
+        i = i + 1
+    e.ftl.write_page(200, mb_page(EB, 0))
+    e.ftl.write_page(201, mb_page(EB, 1))
+    e.ftl.write_page(203, mb_page(EB, 3))
+    e.ftl.write_page(204, mb_page(EB, 4))
+
+    # Positive control FIRST: while healthy, all five blocks come back.
+    e.io_submit(1, cmd_make(60, OP_READ, 200, N, 0))
+    e.io_process()
+    val healthy: NvmeCpl = e.io_reap(1)
+    fail = fail + expect_eq(healthy.status, SC_SUCCESS, "control: the undamaged {N}-block read succeeds")
+    fail = fail + expect_eq(cpl_blocks_transferred(healthy), N, "control: all {N} blocks transferred while healthy")
+    i = 0
+    while i < N:
+        fail = fail + expect_mb(cpl_page_at(healthy, i), EB, i, "control read")
+        i = i + 1
+
+    val bad_blk: i64 = ppn_block(e.ftl.lba_ppn(202))
+    fail = fail + expect_ne(bad_blk, ppn_block(e.ftl.lba_ppn(200)), "the fixture really isolates block index 2")
+    fail = fail + expect_ne(bad_blk, ppn_block(e.ftl.lba_ppn(204)), "and block index 4 shares no block with it")
+    e.ftl.emu_set_block_wear(bad_blk, 200000)
+    e.ftl.emu_advance_time_s(3153600000.0)   # 100 years
+    # Non-vacuity for the injection: exactly one of the five LBAs is now unreadable.
+    fail = fail + expect_eq(e.ftl.read_range_status(200, 1), SC_SUCCESS, "block index 0 is still healthy")
+    fail = fail + expect_eq(e.ftl.read_range_status(201, 1), SC_SUCCESS, "block index 1 is still healthy")
+    fail = fail + expect_eq(e.ftl.read_range_status(202, 1), SC_MEDIA_ERR, "block index 2 is genuinely unreadable")
+    fail = fail + expect_eq(e.ftl.read_range_status(203, 1), SC_SUCCESS, "block index 3 is still healthy")
+
+    val errs_before: i64 = e.media_errors
+    e.io_submit(1, cmd_make(61, OP_READ, 200, N, 0))
+    e.io_process()
+    val pc: NvmeCpl = e.io_reap(1)
+    fail = fail + expect_eq(pc.cid, 61, "the partial failure still completes with its own cid")
+    fail = fail + expect_eq(pc.status, SC_MEDIA_ERR, "WITNESS: the completion reports the FAILING block's status")
+    fail = fail + expect_ne(pc.status, SC_SUCCESS, "WITNESS: it does NOT claim success for a partial transfer")
+    fail = fail + expect_eq(cpl_blocks_transferred(pc), 2, "WITNESS: exactly the 2 blocks before the failure transferred")
+    fail = fail + expect_mb(cpl_page_at(pc, 0), EB, 0, "partial read, block 0")
+    fail = fail + expect_mb(cpl_page_at(pc, 1), EB, 1, "partial read, block 1")
+    fail = fail + expect_gt(e.media_errors, errs_before, "SMART counted the media error")
+    fail = fail + expect_eq(e.last_error, SC_MEDIA_ERR, "the error log records it")
+
+    print ""
+    if fail == 0:
+        print "NVME MULTIBLOCK WITNESS OK"
+    else:
+        print "NVME MULTIBLOCK WITNESS FAIL ({fail})"
+    return ()

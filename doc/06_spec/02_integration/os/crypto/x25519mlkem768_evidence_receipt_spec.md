@@ -20,7 +20,7 @@ Typed receipt integration for X25519MLKEM768 scalar and GPU evidence.
 | Category | Hardware & OS |
 | Status | Active |
 | Source | `test/02_integration/os/crypto/x25519mlkem768_evidence_receipt_spec.spl` |
-| Updated | 2026-08-05 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 Typed receipt integration for X25519MLKEM768 scalar and GPU evidence.
@@ -35,25 +35,26 @@ models pinned absolute correctness but never claims promotion.
 
 #### should serialize only public scalar outputs after a matching exchange
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- should serialize only public scalar outputs after a matching exchange
 - Run the deterministic scalar client and server exchange
-- var config = x25519 mlkem768 default config
 - Bind the scalar label to all three observed operation receipts
 - Reject adjacent backend, operation, proof, fallback, and lifecycle claims
-- x25519 mlkem768 default config
 - Render the public-output-only scalar receipt
-- Some
-- sha256 text
-- sha256 text
-- sha256 text
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 90 lines folded for reproduction.
+Runnable source: 92 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("should serialize only public scalar outputs after a matching exchange")
 step("Run the deterministic scalar client and server exchange")
 val client_private = x25519_mlkem768_evidence_fixture_bytes32(1)
 val d = x25519_mlkem768_evidence_fixture_list32(33)
@@ -150,6 +151,7 @@ expect(rendered.contains(encapsulation.shared_secret.to_text())).to_be(false)
 
 #### should render unavailable Metal as blocked with no selected backend
 
+- should render unavailable Metal as blocked with no selected backend
 - Parse an explicit native Metal evidence request
    - Expected: cli.backend equals `X25519MlKem768EvidenceBackend.Metal`
 - Render a fail-closed blocked receipt without fallback
@@ -158,10 +160,12 @@ expect(rendered.contains(encapsulation.shared_secret.to_text())).to_be(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("should render unavailable Metal as blocked with no selected backend")
 step("Parse an explicit native Metal evidence request")
 val cli = match x25519_mlkem768_parse_evidence_cli(_metal_cli()):
     case Ok(value): value
@@ -184,17 +188,19 @@ expect(rendered.contains("selected_backend=scalar-cpu")).to_be(false)
 
 #### should serialize CUDA lifecycle evidence without a promotion claim
 
+- should serialize CUDA lifecycle evidence without a promotion claim
 - Render a fully observed exact-binary CUDA correctness row
-- Some
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("should serialize CUDA lifecycle evidence without a promotion claim")
 step("Render a fully observed exact-binary CUDA correctness row")
 val rendered = x25519_mlkem768_render_evidence_receipt(_receipt(
     X25519MlKem768EvidenceStatus.Pass,
@@ -232,3 +238,60 @@ expect(rendered).to_contain("promotion_eligible=false\n")
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-INTEGRATION`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `af3b7805f777a0dd3d82f94686fe46cab6e15c8603be23ea0748392e7326963b`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `af3b7805f777a0dd3d82f94686fe46cab6e15c8603be23ea0748392e7326963b`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `af3b7805f777a0dd3d82f94686fe46cab6e15c8603be23ea0748392e7326963b`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **90/100**; effective score: **90/100**; blockers: **0**.
+
+SSpec documentization score: 90/100
+source: test/02_integration/os/crypto/x25519mlkem768_evidence_receipt_spec.spl
+mirror: doc/06_spec/02_integration/os/crypto/x25519mlkem768_evidence_receipt_spec.md (current)
+findings: 8 blockers: 0
+  narrative=100 structure=85 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/02_integration/os/crypto/x25519mlkem768_evidence_receipt_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/02_integration/os/crypto/x25519mlkem768_evidence_receipt_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/02_integration/os/crypto/x25519mlkem768_evidence_receipt_spec.spl:98:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should serialize only public scalar outputs after a matching exchange' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/02_integration/os/crypto/x25519mlkem768_evidence_receipt_spec.spl:98:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should serialize only public scalar outputs after a matching exchange' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/02_integration/os/crypto/x25519mlkem768_evidence_receipt_spec.spl:192:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should render unavailable Metal as blocked with no selected backend' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/02_integration/os/crypto/x25519mlkem768_evidence_receipt_spec.spl:192:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should render unavailable Metal as blocked with no selected backend' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/02_integration/os/crypto/x25519mlkem768_evidence_receipt_spec.spl:212:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should serialize CUDA lifecycle evidence without a promotion claim' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/02_integration/os/crypto/x25519mlkem768_evidence_receipt_spec.spl:212:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should serialize CUDA lifecycle evidence without a promotion claim' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

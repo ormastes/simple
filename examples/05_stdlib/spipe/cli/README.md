@@ -12,24 +12,7 @@ node cli/spipe.js doc-root ../..
 node cli/spipe.js link-plan ../..
 node cli/spipe.js doctor ../..
 node cli/spipe.js skill
-node cli/spipe.js release-guide
-node cli/spipe.js release-capabilities
 ```
-
-The release commands are read-only. `release-guide` prints the canonical
-protected-release process and `release-capabilities` prints the policy schema
-and supported planning boundaries, including
-`capability.scoped_self_review_guidance=true`. The guide distinguishes the
-required `SPipe Self Review Admission` status from GitHub's forbidden author
-`APPROVED` review and gives reason-specific retry/remediation guidance.
-Provider mutation still requires a unique session, live protected-ref
-authority, and explicit approval.
-
-The guarded operational commands each accept exactly one JSON object:
-`release-session-plan`, `release-main-fix-discovery-plan`,
-`release-beta-backport-plan`, `release-forward-port-plan`,
-`release-candidate-plan`, and `release-promotion-plan`. They validate and hash
-evidence but never checkout, cherry-pick, build, tag, push, delete, or publish.
 
 Fine-tune process examples:
 
@@ -51,3 +34,19 @@ Requirement selection is explicit:
 node cli/spipe.js fine-tune-options
 node cli/spipe.js fine-tune-select-requirements <attempt_id> <feature_option> <nfr_option> <selected_by>
 ```
+
+Folder reverse references are queried from one immutable compiled-inventory
+JSON file. The cursor key is caller-owned so an authenticated cursor remains
+valid across CLI processes; it must contain 32 raw bytes or 64 lowercase hex
+digits. Results are stable one-line JSON and remain bound to the snapshot,
+graph root, target, folder, limit, and work limit:
+
+```sh
+node cli/spipe.js reverse-references inventory.json A-target \
+  --cursor-key-file .spipe/reverse-reference.key \
+  --folder doc/04_architecture --limit 100 --max-work-units 10000
+```
+
+Pass the returned `next_cursor` through `--cursor` for the next page. Inputs
+larger than 64 MiB, non-canonical folder paths, unknown flags, malformed keys,
+and cursor rebinding fail closed.

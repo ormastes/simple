@@ -1,0 +1,607 @@
+# BootLayoutPlan - typed boot/kernel layout plan derived from a linker script
+#
+# Lane A9 (doc/05_design/compiler/linker/mold_mdsocpp_linker_design.md §9).
+# Translates a parsed GNU ld script (linker_script.spl) into the typed plan the
+# internal linker needs to lay out a freestanding kernel: memory regions,
+# program-header segments, output sections (VMA/LMA expressions, KEEP roots,
+# NOLOAD, `. +=` padding, inner ALIGN), symbols and assertions.
+#
+# Fail-closed: a `:phdr` naming an undeclared segment, a `> region` naming an
+# undeclared region, a missing ENTRY, or an allocated section left without a
+# segment while PHDRS is declared is an Err, never a silently dropped field.
+#
+# The external `-T` linker path stays the producer; this plan is the internal
+# engine's input and the object of the equivalence ladder (design §9).
+
+use compiler.backend.linker.linker_script.{
+    LdScript, LdOutputSection, LdStmt, LdStmtKind, LdCmdKind, LdToken, LdTokenKind,
+    ld_parse, ld_tokenize, ld_parse_number
+}
+
+# ============================================================================
+# Plan Types
+# ============================================================================
+
+struct BootRegion:
+    """A MEMORY region."""
+    name: text
+    attrs: text
+    origin: i64
+    length: i64
+
+struct BootSegment:
+    """A PHDRS program header."""
+    name: text
+    phdr_type: text      # e.g. "PT_LOAD"
+    flags: i64           # p_flags (PF_X=1, PF_W=2, PF_R=4) or -1 if not given
+    filehdr: bool        # FILEHDR: the ELF header is loaded by this segment
+    phdrs_hdr: bool      # PHDRS keyword: the program header table is loaded by this segment
+    at_expr: text        # AT(expr) physical address or ""
+
+# Ordered operation kinds (BootOp.kind), SECTIONS level and output-section body.
+val BOOT_OP_SECTION: i64 = 0   # index = sections[index]
+val BOOT_OP_DOT: i64 = 1       # `. = expr` (expr)
+val BOOT_OP_SYMBOL: i64 = 2    # index = symbols[index]
+val BOOT_OP_ASSERT: i64 = 3    # index = assertions[index]
+val BOOT_OP_INPUT: i64 = 4     # body input statement (file_pattern, patterns, keep)
+val BOOT_OP_PAD: i64 = 5       # body `. += n` / `. = . + n` (value)
+val BOOT_OP_ALIGN: i64 = 6     # body `. = ALIGN(n)` (value)
+
+struct BootOp:
+    """One ordered layout operation; the order is what the layout engine replays."""
+    kind: i64
+    index: i64
+    expr: text
+    file_pattern: text
+    patterns: [text]
+    keep: bool
+    value: i64
+
+struct BootSectionPlan:
+    """One output section of the boot image."""
+    name: text
+    vma_expr: text       # explicit address expression or "" (follows location counter)
+    dot_expr: text       # `. = expr` between the previous section and this one, or ""
+    align_expr: text     # ALIGN(...) after the colon or ""
+    lma_expr: text       # AT(...) or ""
+    has_lma_bias: bool   # lma_expr has the shape ADDR(<self>) - C
+    lma_bias: i64        # C, i.e. VMA - LMA (higher-half bias); 0 when not biased
+    input_patterns: [text]   # every input section glob, in order (KEEP included)
+    keep_patterns: [text]    # KEEP(...) globs — GC roots
+    noload: bool         # (NOLOAD): SHT_NOBITS, no file bytes
+    pad_bytes: i64       # sum of `. += n` inside the body
+    inner_aligns: [i64]  # `. = ALIGN(n)` inside the body, in order
+    segment: text        # PHDRS segment ("" when PHDRS is not used or section is discarded/non-alloc)
+    region: text         # MEMORY region or ""
+    lma_region: text     # AT> region (load addresses allocated from that region's cursor) or ""
+    discard: bool        # /DISCARD/
+    defined_symbols: [text]  # symbols assigned inside the body
+    body: [BootOp]       # ordered body: INPUT / PAD / ALIGN / SYMBOL / ASSERT
+
+struct BootSymbol:
+    """A symbol assignment (plain or PROVIDE)."""
+    name: text
+    expr: text
+    provide: bool
+    section: text        # enclosing output section, "" at SECTIONS level
+
+struct BootAssertion:
+    expr: text
+    message: text
+
+struct BootLayoutPlan:
+    """Typed layout plan for a freestanding boot image."""
+    output_format: text
+    output_arch: text
+    entry: text
+    start_expr: text     # `. = expr` before the first output section, or ""
+    regions: [BootRegion]
+    segments: [BootSegment]
+    sections: [BootSectionPlan]
+    symbols: [BootSymbol]
+    assertions: [BootAssertion]
+    gc_roots: [text]     # union of all KEEP globs, in order
+    extern_symbols: [text]   # EXTERN(...) — forced-undefined symbols (link roots)
+    discard_patterns: [text]
+    ops: [BootOp]        # SECTIONS commands in source order: SECTION / DOT / SYMBOL / ASSERT
+    top_ops: [BootOp]    # statements outside SECTIONS (SYMBOL / ASSERT), evaluated after layout
+
+fn _boot_op(kind: i64, index: i64) -> BootOp:
+    BootOp(kind: kind, index: index, expr: "", file_pattern: "", patterns: [], keep: false, value: 0)
+
+# ============================================================================
+# Constant-expression evaluator
+# ============================================================================
+
+struct BootEvalCtx:
+    """Evaluation context: location counter plus named values (symbols, ADDR(sec))."""
+    dot: i64
+    names: [text]
+    values: [i64]
+
+struct _BootEv:
+    pos: i64
+    value: i64
+    err: text
+
+fn boot_eval_ctx(dot: i64) -> BootEvalCtx:
+    BootEvalCtx(dot: dot, names: [], values: [])
+
+fn boot_eval_bind(ctx: BootEvalCtx, name: text, value: i64) -> BootEvalCtx:
+    BootEvalCtx(dot: ctx.dot, names: ctx.names.push(name), values: ctx.values.push(value))
+
+fn _boot_lookup(ctx: BootEvalCtx, name: text) -> (bool, i64):
+    var i = ctx.names.len() - 1
+    while i >= 0:
+        if ctx.names[i] == name:
+            return (true, ctx.values[i])
+        i = i - 1
+    (false, 0)
+
+fn boot_align_up(value: i64, align: i64) -> i64:
+    """Round value up to a multiple of align (align <= 1 is identity)."""
+    if align <= 1:
+        return value
+    val rem = value % align
+    if rem == 0:
+        return value
+    if rem < 0:
+        return value - rem
+    value + (align - rem)
+
+fn _boot_tok(toks: [LdToken], pos: i64) -> LdToken:
+    if pos < toks.len():
+        return toks[pos]
+    LdToken(kind: LdTokenKind.Eof, value: "")
+
+fn _boot_fail(pos: i64, msg: text) -> _BootEv:
+    _BootEv(pos: pos, value: 0, err: msg)
+
+fn _boot_eval_primary(toks: [LdToken], pos: i64, ctx: BootEvalCtx) -> _BootEv:
+    val tok = _boot_tok(toks, pos)
+    if tok.kind == LdTokenKind.Number:
+        return _BootEv(pos: pos + 1, value: ld_parse_number(tok.value), err: "")
+    if tok.kind == LdTokenKind.Minus:
+        val inner = _boot_eval_primary(toks, pos + 1, ctx)
+        return _BootEv(pos: inner.pos, value: 0 - inner.value, err: inner.err)
+    if tok.kind == LdTokenKind.Op and (tok.value == "!" or tok.value == "~"):
+        val inner = _boot_eval_primary(toks, pos + 1, ctx)
+        if inner.err != "":
+            return inner
+        if tok.value == "!":
+            val nv: i64 = if inner.value == 0: 1 else: 0
+            return _BootEv(pos: inner.pos, value: nv, err: "")
+        return _BootEv(pos: inner.pos, value: -1 - inner.value, err: "")
+    if tok.kind == LdTokenKind.LParen:
+        val inner = _boot_eval_rel(toks, pos + 1, ctx)
+        if inner.err != "":
+            return inner
+        if _boot_tok(toks, inner.pos).kind != LdTokenKind.RParen:
+            return _boot_fail(inner.pos, "expected ')'")
+        return _BootEv(pos: inner.pos + 1, value: inner.value, err: "")
+    if tok.kind == LdTokenKind.Word:
+        if _boot_tok(toks, pos + 1).kind == LdTokenKind.LParen:
+            val fname = tok.value
+            if fname == "ADDR" or fname == "LOADADDR" or fname == "SIZEOF" or fname == "ORIGIN" or fname == "LENGTH":
+                val arg = _boot_tok(toks, pos + 2)
+                if _boot_tok(toks, pos + 3).kind != LdTokenKind.RParen:
+                    return _boot_fail(pos, "{fname}() takes one name")
+                val (found, v) = _boot_lookup(ctx, fname + "(" + arg.value + ")")
+                if not found:
+                    return _boot_fail(pos, "unknown {fname}({arg.value})")
+                return _BootEv(pos: pos + 4, value: v, err: "")
+            if fname == "ALIGN" or fname == "MAX" or fname == "MIN":
+                val arg = _boot_eval_rel(toks, pos + 2, ctx)
+                if arg.err != "":
+                    return arg
+                if _boot_tok(toks, arg.pos).kind == LdTokenKind.RParen:
+                    if fname != "ALIGN":
+                        return _boot_fail(arg.pos, "{fname} takes two arguments")
+                    return _BootEv(pos: arg.pos + 1, value: boot_align_up(ctx.dot, arg.value), err: "")
+                if _boot_tok(toks, arg.pos).kind != LdTokenKind.Comma:
+                    return _boot_fail(arg.pos, "expected ',' or ')' in {fname}()")
+                val arg2 = _boot_eval_rel(toks, arg.pos + 1, ctx)
+                if arg2.err != "":
+                    return arg2
+                if _boot_tok(toks, arg2.pos).kind != LdTokenKind.RParen:
+                    return _boot_fail(arg2.pos, "{fname} takes at most two arguments")
+                var v2 = boot_align_up(arg.value, arg2.value)
+                if fname == "MAX":
+                    v2 = if _boot_ult(arg2.value, arg.value): arg.value else: arg2.value
+                if fname == "MIN":
+                    v2 = if _boot_ult(arg.value, arg2.value): arg.value else: arg2.value
+                return _BootEv(pos: arg2.pos + 1, value: v2, err: "")
+            return _boot_fail(pos, "unsupported function {fname}")
+        if tok.value == ".":
+            return _BootEv(pos: pos + 1, value: ctx.dot, err: "")
+        val (found, v) = _boot_lookup(ctx, tok.value)
+        if not found:
+            return _boot_fail(pos, "unknown symbol {tok.value}")
+        return _BootEv(pos: pos + 1, value: v, err: "")
+    _boot_fail(pos, "expected expression")
+
+fn _boot_is_mul(tok: LdToken) -> bool:
+    tok.kind == LdTokenKind.Star or (tok.kind == LdTokenKind.Op and (tok.value == "/" or tok.value == "%"))
+
+fn _boot_eval_term(toks: [LdToken], pos: i64, ctx: BootEvalCtx) -> _BootEv:
+    var acc = _boot_eval_primary(toks, pos, ctx)
+    while acc.err == "" and _boot_is_mul(_boot_tok(toks, acc.pos)):
+        val op = _boot_tok(toks, acc.pos)
+        val rhs = _boot_eval_primary(toks, acc.pos + 1, ctx)
+        if rhs.err != "":
+            return rhs
+        var v = acc.value * rhs.value
+        if op.kind == LdTokenKind.Op:
+            if rhs.value == 0:
+                return _boot_fail(acc.pos, "division by zero")
+            val (q, r) = _boot_udivmod(acc.value, rhs.value)
+            v = if op.value == "/": q else: r
+        acc = _BootEv(pos: rhs.pos, value: v, err: "")
+    acc
+
+fn _boot_udivmod(a: i64, b: i64) -> (i64, i64):
+    """Unsigned 64-bit a / b and a % b (b != 0); linker-script values are unsigned."""
+    if b < 0:
+        # divisor >= 2^63: the quotient is 0 or 1
+        if _boot_ult(a, b):
+            return (0, a)
+        return (1, a - b)
+    if a >= 0:
+        return (a / b, a % b)
+    val half = (a >> 1) & 0x7fffffffffffffff
+    var q = (half / b) * 2
+    var r = a - q * b
+    if not _boot_ult(r, b):
+        q = q + 1
+        r = r - b
+    (q, r)
+
+fn _boot_ult(a: i64, b: i64) -> bool:
+    """Unsigned a < b (addresses are unsigned: the higher half is negative as i64)."""
+    if (a < 0) == (b < 0):
+        return a < b
+    b < 0
+
+fn _boot_bin_op(tok: LdToken) -> text:
+    """Binary operator text below the additive level, or "" when tok is not one."""
+    if tok.kind == LdTokenKind.Less:
+        return "<"
+    if tok.kind == LdTokenKind.GreaterThan:
+        return ">"
+    if tok.kind == LdTokenKind.Op and tok.value != "!" and tok.value != "~" and tok.value != "/" and tok.value != "%":
+        return tok.value
+    ""
+
+fn _boot_prec(op: text) -> i64:
+    """C precedence below + and - (higher binds tighter); 0 = not a binary operator."""
+    if op == "<<" or op == ">>":
+        return 8
+    if op == "<" or op == ">" or op == "<=" or op == ">=":
+        return 7
+    if op == "==" or op == "!=":
+        return 6
+    if op == "&":
+        return 5
+    if op == "^":
+        return 4
+    if op == "|":
+        return 3
+    if op == "&&":
+        return 2
+    if op == "||":
+        return 1
+    0
+
+fn _boot_rel_apply(op: text, a: i64, b: i64) -> Result<i64, text>:
+    var r = false
+    if op == "<":
+        r = _boot_ult(a, b)
+    else if op == ">":
+        r = _boot_ult(b, a)
+    else if op == "<=":
+        r = not _boot_ult(b, a)
+    else if op == ">=":
+        r = not _boot_ult(a, b)
+    else if op == "==":
+        r = a == b
+    else if op == "!=":
+        r = a != b
+    else if op == "&&":
+        r = a != 0 and b != 0
+    else if op == "||":
+        r = a != 0 or b != 0
+    else if op == "&":
+        return Ok(a & b)
+    else if op == "|":
+        return Ok(a | b)
+    else if op == "^":
+        return Ok((a | b) - (a & b))
+    else if op == "<<":
+        return Ok(a << b)
+    else if op == ">>":
+        # logical shift: linker-script values are unsigned
+        if b <= 0:
+            return Ok(a)
+        if b >= 64:
+            return Ok(0)
+        return Ok((a >> b) & (((1 << (63 - b)) - 1) * 2 + 1))
+    else:
+        return Err("unsupported operator {op}")
+    if r:
+        return Ok(1)
+    Ok(0)
+
+fn _boot_eval_rel(toks: [LdToken], pos: i64, ctx: BootEvalCtx) -> _BootEv:
+    """Full expression: shifts, comparisons, bitwise and logical ops with C
+    precedence (ld_parse_expr prints them as one flat level in source order,
+    so precedence is recovered here from the token stream)."""
+    _boot_eval_bin(toks, pos, ctx, 1)
+
+fn _boot_eval_bin(toks: [LdToken], pos: i64, ctx: BootEvalCtx, min_prec: i64) -> _BootEv:
+    """Precedence climbing over the binary operators below + and -."""
+    var acc = _boot_eval_sum(toks, pos, ctx)
+    while acc.err == "":
+        val op = _boot_bin_op(_boot_tok(toks, acc.pos))
+        val prec = _boot_prec(op)
+        if op == "":
+            break
+        if prec == 0:
+            return _boot_fail(acc.pos, "unsupported operator {op}")
+        if prec < min_prec:
+            break
+        val rhs = _boot_eval_bin(toks, acc.pos + 1, ctx, prec + 1)
+        if rhs.err != "":
+            return rhs
+        match _boot_rel_apply(op, acc.value, rhs.value):
+            case Ok(v): acc = _BootEv(pos: rhs.pos, value: v, err: "")
+            case Err(e): return _boot_fail(acc.pos, e)
+    acc
+
+fn _boot_eval_sum(toks: [LdToken], pos: i64, ctx: BootEvalCtx) -> _BootEv:
+    var acc = _boot_eval_term(toks, pos, ctx)
+    while acc.err == "" and (_boot_tok(toks, acc.pos).kind == LdTokenKind.Plus or _boot_tok(toks, acc.pos).kind == LdTokenKind.Minus):
+        val is_plus = _boot_tok(toks, acc.pos).kind == LdTokenKind.Plus
+        val rhs = _boot_eval_term(toks, acc.pos + 1, ctx)
+        if rhs.err != "":
+            return rhs
+        val v = if is_plus: acc.value + rhs.value else: acc.value - rhs.value
+        acc = _BootEv(pos: rhs.pos, value: v, err: "")
+    acc
+
+fn boot_eval(expr: text, ctx: BootEvalCtx) -> Result<i64, text>:
+    """Evaluate a canonical linker-script expression (numbers, + - *, ., ALIGN, ADDR, symbols)."""
+    val toks = ld_tokenize(expr)
+    val r = _boot_eval_rel(toks, 0, ctx)
+    if r.err != "":
+        return Err("cannot evaluate '{expr}': {r.err}")
+    if _boot_tok(toks, r.pos).kind != LdTokenKind.Eof:
+        return Err("cannot evaluate '{expr}': trailing tokens")
+    Ok(r.value)
+
+# ============================================================================
+# Script -> Plan
+# ============================================================================
+
+fn _boot_lma_bias(section_name: text, lma_expr: text) -> (bool, i64):
+    """Recognise AT(ADDR(<self>) - C) and return (true, C)."""
+    val toks = ld_tokenize(lma_expr)
+    # ADDR ( name ) - Number Eof
+    if toks.len() != 7:
+        return (false, 0)
+    if toks[0].value != "ADDR" or toks[1].kind != LdTokenKind.LParen or toks[2].value != section_name:
+        return (false, 0)
+    if toks[3].kind != LdTokenKind.RParen or toks[4].kind != LdTokenKind.Minus or toks[5].kind != LdTokenKind.Number:
+        return (false, 0)
+    (true, ld_parse_number(toks[5].value))
+
+fn _boot_is_non_alloc(sec: LdOutputSection) -> bool:
+    # Debug sections are pinned at address 0 and carry no SHF_ALLOC input.
+    sec.name.starts_with(".debug") or sec.name.starts_with(".comment")
+
+fn _boot_find_segment(segments: [BootSegment], name: text) -> bool:
+    for s in segments:
+        if s.name == name:
+            return true
+    false
+
+fn _boot_find_region(regions: [BootRegion], name: text) -> bool:
+    for r in regions:
+        if r.name == name:
+            return true
+    false
+
+fn boot_layout_from_script(script: LdScript) -> Result<BootLayoutPlan, text>:
+    """Build the typed BootLayoutPlan from a parsed script (fail-closed)."""
+    if script.entry == "":
+        return Err("boot layout: script has no ENTRY")
+    if script.fragment_cmds.len() > 0:
+        return Err("boot layout: script is a SECTIONS fragment (output sections outside SECTIONS); plan the including script")
+    var regions: [BootRegion] = []
+    for m in script.memory:
+        regions = regions.push(BootRegion(name: m.name, attrs: m.attrs, origin: m.origin, length: m.length))
+    var segments: [BootSegment] = []
+    for h in script.phdrs:
+        var flags: i64 = -1
+        if h.flags_expr != "":
+            match boot_eval(h.flags_expr, boot_eval_ctx(0)):
+                case Ok(v): flags = v
+                case Err(e): return Err("boot layout: PHDRS {h.name}: {e}")
+        segments = segments.push(BootSegment(name: h.name, phdr_type: h.phdr_type, flags: flags,
+            filehdr: h.filehdr, phdrs_hdr: h.phdrs, at_expr: h.at_expr))
+
+    var sections: [BootSectionPlan] = []
+    var symbols: [BootSymbol] = []
+    var assertions: [BootAssertion] = []
+    var gc_roots: [text] = []
+    var discard: [text] = []
+    var ops: [BootOp] = []
+    var top_ops: [BootOp] = []
+    var start_expr = ""
+    var seen_section = false
+    var sticky_segment = ""
+    var pending_dot = ""
+
+    var externs: [text] = []
+    for st in script.top_stmts:
+        if st.kind == LdStmtKind.Include:
+            return Err("boot layout: INCLUDE \"{st.message}\" is not resolved; plan the expanded script")
+        if st.kind == LdStmtKind.Extern:
+            for sym in st.patterns:
+                externs = externs.push(sym)
+        else if st.kind == LdStmtKind.Assert:
+            top_ops = top_ops.push(_boot_op(BOOT_OP_ASSERT, assertions.len()))
+            assertions = assertions.push(BootAssertion(expr: st.expr, message: st.message))
+        else if st.symbol != ".":
+            top_ops = top_ops.push(_boot_op(BOOT_OP_SYMBOL, symbols.len()))
+            symbols = symbols.push(BootSymbol(name: st.symbol, expr: st.expr,
+                provide: st.kind == LdStmtKind.Provide or st.kind == LdStmtKind.ProvideHidden, section: ""))
+
+    for c in script.commands:
+        if c.kind == LdCmdKind.Stmt:
+            val st = c.stmt
+            if st.kind == LdStmtKind.Include or st.kind == LdStmtKind.Extern:
+                return Err("boot layout: INCLUDE/EXTERN inside SECTIONS is not modelled; plan the expanded script")
+            if st.kind == LdStmtKind.Assert:
+                ops = ops.push(_boot_op(BOOT_OP_ASSERT, assertions.len()))
+                assertions = assertions.push(BootAssertion(expr: st.expr, message: st.message))
+            else if st.symbol == ".":
+                var dexpr = st.expr
+                if st.kind == LdStmtKind.AddAssign:
+                    dexpr = ". + (" + st.expr + ")"
+                else if st.kind != LdStmtKind.Assign:
+                    return Err("boot layout: unsupported location-counter statement '. {st.expr}' between output sections")
+                ops = ops.push(BootOp(kind: BOOT_OP_DOT, index: -1, expr: dexpr, file_pattern: "", patterns: [], keep: false, value: 0))
+                # dot_expr / start_expr keep the rung-2 view (last before the first section, first between sections); `ops` is the replayable order.
+                if not seen_section:
+                    start_expr = dexpr
+                else if pending_dot == "":
+                    pending_dot = dexpr
+            else:
+                ops = ops.push(_boot_op(BOOT_OP_SYMBOL, symbols.len()))
+                symbols = symbols.push(BootSymbol(name: st.symbol, expr: st.expr,
+                    provide: st.kind == LdStmtKind.Provide or st.kind == LdStmtKind.ProvideHidden, section: ""))
+            continue
+
+        seen_section = true
+        val sec = script.sections[c.section_index]
+        val is_discard = sec.name == "/DISCARD/"
+        var inputs: [text] = []
+        var keeps: [text] = []
+        var pad: i64 = 0
+        var aligns: [i64] = []
+        var defined: [text] = []
+        var body: [BootOp] = []
+        for st in sec.body:
+            if st.kind == LdStmtKind.Input or st.kind == LdStmtKind.Keep:
+                body = body.push(BootOp(kind: BOOT_OP_INPUT, index: -1, expr: "", file_pattern: st.file_pattern,
+                    patterns: st.patterns, keep: st.kind == LdStmtKind.Keep, value: 0))
+                for pat in st.patterns:
+                    inputs = inputs.push(pat)
+                    if st.kind == LdStmtKind.Keep:
+                        keeps = keeps.push(pat)
+                        if not is_discard:
+                            gc_roots = gc_roots.push(pat)
+                    if is_discard:
+                        discard = discard.push(pat)
+            else if st.kind == LdStmtKind.Assert:
+                body = body.push(_boot_op(BOOT_OP_ASSERT, assertions.len()))
+                assertions = assertions.push(BootAssertion(expr: st.expr, message: st.message))
+            else if st.kind == LdStmtKind.Include or st.kind == LdStmtKind.Extern:
+                return Err("boot layout: {sec.name}: INCLUDE/EXTERN inside an output section is not modelled")
+            else if st.symbol == ".":
+                if st.kind == LdStmtKind.AddAssign:
+                    match boot_eval(st.expr, boot_eval_ctx(0)):
+                        case Ok(v):
+                            pad = pad + v
+                            body = body.push(BootOp(kind: BOOT_OP_PAD, index: -1, expr: "", file_pattern: "", patterns: [], keep: false, value: v))
+                        case Err(e): return Err("boot layout: {sec.name}: {e}")
+                else:
+                    # Only `. = ALIGN(n)` and `. = . + n` are modelled inside a section body.
+                    val toks = ld_tokenize(st.expr)
+                    if toks.len() == 4 and toks[0].value == "." and toks[1].kind == LdTokenKind.Plus:
+                        match boot_eval(toks[2].value, boot_eval_ctx(0)):
+                            case Ok(v):
+                                pad = pad + v
+                                body = body.push(BootOp(kind: BOOT_OP_PAD, index: -1, expr: "", file_pattern: "", patterns: [], keep: false, value: v))
+                            case Err(e): return Err("boot layout: {sec.name}: {e}")
+                        continue
+                    if toks.len() != 5 or toks[0].value != "ALIGN":
+                        return Err("boot layout: {sec.name}: unsupported location-counter assignment '. = {st.expr}'")
+                    val n = ld_parse_number(toks[2].value)
+                    aligns = aligns.push(n)
+                    body = body.push(BootOp(kind: BOOT_OP_ALIGN, index: -1, expr: "", file_pattern: "", patterns: [], keep: false, value: n))
+            else:
+                defined = defined.push(st.symbol)
+                body = body.push(_boot_op(BOOT_OP_SYMBOL, symbols.len()))
+                symbols = symbols.push(BootSymbol(name: st.symbol, expr: st.expr,
+                    provide: st.kind == LdStmtKind.Provide or st.kind == LdStmtKind.ProvideHidden, section: sec.name))
+
+        if sec.region != "" and not _boot_find_region(regions, sec.region):
+            return Err("boot layout: {sec.name} placed in undeclared region '{sec.region}'")
+        if sec.lma_region != "" and not _boot_find_region(regions, sec.lma_region):
+            return Err("boot layout: {sec.name} loads into undeclared region '{sec.lma_region}' (AT>)")
+        if sec.lma_region != "" and sec.lma_expr != "":
+            return Err("boot layout: {sec.name} has both AT() and AT>")
+        for ph in sec.phdrs:
+            if not _boot_find_segment(segments, ph):
+                return Err("boot layout: {sec.name} placed in undeclared segment '{ph}'")
+
+        var segment = ""
+        if not is_discard and not _boot_is_non_alloc(sec):
+            if sec.phdrs.len() > 0:
+                sticky_segment = sec.phdrs[0]
+            segment = sticky_segment
+            if segments.len() > 0 and segment == "":
+                return Err("boot layout: allocated section {sec.name} has no PHDRS segment")
+
+        val (has_bias, bias) = _boot_lma_bias(sec.name, sec.lma_expr)
+        ops = ops.push(_boot_op(BOOT_OP_SECTION, sections.len()))
+        sections = sections.push(BootSectionPlan(name: sec.name, vma_expr: sec.address_expr, dot_expr: pending_dot,
+            align_expr: sec.align_expr, lma_expr: sec.lma_expr, has_lma_bias: has_bias, lma_bias: bias,
+            input_patterns: inputs, keep_patterns: keeps, noload: sec.section_type == "NOLOAD",
+            pad_bytes: pad, inner_aligns: aligns, segment: segment, region: sec.region, lma_region: sec.lma_region,
+            discard: is_discard, defined_symbols: defined, body: body))
+        pending_dot = ""
+
+    Ok(BootLayoutPlan(output_format: script.output_format, output_arch: script.output_arch,
+        entry: script.entry, start_expr: start_expr, regions: regions, segments: segments,
+        sections: sections, symbols: symbols, assertions: assertions, gc_roots: gc_roots,
+        extern_symbols: externs, discard_patterns: discard, ops: ops, top_ops: top_ops))
+
+fn boot_layout_add_defsym(plan: BootLayoutPlan, name: text, expr: text) -> BootLayoutPlan:
+    """`--defsym=name=expr`: a top-level assignment evaluated after layout."""
+    var top = plan.top_ops
+    top = top.push(_boot_op(BOOT_OP_SYMBOL, plan.symbols.len()))
+    BootLayoutPlan(output_format: plan.output_format, output_arch: plan.output_arch,
+        entry: plan.entry, start_expr: plan.start_expr, regions: plan.regions, segments: plan.segments,
+        sections: plan.sections, symbols: plan.symbols.push(BootSymbol(name: name, expr: expr, provide: false, section: "")),
+        assertions: plan.assertions, gc_roots: plan.gc_roots, extern_symbols: plan.extern_symbols,
+        discard_patterns: plan.discard_patterns, ops: plan.ops, top_ops: top)
+
+
+fn boot_layout_from_text(input: text) -> Result<BootLayoutPlan, text>:
+    """Parse a linker script and build its BootLayoutPlan."""
+    match ld_parse(input):
+        case Ok(script): boot_layout_from_script(script)
+        case Err(e): Err(e)
+
+fn boot_layout_find_section(plan: BootLayoutPlan, name: text) -> BootSectionPlan?:
+    for s in plan.sections:
+        if s.name == name:
+            return s
+    nil
+
+fn boot_layout_start_address(plan: BootLayoutPlan) -> Result<i64, text>:
+    """Initial location counter: the leading `. = expr`, else the first region's ORIGIN, else 0."""
+    if plan.start_expr != "":
+        return boot_eval(plan.start_expr, boot_eval_ctx(0))
+    if plan.regions.len() > 0:
+        return Ok(plan.regions[0].origin)
+    Ok(0)
+
+export BootRegion, BootSegment, BootSectionPlan, BootSymbol, BootAssertion, BootLayoutPlan
+export BootEvalCtx, boot_eval_ctx, boot_eval_bind, boot_eval, boot_align_up
+export boot_layout_from_script, boot_layout_from_text, boot_layout_find_section
+export boot_layout_start_address
+export BootOp, boot_layout_add_defsym
+export BOOT_OP_SECTION, BOOT_OP_DOT, BOOT_OP_SYMBOL, BOOT_OP_ASSERT, BOOT_OP_INPUT, BOOT_OP_PAD, BOOT_OP_ALIGN

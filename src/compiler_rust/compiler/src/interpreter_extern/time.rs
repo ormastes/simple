@@ -13,12 +13,18 @@ use crate::value::Value;
 /// * `args` - Evaluated arguments (none expected)
 ///
 /// # Returns
-/// * Float representing seconds since Unix epoch (with fractional seconds)
+/// * i64 representing seconds since Unix epoch
 pub fn rt_time_now_seconds(_args: &[Value]) -> Result<Value, CompileError> {
-    unsafe {
-        let time = simple_runtime::value::rt_time_now_seconds();
-        Ok(Value::Float(time))
-    }
+    Ok(Value::Int(simple_runtime::value::rt_time_now_seconds()))
+}
+
+/// Get current time in fractional seconds since Unix epoch.
+///
+/// This is separately named because `rt_time_now_seconds` is the legacy C
+/// integer ABI.  Keeping the two return families distinct prevents an
+/// interpreter/native return-representation mismatch.
+pub fn rt_time_now_seconds_f64(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Float(simple_runtime::value::rt_time_now_seconds_f64()))
 }
 
 /// Get current time as Unix timestamp (integer seconds since epoch)
@@ -31,10 +37,7 @@ pub fn rt_time_now_seconds(_args: &[Value]) -> Result<Value, CompileError> {
 /// # Returns
 /// * i64 representing seconds since Unix epoch (integer)
 pub fn _current_time_unix(_args: &[Value]) -> Result<Value, CompileError> {
-    unsafe {
-        let time = simple_runtime::value::rt_time_now_seconds();
-        Ok(Value::Int(time as i64))
-    }
+    Ok(Value::Int(simple_runtime::value::rt_time_now_seconds()))
 }
 
 /// Get current time in milliseconds since Unix epoch
@@ -47,32 +50,27 @@ pub fn _current_time_unix(_args: &[Value]) -> Result<Value, CompileError> {
 /// # Returns
 /// * i64 representing milliseconds since Unix epoch
 pub fn rt_current_time_ms(_args: &[Value]) -> Result<Value, CompileError> {
-    unsafe {
-        let time_seconds = simple_runtime::value::rt_time_now_seconds();
-        let time_ms = (time_seconds * 1000.0) as i64;
-        Ok(Value::Int(time_ms))
-    }
+    let time_seconds = simple_runtime::value::rt_time_now_seconds_f64();
+    Ok(Value::Int(simple_runtime::value::fractional_seconds_to_millis(
+        time_seconds,
+    )))
 }
 
 /// Get current time in milliseconds since Unix epoch (alias for web stack)
 ///
 /// Callable from Simple as: `rt_time_now_ms()`
 pub fn rt_time_now_ms(_args: &[Value]) -> Result<Value, CompileError> {
-    unsafe {
-        let time_seconds = simple_runtime::value::rt_time_now_seconds();
-        let time_ms = (time_seconds * 1000.0) as i64;
-        Ok(Value::Int(time_ms))
-    }
+    let time_seconds = simple_runtime::value::rt_time_now_seconds_f64();
+    Ok(Value::Int(simple_runtime::value::fractional_seconds_to_millis(
+        time_seconds,
+    )))
 }
 
 /// Get current time as integer seconds since Unix epoch (DNS resolver)
 ///
 /// Callable from Simple as: `rt_time_now()`
 pub fn rt_time_now(_args: &[Value]) -> Result<Value, CompileError> {
-    unsafe {
-        let time = simple_runtime::value::rt_time_now_seconds();
-        Ok(Value::Int(time as i64))
-    }
+    Ok(Value::Int(simple_runtime::value::rt_time_now_seconds()))
 }
 
 // ============================================================================
@@ -108,7 +106,9 @@ pub fn rt_progress_clock_now_nanos(_args: &[Value]) -> Result<Value, CompileErro
     Ok(Value::Int(simple_runtime::value::sffi::rt_progress_clock_now_nanos()))
 }
 pub fn rt_progress_tls_is_initialized(_args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::Bool(simple_runtime::value::sffi::rt_progress_tls_is_initialized()))
+    Ok(Value::Bool(
+        simple_runtime::value::sffi::rt_progress_tls_is_initialized(),
+    ))
 }
 pub fn rt_progress_tls_start_nanos(_args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(simple_runtime::value::sffi::rt_progress_tls_start_nanos()))
@@ -116,7 +116,11 @@ pub fn rt_progress_tls_start_nanos(_args: &[Value]) -> Result<Value, CompileErro
 pub fn rt_progress_tls_store_start_nanos(args: &[Value]) -> Result<Value, CompileError> {
     let start = match args {
         [Value::Int(v)] => *v,
-        _ => return Err(CompileError::semantic("rt_progress_tls_store_start_nanos requires one i64")),
+        _ => {
+            return Err(CompileError::semantic(
+                "rt_progress_tls_store_start_nanos requires one i64",
+            ))
+        }
     };
     simple_runtime::value::sffi::rt_progress_tls_store_start_nanos(start);
     Ok(Value::Nil)
@@ -697,6 +701,22 @@ pub fn rt_perf_clear_fn(_args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Nil)
 }
 
+/// Format whole epoch seconds as UTC text (strftime subset) for the
+/// interpreter lane. Mirrors the native core-C capsule's `rt_time_format`.
+///
+/// Callable from Simple as: `rt_time_format(ts_seconds, fmt)`
+pub fn rt_time_format(args: &[Value]) -> Result<Value, CompileError> {
+    let (ts_seconds, fmt) = match (args.first(), args.get(1)) {
+        (Some(Value::Int(ts)), Some(Value::Str(f))) => (*ts, f.as_str().to_string()),
+        _ => return Err(CompileError::semantic(
+            "rt_time_format requires (i64, text) arguments",
+        )),
+    };
+    Ok(Value::text(
+        simple_runtime::value::sffi::time::format_time_utc_strftime(ts_seconds, &fmt),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -705,12 +725,12 @@ mod tests {
     fn test_rt_time_now_seconds() {
         let result = rt_time_now_seconds(&[]).unwrap();
         match result {
-            Value::Float(t) => {
+            Value::Int(t) => {
                 // Time should be reasonable (after year 2020, before year 2100)
-                assert!(t > 1_600_000_000.0); // After Sept 2020
-                assert!(t < 4_000_000_000.0); // Before year 2100
+                assert!(t > 1_600_000_000); // After Sept 2020
+                assert!(t < 4_000_000_000); // Before year 2100
             }
-            _ => panic!("Expected Float value"),
+            _ => panic!("Expected Int value"),
         }
     }
 
@@ -734,5 +754,30 @@ mod tests {
             other => panic!("Expected Float value, got {other:?}"),
         }
         assert_eq!(rt_progress_reset(&[]).unwrap(), Value::Bool(true));
+    }
+
+    #[test]
+    fn test_rt_time_format_matches_capsule_semantics() {
+        let fmt = |ts: i64, f: &str| {
+            rt_time_format(&[Value::Int(ts), Value::text(f.to_string())]).unwrap()
+        };
+        // Epoch 0 is 1970-01-01T00:00:00Z.
+        assert_eq!(fmt(0, "%F"), Value::text("1970-01-01".to_string()));
+        assert_eq!(fmt(0, "%T"), Value::text("00:00:00".to_string()));
+        assert_eq!(
+            fmt(1_735_689_600, "%Y-%m-%d %H:%M:%S"),
+            Value::text("2025-01-01 00:00:00".to_string())
+        );
+        assert_eq!(fmt(0, "100%%"), Value::text("100%".to_string()));
+        // Unknown specifier and trailing '%' fail closed.
+        assert_eq!(fmt(0, "%Q"), Value::text(String::new()));
+        assert_eq!(fmt(0, "%Y-%"), Value::text(String::new()));
+        assert_eq!(
+            fmt(0, &"%Y".repeat(100)),
+            Value::text("1970".repeat(100))
+        );
+        // 104-byte fmt whose 520-byte output reaches the capsule's 512-byte
+        // buffer: the copy guard fires and both lanes fail closed.
+        assert_eq!(fmt(0, &"%F".repeat(52)), Value::text(String::new()));
     }
 }

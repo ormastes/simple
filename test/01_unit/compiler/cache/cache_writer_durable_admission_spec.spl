@@ -1,0 +1,116 @@
+# @req REQ-CSM-007 REQ-CSM-008 REQ-CSM-009 REQ-CSM-012
+# @cover src/compiler/80.driver/cache/journal/action_root_journal_v1.spl 85%
+# @cover src/compiler/80.driver/cache/gateway/cache_writer_v1.spl 85%
+
+use std.spec.{describe, it, expect}
+use std.spec.step
+use compiler.driver.cache.journal.action_root_journal_v1.*
+use compiler.driver.cache.catalog.cache_catalog_projection.CacheCatalogProjectionV1
+use compiler.driver.cache.gateway.cache_writer_v1.*
+use common.cache_daemon_host_authority_v1.{
+    AuthenticatedPeerReceiptV1, CacheReadinessReceiptV1,
+    ExclusiveCacheLockReceiptV1, DurableWriterEpochV1
+}
+
+fn digest(ch: text) -> text:
+    ch.repeat(64)
+
+describe "durable cache-writer admission ordering":
+    it "prepares without visibility and applies one durable receipt idempotently":
+        step("Freeze one checksummed append without advancing the journal head")
+        val journal = ActionRootJournalV1.empty(4)
+        val prepared = journal.prepare(digest("a"), "compile_snapshot",
+            digest("b"), digest("c")).unwrap()
+        expect(journal.bytes).to_equal("")
+        expect(journal.next_sequence).to_equal(0)
+        expect(prepared.expected_bytes).to_equal(0)
+
+        step("Apply the exact durable append once and accept an exact replay")
+        val first = journal.accept_durable(prepared).unwrap()
+        val after = journal.bytes
+        val replay = journal.accept_durable(prepared).unwrap()
+        expect(first.sequence).to_equal(0)
+        expect(replay.sequence).to_equal(0)
+        expect(journal.bytes).to_equal(after)
+        expect(journal.next_sequence).to_equal(1)
+
+    it "recovers a complete durable journal and refuses a torn tail":
+        step("Reconstruct the Simple-owned head from checksummed durable bytes")
+        val journal = ActionRootJournalV1.empty(7)
+        journal.append(digest("a"), "public_summary", digest("b"), digest("c")).unwrap()
+        val recovered = ActionRootJournalV1.recovered(journal.bytes, 7).unwrap()
+        expect(recovered.next_sequence).to_equal(1)
+        expect(recovered.bytes).to_equal(journal.bytes)
+
+        step("Keep a partial host append recovery-only instead of guessing")
+        expect(ActionRootJournalV1.recovered(journal.bytes + "1|torn", 7).is_err()).to_equal(true)
+
+    it "rejects a prepared record whose durable append encodes another object":
+        step("Replace only the public record while retaining the sealed append and operation digest")
+        val journal = ActionRootJournalV1.empty(5)
+        val prepared = journal.prepare(digest("a"), "compile_snapshot",
+            digest("b"), digest("c")).unwrap()
+        val forged = ActionRootPreparedAppendV1(
+            record: ActionRootRecordV1(sequence: prepared.record.sequence,
+                action_digest: prepared.record.action_digest,
+                object_kind: prepared.record.object_kind,
+                object_digest: digest("d"),
+                manifest_digest: prepared.record.manifest_digest),
+            expected_bytes: prepared.expected_bytes,
+            expected_prefix_digest: prepared.expected_prefix_digest,
+            append_bytes: prepared.append_bytes,
+            operation_digest: prepared.operation_digest)
+        expect(journal.accept_durable(forged).is_err()).to_equal(true)
+        expect(journal.bytes).to_equal("")
+        expect(journal.next_sequence).to_equal(0)
+
+    it "refuses the live commit surface before projection without CAS reachability":
+        step("Call the public writer with opaque receipts and retain an empty projection")
+        val catalog = CacheCatalogProjectionV1.memory().unwrap()
+        val result = cache_writer_commit_host_admitted_v1(
+            ExclusiveCacheLockReceiptV1(opaque_handle: -1),
+            AuthenticatedPeerReceiptV1(opaque_handle: -1),
+            CacheReadinessReceiptV1(opaque_handle: -1), [1, 2, 3],
+            DurableWriterEpochV1(opaque_handle: -1), 2, catalog,
+            digest("a"), "compile_snapshot", digest("b"), digest("c"))
+        expect(result.is_err()).to_equal(true)
+        expect(catalog.lookup(digest("a")).unwrap().present).to_equal(false)
+
+    it "refuses live recovery before projecting unverified host journal frames":
+        step("Keep an existing projection byte-identical when recovery has no CAS closure receipt")
+        val catalog = CacheCatalogProjectionV1.memory().unwrap()
+        val existing = ActionRootRecordV1(sequence: 0, action_digest: digest("a"),
+            object_kind: "compile_snapshot", object_digest: digest("b"),
+            manifest_digest: digest("c"))
+        catalog.apply(existing, 2).unwrap()
+        val before = catalog.digest().unwrap()
+        val result = cache_writer_recover_host_admitted_v1(
+            ExclusiveCacheLockReceiptV1(opaque_handle: -1),
+            AuthenticatedPeerReceiptV1(opaque_handle: -1),
+            CacheReadinessReceiptV1(opaque_handle: -1), [1, 2, 3],
+            DurableWriterEpochV1(opaque_handle: -1), 3, catalog)
+        expect(result.is_err()).to_equal(true)
+        expect(catalog.digest().unwrap()).to_equal(before)
+
+    it "does not let a conflicting action cross the closed public writer":
+        step("Retain the original PureDatabase row when a conflicting digest is offered")
+        val catalog = CacheCatalogProjectionV1.memory().unwrap()
+        val existing = ActionRootRecordV1(sequence: 0, action_digest: digest("a"),
+            object_kind: "compile_snapshot", object_digest: digest("b"),
+            manifest_digest: digest("c"))
+        catalog.apply(existing, 2).unwrap()
+        val result = cache_writer_commit_host_admitted_v1(
+            ExclusiveCacheLockReceiptV1(opaque_handle: -1),
+            AuthenticatedPeerReceiptV1(opaque_handle: -1),
+            CacheReadinessReceiptV1(opaque_handle: -1), [1, 2, 3],
+            DurableWriterEpochV1(opaque_handle: -1), 2, catalog,
+            digest("a"), "compile_snapshot", digest("d"), digest("c"))
+        expect(result.is_err()).to_equal(true)
+        val retained = catalog.lookup(digest("a")).unwrap()
+        expect(retained.object_digest).to_equal(digest("b"))
+        expect(retained.quarantined).to_equal(false)
+
+    it "keeps public generation mutation closed until verified CAS and GC agree":
+        step("Do not activate the legacy raw-CAS publication route")
+        expect(cache_writer_mutation_scope_available_v1()).to_equal(false)
+        expect(cache_writer_verified_cas_reachability_available_v1()).to_equal(false)

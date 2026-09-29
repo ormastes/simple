@@ -1,0 +1,165 @@
+"""Installed compiler --version operation for UP-AC-006 / REQ-017, REQ-018.
+
+Only loader siblings may execute this operation. Caller identity/capabilities,
+installed image identity, and terminal output come from their existing owners.
+This receipt proves one execution; it does not prove candidate/cold-boot binding.
+"""
+
+use std.fs_driver.mount_table.{MountTable}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.structural.digest.hash256.{hash256_hex_valid, hash256_is_zero}
+use std.common.contracts.execution.simpleos_executable_v1.{ManifestTarget}
+use os.kernel.scheduler.scheduler_types.{Scheduler}
+use os.kernel.scheduler.scheduler_capability_snapshot_lease_v1.{
+    scheduler_current_execution_snapshot_task_id_v1,
+    scheduler_current_execution_snapshot_lifecycle_generation_v1,
+    scheduler_current_execution_snapshot_exec_generation_v1,
+    scheduler_current_execution_snapshot_lease_v1,
+    scheduler_capability_snapshot_consume_once_v1,
+    scheduler_pinned_capability_snapshot_caps_v1
+}
+use os.kernel.scheduler.process_execution_observation.{
+    SchedulerExecutionEvidenceV1, SchedulerExecutionEvidenceTokenV1,
+    scheduler_execution_evidence_consume_once_v2
+}
+use os.kernel.loader.installed_artifact_catalog_v1.{installed_artifact_catalog_lookup_target_v1}
+use os.kernel.loader.installed_artifact_manifest_execution_policy_v1.{installed_artifact_active_target_v1}
+use os.kernel.loader.executable_authority_registry.{executable_authority_loader_owner}
+use os.kernel.loader.authenticated_fs_exec_submission_service_v1.{
+    authenticated_fs_exec_prepare_installed_artifact_online_v1,
+    authenticated_fs_exec_submit_v1
+}
+use os.kernel.loader.spawn_recipes.{SPAWN_RECIPE_APP_LAUNCHER}
+
+pub(package) const SIMPLE_GUEST_VERSION_OUTPUT_LIMIT_V1: i64 = 4096
+pub(package) const SIMPLE_GUEST_VERSION_COMPILER_V1: text = "/sys/apps/simple_compiler.smf"
+
+pub(package) struct SimpleGuestVersionReceiptV1:
+    parent_task_id: u64
+    child_task_id: u64
+    scheduler_observation_generation: u64
+    compiler_path: text
+    compiler_sha256: text
+    target: ManifestTarget
+    mount_id: u64
+    mount_generation: u64
+    file_generation: u64
+    stdout_bytes: [u8]
+    stderr_bytes: [u8]
+    stdout_sha256: text
+    stderr_sha256: text
+
+pub(package) struct SimpleGuestVersionResultV1:
+    receipt: SimpleGuestVersionReceiptV1
+    scheduler: Scheduler
+
+pub(package) struct SimpleGuestVersionErrorV1:
+    reason: text
+    scheduler: Scheduler
+
+fn _error(reason: text, scheduler: Scheduler
+) -> Result<SimpleGuestVersionResultV1, SimpleGuestVersionErrorV1>:
+    Err(SimpleGuestVersionErrorV1(reason: reason, scheduler: scheduler))
+
+pub(package) fn simple_guest_version_observation_valid_v1(
+    observed: SchedulerExecutionEvidenceV1,
+    parent_id: u64,
+    compiler_sha256: text,
+    target: ManifestTarget
+) -> bool:
+    """Pure rejection policy only; caller-created observations mint no receipt."""
+    if parent_id == 0u64 or observed.parent_id != parent_id or
+       observed.child_id == 0u64 or observed.child_id == parent_id or
+       observed.generation == 0u64 or not observed.command_observed:
+        return false
+    if not hash256_hex_valid(compiler_sha256) or hash256_is_zero(compiler_sha256) or
+       observed.image_hash != compiler_sha256 or
+       observed.executable_path != SIMPLE_GUEST_VERSION_COMPILER_V1 or
+       observed.canonical_source_path != SIMPLE_GUEST_VERSION_COMPILER_V1:
+        return false
+    if target.os != "simpleos" or target.abi != "simpleos" or
+       observed.target_os != target.os or observed.target_arch != target.arch or
+       observed.target_abi != target.abi:
+        return false
+    if observed.argv.len() != 1 or observed.argv[0] != "--version" or
+       observed.argv_file_bindings.len() != 0 or observed.exit_code != 0:
+        return false
+    if observed.mount_id == 0u64 or observed.mount_generation == 0u64 or
+       observed.file_generation == 0u64 or observed.stdout_truncated or
+       observed.stderr_truncated or observed.stdout_bytes.len() == 0 or
+       observed.stdout_bytes.len() > SIMPLE_GUEST_VERSION_OUTPUT_LIMIT_V1 or
+       observed.stderr_bytes.len() > SIMPLE_GUEST_VERSION_OUTPUT_LIMIT_V1:
+        return false
+    true
+
+fn _receipt_consume_once(
+    token: SchedulerExecutionEvidenceTokenV1,
+    parent_id: u64,
+    compiler_sha256: text,
+    target: ManifestTarget
+) -> Result<SimpleGuestVersionReceiptV1, text>:
+    val consumed = scheduler_execution_evidence_consume_once_v2(token)
+    if not consumed.?: return Err("guest-version-observation-missing")
+    val observed = consumed.unwrap()
+    if not simple_guest_version_observation_valid_v1(
+        observed, parent_id, compiler_sha256, target):
+        return Err("guest-version-observation-mismatch")
+    Ok(SimpleGuestVersionReceiptV1(
+        parent_task_id: observed.parent_id, child_task_id: observed.child_id,
+        scheduler_observation_generation: observed.generation,
+        compiler_path: observed.executable_path, compiler_sha256: observed.image_hash,
+        target: target, mount_id: observed.mount_id,
+        mount_generation: observed.mount_generation, file_generation: observed.file_generation,
+        stdout_bytes: observed.stdout_bytes, stderr_bytes: observed.stderr_bytes,
+        stdout_sha256: sha256_u8_hex(observed.stdout_bytes),
+        stderr_sha256: sha256_u8_hex(observed.stderr_bytes)))
+
+pub(package) fn simple_guest_version_execute_v1(
+    scheduler: Scheduler, mut table: MountTable
+) -> Result<SimpleGuestVersionResultV1, SimpleGuestVersionErrorV1>:
+    """Execute the authenticated installed compiler with exactly ['--version'].
+
+    The caller must hold exclusive Scheduler and MountTable ownership across
+    this synchronous operation, as required by the submission service.
+    The mutable table parameter aliases that owner so execute-open and cleanup
+    mutations survive both successful and failed returns.
+    Every delivered observation is consumed even on failed submission.
+    """
+    val snapshot = scheduler.current_execution_snapshot_v1()
+    if not snapshot.?: return _error("guest-version-current-task-missing", scheduler)
+    val execution = snapshot.unwrap()
+    val parent_id = scheduler_current_execution_snapshot_task_id_v1(execution)
+    val pinned = scheduler_capability_snapshot_consume_once_v1(
+        scheduler_current_execution_snapshot_lease_v1(execution), parent_id,
+        scheduler_current_execution_snapshot_lifecycle_generation_v1(execution),
+        scheduler_current_execution_snapshot_exec_generation_v1(execution))
+    if not pinned.? or parent_id == 0u64 or parent_id > 0x7fffffffffffffffu64:
+        return _error("guest-version-current-task-unavailable", scheduler)
+    val target = installed_artifact_active_target_v1()
+    if not target.?: return _error("guest-version-target-unavailable", scheduler)
+    val installed = installed_artifact_catalog_lookup_target_v1(
+        SIMPLE_GUEST_VERSION_COMPILER_V1, target.unwrap())
+    if not installed.?: return _error("guest-version-installed-compiler-missing", scheduler)
+    val owner = executable_authority_loader_owner()
+    if owner.is_err(): return _error("guest-version-loader-unavailable", scheduler)
+    val prepared = authenticated_fs_exec_prepare_installed_artifact_online_v1(
+        table, owner.unwrap(), parent_id as i64, SIMPLE_GUEST_VERSION_COMPILER_V1,
+        SPAWN_RECIPE_APP_LAUNCHER)
+    if prepared.is_err(): return _error("guest-version-admission-failed", scheduler)
+    val submitted = authenticated_fs_exec_submit_v1(
+        scheduler, table, prepared.unwrap(),
+        scheduler_pinned_capability_snapshot_caps_v1(pinned.unwrap()),
+        SIMPLE_GUEST_VERSION_COMPILER_V1, ["--version"])
+    if not submitted.evidence.?:
+        if submitted.cleanup_indeterminate:
+            return _error("guest-version-cleanup-indeterminate", submitted.scheduler)
+        return _error("guest-version-observation-missing", submitted.scheduler)
+    val receipt = _receipt_consume_once(
+        submitted.evidence.unwrap(), parent_id,
+        installed.unwrap().content_sha256, target.unwrap())
+    if submitted.cleanup_indeterminate:
+        return _error("guest-version-cleanup-indeterminate", submitted.scheduler)
+    if submitted.exit_code != 0:
+        return _error("guest-version-execution-failed", submitted.scheduler)
+    if receipt.is_err(): return _error(receipt.unwrap_err(), submitted.scheduler)
+    Ok(SimpleGuestVersionResultV1(receipt: receipt.unwrap(), scheduler: submitted.scheduler))

@@ -2,7 +2,9 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use simple_parser::ast::{AssignOp, BinOp, BitfieldDef, BitfieldField, ClassDef, Expr, FunctionDef, ImportTarget, Node, Type};
+use simple_parser::ast::{
+    AssignOp, BinOp, BitfieldDef, BitfieldField, ClassDef, Expr, FunctionDef, ImportTarget, Node, Type,
+};
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::value::{strict_mem_enabled, Env, Value};
 use super::core_types::{
@@ -16,9 +18,14 @@ use super::interpreter_control::{
     assert_stmt_failure, exec_if, exec_while, exec_loop, exec_for, exec_match, exec_context, exec_with,
     is_condition_present,
 };
-use super::interpreter_state::{mark_as_moved, BLOCK_SCOPED_ENUMS, CONST_NAMES, IMMUTABLE_VARS, MODULE_GLOBALS};
+use super::interpreter_state::{
+    mark_as_moved, BLOCK_SCOPED_ENUMS, CONST_NAMES, GLOBAL_ENUMS, IMMUTABLE_VARS, MODULE_GLOBALS,
+};
 use super::coverage_helpers::{record_node_coverage, extract_node_location};
-use crate::interpreter_unit::{is_unit_type, validate_unit_type, validate_unit_constraints};
+use crate::interpreter_unit::{
+    is_unit_type, register_standalone_unit_locals, register_unit_family_locals, validate_unit_constraints,
+    validate_unit_type,
+};
 use simple_runtime::debug;
 
 /// Check if the watchdog timeout has been exceeded (single atomic load, negligible overhead).
@@ -391,14 +398,30 @@ pub(crate) fn exec_node(
         Node::Function(f) => {
             // Nested function definition - treat as a closure that captures the current scope
             // Store as a Function with the captured env embedded for closure semantics
-            env.insert(
-                f.name.clone(),
-                Value::Function {
-                    name: f.name.clone(),
-                    def: Arc::new(f.clone()),
-                    captured_env: Arc::new(env.clone()), // Capture current scope
-                },
-            );
+            let plain = Value::Function {
+                name: f.name.clone(),
+                def: Arc::new(f.clone()),
+                captured_env: Arc::new(env.clone()), // Capture current scope
+            };
+            env.insert(f.name.clone(), plain.clone());
+            // A user-defined (non-directive) decorator rebinds the name to
+            // `dec(original)`.
+            if let Some(decorated) = crate::decorator_apply::apply_runtime_decorators(
+                f,
+                plain,
+                false,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )? {
+                // Keep the plain definition in `functions` so the original body
+                // can still recurse; the sentinel makes `evaluate_call` prefer
+                // the wrapper for calls from outside it.
+                env.insert(crate::decorator_apply::decorated_fn_key(&f.name), Value::Bool(true));
+                env.insert(f.name.clone(), decorated);
+            }
             Ok(Control::Next)
         }
         Node::LiteralFunction(lit_fn) => {
@@ -498,6 +521,20 @@ pub(crate) fn exec_node(
             }
             Ok(Control::Next)
         }
+        // A `unit` declared inside a block (e.g. within a `describe`/`it` body)
+        // must register in the same thread-local registries the module-level
+        // declaration pass uses; otherwise its suffixes are invisible and
+        // literals silently fall back to the preloaded on-disk unit tree.
+        Node::Unit(u) => {
+            register_standalone_unit_locals(u);
+            env.insert(u.name.clone(), Value::Nil);
+            Ok(Control::Next)
+        }
+        Node::UnitFamily(uf) => {
+            register_unit_family_locals(uf);
+            env.insert(uf.name.clone(), Value::Nil);
+            Ok(Control::Next)
+        }
         Node::Newtype(nt) => {
             // Newtype `Name = T` is lowered to an internal class `Name { value: T }`.
             // Constructor `Name(value: x)` and field access `.value` then route through
@@ -582,10 +619,16 @@ pub(crate) fn exec_node(
         // See doc/08_tracking/bug/block_scoped_use_no_op_symbol_resolution_2026-08-18.md
         Node::UseStmt(use_stmt) => {
             let current_file = super::get_current_file();
-            // `enums` is borrowed immutably in this signature; enum imports
-            // reach the interpreter through the GLOBAL_ENUMS thread-local
-            // rather than this map, so a local copy satisfies the loader
-            // without dropping them.
+            // `enums` is borrowed immutably in this signature, so the loader
+            // gets a local clone to register the imported closure's enums
+            // into -- and that clone used to be dropped on the floor. The old
+            // comment here claimed those enums "reach the interpreter through
+            // the GLOBAL_ENUMS thread-local"; nothing on this path put them
+            // there, so a block-scoped import of a module whose closure defines
+            // an enum loaded the FUNCTIONS and lost the ENUMS, and the first use
+            // failed at run time with "enum `X` not found in this scope".
+            // Publish them below.
+            // See doc/08_tracking/bug/function_local_use_loses_enum_scope_2026-09-12.md
             let mut merged_enums = enums.clone();
             let loaded = crate::interpreter::interpreter_module::load_and_merge_module(
                 use_stmt,
@@ -594,6 +637,19 @@ pub(crate) fn exec_node(
                 classes,
                 &mut merged_enums,
             )?;
+            // Publish enums the import brought in to the cross-module registry
+            // every enum lookup already falls back to (expr/calls.rs,
+            // interpreter_call/mod.rs, interpreter_method/mod.rs). Only names
+            // the local map does not already carry are published, so a local
+            // definition is never clobbered by an import.
+            GLOBAL_ENUMS.with(|cell| {
+                let mut registry = cell.borrow_mut();
+                for (enum_name, enum_def) in merged_enums.iter() {
+                    if !enums.contains_key(enum_name) {
+                        registry.insert(enum_name.clone(), Arc::clone(enum_def));
+                    }
+                }
+            });
             if let Value::Dict(exports) = &loaded {
                 // Same unpack rules as module scope: Group binds only the named
                 // items, Glob binds everything, Single/Aliased bind the module
@@ -651,6 +707,69 @@ pub(crate) fn exec_node(
     }
 }
 
+/// Mutate an indexed same-file module global in its authoritative store.
+///
+/// `MODULE_GLOBALS.get(...).cloned()` followed by `Arc::make_mut` keeps the
+/// store's Arc alive and therefore copies the entire array/dict on every
+/// write. Borrowing the value mutably in the store means only the first write
+/// may copy against the required module-load Env snapshot; later writes see
+/// the now-unique authoritative Arc and update in place. A real user alias
+/// likewise retains COW value semantics. `Ok(Some(value))` means the container
+/// needs the general path (currently object `__setitem__` or an invalid type).
+fn try_assign_module_global_index(
+    container_name: &str,
+    index_val: &Value,
+    value: Value,
+) -> Result<Option<Value>, CompileError> {
+    MODULE_GLOBALS.with(|cell| {
+        let mut globals = cell.borrow_mut();
+        let Some(container) = globals.get_mut(container_name) else {
+            return Ok(Some(value));
+        };
+        match container {
+            Value::Array(arc) => {
+                let idx = index_val.as_int()? as usize;
+                let arr = Arc::make_mut(arc);
+                if idx < arr.len() {
+                    arr[idx] = value;
+                } else {
+                    while arr.len() < idx {
+                        arr.push(Value::Nil);
+                    }
+                    arr.push(value);
+                }
+                Ok(None)
+            }
+            Value::Dict(dict) => {
+                let key = index_val.to_key_string();
+                let stored = Value::wrap_dict_entry(index_val, value);
+                Arc::make_mut(dict).insert(key, stored);
+                Ok(None)
+            }
+            Value::Tuple(tuple) => {
+                let idx = index_val.as_int()? as usize;
+                if idx >= tuple.len() {
+                    let ctx = ErrorContext::new()
+                        .with_code(codes::INDEX_OUT_OF_BOUNDS)
+                        .with_help(format!("tuple has {} element(s)", tuple.len()))
+                        .with_note(format!("index {} is out of bounds", idx));
+                    return Err(CompileError::semantic_with_context(
+                        format!(
+                            "index out of bounds: tuple index {} out of bounds (len={})",
+                            idx,
+                            tuple.len()
+                        ),
+                        ctx,
+                    ));
+                }
+                tuple[idx] = value;
+                Ok(None)
+            }
+            _ => Ok(Some(value)),
+        }
+    })
+}
+
 // Helper function for regular assignment
 pub(crate) fn exec_assignment(
     assign: &simple_parser::ast::AssignmentStmt,
@@ -682,7 +801,13 @@ pub(crate) fn exec_assignment(
         // and the engines agree. Note the read path already errors (E1001),
         // so this only restores read/write symmetry.
         // See doc/08_tracking/bug/interp_implicit_self_field_assignment_silent_noop_2026-07-17.md
-        if is_first_assignment {
+        // `is_first_assignment` alone is not sufficient: method dispatch
+        // pre-binds every receiver field as a local (`exec_method_body`), so a
+        // plain `fn` method's bare `field = ...` was NOT a first assignment and
+        // slipped through. `is_field_prebind` recognises exactly those
+        // pre-bound bindings and is cleared by any genuine local declaration.
+        // doc/08_tracking/bug/implicit_self_field_assignment_still_silent_in_plain_fn_methods_2026-08-31.md
+        if is_first_assignment || env.is_field_prebind(name) {
             if let Some(Value::Object { class, fields }) = env.get("self") {
                 if fields.contains_key(name) {
                     let ctx = ErrorContext::new()
@@ -748,7 +873,7 @@ pub(crate) fn exec_assignment(
                                 if let Some(v) = env.get(name) {
                                     cell.borrow_mut().insert(name.clone(), v.clone());
                                 }
-                                });
+                            });
                             return Ok(Control::Next);
                         }
                     }
@@ -781,7 +906,7 @@ pub(crate) fn exec_assignment(
                                     if let Some(v) = env.get(name) {
                                         cell.borrow_mut().insert(name.clone(), v.clone());
                                     }
-                                    });
+                                });
                                 return Ok(Control::Next);
                             }
                             Some(rhs_val) => {
@@ -812,7 +937,7 @@ pub(crate) fn exec_assignment(
                                     if let Some(v) = env.get(name) {
                                         cell.borrow_mut().insert(name.clone(), v.clone());
                                     }
-                                    });
+                                });
                                 return Ok(Control::Next);
                             }
                         }
@@ -872,7 +997,7 @@ pub(crate) fn exec_assignment(
                         return;
                     }
                     cell.borrow_mut().insert(name.clone(), env.get(name).unwrap().clone());
-                    });
+                });
             }
         }
         Ok(Control::Next)
@@ -881,7 +1006,7 @@ pub(crate) fn exec_assignment(
         let value = evaluate_expr(&assign.value, env, functions, classes, enums, impl_methods)?;
         // Get the object name (must be an identifier for now)
         if let Expr::Identifier(obj_name) = receiver.as_ref() {
-            if let Some(obj_val) = env.remove(obj_name) {
+            if let Some(obj_val) = env.remove(obj_name).map(Value::into_option_payload) {
                 match obj_val {
                     Value::ClassInstance(instance) => {
                         instance.set_field(field.clone(), value);
@@ -918,7 +1043,7 @@ pub(crate) fn exec_assignment(
                 Ok(Control::Next)
             } else {
                 let global_obj = MODULE_GLOBALS.with(|cell| cell.borrow().get(obj_name).cloned());
-                if let Some(obj_val) = global_obj {
+                if let Some(obj_val) = global_obj.map(Value::into_option_payload) {
                     match obj_val {
                         Value::ClassInstance(instance) => {
                             instance.set_field(field.clone(), value);
@@ -1030,6 +1155,15 @@ pub(crate) fn exec_assignment(
                         }
                     }
                 } else {
+                    // Not a local array binding (dict-rooted, module global,
+                    // class instance, ...). It may still be a writable place.
+                    if let Some(place) =
+                        super::place::resolve_place(&assign.target, env, functions, classes, enums, impl_methods)?
+                    {
+                        if super::place::write_place(env, &place, value) {
+                            return Ok(Control::Next);
+                        }
+                    }
                     let ctx = ErrorContext::new()
                         .with_code(codes::INVALID_ASSIGNMENT)
                         .with_help("indexed field assignment requires an array identifier");
@@ -1039,11 +1173,25 @@ pub(crate) fn exec_assignment(
                     ))
                 }
             } else {
+                // The indexed receiver is itself a projection (`self.rows[i].f = v`,
+                // `a.b[i].c = v`, `grid[i][j].c = v`). These are ordinary places;
+                // `place::resolve_place` + `write_place` walk an arbitrary
+                // projection chain with `Arc::make_mut`, preserving the COW
+                // value-semantics contract. Rejecting them forced a
+                // read-modify-write workaround whose intermediate binding
+                // aliases the inner container, making every write O(n).
+                if let Some(place) =
+                    super::place::resolve_place(&assign.target, env, functions, classes, enums, impl_methods)?
+                {
+                    if super::place::write_place(env, &place, value) {
+                        return Ok(Control::Next);
+                    }
+                }
                 let ctx = ErrorContext::new()
                     .with_code(codes::INVALID_ASSIGNMENT)
-                    .with_help("indexed field assignment requires a simple array identifier");
+                    .with_help("indexed field assignment requires a variable followed by field/index projections");
                 Err(CompileError::semantic_with_context(
-                    "invalid assignment: complex indexed field receiver is not supported",
+                    "invalid assignment: indexed field assignment target is not a writable place",
                     ctx,
                 ))
             }
@@ -1055,7 +1203,7 @@ pub(crate) fn exec_assignment(
         } = receiver.as_ref()
         {
             if let Expr::Identifier(obj_name) = inner_receiver.as_ref() {
-                if let Some(obj_val) = env.remove(obj_name) {
+                if let Some(obj_val) = env.remove(obj_name).map(Value::into_option_payload) {
                     match obj_val {
                         Value::Object { class, mut fields } => {
                             // Get the inner object
@@ -1214,11 +1362,36 @@ pub(crate) fn exec_assignment(
         }
     } else if let Expr::Index { receiver, index } = &assign.target {
         // Handle index assignment: arr[i] = value or dict["key"] = value or self.dict[key] = value
-        let value = evaluate_expr(&assign.value, env, functions, classes, enums, impl_methods)?;
+        let mut value = evaluate_expr(&assign.value, env, functions, classes, enums, impl_methods)?;
         let index_val = evaluate_expr(index, env, functions, classes, enums, impl_methods)?;
 
         // Case 1: Plain identifier: arr[i] = value
         if let Expr::Identifier(container_name) = receiver.as_ref() {
+            // Same-file module variables live in both the evaluation env and
+            // MODULE_GLOBALS. Identifier reads deliberately treat
+            // MODULE_GLOBALS as authoritative for a non-local binding (see
+            // expr/literals.rs), so classify this BEFORE the local in-place
+            // path. Otherwise the first global COW write leaves a uniquely
+            // owned stale Env snapshot, and the next loop iteration mutates
+            // that snapshot then returns without publishing.
+            //
+            // A true local may shadow a same-named module global, while an
+            // owner-qualified imported global belongs to its owner store;
+            // keep both on the existing Env path. Check the allocation-free
+            // flat-store membership first so unrelated writes do not clone
+            // owner/name metadata through `global_binding`.
+            let is_module_global = !env.is_local(container_name)
+                && MODULE_GLOBALS.with(|cell| cell.borrow().contains_key(container_name))
+                && env.global_binding(container_name).is_none();
+
+            if is_module_global {
+                if let Some(unhandled_value) = try_assign_module_global_index(container_name, &index_val, value)? {
+                    value = unhandled_value;
+                } else {
+                    return Ok(Control::Next);
+                }
+            }
+
             // Fast in-place path for a local array/dict that is PROVABLY
             // unaliased (Arc strong_count == 1, no weak refs): mutate in place,
             // avoiding the O(n) copy-on-write clone the `.cloned()` path below
@@ -1229,11 +1402,27 @@ pub(crate) fn exec_assignment(
             let case1_unique = match env.get(container_name) {
                 Some(Value::Array(arc)) => Arc::strong_count(arc) == 1 && Arc::weak_count(arc) == 0,
                 Some(Value::Dict(arc)) => Arc::strong_count(arc) == 1 && Arc::weak_count(arc) == 0,
+                Some(Value::ByteArray(arc)) => Arc::strong_count(arc) == 1 && Arc::weak_count(arc) == 0,
                 _ => false,
             };
-            if case1_unique {
+            if !is_module_global && case1_unique {
                 if let Some(slot) = env.get_mut(container_name) {
                     match slot {
+                        Value::ByteArray(arc) => {
+                            if let Some(bytes) = Arc::get_mut(arc) {
+                                let idx = index_val.as_int()? as usize;
+                                let byte = value.as_int()? as u8;
+                                if idx < bytes.len() {
+                                    bytes[idx] = byte;
+                                } else {
+                                    while bytes.len() < idx {
+                                        bytes.push(0);
+                                    }
+                                    bytes.push(byte);
+                                }
+                                return Ok(Control::Next);
+                            }
+                        }
                         Value::Array(arc) => {
                             if let Some(arr) = Arc::get_mut(arc) {
                                 let idx = index_val.as_int()? as usize;
@@ -1258,14 +1447,11 @@ pub(crate) fn exec_assignment(
                     }
                 }
             }
-            // Try local env first
-            let container_opt = env.get(container_name).cloned();
-            // Try module globals if not in local env
-            let is_global = container_opt.is_none();
-            let container = if let Some(c) = container_opt {
-                Some(c)
+            let env_container = env.get(container_name).cloned();
+            let container = if is_module_global {
+                env_container.or_else(|| MODULE_GLOBALS.with(|cell| cell.borrow().get(container_name).cloned()))
             } else {
-                MODULE_GLOBALS.with(|cell| cell.borrow().get(container_name).cloned())
+                env_container
             };
 
             if let Some(container) = container {
@@ -1283,6 +1469,23 @@ pub(crate) fn exec_assignment(
                             arr.push(value);
                         }
                         Value::Array(arc)
+                    }
+                    // `rt_bytes_alloc` / `rt_byte_array_new` hand back a packed
+                    // `Value::ByteArray`; `var buf = rt_bytes_alloc(n); buf[i] = b`
+                    // must work like the field paths below. Frozen stays rejected.
+                    Value::ByteArray(mut arc) => {
+                        let idx = index_val.as_int()? as usize;
+                        let byte = value.as_int()? as u8;
+                        let bytes = Arc::make_mut(&mut arc);
+                        if idx < bytes.len() {
+                            bytes[idx] = byte;
+                        } else {
+                            while bytes.len() < idx {
+                                bytes.push(0);
+                            }
+                            bytes.push(byte);
+                        }
+                        Value::ByteArray(arc)
                     }
                     Value::Dict(mut dict) => {
                         let key = index_val.to_key_string();
@@ -1366,7 +1569,12 @@ pub(crate) fn exec_assignment(
                 };
 
                 // Update the correct storage
-                if is_global {
+                if is_module_global {
+                    // Publish exactly once. The non-local env entry is only a
+                    // module-load snapshot; identifier reads intentionally use
+                    // MODULE_GLOBALS for it. Avoid cloning `new_container`
+                    // merely to refresh that stale mirror (important for
+                    // tuple values, whose clone is O(n)).
                     MODULE_GLOBALS.with(|cell| {
                         cell.borrow_mut().insert(container_name.clone(), new_container);
                     });
@@ -1716,112 +1924,106 @@ pub(crate) fn exec_assignment(
                 // Handle nested field access: self.ctx.dict[key] = value
                 // This is obj.field1.field2[index] = value
                 if let Expr::Identifier(root_name) = inner_obj_expr.as_ref() {
-                    if let Some(Value::Object {
-                        class: r_class,
-                        fields: r_fields,
-                    }) = env.get(root_name).cloned()
-                    {
-                        let mut root_fields = r_fields;
-                        let root_class = r_class;
-                        if let Some(Value::Object {
-                            class: i_class,
-                            fields: i_fields,
-                        }) = root_fields.get(inner_field_name).cloned()
-                        {
-                            let mut inner_fields = i_fields;
-                            let inner_class = i_class;
-                            if let Some(container) = inner_fields.get(field_name).cloned() {
-                                let new_container = match container {
-                                    Value::Array(mut arc) => {
-                                        let arr = Arc::make_mut(&mut arc);
-                                        let idx = index_val.as_int()? as usize;
-                                        if idx < arr.len() {
-                                            arr[idx] = value;
-                                        } else {
-                                            while arr.len() < idx {
-                                                arr.push(Value::Nil);
-                                            }
-                                            arr.push(value);
-                                        }
-                                        Value::Array(arc)
+                    // Walk root -> inner -> leaf through `env.get_mut` with
+                    // `Arc::make_mut` at each hop, instead of cloning each level
+                    // out of `env` first. The previous shape cloned the root
+                    // object, then the inner object, then the leaf container --
+                    // so the leaf `Arc` was ALIASED and the `Arc::make_mut` in the
+                    // arms below deep-copied the WHOLE dict/array on every single
+                    // write. `self.inner.d[k] = v` was therefore quadratic
+                    // (12,497,500 entries copied over 5,000 writes at n = 5,000)
+                    // while its one-level sibling `self.d[k] = v` was O(1). Every
+                    // arm below is unchanged, including the array/byte-array
+                    // auto-extend and both out-of-range errors; only *where* the
+                    // container lives while it is mutated is different, and
+                    // `Arc::make_mut` keeps the copy-on-write contract intact at
+                    // each hop (a genuinely aliased object/dict/array still
+                    // deep-copies exactly once, before it is touched).
+                    let container_slot = match env.get_mut(root_name) {
+                        Some(Value::Object {
+                            fields: root_fields, ..
+                        }) => match Arc::make_mut(root_fields).get_mut(inner_field_name) {
+                            Some(Value::Object {
+                                fields: inner_fields, ..
+                            }) => Arc::make_mut(inner_fields).get_mut(field_name),
+                            _ => None,
+                        },
+                        _ => None,
+                    };
+                    if let Some(slot) = container_slot {
+                        match slot {
+                            Value::Array(arc) => {
+                                let arr = Arc::make_mut(arc);
+                                let idx = index_val.as_int()? as usize;
+                                if idx < arr.len() {
+                                    arr[idx] = value;
+                                } else {
+                                    while arr.len() < idx {
+                                        arr.push(Value::Nil);
                                     }
-                                    // Same runtime-allocator buffer case as the
-                                    // ClassInstance path above (`rt_byte_array_new` /
-                                    // `rt_bytes_alloc` hand back a `Value::ByteArray`,
-                                    // not a `Value::Array`). Frozen variants stay
-                                    // rejected on purpose.
-                                    Value::ByteArray(mut arc) => {
-                                        let idx = index_val.as_int()? as usize;
-                                        let byte = value.as_int()? as u8;
-                                        let bytes = Arc::make_mut(&mut arc);
-                                        if idx < bytes.len() {
-                                            bytes[idx] = byte;
-                                        } else {
-                                            while bytes.len() < idx {
-                                                bytes.push(0);
-                                            }
-                                            bytes.push(byte);
-                                        }
-                                        Value::ByteArray(arc)
+                                    arr.push(value);
+                                }
+                            }
+                            // Same runtime-allocator buffer case as the
+                            // ClassInstance path above (`rt_byte_array_new` /
+                            // `rt_bytes_alloc` hand back a `Value::ByteArray`,
+                            // not a `Value::Array`). Frozen variants stay
+                            // rejected on purpose.
+                            Value::ByteArray(arc) => {
+                                let idx = index_val.as_int()? as usize;
+                                let byte = value.as_int()? as u8;
+                                let bytes = Arc::make_mut(arc);
+                                if idx < bytes.len() {
+                                    bytes[idx] = byte;
+                                } else {
+                                    while bytes.len() < idx {
+                                        bytes.push(0);
                                     }
-                                    Value::FixedSizeArray { mut data, size } => {
-                                        let idx = index_val.as_int()? as usize;
-                                        if idx < data.len() {
-                                            data[idx] = value;
-                                            Value::FixedSizeArray { data, size }
-                                        } else {
-                                            let ctx = ErrorContext::new()
-                                                .with_code(codes::INDEX_OUT_OF_BOUNDS)
-                                                .with_help(format!("array has {} element(s)", data.len()))
-                                                .with_note(format!("index {} is out of bounds", idx));
-                                            return Err(CompileError::semantic_with_context(
-                                                format!(
-                                                    "index out of bounds: array index {} out of bounds (len={})",
-                                                    idx,
-                                                    data.len()
-                                                ),
-                                                ctx,
-                                            ));
-                                        }
-                                    }
-                                    Value::Dict(mut dict) => {
-                                        let key = index_val.to_key_string();
-                                        let stored = Value::wrap_dict_entry(&index_val, value);
-                                        Arc::make_mut(&mut dict).insert(key, stored);
-                                        Value::Dict(dict)
-                                    }
-                                    _ => {
-                                        let ctx = ErrorContext::new()
-                                            .with_code(codes::INVALID_ASSIGNMENT)
-                                            .with_help("nested index assignment requires an array or dict");
-                                        return Err(CompileError::semantic_with_context(
-                                            format!(
-                                                "invalid assignment: cannot index assign to field `{}` of type {}",
-                                                field_name,
-                                                container.type_name()
-                                            ),
-                                            ctx,
-                                        ));
-                                    }
-                                };
-                                Arc::make_mut(&mut inner_fields).insert(field_name.clone(), new_container);
-                                let new_inner_obj = Value::Object {
-                                    class: inner_class,
-                                    fields: inner_fields,
-                                };
-                                Arc::make_mut(&mut root_fields).insert(inner_field_name.clone(), new_inner_obj);
-                                env.insert(
-                                    root_name.clone(),
-                                    Value::Object {
-                                        class: root_class,
-                                        fields: root_fields,
-                                    },
-                                );
-                                return Ok(Control::Next);
+                                    bytes.push(byte);
+                                }
+                            }
+                            Value::FixedSizeArray { data, .. } => {
+                                let idx = index_val.as_int()? as usize;
+                                if idx < data.len() {
+                                    data[idx] = value;
+                                } else {
+                                    let ctx = ErrorContext::new()
+                                        .with_code(codes::INDEX_OUT_OF_BOUNDS)
+                                        .with_help(format!("array has {} element(s)", data.len()))
+                                        .with_note(format!("index {} is out of bounds", idx));
+                                    return Err(CompileError::semantic_with_context(
+                                        format!(
+                                            "index out of bounds: array index {} out of bounds (len={})",
+                                            idx,
+                                            data.len()
+                                        ),
+                                        ctx,
+                                    ));
+                                }
+                            }
+                            Value::Dict(dict) => {
+                                let key = index_val.to_key_string();
+                                let stored = Value::wrap_dict_entry(&index_val, value);
+                                Arc::make_mut(dict).insert(key, stored);
+                            }
+                            other => {
+                                let ctx = ErrorContext::new()
+                                    .with_code(codes::INVALID_ASSIGNMENT)
+                                    .with_help("nested index assignment requires an array or dict");
+                                return Err(CompileError::semantic_with_context(
+                                    format!(
+                                        "invalid assignment: cannot index assign to field `{}` of type {}",
+                                        field_name,
+                                        other.type_name()
+                                    ),
+                                    ctx,
+                                ));
                             }
                         }
+                        return Ok(Control::Next);
                     }
                 }
+
                 // General place fallback: an arbitrary projection chain rooted at a
                 // variable (`self.a[i].b[k] = v`, `self.rows[i].cols[j] = v`).
                 // `place::resolve_place` + `write_place` already walk any depth with
@@ -2208,7 +2410,7 @@ pub(crate) fn exec_augmented_assignment(
             if is_suspend {
                 rhs_value = await_value(rhs_value)?;
             }
-            if let Some(obj_val) = env.remove(obj_name) {
+            if let Some(obj_val) = env.remove(obj_name).map(Value::into_option_payload) {
                 match obj_val {
                     Value::Object { class, mut fields } => {
                         let new_value = if let Some(op) = bin_op {
@@ -2275,7 +2477,7 @@ pub(crate) fn exec_augmented_assignment(
                 }
             } else {
                 let global_obj = MODULE_GLOBALS.with(|cell| cell.borrow().get(obj_name).cloned());
-                if let Some(obj_val) = global_obj {
+                if let Some(obj_val) = global_obj.map(Value::into_option_payload) {
                     match obj_val {
                         Value::Object { class, mut fields } => {
                             let new_value = if let Some(op) = bin_op {
@@ -2649,6 +2851,249 @@ pub(crate) fn exec_augmented_assignment(
             "invalid assignment: unsupported augmented assignment target",
             ctx,
         ))
+    }
+}
+
+/// Regression coverage for a module-level collection indexed from script
+/// control flow. Same-file module variables have a non-local snapshot in the
+/// evaluator Env plus an authoritative entry in MODULE_GLOBALS. Before the
+/// fix, `arr[i] = value` selected the snapshot merely because `env.get(arr)`
+/// succeeded, then wrote only that snapshot. Identifier reads select
+/// MODULE_GLOBALS, so the mutation was observably dropped.
+#[cfg(test)]
+mod module_global_index_assignment_tests {
+    use super::*;
+    use simple_parser::ast::{Block, ForStmt, Pattern};
+    use simple_parser::{Parser, Span};
+
+    fn install_module_snapshot(env: &mut Env, name: &str, value: Value) {
+        env.insert(name.to_string(), value.clone());
+        MODULE_GLOBALS.with(|cell| {
+            cell.borrow_mut().insert(name.to_string(), value);
+        });
+    }
+
+    fn global_value(name: &str) -> Value {
+        MODULE_GLOBALS.with(|cell| cell.borrow().get(name).cloned().expect("module global"))
+    }
+
+    fn array_elem(value: &Value, index: usize) -> i64 {
+        match value {
+            Value::Array(items) => items[index].as_int().expect("integer array element"),
+            other => panic!("expected array, got {:?}", other),
+        }
+    }
+
+    fn index_expr(name: &str, index: i64) -> Expr {
+        Expr::Index {
+            receiver: Box::new(Expr::Identifier(name.to_string())),
+            index: Box::new(Expr::Integer(index)),
+        }
+    }
+
+    fn assignment(name: &str, index: i64, op: AssignOp, value: Expr) -> simple_parser::ast::AssignmentStmt {
+        simple_parser::ast::AssignmentStmt {
+            span: Span::new(0, 0, 0, 0),
+            target: index_expr(name, index),
+            op,
+            value,
+        }
+    }
+
+    fn exec(stmt: &simple_parser::ast::AssignmentStmt, env: &mut Env) -> Result<Control, CompileError> {
+        match stmt.op {
+            AssignOp::Assign => exec_assignment(
+                stmt,
+                env,
+                &mut HashMap::new(),
+                &mut HashMap::new(),
+                &HashMap::new(),
+                &HashMap::new(),
+            ),
+            _ => exec_augmented_assignment(
+                stmt,
+                env,
+                &mut HashMap::new(),
+                &mut HashMap::new(),
+                &HashMap::new(),
+                &HashMap::new(),
+            ),
+        }
+    }
+
+    #[test]
+    fn top_level_index_assignment_in_for_loop_updates_authoritative_global() {
+        MODULE_GLOBALS.with(|cell| cell.borrow_mut().clear());
+        let mut env = Env::new();
+        install_module_snapshot(&mut env, "hist", Value::array(vec![Value::Int(0)]));
+        let alias = env.get("hist").expect("module-load snapshot").clone();
+        env.mark_local("original");
+        env.insert("original".to_string(), alias);
+
+        let increment = assignment(
+            "hist",
+            0,
+            AssignOp::Assign,
+            Expr::Binary {
+                op: BinOp::Add,
+                left: Box::new(index_expr("hist", 0)),
+                right: Box::new(Expr::Integer(1)),
+            },
+        );
+        let loop_node = Node::For(ForStmt {
+            span: Span::new(0, 0, 0, 0),
+            pattern: Pattern::Identifier("item".to_string()),
+            iterable: Expr::Array(vec![Expr::Integer(10), Expr::Integer(11), Expr::Integer(12)]),
+            body: Block {
+                span: Span::new(0, 0, 0, 0),
+                statements: vec![Node::Assignment(increment)],
+            },
+            simd_requested: false,
+            is_suspend: false,
+            invariants: vec![],
+            label: None,
+        });
+
+        exec_node(
+            &loop_node,
+            &mut env,
+            &mut HashMap::new(),
+            &mut HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .expect("top-level for loop");
+
+        assert_eq!(
+            array_elem(&global_value("hist"), 0),
+            3,
+            "all loop writes must be published"
+        );
+        assert_eq!(
+            array_elem(env.get("original").expect("value-semantics alias"), 0),
+            0,
+            "publishing a module write must not mutate a genuine value alias"
+        );
+        assert_eq!(
+            array_elem(env.get("hist").expect("module-load name-precedence snapshot"), 0),
+            0,
+            "the non-local snapshot must remain bound so it continues to shadow same-named callables and types"
+        );
+
+        let parsed = Parser::new("class hist:\n    value: i64\n")
+            .parse()
+            .expect("colliding class fixture");
+        let class = parsed
+            .items
+            .into_iter()
+            .find_map(|node| match node {
+                Node::Class(def) => Some(def),
+                _ => None,
+            })
+            .expect("class definition");
+        let mut colliding_classes = HashMap::new();
+        colliding_classes.insert("hist".to_string(), Arc::new(class));
+        let resolved = evaluate_expr(
+            &Expr::Identifier("hist".to_string()),
+            &mut env,
+            &mut HashMap::new(),
+            &mut colliding_classes,
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .expect("module collection must resolve ahead of same-named class");
+        assert_eq!(
+            array_elem(&resolved, 0),
+            3,
+            "reads must use the authoritative global value"
+        );
+        MODULE_GLOBALS.with(|cell| cell.borrow_mut().clear());
+    }
+
+    #[test]
+    fn local_shadow_does_not_write_same_named_module_global() {
+        MODULE_GLOBALS.with(|cell| cell.borrow_mut().clear());
+        let mut env = Env::new();
+        MODULE_GLOBALS.with(|cell| {
+            cell.borrow_mut()
+                .insert("hist".to_string(), Value::array(vec![Value::Int(90)]));
+        });
+        env.mark_local("hist");
+        env.insert("hist".to_string(), Value::array(vec![Value::Int(10)]));
+
+        exec(&assignment("hist", 0, AssignOp::Assign, Expr::Integer(11)), &mut env).expect("local indexed assignment");
+
+        assert_eq!(array_elem(env.get("hist").expect("local shadow"), 0), 11);
+        assert_eq!(
+            array_elem(&global_value("hist"), 0),
+            90,
+            "local shadow must isolate the global"
+        );
+        MODULE_GLOBALS.with(|cell| cell.borrow_mut().clear());
+    }
+
+    #[test]
+    fn augmented_index_assignment_uses_the_same_global_publication_path() {
+        MODULE_GLOBALS.with(|cell| cell.borrow_mut().clear());
+        let mut env = Env::new();
+        install_module_snapshot(&mut env, "counts", Value::array(vec![Value::Int(5)]));
+
+        exec(
+            &assignment("counts", 0, AssignOp::AddAssign, Expr::Integer(2)),
+            &mut env,
+        )
+        .expect("module-global augmented indexed assignment");
+
+        assert_eq!(array_elem(&global_value("counts"), 0), 7);
+        MODULE_GLOBALS.with(|cell| cell.borrow_mut().clear());
+    }
+
+    #[test]
+    fn missing_container_and_tuple_bounds_errors_publish_nothing() {
+        MODULE_GLOBALS.with(|cell| cell.borrow_mut().clear());
+        let mut env = Env::new();
+        let missing = exec(&assignment("missing", 0, AssignOp::Assign, Expr::Integer(1)), &mut env);
+        assert!(missing.is_err(), "an unknown container must remain an error");
+        assert!(
+            MODULE_GLOBALS.with(|cell| cell.borrow().is_empty()),
+            "a failed lookup must not create a module global"
+        );
+
+        install_module_snapshot(&mut env, "pair", Value::Tuple(vec![Value::Int(4), Value::Int(5)]));
+        let out_of_bounds = exec(&assignment("pair", 2, AssignOp::Assign, Expr::Integer(9)), &mut env);
+        assert!(out_of_bounds.is_err(), "tuple out-of-bounds must remain an error");
+        assert_eq!(
+            global_value("pair"),
+            Value::Tuple(vec![Value::Int(4), Value::Int(5)]),
+            "a rejected indexed write must not publish a partial value"
+        );
+        assert_eq!(
+            env.get("pair").expect("tuple name-precedence snapshot"),
+            &Value::Tuple(vec![Value::Int(4), Value::Int(5)]),
+            "a rejected bounds check must not change Env lookup state"
+        );
+
+        install_module_snapshot(&mut env, "numbers", Value::array(vec![Value::Int(8)]));
+        let invalid_index = simple_parser::ast::AssignmentStmt {
+            span: Span::new(0, 0, 0, 0),
+            target: Expr::Index {
+                receiver: Box::new(Expr::Identifier("numbers".to_string())),
+                index: Box::new(Expr::String("not-an-index".to_string())),
+            },
+            op: AssignOp::Assign,
+            value: Expr::Integer(9),
+        };
+        assert!(
+            exec(&invalid_index, &mut env).is_err(),
+            "invalid array index conversion must fail"
+        );
+        assert_eq!(array_elem(&global_value("numbers"), 0), 8);
+        assert_eq!(
+            array_elem(env.get("numbers").expect("array name-precedence snapshot"), 0),
+            8,
+            "a rejected index conversion must not change Env lookup state"
+        );
+        MODULE_GLOBALS.with(|cell| cell.borrow_mut().clear());
     }
 }
 
@@ -3048,7 +3493,10 @@ mod nested_assignment_target_tests {
         let mut env = Env::new();
         let row = obj("Row", vec![("cols", Value::array(vec![Value::Int(0), Value::Int(0)]))]);
         env.insert("s".to_string(), obj("S", vec![("rows", Value::array(vec![row]))]));
-        let target = index(field(index(field(ident("s"), "rows"), Expr::Integer(0)), "cols"), Expr::Integer(1));
+        let target = index(
+            field(index(field(ident("s"), "rows"), Expr::Integer(0)), "cols"),
+            Expr::Integer(1),
+        );
         exec(&assign(target, Expr::Integer(42)), &mut env).expect("nested assignment must be accepted");
         assert_eq!(read(&env, "s", &["rows", "0", "cols", "1"]), Value::Int(42));
         assert_eq!(
@@ -3097,7 +3545,10 @@ mod nested_assignment_target_tests {
         let alias = read(&env, "s", &["rows"]);
         env.insert("alias".to_string(), alias);
 
-        let target = index(field(index(field(ident("s"), "rows"), Expr::Integer(0)), "cols"), Expr::Integer(1));
+        let target = index(
+            field(index(field(ident("s"), "rows"), Expr::Integer(0)), "cols"),
+            Expr::Integer(1),
+        );
         exec(&assign(target, Expr::Integer(42)), &mut env).expect("nested assignment must be accepted");
 
         assert_eq!(read(&env, "s", &["rows", "0", "cols", "1"]), Value::Int(42));
@@ -3122,6 +3573,160 @@ mod nested_assignment_target_tests {
             Expr::Integer(0),
         );
         let err = exec(&assign(target, Expr::Integer(1)), &mut env);
-        assert!(err.is_err(), "a call-result index target is not a place and must be an error");
+        assert!(
+            err.is_err(),
+            "a call-result index target is not a place and must be an error"
+        );
+    }
+}
+
+/// Regression: FIELD assignment whose receiver is an INDEX whose own receiver
+/// is not a bare identifier — `self.rows[i].f = v`, `a.b[i].c = v`,
+/// `grid[i][j].c = v`. `exec_assignment`'s field-target branch hand-wrote only
+/// `ident[i].field = v` and rejected everything else outright with
+/// "invalid assignment: complex indexed field receiver is not supported",
+/// even though `place::resolve_place` already models exactly these chains.
+/// One seed gap, six unrelated specs across five areas.
+#[cfg(test)]
+mod indexed_field_receiver_tests {
+    use super::*;
+    use simple_parser::Span;
+
+    fn obj(class: &str, fields: Vec<(&str, Value)>) -> Value {
+        let mut map: HashMap<String, Value> = HashMap::new();
+        for (k, v) in fields {
+            map.insert(k.to_string(), v);
+        }
+        Value::Object {
+            class: class.to_string(),
+            fields: Arc::new(map),
+        }
+    }
+    fn ident(name: &str) -> Expr {
+        Expr::Identifier(name.to_string())
+    }
+    fn field(recv: Expr, name: &str) -> Expr {
+        Expr::FieldAccess {
+            receiver: Box::new(recv),
+            field: name.to_string(),
+        }
+    }
+    fn index(recv: Expr, i: Expr) -> Expr {
+        Expr::Index {
+            receiver: Box::new(recv),
+            index: Box::new(i),
+        }
+    }
+    fn exec(target: Expr, value: Expr, env: &mut Env) -> Result<Control, CompileError> {
+        let stmt = simple_parser::ast::AssignmentStmt {
+            span: Span::new(0, 0, 0, 0),
+            target,
+            op: AssignOp::Assign,
+            value,
+        };
+        exec_assignment(
+            &stmt,
+            env,
+            &mut HashMap::new(),
+            &mut HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+    }
+    fn read(env: &Env, root: &str, path: &[&str]) -> Value {
+        let mut cur = env.get(root).expect("root").clone();
+        for step in path {
+            cur = match (&cur, step.parse::<usize>()) {
+                (Value::Array(items), Ok(i)) => items[i].clone(),
+                (Value::Object { fields, .. }, _) => fields.get(*step).expect("field").clone(),
+                (Value::Dict(entries), _) => entries.get(*step).expect("key").clone(),
+                (other, _) => panic!("cannot project {step} out of {:?}", other),
+            };
+        }
+        cur
+    }
+
+    /// `s.rows[1].n = 7` — the exact shape the rejected message named.
+    #[test]
+    fn field_under_indexed_field_assignment_lands() {
+        let mut env = Env::new();
+        let mk = |n: i64| obj("Row", vec![("n", Value::Int(n))]);
+        env.insert(
+            "s".to_string(),
+            obj("S", vec![("rows", Value::array(vec![mk(0), mk(0)]))]),
+        );
+        exec(
+            field(index(field(ident("s"), "rows"), Expr::Integer(1)), "n"),
+            Expr::Integer(7),
+            &mut env,
+        )
+        .expect("`s.rows[1].n = 7` must be accepted");
+        assert_eq!(read(&env, "s", &["rows", "1", "n"]), Value::Int(7));
+        assert_eq!(
+            read(&env, "s", &["rows", "0", "n"]),
+            Value::Int(0),
+            "the sibling element must be untouched"
+        );
+    }
+
+    /// `grid[0][1].n = 3` — index-of-index under a field write.
+    #[test]
+    fn field_under_index_of_index_assignment_lands() {
+        let mut env = Env::new();
+        let mk = |n: i64| obj("Cell", vec![("n", Value::Int(n))]);
+        env.insert("grid".to_string(), Value::array(vec![Value::array(vec![mk(0), mk(0)])]));
+        exec(
+            field(index(index(ident("grid"), Expr::Integer(0)), Expr::Integer(1)), "n"),
+            Expr::Integer(3),
+            &mut env,
+        )
+        .expect("`grid[0][1].n = 3` must be accepted");
+        assert_eq!(read(&env, "grid", &["0", "1", "n"]), Value::Int(3));
+    }
+
+    /// Value semantics: an alias of the intermediate array must NOT observe the
+    /// nested write — copy-on-write is preserved, not bypassed.
+    #[test]
+    fn aliased_intermediate_still_copies_on_write() {
+        let mut env = Env::new();
+        let mk = |n: i64| obj("Row", vec![("n", Value::Int(n))]);
+        env.insert("s".to_string(), obj("S", vec![("rows", Value::array(vec![mk(0)]))]));
+        let alias = read(&env, "s", &["rows"]);
+        env.insert("alias".to_string(), alias);
+        exec(
+            field(index(field(ident("s"), "rows"), Expr::Integer(0)), "n"),
+            Expr::Integer(42),
+            &mut env,
+        )
+        .expect("nested assignment must be accepted");
+        assert_eq!(read(&env, "s", &["rows", "0", "n"]), Value::Int(42));
+        assert_eq!(
+            read(&env, "alias", &["0", "n"]),
+            Value::Int(0),
+            "the aliased intermediate must not observe the write — value semantics"
+        );
+    }
+
+    /// A genuine non-place receiver must still be a loud error, never a
+    /// silently dropped write.
+    #[test]
+    fn non_place_indexed_field_target_is_still_rejected() {
+        let mut env = Env::new();
+        let target = field(
+            index(
+                Expr::MethodCall {
+                    receiver: Box::new(ident("nothing")),
+                    method: "f".to_string(),
+                    args: vec![],
+                    generic_args: vec![],
+                },
+                Expr::Integer(0),
+            ),
+            "n",
+        );
+        assert!(
+            exec(target, Expr::Integer(1), &mut env).is_err(),
+            "a call-result indexed field target is not a place and must be an error"
+        );
     }
 }

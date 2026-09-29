@@ -12,6 +12,7 @@ import { graphRecordHash, hashGraphDelta } from "../graph/index.js";
 import { GraphSnapshotStore } from "../storage/graph_snapshot_store.js";
 import { canonicalGraphBytes } from "../graph/canonical.js";
 import { createDiagnosticRecord } from "../diagnostics/record.js";
+import { isTargetInventoryStoreV1 } from "../storage/authority_inventory_store.js";
 
 function compare(left, right) {
   return left < right ? -1 : left > right ? 1 : 0;
@@ -333,16 +334,21 @@ export function compileKnowledgeInventory(options = {}) {
 export class KnowledgeCompiler {
   #authorizationPort;
   #graphSnapshotStore;
+  #targetInventoryStore;
 
-  constructor({ authorizationPort = null, graphSnapshotStore = null } = {}) {
+  constructor({ authorizationPort = null, graphSnapshotStore = null, targetInventoryStore = null } = {}) {
     if (authorizationPort !== null && !isTrustedAuthorizationPort(authorizationPort)) {
       throw new TypeError("KnowledgeCompiler requires a trusted AuthorizationPort");
     }
     if (graphSnapshotStore !== null && !(graphSnapshotStore instanceof GraphSnapshotStore)) {
       throw new TypeError("KnowledgeCompiler requires a GraphSnapshotStore");
     }
+    if (targetInventoryStore !== null && !isTargetInventoryStoreV1(targetInventoryStore)) {
+      throw new TypeError("KnowledgeCompiler requires a TargetInventoryStoreV1");
+    }
     this.#authorizationPort = authorizationPort;
     this.#graphSnapshotStore = graphSnapshotStore;
+    this.#targetInventoryStore = targetInventoryStore;
   }
 
   compile(options = {}) {
@@ -351,6 +357,42 @@ export class KnowledgeCompiler {
 
   compileDelta(previous, changes, options = {}) {
     return compileDelta(previous, changes, options, this.#authorizationPort, this.#graphSnapshotStore);
+  }
+
+  /** The only product path allowed to publish an authority inventory. */
+  publishAuthorityInventory(inventory, build) {
+    if (!this.#targetInventoryStore) throw new Error("TargetInventoryStoreV1 is unavailable");
+    if (!inventory?.snapshot || !build || typeof build !== "object") throw new TypeError("compiled inventory and authority build are required");
+    if (build.inventory?.baseSnapshotUid !== inventory.snapshot.snapshot_uid || build.inventory?.revisionId !== inventory.snapshot.revision_id ||
+        build.inventory?.worktreeUid !== inventory.snapshot.worktree_uid || build.inventory?.projectUidOrNull !== inventory.snapshot.project_uid) {
+      throw new Error("authority build does not match compiled snapshot");
+    }
+    return this.#targetInventoryStore.publishAuthorityInventoryV1({ publisher: "KnowledgeCompiler", inventory: build.inventory });
+  }
+
+  /**
+   * Production commit helper. Adapters provide only already-compiled directory
+   * projections; this method derives artifact/section membership from the
+   * immutable compiler result and is the sole store writer.
+   */
+  commitAuthorityInventory({ inventory, workspaceUid, scopeKind = "project", projectionRoot, directories = [], aliases = [], contributingProjectRoots = [] } = {}) {
+    if (!inventory?.snapshot || !this.#targetInventoryStore) throw new TypeError("compiled inventory and TargetInventoryStoreV1 are required");
+    const documentEntries = [
+      ...(inventory.artifacts ?? []).map((artifact) => ({ targetKind: "artifact", targetUid: artifact.uid, contentDigest: artifact.content_hash, locator: artifact.canonical_path })),
+      ...(inventory.sections ?? []).map((section) => ({ targetKind: "section", targetUid: section.uid, contentDigest: sha256Hex(canonicalJson(section)), locator: `${section.artifact_uid}:${section.uid}` }))
+    ];
+    const directoryEntries = directories.map((directory) => ({
+      targetKind: "directory", targetUid: directory.targetUid, contentDigest: directory.contentDigest,
+      locator: directory.locator, children: directory.children ?? []
+    }));
+    const entries = [...documentEntries, ...directoryEntries]
+      .sort((left, right) => `${left.targetKind}\0${left.targetUid}`.localeCompare(`${right.targetKind}\0${right.targetUid}`));
+    return this.publishAuthorityInventory(inventory, { inventory: {
+      scopeKind, workspaceUid, projectUidOrNull: scopeKind === "project" ? inventory.snapshot.project_uid : null,
+      worktreeUid: inventory.snapshot.worktree_uid, baseSnapshotUid: inventory.snapshot.snapshot_uid,
+      revisionId: inventory.snapshot.revision_id, projectionRoot: projectionRoot ?? sha256Hex(canonicalJson(entries)),
+      entries, aliasIndex: aliases, contributingProjectRoots
+    }});
   }
 }
 

@@ -1,0 +1,352 @@
+# codex-impl
+# Pure scalar policy for the Cosmos+ OpenSSD FTL/NFC media backend.
+#
+# The C backend remains the sole owner of MMIO, NAND commands, DMA buffers,
+# volatile state, raw pointers, callbacks, barriers, byte serialization, CRC
+# acquisition, and side-effect ordering.  This module accepts only copied
+# fixed-width values and returns allocation-free scalar decisions.  Stable
+# COSMOS-FTL-NFC-Dnnn source IDs are consumed by compiler-generated coverage;
+# this owner intentionally contains no self-reported coverage counters.
+
+const BACKEND_OK: i32 = 0
+const BACKEND_UNAVAILABLE: i32 = 1
+const BACKEND_INVALID: i32 = 2
+const BACKEND_TIMEOUT: i32 = 3
+const BACKEND_HW_ERROR: i32 = 4
+const BACKEND_RETRY: i32 = 5
+const BACKEND_COMPLETION_UNCERTAIN: i32 = 6
+
+const PAGE_BLANK: i32 = 0
+const PAGE_VALID: i32 = 1
+const PAGE_TORN: i32 = 2
+const PAGE_RETRY: i32 = 3
+const PAGE_IO_ERROR: i32 = 4
+
+const APPEND_COMMITTED: u32 = 0
+const APPEND_NOT_COMMITTED: u32 = 1
+const APPEND_AMBIGUOUS: u32 = 2
+const APPEND_HARD_FAILED: u32 = 3
+
+const NFC_MAGIC: u32 = 0x43464e31u32
+const NFC_FORMAT_VERSION: u32 = 1
+const NFC_METADATA_PAYLOAD_BYTES: u32 = 16348
+const FTL_PAGES_PER_BLOCK: u32 = 128
+const NFC_DEFAULT_JOURNAL_PAGES: u64 = 65536
+const NFC_MAX_JOURNAL_PAGES: u64 = 262144
+
+fn journal_capacity_valid(capacity: u64) -> u32:
+    if capacity == 0u64 or (capacity & (capacity - 1u64)) != 0u64:  # COSMOS-FTL-NFC-D001
+        return 0u32
+    1u32
+
+@export("C")
+fn cosmos_ftl_nfc_backend_policy_checkpoint_total_bytes(
+    l2p_count: u32, block_count: u32
+) -> u32:
+    val total = (l2p_count as u64) * 4u64 + (block_count as u64) * 8u64
+    if total > 0xffffffffu64:  # COSMOS-FTL-NFC-D002
+        return 0u32
+    total as u32
+
+@export("C")
+fn cosmos_ftl_nfc_backend_policy_header_prefix_status(
+    magic: u32, version: u32, header_crc: u32,
+    expected_header_crc: u32
+) -> i32:
+    if magic != NFC_MAGIC or version != NFC_FORMAT_VERSION or header_crc != expected_header_crc:  # COSMOS-FTL-NFC-D003
+        return BACKEND_INVALID
+    BACKEND_OK
+
+@export("C")
+fn cosmos_ftl_nfc_backend_policy_payload_length_status(
+    payload_length: u32
+) -> i32:
+    if payload_length > NFC_METADATA_PAYLOAD_BYTES:  # COSMOS-FTL-NFC-D004
+        return BACKEND_INVALID
+    BACKEND_OK
+
+@export("C")
+fn cosmos_ftl_nfc_backend_policy_read_io_state(status: i32) -> i32:
+    if status == BACKEND_RETRY:  # COSMOS-FTL-NFC-D005
+        return PAGE_RETRY
+    if status != BACKEND_OK:  # COSMOS-FTL-NFC-D006
+        return PAGE_IO_ERROR
+    PAGE_VALID
+
+@export("C")
+fn cosmos_ftl_nfc_backend_policy_read_content_state(
+    all_ff: u32, header_status: i32, spare_header: u32,
+    payload_status: i32
+) -> i32:
+    if all_ff != 0u32:  # COSMOS-FTL-NFC-D007
+        return PAGE_BLANK
+    if header_status != BACKEND_OK:  # COSMOS-FTL-NFC-D008
+        return PAGE_TORN
+    if spare_header == 0u32:  # COSMOS-FTL-NFC-D009
+        if payload_status != BACKEND_OK:  # COSMOS-FTL-NFC-D010
+            return PAGE_TORN
+    PAGE_VALID
+
+@export("C")
+fn cosmos_ftl_nfc_backend_policy_write_faults(status: i32) -> u32:
+    if status == BACKEND_TIMEOUT or status == BACKEND_COMPLETION_UNCERTAIN:  # COSMOS-FTL-NFC-D011
+        return 1u32
+    0u32
+
+@export("C")
+fn cosmos_ftl_nfc_backend_policy_superblock_status(
+    page_state: i32, page_type: u32, logical_index: u64,
+    payload_length: u32, payload_valid: u32
+) -> i32:
+    if page_state == PAGE_RETRY:  # COSMOS-FTL-NFC-D012
+        return BACKEND_RETRY
+    if page_state != PAGE_VALID:  # COSMOS-FTL-NFC-D013
+        if page_state == PAGE_BLANK:  # COSMOS-FTL-NFC-D014
+            return BACKEND_UNAVAILABLE
+        return BACKEND_HW_ERROR
+    if page_type != 1u32:  # COSMOS-FTL-NFC-D015
+        return BACKEND_HW_ERROR
+    if logical_index != 0u64:  # COSMOS-FTL-NFC-D016
+        return BACKEND_HW_ERROR
+    if payload_length != 40u32:  # COSMOS-FTL-NFC-D017
+        return BACKEND_HW_ERROR
+    if payload_valid == 0u32:  # COSMOS-FTL-NFC-D018
+        return BACKEND_HW_ERROR
+    BACKEND_OK
+
+@export("C")
+fn cosmos_ftl_nfc_backend_policy_mounted_status(
+    backend_present: u32, mounted: u32, faulted: u32
+) -> i32:
+    if backend_present == 0u32 or mounted == 0u32 or faulted != 0u32:  # COSMOS-FTL-NFC-D019
+        return BACKEND_UNAVAILABLE
+    BACKEND_OK
+
+@export("C")
+fn cosmos_ftl_nfc_backend_policy_checkpoint_candidate_better(
+    have_latest: u32, candidate_generation: u64,
+    latest_generation: u64, candidate_segment: u32,
+    latest_segment: u32
+) -> u32:
+    if have_latest == 0u32:  # COSMOS-FTL-NFC-D020
+        return 1u32
+    if candidate_generation > latest_generation:  # COSMOS-FTL-NFC-D021
+        return 1u32
+    if candidate_generation != latest_generation:  # COSMOS-FTL-NFC-D022
+        return 0u32
+    if candidate_segment > latest_segment:  # COSMOS-FTL-NFC-D023
+        return 1u32
+    0u32
+
+@export("C")
+fn cosmos_ftl_nfc_backend_policy_page_blank_status(page_state: i32) -> i32:
+    if page_state == PAGE_BLANK:  # COSMOS-FTL-NFC-D024
+        return BACKEND_OK
+    if page_state == PAGE_RETRY:  # COSMOS-FTL-NFC-D025
+        return BACKEND_RETRY
+    if page_state == PAGE_IO_ERROR:  # COSMOS-FTL-NFC-D026
+        return BACKEND_HW_ERROR
+    BACKEND_INVALID
+
+@export("C")
+fn cosmos_ftl_nfc_backend_policy_recycle_status(
+    slot: u32, checkpoint_valid_mask: u32
+) -> i32:
+    if slot >= 2u32:  # COSMOS-FTL-NFC-D027
+        return BACKEND_UNAVAILABLE
+    val other_slot_mask = 1u32 << (slot ^ 1u32)
+    if (checkpoint_valid_mask & other_slot_mask) == 0u32:  # COSMOS-FTL-NFC-D028
+        return BACKEND_UNAVAILABLE
+    BACKEND_OK
+
+@export("C")
+fn cosmos_ftl_nfc_backend_policy_next_journal_index(
+    current: u64, checkpoint_index: u64
+) -> u64:
+    if checkpoint_index > current:  # COSMOS-FTL-NFC-D029
+        return checkpoint_index
+    current
+
+@export("C")
+fn cosmos_ftl_nfc_backend_policy_first_journal_index(
+    checkpoint_valid_mask: u32, current: u64,
+    checkpoint_index_0: u64, checkpoint_index_1: u64
+) -> u64:
+    if checkpoint_valid_mask != 3u32:  # COSMOS-FTL-NFC-D030
+        return current
+    var first = checkpoint_index_0
+    if checkpoint_index_1 < first:  # COSMOS-FTL-NFC-D031
+        first = checkpoint_index_1
+    if first > current:  # COSMOS-FTL-NFC-D032
+        return first
+    current
+
+@export("C")
+fn cosmos_ftl_nfc_backend_policy_journal_pages_normalized(
+    journal_pages: u64
+) -> u64:
+    if journal_pages == 0u64:  # COSMOS-FTL-NFC-D033
+        return NFC_DEFAULT_JOURNAL_PAGES
+    journal_pages
+
+@export("C")
+fn cosmos_ftl_nfc_backend_policy_journal_pages_valid(
+    journal_pages: u64
+) -> u32:
+    if journal_pages - 1u64 >= NFC_MAX_JOURNAL_PAGES:  # COSMOS-FTL-NFC-D034
+        return 0u32
+    if (journal_pages & (journal_pages - 1u64)) != 0u64:  # COSMOS-FTL-NFC-D035
+        return 0u32
+    if journal_pages % (FTL_PAGES_PER_BLOCK as u64) != 0u64:  # COSMOS-FTL-NFC-D036
+        return 0u32
+    1u32
+
+@export("C")
+fn cosmos_ftl_nfc_backend_policy_checkpoint_data_pages(total_bytes: u32) -> u32:
+    (((total_bytes as u64) + (NFC_METADATA_PAYLOAD_BYTES as u64) - 1u64) /
+        (NFC_METADATA_PAYLOAD_BYTES as u64)) as u32
+
+@export("C")
+fn cosmos_ftl_nfc_backend_policy_checkpoint_slot_pages(
+    journal_pages: u64, metadata_page_limit: u32
+) -> u32:
+    if metadata_page_limit < FTL_PAGES_PER_BLOCK or journal_pages > ((metadata_page_limit - FTL_PAGES_PER_BLOCK) as u64):  # COSMOS-FTL-NFC-D037
+        return 0u32
+    val available_after_block = metadata_page_limit - FTL_PAGES_PER_BLOCK
+    val available = available_after_block - (journal_pages as u32)
+    (available / 2u32 / FTL_PAGES_PER_BLOCK) * FTL_PAGES_PER_BLOCK
+
+@export("C")
+fn cosmos_ftl_nfc_backend_policy_journal_start_page(
+    checkpoint_slot_pages: u32
+) -> u32:
+    FTL_PAGES_PER_BLOCK + 2u32 * checkpoint_slot_pages
+
+@export("C")
+fn cosmos_ftl_nfc_backend_policy_layout_valid(
+    journal_start_page: u32, journal_pages: u64,
+    checkpoint_slot_pages: u32, checkpoint_record_pages: u32,
+    metadata_page_limit: u32
+) -> u32:
+    if journal_start_page >= metadata_page_limit:  # COSMOS-FTL-NFC-D038
+        return 0u32
+    if (metadata_page_limit - journal_start_page) as u64 < journal_pages:  # COSMOS-FTL-NFC-D039
+        return 0u32
+    if checkpoint_slot_pages < checkpoint_record_pages:  # COSMOS-FTL-NFC-D040
+        return 0u32
+    1u32
+
+@export("C")
+fn cosmos_ftl_nfc_backend_policy_journal_page(
+    journal_start_page: u32, journal_capacity: u64, index: u64
+) -> u32:
+    if journal_capacity_valid(journal_capacity) == 0u32:  # COSMOS-FTL-NFC-D041
+        return 0u32
+    journal_start_page + ((index & (journal_capacity - 1u64)) as u32)
+
+@export("C")
+fn cosmos_ftl_nfc_backend_policy_journal_append_admit(
+    mounted_status: i32, index: u64, first_index: u64,
+    capacity: u64, next_index: u64
+) -> u32:
+    if journal_capacity_valid(capacity) == 0u32:  # COSMOS-FTL-NFC-D042
+        return 0u32
+    if mounted_status != BACKEND_OK:  # COSMOS-FTL-NFC-D043
+        return 0u32
+    if index < first_index:  # COSMOS-FTL-NFC-D044
+        return 0u32
+    if index - first_index >= capacity:  # COSMOS-FTL-NFC-D045
+        return 0u32
+    if next_index != 0u64:  # COSMOS-FTL-NFC-D046
+        if index != next_index:  # COSMOS-FTL-NFC-D047
+            return 0u32
+    1u32
+
+@export("C")
+fn cosmos_ftl_nfc_backend_policy_journal_append_result(status: i32) -> u32:
+    if status == BACKEND_OK:  # COSMOS-FTL-NFC-D048
+        return APPEND_COMMITTED
+    if status == BACKEND_TIMEOUT or status == BACKEND_COMPLETION_UNCERTAIN:  # COSMOS-FTL-NFC-D049
+        return APPEND_AMBIGUOUS
+    if status == BACKEND_UNAVAILABLE:  # COSMOS-FTL-NFC-D050
+        return APPEND_NOT_COMMITTED
+    if status == BACKEND_RETRY:  # COSMOS-FTL-NFC-D051
+        return APPEND_NOT_COMMITTED
+    APPEND_HARD_FAILED
+
+@export("C")
+fn cosmos_ftl_nfc_backend_policy_journal_read_admit(
+    mounted_status: i32, index: u64, first_index: u64, capacity: u64
+) -> u32:
+    if journal_capacity_valid(capacity) == 0u32:  # COSMOS-FTL-NFC-D052
+        return 0u32
+    if mounted_status != BACKEND_OK:  # COSMOS-FTL-NFC-D053
+        return 0u32
+    if index < first_index:  # COSMOS-FTL-NFC-D054
+        return 0u32
+    if index - first_index >= capacity:  # COSMOS-FTL-NFC-D055
+        return 0u32
+    1u32
+
+@export("C")
+fn cosmos_ftl_nfc_backend_policy_journal_next_after_read(
+    index: u64, current: u64
+) -> u64:
+    if index == 0xffffffffffffffffu64:  # COSMOS-FTL-NFC-D056
+        return current
+    val candidate = index + 1u64
+    if candidate > current:  # COSMOS-FTL-NFC-D057
+        return candidate
+    current
+
+@export("C")
+fn cosmos_ftl_nfc_backend_policy_journal_record_valid(
+    sequence: u64, expected_sequence: u64, magic: u32,
+    crc: u32, expected_crc: u32
+) -> u32:
+    if sequence != expected_sequence:  # COSMOS-FTL-NFC-D058
+        return 0u32
+    if magic != 0x46544c31u32:  # COSMOS-FTL-NFC-D059
+        return 0u32
+    if crc != expected_crc:  # COSMOS-FTL-NFC-D060
+        return 0u32
+    1u32
+
+@export("C")
+fn cosmos_ftl_nfc_backend_policy_journal_block_fully_dead(
+    capacity: u64, next_index: u64, block: u32, first_live: u64
+) -> u32:
+    if journal_capacity_valid(capacity) == 0u32:  # COSMOS-FTL-NFC-D061
+        return 0u32
+    var candidate = (next_index & ~(capacity - 1u64)) +
+        (block as u64) * (FTL_PAGES_PER_BLOCK as u64)
+    if candidate >= next_index:  # COSMOS-FTL-NFC-D062
+        if candidate < capacity:  # COSMOS-FTL-NFC-D063
+            return 0u32
+        candidate = candidate - capacity
+    if candidate > 0xffffffffffffffffu64 - (FTL_PAGES_PER_BLOCK as u64):  # COSMOS-FTL-NFC-D064
+        return 0u32
+    if candidate + (FTL_PAGES_PER_BLOCK as u64) > first_live:  # COSMOS-FTL-NFC-D065
+        return 0u32
+    1u32
+
+@export("C")
+fn cosmos_ftl_nfc_backend_policy_journal_trim_status(
+    mounted_status: i32, checkpoint_valid_mask: u32,
+    first_live: u64, first_index: u64, capacity: u64,
+    checkpoint_index_0: u64, checkpoint_index_1: u64
+) -> i32:
+    if journal_capacity_valid(capacity) == 0u32:  # COSMOS-FTL-NFC-D066
+        return BACKEND_UNAVAILABLE
+    if mounted_status != BACKEND_OK or (checkpoint_valid_mask & 3u32) != 3u32:  # COSMOS-FTL-NFC-D067
+        return BACKEND_UNAVAILABLE
+    if first_live < first_index:  # COSMOS-FTL-NFC-D068
+        return BACKEND_UNAVAILABLE
+    if first_live - first_index > capacity:  # COSMOS-FTL-NFC-D069
+        return BACKEND_UNAVAILABLE
+    var watermark = checkpoint_index_0
+    if checkpoint_index_1 < watermark:  # COSMOS-FTL-NFC-D070
+        watermark = checkpoint_index_1
+    if first_live > watermark:  # COSMOS-FTL-NFC-D071
+        return BACKEND_INVALID
+    BACKEND_OK

@@ -278,7 +278,7 @@ The committed-state hash deliberately excludes
 attempt telemetry and staging state, while binding arena/domain identity,
 profile hash, committed generation/extent/count, and publication epoch.
 
-At initialization, the owner allocates each arena at its hard quota, binds it to one domain, and seals the profile before readiness. `arena_try_alloc<T>(arena, count, context)` checks context, generation, count, multiplication, alignment, quota, and allocation-count bounds, then advances the cursor and returns `Result<ArenaRef<T>, AllocationExhaustionV1>`. It never invokes a general allocator. Arena references contain arena/domain/generation plus an offset, not a freely transferable raw owner.
+At initialization, the owner admits only a finite V1 profile quota (currently at most 16 MiB) before allocating either fixed bank, then binds the arena to one domain and seals the profile before readiness. `arena_try_alloc<T>(arena, count, context)` checks context, generation, count, multiplication, alignment, quota, and allocation-count bounds, then advances the cursor and returns `Result<ArenaRef<T>, AllocationExhaustionV1>`. It never invokes a general allocator. Arena references contain arena/domain/generation plus an offset, not a freely transferable raw owner.
 
 Work begins from `checkpoint()`. Objects remain private to the arena transaction until validation succeeds. `commit(checkpoint)` constructs and validates a complete committed snapshot, then makes it visible with one owner-state assignment; compatibility mirrors are not publication authority. On any error, `rollback(checkpoint)` clears publication candidates, rewinds cursor/allocation count deterministically, restores the last committed visible generation, and leaves the reserved next-generation counter monotonic so the next checkpoint is fresh. Rollback cannot cross a committed checkpoint. Kernel, ISR, storage-commit, ownership-publication, and policy-declared critical contexts reject before cursor mutation. Cross-domain ownership is forbidden; explicit copying through a bounded port is required.
 
@@ -379,12 +379,21 @@ Each certified profile may tighten these values, but cannot omit a field or exce
 
 Benchmarks use versioned realistic fixtures, at least 30 warm samples for CLI startup and 1,000 representative requests/frames for request/render percentiles. Receipts record sample count, fixture/configuration hashes, raw timing artifact, p50/p95/p99/max, and max RSS. A machine/profile change creates a new baseline rather than silently resetting regression history.
 
+The tooling child manifest carries these certified values as policy fields rather
+than accepting caller-provided limits. Its `scan_count_limit` is exactly `1`,
+matching the one bounded scan/index per gate in NFR-MCI-003. Warm rows require
+nonzero samples and metrics, the minimum representative counts above, and an
+additional `metric=<warm-id>|startup_p95_ms|<value>` line. CLI startup and MCP/LSP
+startup/request/RSS are checked against the absolute ceilings above before the
+existing p95 regression gate (<=5%) is considered; missing telemetry cannot be
+converted into a zero-valued pass.
+
 ## 7. Verification and traceability
 
 | Requirement | Executable evidence obligation |
 |---|---|
 | REQ-MCI-001, NFR-MCI-001/002 | exact-current receipt; two clean builds; executed discrimination corpus and negative lineage controls |
-| REQ-MCI-002, 009/010; NFR-MCI-003/007 | aggregate completeness/duplicate/stale controls; `bounded_process_policy_spec.spl` proves generation-bound reservation/release receipts, identity-bound owner leases, sequenced `TerminationRequested -> ReapPending -> Completed` only after registered reap acknowledgement, and checked incremental stdout/stderr chunks. Negative controls cover replay/stale races, PID reuse, forged PGID, concurrent last-slot reservation, and `limit + 1`. The native owned-process provider now implements mutex-synchronized fixed-slot admission plus bounded spawn/process-group/pidfd signal/reap syscalls through the registered facade ABI. **BLOCKED release evidence:** the synchronous Simple facade has no public cancel/terminate operation, the interpreter fails closed by design, and an admitted exact-current native Simple receipt has not yet exercised the source-matched deployed ABI; warm latency/RSS evidence remains separate. |
+| REQ-MCI-002, 009/010; NFR-MCI-003/007 | Policy and synchronous native provider checks exist. The canonical facade exposes a versioned 19-field receipt, but no usable public async owner-token lifecycle; a synchronous receipt is stale after return. Raw PID fallback and interpreter paths fail closed. Async cancellation, native Simple admission, and warm latency/RSS remain release gates. |
 | REQ-MCI-003/004 | all 24 manifest rows visible; selected-row boot/mount/list/execute/lineage/source/run/payload/stress evidence from target |
 | REQ-MCI-005/006; NFR-MCI-006 | count/plan/admit boundaries; every dimension overflow; no partial generation; backend/device/readback/interaction/RenderDoc provenance |
 | REQ-MCI-007/008; NFR-MCI-004/005 | strict zero-allocation counters; allowed/forbidden context matrix; every injectable failure; isolation and deterministic rollback |
@@ -393,6 +402,20 @@ Benchmarks use versioned realistic fixtures, at least 30 warm samples for CLI st
 Negative controls must deliberately corrupt each identity/hash, expire evidence, omit each required receipt in turn, use synthetic backend handles, overflow each packed column and queue, inject failure at every arena allocation/publication boundary, and pass `0` and negative PIDs. Success assertions must also prove the prior committed generation/storage/domain state is byte-identical after each rejected operation.
 
 ## 8. Migration sequence
+
+### 8.1 AC-6 formal receipt and host-correspondence design
+
+Every AC-6 producer emits a content-addressed receipt through the common FV2
+owners. A release-capable V2 receipt has an exact artifact hash, canonical VIR
+and weaving identities, transitive trust/audit closure, and a versioned delivery
+envelope binding `gate` and `evidence_hash`. V1 delivery blobs are compatibility
+diagnostics only; they cannot authorize the typed verified release path.
+
+Formal proof engines establish model or transformation claims; target execution
+establishes host correspondence: `canonical woven VIR -> refinement certificate
+-> target artifact -> target-host evidence`. Unavailable RVFI/SBY, FPGA, QEMU
+GPU, CPU/SIMD, and RenderDoc/Vulkan rows remain HOLD with owner, prerequisite,
+resume command, and retained artifact directory.
 
 ## 9. Implemented correction details (2026-08-11)
 

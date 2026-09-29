@@ -1,4 +1,8 @@
 # native-build: split()-result element access prints raw handle (silent wrong value)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Severity:** high (silent wrong value)
 **Found:** 2026-07-17 during review of the `text.split_lines()` fix lane
@@ -50,3 +54,4 @@ for-in join, plus a `split_lines()` element read. The fix records `[text]` HIR
 metadata at both producers and consults it at both runtime-array
 element consumers, so `rt_array_get` results decode as text rather than
 integers. LLVM and Cranelift execution remains pending in the staged full gate.
+

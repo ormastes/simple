@@ -214,8 +214,11 @@ fn _abi_timestamp_diff_days(micros1: i64, micros2: i64) -> i64:
 # (implemented in src/runtime/runtime_time.c)
 # ============================================================================
 
+@unsafe(reason: "raw wall-clock microsecond provider; negative i64 sentinel is failure", capabilities: [ffi])
 extern fn rt_time_now_unix_micros() -> i64
+@unsafe(reason: "raw monotonic nanosecond provider; negative i64 sentinel is failure", capabilities: [ffi])
 extern fn rt_time_now_nanos() -> i64
+@unsafe(reason: "raw monotonic microsecond provider; negative i64 sentinel is failure", capabilities: [ffi])
 extern fn rt_time_now_micros() -> i64
 @unsafe(reason: "raw wall-clock provider; negative f64 sentinel is failure", capabilities: [ffi])
 extern fn rt_time_now_seconds_f64() -> f64
@@ -237,11 +240,14 @@ pub fn progress_elapsed_regressed(now_nanos: i64, start_nanos: i64) -> bool:
 
 @export("C", name: "rt_progress_init")
 pub fn progress_init() -> bool:
-    val now = rt_progress_clock_now_nanos()
+    val now = unsafe(capabilities: [ffi]):
+        rt_progress_clock_now_nanos()
     if progress_clock_failed(now):
-        rt_progress_tls_clear()
+        unsafe(capabilities: [ffi]):
+            rt_progress_tls_clear()
         return false
-    rt_progress_tls_store_start_nanos(now)
+    unsafe(capabilities: [ffi]):
+        rt_progress_tls_store_start_nanos(now)
     true
 
 @export("C", name: "rt_progress_reset")
@@ -250,14 +256,18 @@ pub fn progress_reset() -> bool:
 
 @export("C", name: "rt_progress_get_elapsed_seconds")
 pub fn progress_get_elapsed_seconds() -> f64:
-    if progress_should_lazy_init(rt_progress_tls_is_initialized()):
+    val initialized = unsafe(capabilities: [ffi]):
+        rt_progress_tls_is_initialized()
+    if progress_should_lazy_init(initialized):
         if not progress_init():
             return -1.0
         return 0.0
-    val now = rt_progress_clock_now_nanos()
+    val now = unsafe(capabilities: [ffi]):
+        rt_progress_clock_now_nanos()
     if progress_clock_failed(now):
         return -1.0
-    val start_nanos = rt_progress_tls_start_nanos()
+    val start_nanos = unsafe(capabilities: [ffi]):
+        rt_progress_tls_start_nanos()
     val elapsed_nanos = now - start_nanos
     if progress_elapsed_regressed(now, start_nanos):
         return -1.0

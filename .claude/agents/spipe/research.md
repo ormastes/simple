@@ -1,8 +1,23 @@
 # SPipe Research Agent - Analyst
 
 **Role:** Research existing code and domain knowledge relevant to the refined goal.
+
+Resolve the exact feature and all planned source paths through
+`doc/00_llm_process/knowledge_registry.sdn`, then retain
+`.spipe/<feature>/knowledge_selection.sdn`. Missing/ambiguous routes are a
+research gap. Kernel and drivers are MDSOC-only.
 **Blinders:** ONLY research and discovery. No design decisions, no code changes, no tests.
 **Context budget:** sub-40% — targeted searches only, no full-tree scans.
+
+## SPipe common bootstrap
+
+Resolve common SPipe before research. Prefer `SPIPE_HOME`, the project's
+configured common route, `~/spipe`, and `~/.spipe/common`; retain
+`.spipe/spipe` only as a legacy migration fallback. From the resolved root load
+the applicable `skills/`, ownership/setup guides, and `wiki/index.md`, then
+compose only authorized company, organization, project, user, and host wiki
+indexes. Filesystem presence is not authorization. Missing common is an
+explicit setup error, not permission to continue without SPipe guidance.
 
 ## State File
 

@@ -1,0 +1,229 @@
+#![allow(primitive_api)]
+
+use std.common.structural.wire.{wire_check_envelope, wire_envelope_len, wire_magic,
+    wire_put_envelope, wire_put_u8, wire_put_u32, wire_put_u64}
+use std.common.string_core.{text_to_bytes}
+use compiler.common.cache_contract.physical_tld_v1.{ThreePayloadContractBudgetV1,
+    ThreePayloadContractReaderV1, three_payload_contract_budget_v1,
+    three_payload_contract_digest_valid_v1, three_payload_contract_max_items_v1,
+    three_payload_contract_max_payload_bytes_v1,
+    three_payload_contract_put_digest_v1, three_payload_contract_put_optional_digest_v1,
+    three_payload_contract_put_text_v1, three_payload_contract_text_valid_v1}
+use compiler.common.cache_contract.semantic_query_read_manifest_v1.{SemanticCoverageV1,
+    SemanticQueryKeyV1, semantic_coverage_from_tag_v1, semantic_coverage_tag_v1,
+    semantic_query_key_budget_v1, semantic_query_key_canonical_v1,
+    semantic_query_key_put_v1, semantic_query_key_read_v1,
+    semantic_query_key_valid_v1}
+
+pub struct ReverseReferenceEdgeV1:
+    producer: SemanticQueryKeyV1
+    facet: text
+    consumer: SemanticQueryKeyV1
+    consumed_fingerprint: text
+    forward_manifest_digest: text
+    partition_id: text
+
+pub struct ReverseReferenceShardV1:
+    schema: i64
+    partition_id: text
+    coverage: SemanticCoverageV1
+    sorted_edges: [ReverseReferenceEdgeV1]
+
+pub struct ReverseReferenceDeltaV1:
+    consumer: SemanticQueryKeyV1
+    old_manifest_digest: text?
+    new_manifest_digest: text
+    inserted: [ReverseReferenceEdgeV1]
+    removed: [ReverseReferenceEdgeV1]
+
+pub struct ReverseReferenceShardDecodeV1:
+    ok: bool
+    value: ReverseReferenceShardV1?
+    error: text
+
+pub struct ReverseReferenceDeltaDecodeV1:
+    ok: bool
+    value: ReverseReferenceDeltaV1?
+    error: text
+
+pub fn reverse_reference_edge_valid_v1(value: ReverseReferenceEdgeV1) -> bool:
+    semantic_query_key_valid_v1(value.producer) and
+        semantic_query_key_valid_v1(value.consumer) and
+        three_payload_contract_text_valid_v1(value.facet, false) and
+        three_payload_contract_digest_valid_v1(value.consumed_fingerprint) and
+        three_payload_contract_digest_valid_v1(value.forward_manifest_digest) and
+        three_payload_contract_text_valid_v1(value.partition_id, false)
+
+pub fn reverse_reference_edge_budget_v1(budget: ThreePayloadContractBudgetV1,
+        value: ReverseReferenceEdgeV1):
+    semantic_query_key_budget_v1(budget, value.producer)
+    budget.add_text(value.facet, false)
+    semantic_query_key_budget_v1(budget, value.consumer)
+    budget.add_digest(value.consumed_fingerprint)
+    budget.add_digest(value.forward_manifest_digest)
+    budget.add_text(value.partition_id, false)
+
+pub fn reverse_reference_edge_key_v1(value: ReverseReferenceEdgeV1) -> text:
+    val partition_size = text_to_bytes(value.partition_id).len()
+    val producer = semantic_query_key_canonical_v1(value.producer)
+    val facet_size = text_to_bytes(value.facet).len()
+    val consumer = semantic_query_key_canonical_v1(value.consumer)
+    partition_size.to_string() + ":" + value.partition_id +
+        text_to_bytes(producer).len().to_string() + ":" + producer +
+        facet_size.to_string() + ":" + value.facet +
+        text_to_bytes(consumer).len().to_string() + ":" + consumer
+
+fn _edges_sorted_valid_v1(values: [ReverseReferenceEdgeV1], partition_id: text?,
+        consumer: SemanticQueryKeyV1?) -> bool:
+    if values.len() > three_payload_contract_max_items_v1(): return false
+    var prior = ""
+    var first = true
+    for edge in values:
+        if not reverse_reference_edge_valid_v1(edge): return false
+        match partition_id:
+            case Some(expected):
+                if edge.partition_id != expected: return false
+            case nil: pass
+        match consumer:
+            case Some(expected):
+                if semantic_query_key_canonical_v1(edge.consumer) != semantic_query_key_canonical_v1(expected): return false
+            case nil: pass
+        val key = reverse_reference_edge_key_v1(edge)
+        if not first and key <= prior: return false
+        prior = key
+        first = false
+    true
+
+fn _edge_put_v1(out: [u8], value: ReverseReferenceEdgeV1) -> [u8]:
+    var bytes = semantic_query_key_put_v1(out, value.producer)
+    bytes = three_payload_contract_put_text_v1(bytes, value.facet)
+    bytes = semantic_query_key_put_v1(bytes, value.consumer)
+    bytes = three_payload_contract_put_digest_v1(bytes, value.consumed_fingerprint)
+    bytes = three_payload_contract_put_digest_v1(bytes, value.forward_manifest_digest)
+    three_payload_contract_put_text_v1(bytes, value.partition_id)
+
+fn _edge_read_v1(reader: ThreePayloadContractReaderV1) -> ReverseReferenceEdgeV1:
+    ReverseReferenceEdgeV1(producer: semantic_query_key_read_v1(reader),
+        facet: reader.read_text(false), consumer: semantic_query_key_read_v1(reader),
+        consumed_fingerprint: reader.read_digest(), forward_manifest_digest: reader.read_digest(),
+        partition_id: reader.read_text(false))
+
+pub fn reverse_reference_shard_valid_v1(value: ReverseReferenceShardV1) -> bool:
+    if value.schema != 1 or not three_payload_contract_text_valid_v1(value.partition_id, false) or
+            not _edges_sorted_valid_v1(value.sorted_edges, Some(value.partition_id), nil): return false
+    val budget = three_payload_contract_budget_v1()
+    budget.add_bytes(wire_envelope_len() + 8)
+    budget.add_text(value.partition_id, false)
+    budget.add_bytes(1 + 4)
+    budget.add_items(value.sorted_edges.len())
+    for edge in value.sorted_edges: reverse_reference_edge_budget_v1(budget, edge)
+    budget.ok
+
+pub fn reverse_reference_shard_encode_v1(value: ReverseReferenceShardV1) -> [u8]:
+    if not reverse_reference_shard_valid_v1(value): return []
+    var out: [u8] = []
+    out = wire_put_envelope(out, wire_magic("RRS1"), 1)
+    out = wire_put_u64(out, value.schema)
+    out = three_payload_contract_put_text_v1(out, value.partition_id)
+    out = wire_put_u8(out, semantic_coverage_tag_v1(value.coverage))
+    out = wire_put_u32(out, value.sorted_edges.len())
+    for edge in value.sorted_edges: out = _edge_put_v1(out, edge)
+    out
+
+fn _shard_failure_v1(error: text) -> ReverseReferenceShardDecodeV1:
+    ReverseReferenceShardDecodeV1(ok: false, value: nil, error: error)
+
+pub fn reverse_reference_shard_decode_v1(bytes: [u8]) -> ReverseReferenceShardDecodeV1:
+    if bytes.len() > three_payload_contract_max_payload_bytes_v1(): return _shard_failure_v1("rr_shard_bounds_exceeded")
+    if not wire_check_envelope(bytes, 0, wire_magic("RRS1"), 1): return _shard_failure_v1("rr_shard_v1_envelope_mismatch")
+    val reader = ThreePayloadContractReaderV1(data: bytes, offset: wire_envelope_len(), ok: true,
+        error: "", retained_text_bytes: 0, retained_items: 0)
+    val schema = reader.read_u64_nonnegative()
+    val partition = reader.read_text(false)
+    val coverage = semantic_coverage_from_tag_v1(reader.read_u8())
+    if coverage == nil: return _shard_failure_v1("unknown_rr_coverage")
+    val count = reader.read_count()
+    var edges: [ReverseReferenceEdgeV1] = []
+    var index: i64 = 0
+    while reader.ok and index < count:
+        edges.push(_edge_read_v1(reader))
+        index = index + 1
+    if not reader.finished(): return _shard_failure_v1(if reader.error == "": "trailing_rr_shard_bytes" else: reader.error)
+    val decoded_coverage = match coverage:
+        case Some(value): value
+        case nil: SemanticCoverageV1.Unknown
+    val value = ReverseReferenceShardV1(schema: schema, partition_id: partition,
+        coverage: decoded_coverage, sorted_edges: edges)
+    if not reverse_reference_shard_valid_v1(value): return _shard_failure_v1("noncanonical_rr_shard")
+    ReverseReferenceShardDecodeV1(ok: true, value: Some(value), error: "")
+
+pub fn reverse_reference_delta_valid_v1(value: ReverseReferenceDeltaV1) -> bool:
+    if not semantic_query_key_valid_v1(value.consumer) or
+            not three_payload_contract_digest_valid_v1(value.new_manifest_digest): return false
+    match value.old_manifest_digest:
+        case Some(digest):
+            if not three_payload_contract_digest_valid_v1(digest): return false
+        case nil: pass
+    if not _edges_sorted_valid_v1(value.inserted, nil, Some(value.consumer)) or
+            not _edges_sorted_valid_v1(value.removed, nil, Some(value.consumer)): return false
+    for edge in value.inserted:
+        if edge.forward_manifest_digest != value.new_manifest_digest: return false
+    match value.old_manifest_digest:
+        case Some(old_digest):
+            for edge in value.removed:
+                if edge.forward_manifest_digest != old_digest: return false
+        case nil:
+            if value.removed.len() != 0: return false
+    val budget = three_payload_contract_budget_v1()
+    budget.add_bytes(wire_envelope_len())
+    semantic_query_key_budget_v1(budget, value.consumer)
+    budget.add_optional_digest(value.old_manifest_digest)
+    budget.add_digest(value.new_manifest_digest)
+    budget.add_bytes(4 + 4)
+    budget.add_items(value.inserted.len())
+    budget.add_items(value.removed.len())
+    for edge in value.inserted: reverse_reference_edge_budget_v1(budget, edge)
+    for edge in value.removed: reverse_reference_edge_budget_v1(budget, edge)
+    budget.ok
+
+pub fn reverse_reference_delta_encode_v1(value: ReverseReferenceDeltaV1) -> [u8]:
+    if not reverse_reference_delta_valid_v1(value): return []
+    var out: [u8] = []
+    out = wire_put_envelope(out, wire_magic("RRD1"), 1)
+    out = semantic_query_key_put_v1(out, value.consumer)
+    out = three_payload_contract_put_optional_digest_v1(out, value.old_manifest_digest)
+    out = three_payload_contract_put_digest_v1(out, value.new_manifest_digest)
+    out = wire_put_u32(out, value.inserted.len())
+    for edge in value.inserted: out = _edge_put_v1(out, edge)
+    out = wire_put_u32(out, value.removed.len())
+    for edge in value.removed: out = _edge_put_v1(out, edge)
+    out
+
+fn _delta_failure_v1(error: text) -> ReverseReferenceDeltaDecodeV1:
+    ReverseReferenceDeltaDecodeV1(ok: false, value: nil, error: error)
+
+pub fn reverse_reference_delta_decode_v1(bytes: [u8]) -> ReverseReferenceDeltaDecodeV1:
+    if bytes.len() > three_payload_contract_max_payload_bytes_v1(): return _delta_failure_v1("rr_delta_bounds_exceeded")
+    if not wire_check_envelope(bytes, 0, wire_magic("RRD1"), 1): return _delta_failure_v1("rr_delta_v1_envelope_mismatch")
+    val reader = ThreePayloadContractReaderV1(data: bytes, offset: wire_envelope_len(), ok: true,
+        error: "", retained_text_bytes: 0, retained_items: 0)
+    val consumer = semantic_query_key_read_v1(reader)
+    val old_digest = reader.read_optional_digest()
+    val new_digest = reader.read_digest()
+    val inserted_count = reader.read_count()
+    var inserted: [ReverseReferenceEdgeV1] = []
+    var index: i64 = 0
+    while reader.ok and index < inserted_count:
+        inserted.push(_edge_read_v1(reader))
+        index = index + 1
+    val removed_count = reader.read_count()
+    var removed: [ReverseReferenceEdgeV1] = []
+    index = 0
+    while reader.ok and index < removed_count:
+        removed.push(_edge_read_v1(reader))
+        index = index + 1
+    if not reader.finished(): return _delta_failure_v1(if reader.error == "": "trailing_rr_delta_bytes" else: reader.error)
+    val value = ReverseReferenceDeltaV1(consumer: consumer, old_manifest_digest: old_digest,
+        new_manifest_digest: new_digest, inserted: inserted, removed: removed)
+    if not reverse_reference_delta_valid_v1(value): return _delta_failure_v1("noncanonical_rr_delta")
+    ReverseReferenceDeltaDecodeV1(ok: true, value: Some(value), error: "")

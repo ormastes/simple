@@ -1,4 +1,8 @@
 # BUG: `LlvmIRBuilder.emit_module_header()` ignores the triple passed to `create()`
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Date:** 2026-08-09
 - Status: OPEN (P2)
@@ -91,3 +95,4 @@ the interpreter.
 Not established whether the offset-shift bug affects `datalayout()` specifically
 or only the `env: text?` field named in that bug. If only `env`, the fix above
 is safe and cheap.
+

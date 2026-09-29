@@ -1,0 +1,453 @@
+# Frozen U03 acceptance packet for the L7/L8 V4 pipeline composition seam.
+# @req REQ-CSM-003 REQ-CSM-007 REQ-CSM-008 REQ-CSM-012 REQ-CSM-024
+
+use std.spec.*
+use std.spec.step
+use std.common.crypto.sha256.{sha256_text}
+use std.common.string_core.{text_to_bytes}
+use common.cache_daemon_host_authority_v1.{CacheNamespaceExpectedHeadV3}
+use compiler.common.cache_contract.canonical_cache_codec_v1.{
+    canonical_cache_encode_envelope_v1,
+    canonical_cache_kind_compile_snapshot_v1,
+    canonical_cache_kind_public_summary_v1,
+}
+use compiler.common.cache_contract.generation_manifest_v1.{
+    GenerationManifestV1, generation_manifest_digest_v1,
+    generation_manifest_encode_v1,
+}
+use compiler.common.cache_contract.semantic_scope_live_port_contract_v1.{
+    SemanticScopeLiveIdentityV1, SemanticScopeAttemptLiveRequestV1,
+    L78AttemptKeyV4, L78AuthorityDomainV4, L78BoundaryErrorV4,
+    L78LimitsV4, L78OwnerTokenV4, L78TokenKindV4,
+    l78_attempt_key_digest_v4,
+}
+use compiler.driver.cache.cas.verified_cas_kind_registry_v1.{
+    verified_cas_kind_digest_v1,
+}
+use compiler.driver.cache.gc.verified_generation_reachability_v1.{
+    VerifiedCasTypedIdentityV1, VerifiedGenerationRootV1,
+    VerifiedGenerationPinV1, VerifiedCasReadObjectV1,
+    VerifiedGenerationDurableBindingV1, verified_generation_pin_snapshot_v1,
+}
+use compiler.driver.cache.gateway.cooperative_namespace_gc_begin_authority_v1.{
+    CacheCooperativeNamespaceGcRootUnionV3,
+    cache_cooperative_namespace_gc_root_union_decode_v3,
+}
+use compiler.driver.cache.gateway.cache_gateway_adapter.{
+    L78PipelinePortsV4, L78PipelineRequestV4, L78PipelineObservationV4,
+    l78_plan_publish_with_ports_v4, l78_compile_publish_v4,
+}
+use compiler.driver.cache.journal.action_root_journal_v1.{ActionRootJournalV1}
+use compiler.driver.cache.publication.three_payload_generation_publisher_v1.{
+    ThreePayloadImmutableObjectV1, PreparedThreePayloadGenerationV1,
+    ThreePayloadDurablePublicationPacketV1,
+}
+use compiler.driver.cache.publication.three_payload_selected_head_publisher.{
+    L78PublicationPhaseV4, L78PublishReceiptV4,
+}
+use compiler.driver.cache.reference.reverse_reference_coordinator_v1.{
+    AffectedQueryPlanV1,
+}
+use .fixtures.l78_scope_rr_ports_v4.{
+    L78FakeScopePortV4, L78FakeAffectedDomainPortV4,
+    l78_fake_scope_port_v4, l78_fake_affected_domain_port_v4,
+}
+use .fixtures.l78_namespace_publication_ports_v4.{
+    L78FakeNamespacePortV4, L78FakePublicationPortV4,
+    l78_fake_namespace_port_v4, l78_fake_publication_port_v4,
+}
+use .fixtures.l78_pipeline_ports_v4.{
+    l78_fake_pipeline_ports_v4, l78_expect_pipeline_trace_v4,
+}
+
+fn d(label: text) -> text: sha256_text(label)
+
+fn durable_packet(label: text, generation: i64
+) -> ThreePayloadDurablePublicationPacketV1:
+    val compile_bytes = canonical_cache_encode_envelope_v1(
+        canonical_cache_kind_compile_snapshot_v1(), 1,
+        text_to_bytes("compile-" + label))
+    val summary_bytes = canonical_cache_encode_envelope_v1(
+        canonical_cache_kind_public_summary_v1(), 1,
+        text_to_bytes("summary-" + label))
+    val compile_digest = verified_cas_kind_digest_v1(
+        "compile_snapshot", compile_bytes)
+    val summary_digest = verified_cas_kind_digest_v1(
+        "public_summary", summary_bytes)
+    val manifest = GenerationManifestV1(
+        schema: 1,
+        snapshot_digest: compile_digest,
+        catalog_digest: d("catalog-" + label),
+        summary_refs: [summary_digest],
+        scope_refs: [],
+        rr_shard_refs: [],
+        forward_manifest_refs: [],
+        portable_refs: [],
+        target_refs: [],
+        diagnostic_refs: [],
+    )
+    val manifest_digest = generation_manifest_digest_v1(manifest)
+    val prepared = PreparedThreePayloadGenerationV1(
+        manifest: manifest,
+        manifest_digest: manifest_digest,
+        immutable_objects: [ThreePayloadImmutableObjectV1(
+            digest: summary_digest,
+            kind: "public_summary",
+            bytes: summary_bytes,
+        )],
+    )
+    val root = VerifiedGenerationRootV1(
+        generation: generation,
+        manifest_digest: manifest_digest,
+    )
+    val epoch = generation * 2 + 100
+    val pins = verified_generation_pin_snapshot_v1(epoch, [
+        VerifiedGenerationPinV1(pin_id: "pin-" + label, root: root),
+    ], []).unwrap()
+    val objects = [
+        VerifiedCasReadObjectV1(
+            identity: VerifiedCasTypedIdentityV1(
+                kind: "generation_manifest", digest: manifest_digest),
+            canonical_bytes: generation_manifest_encode_v1(manifest),
+        ),
+        VerifiedCasReadObjectV1(
+            identity: VerifiedCasTypedIdentityV1(
+                kind: "compile_snapshot", digest: compile_digest),
+            canonical_bytes: compile_bytes,
+        ),
+        VerifiedCasReadObjectV1(
+            identity: VerifiedCasTypedIdentityV1(
+                kind: "public_summary", digest: summary_digest),
+            canonical_bytes: summary_bytes,
+        ),
+    ]
+    val journal = ActionRootJournalV1.recovered("", generation).unwrap()
+    val action_digest = d("operation-" + label)
+    val append = journal.prepare(action_digest, "public_summary",
+        summary_digest, manifest_digest).unwrap()
+    journal.accept_durable(append).unwrap()
+    val journal_digest = sha256_text(journal.bytes)
+    val durable = VerifiedGenerationDurableBindingV1(
+        generation: generation,
+        sequence: append.record.sequence,
+        writer_epoch: epoch,
+        operation_digest: append.operation_digest,
+        host_receipt_digest: d("host-" + label),
+        journal_digest: journal_digest,
+        accepted_journal_bytes: journal.bytes.len(),
+        accepted_journal_prefix_digest: journal_digest,
+        projection_applied: true,
+        projection_digest: manifest.catalog_digest,
+    )
+    ThreePayloadDurablePublicationPacketV1(
+        prepared: prepared,
+        action_digest: action_digest,
+        root: root,
+        pins: pins,
+        objects: objects,
+        journal: journal,
+        durable: durable,
+    )
+
+fn attempt_for(packet: ThreePayloadDurablePublicationPacketV1,
+        label: text) -> L78AttemptKeyV4:
+    L78AttemptKeyV4(
+        root_digest: d("root-" + label),
+        generation: packet.root.generation,
+        manifest_digest: packet.prepared.manifest_digest,
+        profile_digest: d("profile-" + label),
+        operation_digest: packet.durable.operation_digest,
+    )
+
+fn scope_request_for(attempt: L78AttemptKeyV4
+) -> SemanticScopeAttemptLiveRequestV1:
+    val identity = SemanticScopeLiveIdentityV1(
+        writer_instance_digest: d("writer"),
+        generation: attempt.generation,
+        manifest_digest: attempt.manifest_digest,
+        pin_snapshot_digest: d("pins"),
+        generation_closure_digest: d("closure"),
+        binding_digest: attempt.root_digest,
+        query_domain_digest: d("query-domain"),
+        semantic_rules_digest: attempt.profile_digest,
+        cancellation_epoch: 0,
+    )
+    SemanticScopeAttemptLiveRequestV1(
+        identity: identity,
+        attempt_seal_digest: attempt.operation_digest,
+        source_content_digest: d("source"),
+        snapshot_semantic_digest: d("snapshot"),
+    )
+
+fn affected_seed() -> AffectedQueryPlanV1:
+    AffectedQueryPlanV1(
+        accepted: true,
+        rejection_reason: "",
+        ordered_query_ids: [],
+        owner_modules: [],
+        changed_dimensions: [],
+        conservative_domain_receipt: d("affected-domain"),
+        scc_group_identities: [],
+    )
+
+# A namespace seed the fake can actually admit: the G record must carry the
+# attempt's own generation and manifest digest, and at least one O record must
+# exist, or checked_closure_roots refuses the closure with Incomplete.
+fn namespace_seed_for(attempt: L78AttemptKeyV4) -> CacheCooperativeNamespaceGcRootUnionV3:
+    val records = ("G\n" + attempt.generation.to_string() +
+        "\ngeneration_manifest\n1\n" + attempt.manifest_digest + "\n" +
+        "O\npublic_summary\n1\n" + d("artifact") + "\nlease_artifact\n")
+    val wire = "simple.cache.namespace-roots.v3\n2\n" + records
+    cache_cooperative_namespace_gc_root_union_decode_v3(
+        text_to_bytes(wire), limits().max_items).unwrap()
+
+fn publication_seed(attempt: L78AttemptKeyV4,
+        phase: L78PublicationPhaseV4) -> L78PublishReceiptV4:
+    val authority = L78OwnerTokenV4(
+        domain: L78AuthorityDomainV4.TestDouble,
+        kind: L78TokenKindV4.Publication,
+        owner_instance: 404,
+        slot: 1,
+        epoch: 1,
+        attempt_digest: l78_attempt_key_digest_v4(attempt).unwrap(),
+    )
+    L78PublishReceiptV4(
+        phase: phase,
+        operation: attempt,
+        active_head: CacheNamespaceExpectedHeadV3.Genesis,
+        authority: Some(authority),
+    )
+
+fn limits() -> L78LimitsV4:
+    L78LimitsV4(max_items: 64, max_bytes: 65536, max_steps: 64)
+
+fn request_for(packet: ThreePayloadDurablePublicationPacketV1,
+        attempt: L78AttemptKeyV4) -> L78PipelineRequestV4:
+    L78PipelineRequestV4(
+        scope_request: scope_request_for(attempt),
+        attempt: attempt,
+        changes: [],
+        membership: [],
+        groups: [],
+        expected: CacheNamespaceExpectedHeadV3.Genesis,
+        packet: packet,
+        limits: limits(),
+    )
+
+fn fake_ports(
+    attempt: L78AttemptKeyV4,
+    scope_case: text,
+    affected_case: text,
+    namespace_case: text,
+    publication_case: text,
+) -> L78PipelinePortsV4<L78FakeScopePortV4, L78FakeAffectedDomainPortV4, L78FakeNamespacePortV4, L78FakePublicationPortV4>:
+    l78_fake_pipeline_ports_v4(
+        l78_fake_scope_port_v4(scope_case, 101, attempt, limits()),
+        l78_fake_affected_domain_port_v4(
+            affected_case, 202, attempt, limits(), affected_seed()),
+        l78_fake_namespace_port_v4(
+            namespace_case, 303, attempt, limits(), namespace_seed_for(attempt)),
+        l78_fake_publication_port_v4(
+            publication_case, 404, attempt, limits(),
+            publication_seed(attempt, L78PublicationPhaseV4.Committed)),
+    )
+
+fn event_count(ports: L78PipelinePortsV4<L78FakeScopePortV4, L78FakeAffectedDomainPortV4, L78FakeNamespacePortV4, L78FakePublicationPortV4>) -> i64:
+    ports.scope.events.len() + ports.affected.events.len() +
+        ports.namespace_port.events.len() + ports.publication.events.len()
+
+fn successful_trace(ports: L78PipelinePortsV4<L78FakeScopePortV4, L78FakeAffectedDomainPortV4, L78FakeNamespacePortV4, L78FakePublicationPortV4>) -> [text]:
+    [
+        ports.scope.events[0],
+        ports.scope.events[1],
+        ports.affected.events[0],
+        ports.affected.events[1],
+        ports.namespace_port.events[0],
+        ports.namespace_port.events[1],
+        ports.namespace_port.events[2],
+        ports.publication.events[0],
+        ports.namespace_port.events[3],
+        ports.affected.events[2],
+        ports.scope.events[2],
+    ]
+
+fn expect_released(active: [i64], revoked: [i64]) -> ():
+    for slot in active:
+        expect(revoked.contains(slot)).to_equal(true)
+
+fn expect_safe_cleanup(ports: L78PipelinePortsV4<L78FakeScopePortV4, L78FakeAffectedDomainPortV4, L78FakeNamespacePortV4, L78FakePublicationPortV4>) -> ():
+    expect_released(ports.scope.active_slots, ports.scope.revoked_slots)
+    expect_released(ports.affected.active_slots, ports.affected.revoked_slots)
+    expect_released(ports.namespace_port.active_slots,
+        ports.namespace_port.revoked_slots)
+
+describe "L7/L8 V4 pipeline ports":
+    it "runs every stage in order and acknowledges safe cleanup":
+        step("Run scope affected namespace publication and safe release in order")
+        val packet = durable_packet("committed", 7)
+        val attempt = attempt_for(packet, "committed")
+        val run = l78_plan_publish_with_ports_v4(
+            fake_ports(attempt, "scope_ok", "rr_ok", "namespace_ok",
+                "publish_committed"),
+            request_for(packet, attempt),
+        )
+        val observation = run.outcome.unwrap()
+        expect(observation.last_completed_stage).to_equal(5)
+        expect(observation.attempt).to_equal(attempt)
+        expect(observation.publication.unwrap().phase).to_equal(
+            L78PublicationPhaseV4.Committed)
+        expect(observation.retained_tokens.len()).to_equal(0)
+        l78_expect_pipeline_trace_v4(observation, successful_trace(run.owner), [
+            "scope.acquire", "scope.validate",
+            "affected.plan", "affected.validate",
+            "namespace.begin", "namespace.roots", "namespace.closure",
+            "publication.commit", "namespace.finish", "affected.close",
+            "scope.close",
+        ])
+        expect_safe_cleanup(run.owner)
+
+    it "rejects an invalid request before stage one touches any port":
+        step("Validate request and attempt identity before scope acquisition")
+        val packet = durable_packet("invalid", 8)
+        val attempt = attempt_for(packet, "invalid")
+        var request = request_for(packet, attempt)
+        request.attempt.operation_digest = "not-a-digest"
+        val run = l78_plan_publish_with_ports_v4(
+            fake_ports(attempt, "scope_ok", "rr_ok", "namespace_ok",
+                "publish_committed"), request)
+        expect(run.outcome).to_equal(Err(L78BoundaryErrorV4.InvalidRequest))
+        expect(event_count(run.owner)).to_equal(0)
+        expect_safe_cleanup(run.owner)
+
+    it "returns the updated owner after an early scope refusal":
+        step("Stop at scope acquire and retain its refusal event")
+        val packet = durable_packet("scope-refusal", 9)
+        val attempt = attempt_for(packet, "scope-refusal")
+        val run = l78_plan_publish_with_ports_v4(
+            fake_ports(attempt, "scope_unavailable", "rr_ok", "namespace_ok",
+                "publish_committed"), request_for(packet, attempt))
+        expect(run.outcome).to_equal(Err(L78BoundaryErrorV4.Unavailable))
+        expect(run.owner.scope.events).to_equal(["scope.acquire"])
+        expect(event_count(run.owner)).to_equal(1)
+        expect_safe_cleanup(run.owner)
+
+    it "closes the scope when affected-domain planning fails":
+        step("Release stage one after a stage two refusal")
+        val packet = durable_packet("rr-refusal", 10)
+        val attempt = attempt_for(packet, "rr-refusal")
+        val run = l78_plan_publish_with_ports_v4(
+            fake_ports(attempt, "scope_ok", "rr_missing_absence",
+                "namespace_ok", "publish_committed"),
+            request_for(packet, attempt))
+        expect(run.outcome).to_equal(Err(L78BoundaryErrorV4.Incomplete))
+        expect(run.owner.scope.events).to_equal(
+            ["scope.acquire", "scope.validate", "scope.close"])
+        expect(run.owner.affected.events).to_equal(["affected.plan"])
+        expect(run.owner.namespace_port.events.len()).to_equal(0)
+        expect(run.owner.publication.events.len()).to_equal(0)
+        expect_safe_cleanup(run.owner)
+
+    it "closes affected and scope owners when namespace begin refuses":
+        step("Clean earlier stages after a stage three refusal")
+        val packet = durable_packet("namespace-refusal", 11)
+        val attempt = attempt_for(packet, "namespace-refusal")
+        val run = l78_plan_publish_with_ports_v4(
+            fake_ports(attempt, "scope_ok", "rr_ok", "namespace_unavailable",
+                "publish_committed"), request_for(packet, attempt))
+        expect(run.outcome).to_equal(Err(L78BoundaryErrorV4.Unavailable))
+        expect(run.owner.affected.events).to_equal(
+            ["affected.plan", "affected.validate", "affected.close"])
+        expect(run.owner.namespace_port.events).to_equal(["namespace.begin"])
+        expect(run.owner.scope.events).to_equal(
+            ["scope.acquire", "scope.validate", "scope.close"])
+        expect(run.owner.publication.events.len()).to_equal(0)
+        expect_safe_cleanup(run.owner)
+
+    it "aborts and releases all owners after a precommit conflict":
+        step("Treat conflict as an unmutated refusal and perform safe cleanup")
+        val packet = durable_packet("conflict", 12)
+        val attempt = attempt_for(packet, "conflict")
+        val run = l78_plan_publish_with_ports_v4(
+            fake_ports(attempt, "scope_ok", "rr_ok", "namespace_ok",
+                "publish_conflict"), request_for(packet, attempt))
+        expect(run.outcome).to_equal(Err(L78BoundaryErrorV4.Conflict))
+        expect(run.owner.publication.events).to_equal(["publication.commit"])
+        expect(run.owner.namespace_port.events).to_equal([
+            "namespace.begin", "namespace.roots", "namespace.closure",
+            "namespace.abort",
+        ])
+        expect(run.owner.affected.events).to_equal(
+            ["affected.plan", "affected.validate", "affected.close"])
+        expect(run.owner.scope.events).to_equal(
+            ["scope.acquire", "scope.validate", "scope.close"])
+        expect_safe_cleanup(run.owner)
+
+    it "retains scope affected namespace and closure tokens on Unknown":
+        step("Keep every outstanding owner after postmutation outcome becomes Unknown")
+        val packet = durable_packet("unknown", 13)
+        val attempt = attempt_for(packet, "unknown")
+        val run = l78_plan_publish_with_ports_v4(
+            fake_ports(attempt, "scope_ok", "rr_ok", "namespace_ok",
+                "publish_unknown"), request_for(packet, attempt))
+        val observation = run.outcome.unwrap()
+        expect(observation.last_completed_stage).to_equal(4)
+        # The publish_unknown fake refuses BOTH commit and the exact resolve
+        # with Err(Unknown) (pinned by l78_publication_port_v4_spec.spl:145,150),
+        # so no trustworthy receipt exists.  Design 8.5 allows Unknown as an
+        # error as well as a phase; the pipeline must not fabricate a receipt or
+        # assert the expected old head, so it reports none and retains all four.
+        expect(observation.publication).to_equal(nil)
+        expect(observation.retained_tokens.len()).to_equal(4)
+        expect(run.owner.publication.events).to_equal(
+            ["publication.commit", "publication.resolve"])
+        expect(run.owner.scope.active_slots.len()).to_equal(1)
+        expect(run.owner.affected.active_slots.len()).to_equal(1)
+        expect(run.owner.namespace_port.active_slots.len()).to_equal(2)
+        expect(run.owner.namespace_port.events.contains(
+            "namespace.finish")).to_equal(false)
+        expect(run.owner.namespace_port.events.contains(
+            "namespace.abort")).to_equal(false)
+        expect(run.owner.scope.events.contains("scope.close")).to_equal(false)
+        expect(run.owner.affected.events.contains("affected.close")).to_equal(false)
+
+    it "resolves an Unknown commit exactly once before safe cleanup":
+        step("Resolve the same operation as committed without replaying publication")
+        val packet = durable_packet("resolved", 14)
+        val attempt = attempt_for(packet, "resolved")
+        val run = l78_plan_publish_with_ports_v4(
+            fake_ports(attempt, "scope_ok", "rr_ok", "namespace_ok",
+                "publish_unknown_then_committed"), request_for(packet, attempt))
+        val observation = run.outcome.unwrap()
+        expect(observation.last_completed_stage).to_equal(5)
+        expect(observation.publication.unwrap().phase).to_equal(
+            L78PublicationPhaseV4.Committed)
+        expect(observation.retained_tokens.len()).to_equal(0)
+        expect(run.owner.publication.events).to_equal(
+            ["publication.commit", "publication.resolve"])
+        expect_safe_cleanup(run.owner)
+
+    it "retains all outstanding owners when committed cleanup is Unknown":
+        step("Keep committed authority while namespace finish remains unresolved")
+        val packet = durable_packet("finish-unknown", 15)
+        val attempt = attempt_for(packet, "finish-unknown")
+        val run = l78_plan_publish_with_ports_v4(
+            fake_ports(attempt, "scope_ok", "rr_ok", "namespace_unknown_finish",
+                "publish_committed"), request_for(packet, attempt))
+        val observation = run.outcome.unwrap()
+        expect(observation.last_completed_stage).to_equal(4)
+        expect(observation.publication.unwrap().phase).to_equal(
+            L78PublicationPhaseV4.Committed)
+        expect(observation.retained_tokens.len()).to_equal(4)
+        expect(run.owner.namespace_port.events).to_equal([
+            "namespace.begin", "namespace.roots", "namespace.closure",
+            "namespace.finish",
+        ])
+        expect(run.owner.scope.events.contains("scope.close")).to_equal(false)
+        expect(run.owner.affected.events.contains("affected.close")).to_equal(false)
+
+    it "does not expose fake-port injection through the production entry":
+        step("Keep the non-injectable production route unavailable")
+        val packet = durable_packet("production", 16)
+        val attempt = attempt_for(packet, "production")
+        expect(l78_compile_publish_v4(request_for(packet, attempt))).to_equal(
+            Err(L78BoundaryErrorV4.Unavailable))

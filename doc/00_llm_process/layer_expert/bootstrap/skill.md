@@ -18,7 +18,96 @@ LLVM llc by default; JIT is opt-in via `SIMPLE_BOOTSTRAP_REAL_LLVM` env var).
 Tracks redeploy gate (`scripts/check/cert/redeploy_gate/redeploy_gate.shs`), smoke-matrix
 verification, and all bootstrap-blocking regressions.
 
+Bootstrap ledger pushes use a shared Git hook directory across linked
+worktrees. The installed hook is `scripts/hooks/pre-push-worktree-launcher`, a
+stable launcher that resolves the active worktree before entering its tracked
+must-check dispatcher. An absolute dispatcher symlink is invalid across
+worktrees and must not be restored during bootstrap setup.
+
 ## Pipeline Links
+
+### Phase live checks (2026-09-08)
+
+The full SIMD/bootstrap lane requires actual same-phase launches in addition to
+source checks and suites. Use `scripts/check/check-bootstrap-phase-live.py` with
+the producer's admitted compiler/tool manifest for MCP/LSP, SPipe plugin, Caret,
+DevHub and independent GitHub/Jira/Confluence fixture reads. Keep missing phase
+tools, provider identity routes, credentials and read scope as explicit blockers;
+`auth status` configuration output never earns live access PASS. The controller
+cannot create its own admission authority or promote fixture tests to live
+evidence. See `doc/07_guide/tooling/bootstrap_phase_live_services.md` for exact argv
+and receipt contracts.
+
+Rust seed tool discovery is owned by the shell authority boundary. Normalize
+native sysroot/CRLF output before POSIX path validation and bind actual `.exe`
+files on Windows; retain strict policy/PATH checks. A successful focused
+resolver probe does not admit the seed generation or prove Stage 4 readiness.
+
+## Windows MSVC host: install, antivirus, traps (2026-09-24)
+
+The guide is
+`doc/07_guide/infra/toolchain/windows_install_deploy_antivirus_2026-09-24.md`.
+
+- **Entry:** in Git Bash, run
+  `. scripts/setup/windows-msvc-bootstrap-env.shs`, then
+  `sh scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --stop-after-stage2`.
+  A bare `--full-bootstrap` stops at the receipt gate. The env script pins
+  VS `14.44.35207`, SDK `10.0.26100.0`, MSYS2 and LLVM 23.1.1 paths. Only
+  `LLVM_SYS_231_PREFIX` can override them. Its header still names
+  `bootstrap-windows.sh --msvc`, which is stale.
+- **Fixes this path depends on:** #1457 (drive-letter `LLVM_CONFIG`
+  canonicalization; without it the fingerprint aborts silently), #1459
+  (inkwell 0.9 `.basic()`; without it the seed fails with E0599), #1461
+  (`VCToolsInstallDir` export; without it preflight cannot find the Rust
+  MSVC-target `link.exe`).
+- **Clang-only:** `clang-cl` on Windows. `link.exe` survives only as the Rust
+  MSVC-target linker.
+- **Dev Drive first:** run `fsutil devdrv query <drive>` (needs admin). A
+  trusted Dev Drive with no filter attached is not scanned at all, so
+  exclusions for paths on it add nothing. D: on the reference host is such a
+  volume. Build there, and exclude only what must live on a normal volume.
+- **Diagnose with Defender's profiler:**
+  `New-MpPerformanceRecording -RecordTo <etl outside checkout> -Seconds 30`,
+  then `Get-MpPerformanceReport -Path <etl> -TopProcesses N -TopFiles N -TopExtensions N`
+  (both need admin). Measured 2026-09-24:
+  - `grep.exe` accounted for 27.3 s of 30 s of scan time over 2,847 `.spl`
+    files in the C: checkout.
+  - `git.exe` accounted for 2.5 s over `.idx` pack indexes.
+
+  Recursive grep over sources on a normal volume is the dominant cost. The fix
+  is a Dev Drive checkout. Never exclude the sources.
+- **Defender:** `sh scripts/setup/windows-defender-exclusions.shs {list|add|remove}`
+  excludes generated build output only, never the source tree. #1460 was the
+  initial version. #1462 resolves the scope from
+  `scripts/lib/storage-roots.shs`. It covers the whole `.simple/storage` and
+  `<user storage>/cache/compiler`, and it adds the Stage 2/3 compilers as
+  processes at their expected paths. A process exclusion covers the files the
+  compiler opens (sources); a path exclusion does not.
+- **Defender behaviour:** the script elevates only the Defender call, through
+  one UAC prompt. Declining gives `FAIL — add not applied`. It verifies by
+  reading `Get-MpPreference` back. The exclusions take effect immediately,
+  with no reboot. It is per checkout, because paths come from the script's
+  location. Re-run `add` after the first deploy.
+- **Defender only:** nothing in the repo detects or configures third-party
+  antivirus. ESET, Kaspersky, and Bitdefender GravityZone have CLIs, but each
+  needs the owner or admin to enable something first, and ESET and Kaspersky
+  import a whole config. V3, ALYac, Norton, and the others are GUI or console
+  only. The third-party facts come from search extracts and are unverified.
+  `root/SecurityCenter2` detection is not sufficient on its own. It listed
+  only Defender on a host with `C:\Program Files\AhnLab\Safe Transaction`
+  installed, so also check well-known install directories.
+- **Traps:**
+  - Never add files to a checkout, or write logs into it, while preflight is
+    running. Preflight aborts with `source, Git state, configuration, seed,
+    or checker changed during preflight`.
+  - Do not run the bootstrap as Administrator.
+  - The Stage 2 pre-exec refusal (`log was NEVER CREATED ... wrapper
+    PRECONDITION refusal ... UNDIAGNOSABLE`, about 220 s) is **not
+    Defender**. It reproduced with every stage compiler process-excluded, and
+    again on the unfiltered Dev Drive. Its cause is still open.
+- **End users:** an installer must never silently add antivirus exclusions.
+  Code signing helps SmartScreen and false positives for downloads but does
+  not exempt files from scanning.
 
 ## SimpleOS 32-bit cross-target boundary
 
@@ -174,33 +263,6 @@ the env var points to the correct seed target.
    stage2/stage3 round-trip + test subset). Gate failures are hard stops.
 3. **stage2 binary is ephemeral:** only used during bootstrap. After stage3
    succeeds, discard it — no production reliance on stage2 artifacts.
-4. **Deployed `simple` is a frontend; SSpec needs its `simple_seed` sibling.**
-   The release CLI delegates `test` to a `simple_seed` in the SAME directory
-   (`seed sibling not found, skipping delegation` = it's missing → in-process
-   fallback fails `unresolved name: describe`). Every deploy must ship the
-   pair. Recovery: copy a known-good `{simple, simple_seed}` pair from a clean
-   worktree's `build/bootstrap/full/<triple>/` to a scratch dir.
-   See `cli_symlink_argv0_seed_sibling_lookup_2026-07-24.md`.
-   **Exe identity must be resolved IN-PROCESS.** `_cli_current_exe_path` now
-   canonicalizes `/proc/self/exe` via `rt_path_absolute`
-   (`std::fs::canonicalize`). Never shell out for it: a `/proc/self` read done
-   by a spawned helper describes the HELPER, so `readlink -f /proc/self/exe`
-   returned `/usr/bin/readlink` — its seed sibling `/usr/bin/simple_seed` never
-   exists, so the CLI fell through to delegate to `bin/simple` = itself and
-   `bin/simple run` became an unbounded fork bomb (2026-07-25, `0531ca8ce266`).
-   The same commit restored `_cli_resolve_symlink` on the *candidate* side of
-   `_cli_is_current_exe`: `bin/simple` is a symlink, so an unresolved candidate
-   never matches our real exe and the fork-bomb guard silently passes.
-   **Binaries deployed before `0531ca8ce266` self-delegate no matter which path
-   invokes them** — identity does not depend on argv[0] in those builds, so the
-   old "invoke the REAL path, not the symlink" workaround does not help. Drive
-   `simple_seed` directly until redeploy.
-5. **Stale untracked `.smf` stubs poison module resolution tree-wide** —
-   symptom is identical to a deploy clobber (every spec fails
-   `unresolved name: describe`). `find src test -name '*.smf'` must be empty;
-   quarantine hits. See
-   `doc/08_tracking/bug/smf_stub_shadowing_unresolved_describe_2026-07-24.md`
-   and `doc/07_guide/infra/testing.md` § Troubleshooting.
 
 ## Multi-Error Recovery Strategy
 
@@ -606,7 +668,155 @@ Stage-3/4 run; never substitute the seed or bypass must-check.
 ## Must-check ledger handoff
 
 The bootstrap owner is the only producer of must-check ledger PASS state.
+It retains commit-ready logs under
+`doc/08_tracking/check/evidence/<source-fingerprint>/`, refuses fingerprinted
+input drift from `HEAD`, and records external TODO receipts only through
+`--record-gate-pass <id> --evidence <repo-relative-committed-receipt>`. The
+push consumer validates evidence blobs from the exact pushed revision.
 Schema v3 requires a named owner on every row, actionable unblock text for
 TODO/blocked rows, and `unblock_condition=none` for PASS. A bootstrap wrapper
 must not publish a phase PASS until its exact receipt has been validated and
 hashed; the bounded push consumer only verifies that retained state.
+
+## 2026-09-06 — the shared checkout cannot bootstrap; operator gotchas
+
+**Stage 2 admits only against content that does not move under it.** In the
+shared working copy a peer editing anything under `src/**` mid-run makes Stage 2
+refuse:
+
+```
+error: refused incomplete Stage 2 admission provenance
+```
+
+emitted at `scripts/bootstrap/bootstrap-from-scratch.sh:2703` and again at
+`:2724` (the post-publication re-snapshot), each setting `stage2_status=4`. The
+admission compares a `bootstrap_stage3_source_snapshot` taken before and after
+the stage; any drift invalidates the private copy, which is deliberate — it
+prevents a stop-after-stage2 false admission.
+
+## macOS current-source Stage2 handoff (2026-09-08)
+
+The current Apple Silicon lane reduced LLVM failed files from 374 to one.
+`cache_gateway_v1.spl` still loses the slot for generic/imported
+`CacheGatewayV1.virtual_source_store`; no Stage4 candidate exists and the July
+deployment must remain untouched. The exact resume condition and capped-cycle
+history are in `doc/03_plan/compiler/bootstrap/stage4_macos_deploy_2026-07-25.md`.
+
+**Use a private worktree pinned to a commit.** `scripts/bootstrap/bootstrap-in-snapshot.shs`
+exists exactly for this: it materialises COMMITTED content into
+`git worktree add --detach` and runs the bootstrap there. Its header records
+three failures in 70 minutes on 2026-09-05, each with a different error string
+and each looking like a defect in the thing it named (`found TripleLt` from
+transient conflict markers; `parent-stage2-sanity-candidate-mismatch` from the
+Stage-2 binary being rewritten mid-hash; the provenance refusal above from two
+files appearing under `src/compiler/10.frontend/`). Record:
+[bootstrap_reads_transiently_broken_shared_working_copy_2026-09-05.md](../../../08_tracking/bug/bootstrap_reads_transiently_broken_shared_working_copy_2026-09-05.md)
+and
+[bootstrap_stage2_admission_refused_by_concurrent_source_edits_2026-09-05.md](../../../08_tracking/bug/bootstrap_stage2_admission_refused_by_concurrent_source_edits_2026-09-05.md).
+Note the semantic: uncommitted edits are NOT built. Commit first.
+
+### Three operator gotchas measured the same day
+
+- **Never symlink `src/compiler_rust/target`.** The seed-input content hash walks
+  those paths; a symlink defeats it and the run dies at
+  `error: failed to fingerprint Rust seed inputs`
+  (`bootstrap-from-scratch.sh:1766`, from `seed_inputs_hash pre` at `:1765`).
+  The message names no path, so it reads as a corrupt tree. Point
+  `CARGO_TARGET_DIR` at the fast disk instead of relinking the tree.
+- **Always capture the bootstrap's own stdout to a file.** The per-phase logs do
+  NOT carry the failure reason — the reason (the two errors above, among others)
+  is printed on the driver's stderr/stdout only. A run whose console output was
+  lost has to be repeated.
+- **Do not trust `bootstrap-progress.log` as a liveness oracle.** Measured on
+  this darwin host, the watcher reported
+  `alive-no-progress cpu_pct=0.0 tree_processes=0` while the build was compiling
+  at full tilt. `scripts/bootstrap/bootstrap-progress-watch.shs:27-31` documents
+  `alive-no-progress` as REPORTED, never acted on (the watcher kills nothing),
+  and `scripts/check/check-bootstrap-progress-watch.shs:235-238` has a selftest
+  asserting a busy tree is NOT reported that way — so this is a host-specific
+  false stall (process-tree enumeration and CPU sampling differ on macOS), not
+  the documented behaviour. Root cause NOT established here; treat a
+  zero-process, zero-CPU sample on darwin as "unknown", never as "dead", and
+  confirm with `ps`/log growth before killing anything. Related:
+  [bootstrap_progress_monitor_reports_live_run_as_dead_2026-09-03.md](../../../08_tracking/bug/bootstrap_progress_monitor_reports_live_run_as_dead_2026-09-03.md).
+
+## Seed-vs-self-hosted PARSER divergence is a real Stage-3 blocker class (2026-09-06)
+
+Stage 3 failed in **parse**, not in HIR/MIR/codegen — an unusual shape for this
+layer, and the first place to look when the Stage-3 log's first error is a
+`[parser_error]` rather than a segfault or an unresolved name:
+
+```
+[parser_error] path src/compiler/driver/driver_source_pipeline_parsing.spl
+line 309:16: expected :, got -> '->'
+```
+
+Stage 3 is compiled BY Stage 2, so a Stage-3 parse error is a statement about
+**Stage 2's parser** (i.e. about `src/compiler/10.frontend/`), never about the
+file it names. The Rust seed parsed the same file fine, which is exactly the
+signal: any construct the seed accepts and the self-hosted frontend does not
+will surface here the moment someone writes it into `src/`.
+
+Diagnosis without a bootstrap. `bin/simple` is the Rust seed and does not read
+`src/compiler/10.frontend/` at all, but the self-hosted parser can still be run
+in-process under it:
+
+```simple
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.frontend.core.parser.{parser_has_errors, parser_get_errors}
+val module = parse_and_build_module(source_text, "probe.spl")
+```
+
+Seconds per file instead of a multi-hour bootstrap, and it takes a whole real
+source file, so "does Stage 2 accept `src/compiler/**/foo.spl`?" is answerable
+directly. Same pattern as `test/01_unit/compiler/frontend/layer_decl_parse_spec.spl`.
+
+Trap found while fixing this one: a new separator token in
+`parse_match_arms_common` is only HALF the work. `token_requires_rhs()`
+(`core/tokens.spl`) makes a trailing `->` suppress the following
+Newline/Indent so a return type may wrap onto the next line, so a block-bodied
+arm silently kept only its FIRST statement and handed the second to the arm
+loop as the next pattern — parsing "cleanly" and wrong. The parser must hand
+the lexer `lex_mark_current_token_as_generic_close()` before advancing past a
+token that looks like a binary operator but opens a block. Record:
+[stage3_selfhost_parser_rejects_arrow_match_arms_2026-09-06.md](../../../08_tracking/bug/stage3_selfhost_parser_rejects_arrow_match_arms_2026-09-06.md).
+
+## Stage-2 candidate SIGILL family + phase-1 script traps (2026-09-26/27)
+
+Three distinct SIGILLs in the Stage-2 candidate, all "mid-parse", all
+invisible under `simple run`, each with a record and a landed fix:
+
+| symptom | root cause | fix / record |
+|---|---|---|
+| `ud2` on the first bare `return` executed | seed cranelift lowered bare `return` in an inferred-`ANY` fn to the fail-fast trap | seed `body.rs` returns tagged nil `3` — [backend](../backend/skill.md) § 2026-09-26 |
+| OOB on `lex_env_save_enabled[0]` | module-level array empty because `__module_init_*` never ran for this consumer | `lex_env_save_on()` guard — [compiler_driver](../compiler_driver/skill.md) § 2026-09-26 |
+| stack overflow under `env`/`host_os` | `host_os -> shell_output("uname -s") -> _io_runtime_process_run_raw -> host_os` | the primitive branches on compiled-in `platform_name()` (`rt_platform_name`, no spawn): [io_runtime.spl](../../../../src/lib/nogc_sync_mut/io_runtime.spl) :37-46, `e52371ff594`; record [stage2_candidate_env_get_infinite_recursion_sigill_2026-09-26](../../../08_tracking/bug/stage2_candidate_env_get_infinite_recursion_sigill_2026-09-26.md) |
+
+Rule: a candidate SIGILL that "never reproduces under `simple run`" is evidence
+about the SEED's codegen or about module-init ordering, not about the file the
+backtrace names.
+
+Phase-1 entrypoint traps (`1b66acd7379`, `6870c4a6039`):
+- `run-phase1-local.shs` exec'd `bootstrap-windows.sh` (a `#!/usr/bin/env bash`
+  script with `set -o pipefail`) via `sh` — fatal where `/bin/sh` is dash
+  (`set: Illegal option -o pipefail`, exit 2 before any step). It is
+  `exec bash ...` now; Git Bash hid this because there `sh` IS bash.
+- `bootstrap-windows.sh` exported `SIMPLE_WINDOWS_MATERIALIZED_LINKS_RECEIPT`
+  unconditionally. On Linux the materializer is a no-op that writes no
+  receipt, and `bootstrap_stage3_git_state` treats a non-empty value as "a
+  receipt exists" and chased the absent file — surfacing only as "could not
+  bind preflight source and git state" after every Rust stage had built
+  green. The export is now guarded by `[ -f "$materialized_receipt" ]`.
+- `check-bootstrap-preflight.shs` `capture_bindings` returned a bare `1` from
+  five steps; each now names the failing step on stderr
+  (`preflight bind: <step> failed`).
+
+**`VAR=` in POSIX shell sets EMPTY, not unset** (`dced8d0dd80`; 4 scripts:
+`cert/redeploy_gate/candidate_frontend_admission.shs`,
+`check-phase2-low-memory-source-reclaim.shs`,
+`check-rocm-engine2d-font-readback.shs`, `check-seed-native-build-invariant.shs`).
+`SIMPLE_EXECUTION_MODE=` was meant as "use the default", but
+`src/compiler_rust/driver/src/exec_core.rs` ~:223 takes the JIT default only
+on `Err(_)` (var UNSET); `Ok("")` goes to `parse_str_checked`, which rejects
+the empty spelling and hard-exits 2. Use `env -u SIMPLE_EXECUTION_MODE ...` or
+a scoped `unset`. The same rule applies to every fail-closed selector variable.

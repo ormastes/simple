@@ -1,0 +1,25 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+build_dir=${TMPDIR:-/tmp}/simple-hal-device-parity-v1-$$
+mkdir -p "$build_dir"
+trap 'rm -rf "$build_dir"' EXIT HUP INT TERM
+
+cc -std=c11 -O3 -Wall -Wextra -Werror -pedantic \
+    "$repo_root/src/app/hal_provider/hal_provider_device_payload_v1.c" \
+    "$repo_root/src/app/hal_provider/test/hal_provider_device_payload_v1_selfcheck.c" \
+    -o "$build_dir/c-selfcheck"
+rustc -C opt-level=3 -C debuginfo=0 \
+    "$repo_root/src/app/hal_provider/test/hal_provider_device_payload_v1_rust.rs" \
+    -o "$build_dir/rust-selfcheck"
+
+c_output=$(/usr/bin/time -f 'c_peak_rss_kib=%M' \
+    "$build_dir/c-selfcheck" 2>&1)
+rust_output=$(/usr/bin/time -f 'rust_peak_rss_kib=%M' \
+    "$build_dir/rust-selfcheck" 2>&1)
+printf '%s\n' "$c_output"
+printf '%s\n' "$rust_output"
+printf '%s\n' "$c_output" | grep -q 'parity_mask=7 effects=0 allocations=0'
+printf '%s\n' "$rust_output" | grep -q 'parity_mask=7 effects=0 allocations=0'
+printf '%s\n' 'hal-device-provider-parity-v1: PASS exact_providers=3'

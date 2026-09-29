@@ -19,6 +19,16 @@ impl MirInst {
         self.effect().is_nogc()
     }
 
+    /// Every register this instruction defines. `dest()` covers the
+    /// single-result instructions; `InlineAsm` is the one instruction that can
+    /// define several (one per `out(reg)` operand).
+    pub fn defs(&self) -> Vec<VReg> {
+        match self {
+            MirInst::InlineAsm { outputs, .. } => outputs.iter().map(|(v, _)| *v).collect(),
+            _ => self.dest().into_iter().collect(),
+        }
+    }
+
     /// Destination register if this instruction defines one.
     pub fn dest(&self) -> Option<VReg> {
         match self {
@@ -141,8 +151,8 @@ impl MirInst {
             | MirInst::ConstBool { .. }
             | MirInst::ConstString { .. }
             | MirInst::ConstSymbol { .. }
-            | MirInst::GcAlloc { .. }
-            | MirInst::InlineAsm { .. } => vec![],
+            | MirInst::GcAlloc { .. } => vec![],
+            MirInst::InlineAsm { inputs, .. } => inputs.clone(),
             MirInst::Copy { src, .. } => vec![*src],
             MirInst::AggregateCopy { src, .. } => vec![*src],
             MirInst::BinOp { left, right, .. } => vec![*left, *right],

@@ -1,5 +1,6 @@
 # Primary parsing: parse_primary_expr (literals, identifiers, keywords).
 use compiler.frontend.core.parser_primary.*
+use compiler.frontend.core._ParserPrimary.asm_match_suffix.{parser_validate_unit_suffix}
 # Parser — Primary Expression & ASM Parsing
 #
 # Extracted from parser_expr.spl. Contains:
@@ -32,14 +33,19 @@ use compiler.core.tokens.{TOK_BACKTICK_IDENT}
 use compiler.core.tokens.{TOK_AT, TOK_KW_KEYOF, TOK_KW_MIXIN}
 use compiler.core.tokens.{TOK_AMP_COLON, TOK_BACKSLASH}
 use compiler.core.tokens.{TOK_KW_FOR, TOK_KW_IF, TOK_KW_IN}
-use compiler.core.ast.{expr_int_lit, expr_float_lit, expr_string_lit, expr_raw_string_lit}
-use compiler.core.ast.{expr_bool_lit, expr_nil_lit, expr_ident, expr_custom_block}
+use compiler.core.tokens.{TOK_IDENT, TOK_UNDERSCORE}
+use compiler.core.ast.{expr_int_lit, expr_float_lit, expr_raw_string_lit}
+use compiler.core.ast.{expr_bool_lit, expr_nil_lit, expr_custom_block}
+use compiler.frontend.core._AstExpr.nodes.{expr_ident, expr_string_lit, expr_call_named}
 use compiler.core.ast.{expr_unary, expr_call, expr_array_lit, expr_array_repeat, expr_method_call, expr_lambda}
 use compiler.core.ast.{expr_block, expr_tuple}
 use compiler.core.ast.{expr_return_expr, expr_break_expr, expr_continue_expr}
-use compiler.core.ast.{expr_unit, expr_pass, expr_pass_with_msg, expr_pass_todo, expr_pass_do_nothing, expr_pass_dn}
+use compiler.core.ast.{expr_unit, expr_pass, expr_pass_with_msg, expr_pass_todo, expr_pass_todo_call, expr_pass_do_nothing, expr_pass_dn}
 use compiler.core.ast.{expr_dict_lit}
-use compiler.core.ast.{expr_suffixed_int, expr_suffixed_float, expr_suffixed_bool}
+# D1 arrow lambda: a parenthesised element list is a PARAMETER list only when
+# every element is a bare identifier, which needs the arena tag directly.
+use compiler.core.ast_expr.{EXPR_IDENT, expr_tag}
+use compiler.core.ast.{expr_suffixed_int, expr_suffixed_float, expr_suffixed_bool, expr_suffixed_string}
 use compiler.core.ast.{expr_await, expr_yield, expr_spawn, expr_do_block, expr_atom, expr_new_alloc}
 use compiler.core.ast.{expr_list_comp, expr_dict_comp}
 use compiler.core.ast.{expr_asm, expr_asm_operands, expr_asm_match, expr_asm_assert}
@@ -75,6 +81,36 @@ fn parser_is_canonical_custom_block_kind(kind: text) -> bool:
         kind == "schema" or kind == "style" or kind == "ui" or kind == "music" or
         kind == "bim" or kind == "cad" or kind == "city" or kind == "rtl" or
         kind == "loss" or kind == "lean" or kind == "nograd")
+
+# `_path` is a construction suffix, not an interpolation operator.  Keep the
+# accepted grammar aligned with the Rust bootstrap lexer: escaped/empty braces
+# remain literal text, while a non-empty balanced interpolation region makes
+# the suffixed form unsupported (and therefore an explicit parse error).
+fn parser_path_literal_has_interpolation(value: text) -> bool:
+    var i: i64 = 0
+    while i < value.len():
+        val ch = value[i:i + 1]
+        val next = if i + 1 < value.len() then value[i + 1:i + 2] else ""
+        if ch == "{" and next == "{":
+            i = i + 2
+            continue
+        if ch == "{" and next == "}":
+            i = i + 2
+            continue
+        if ch == "{":
+            var depth: i64 = 1
+            var j: i64 = i + 1
+            while j < value.len():
+                val inner = value[j:j + 1]
+                if inner == "{":
+                    depth = depth + 1
+                elif inner == "}":
+                    depth = depth - 1
+                    if depth == 0:
+                        return true
+                j = j + 1
+        i = i + 1
+    false
 
 # Parses the tail of a `fn` lambda after the `fn` keyword itself has already
 # been consumed by the caller: `(param: Type, ...) -> RetType: body`.
@@ -296,6 +332,24 @@ fn parse_primary_expr() -> i64:
         if par_kind_get() == 6 and par_text_get() == "volatile":
             parser_advance()
 
+        # Design A.4: `asm [volatile] clobbers(rax, rcx, memory) { ... }`.
+        # Names travel as "clobber:<name>" so the flat bridge routes them to
+        # AsmExpr.clobbers exactly like the legacy `clobber(...)` directive.
+        var raw_clobbers: [text] = []
+        if par_kind_get() == 6 and par_text_get() == "clobbers":
+            parser_advance()
+            parser_expect(140)
+            while par_kind_get() != 141 and par_kind_get() != 190:
+                if par_kind_get() == 6:
+                    raw_clobbers.push("clobber:" + par_text_get())
+                    parser_advance()
+                else:
+                    parser_error("expected register name in clobbers(...)")
+                    break
+                if par_kind_get() == 160:
+                    parser_advance()
+            parser_expect(141)
+
         if par_kind_get() == 140:
             return parse_legacy_parenthesized_asm()
 
@@ -337,6 +391,8 @@ fn parse_primary_expr() -> i64:
 
         if par_kind_get() == 142:
             val raw_asm = parse_raw_asm_braced_payload()
+            if raw_clobbers.len() > 0:
+                return expr_asm_operands(raw_asm, [], [], [], [], [], raw_clobbers, 0)
             return expr_asm(raw_asm, 0)
 
         if par_kind_get() == 164:
@@ -373,14 +429,50 @@ fn parse_primary_expr() -> i64:
 
     if par_kind_get() == 3:
         val str_text = par_text_get()
+        val str_suffix = lex_cur_suffix_get()
         # Token text excludes delimiters; the source start preserves whether
         # this was ordinary double-quote, single/raw-prefixed, or bare triple.
         val str_start = lex_token_start_get()
+        val str_end = lex_token_end_get()
+        val source_len = lex_source_len()
         val str_first = lex_source_char_at(str_start)
         var no_interp = lex_cur_no_interp_get() or str_first != "\""
-        if str_first == "\"" and lex_source_char_at(str_start + 1) == "\"" and lex_source_char_at(str_start + 2) == "\"":
+        val quoted_triple = (str_start + 2 < source_len and
+            lex_source_char_at(str_start + 1) == str_first and
+            lex_source_char_at(str_start + 2) == str_first and
+            (str_first == "\"" or str_first == "'"))
+        val raw_triple = (str_first == "r" and str_start + 3 < source_len and
+            lex_source_char_at(str_start + 1) == "\"" and
+            lex_source_char_at(str_start + 2) == "\"" and
+            lex_source_char_at(str_start + 3) == "\"")
+        val is_triple = quoted_triple or raw_triple
+        if is_triple:
             no_interp = true
         parser_advance()
+        # A path literal is deliberately lowered to the canonical Path
+        # constructor in the caller's module.  This keeps the language
+        # spelling (`"config/app.toml"_path`) small while preserving the
+        # normal import/type-checking rules for `Path`.
+        # The source positions are part of the grammar: `"x" _path` is two
+        # expressions and must never be accepted as a suffixed literal.
+        if (par_kind_get() == TOK_IDENT and par_text_get() == "_path" and
+                lex_token_start_get() == str_end):
+            parser_advance()
+            if is_triple:
+                parser_error("_path does not support triple-quoted strings")
+                if no_interp:
+                    return expr_raw_string_lit(str_text, 0)
+                return expr_string_lit(str_text, 0)
+            if parser_path_literal_has_interpolation(str_text):
+                parser_error("_path does not support interpolated strings")
+                return expr_string_lit(str_text, 0)
+            return expr_call_named(
+                expr_ident("Path", 0), [expr_string_lit(str_text, 0)], ["path"], 0)
+        if par_kind_get() == TOK_IDENT and par_text_get() == "_path":
+            parser_error("_path suffix must be adjacent to its string literal")
+            parser_advance()
+        if str_suffix != "":
+            return expr_suffixed_string(str_text, str_suffix, 0)
         if no_interp:
             return expr_raw_string_lit(str_text, 0)
         return expr_string_lit(str_text, 0)
@@ -402,7 +494,7 @@ fn parse_primary_expr() -> i64:
             val msg = parse_optional_rationale_args()
             if msg == "":
                 parser_warn("REQC003: todo requires two strings: todo(\"what remains\", \"hint or issue\")")
-            return expr_pass_todo(msg, 0)
+            return expr_pass_todo_call(msg, 0)
 
     if par_kind_get() == TOK_IDENT and (par_text_get() == "unsafe" or par_text_get() == "danger"):
         val unsafe_expr = parse_unsafe_block_expr_if_present()
@@ -508,6 +600,17 @@ fn parse_primary_expr() -> i64:
         parser_advance()
         if par_kind_get() == 141:
             parser_advance()
+            # D1: zero-parameter arrow lambda — `() => expr`. The Rust seed has
+            # accepted this form since expressions/primary/collections.rs:32;
+            # without it here the two parsers disagreed about a construct the
+            # seed already compiles, which breaks self-hosting asymmetrically.
+            # doc/08_tracking/bug/
+            # seed_parser_arrow_lambda_block_expr_wrapped_return_type_2026-08-23.md
+            if par_kind_get() == 168:
+                parser_advance()
+                var zero_body: [i64] = []
+                zero_body.push(parse_expr())
+                return expr_lambda([], zero_body, 0)
             return expr_unit(0)
         val inner = parse_expr()
         # G29: tuple literal — (e1, e2, ...)
@@ -520,8 +623,33 @@ fn parse_primary_expr() -> i64:
                     break
                 tup_elems.push(parse_expr())
             parser_expect(141)
+            # D1: multi-parameter arrow lambda — `(x, y) => expr`. Same
+            # production as the zero-parameter form above, only with a
+            # non-empty parameter list. The parenthesised element list has
+            # already been parsed as expressions; it is a parameter list only
+            # when EVERY element is a bare identifier, so a real tuple such as
+            # `(a.b, 1)` can never be mistaken for one.
+            if par_kind_get() == 168:
+                var tup_all_idents = true
+                for te in tup_elems:
+                    if te < 0 or te >= expr_tag.len() or expr_tag[te] != EXPR_IDENT:
+                        tup_all_idents = false
+                if tup_all_idents:
+                    parser_advance()
+                    var multi_body: [i64] = []
+                    multi_body.push(parse_expr())
+                    return expr_lambda(tup_elems, multi_body, 0)
             return expr_tuple(tup_elems, 0)
         parser_expect(141)
+        # D1: single-parameter arrow lambda — `(x) => expr`.
+        if par_kind_get() == 168:
+            if inner >= 0 and inner < expr_tag.len() and expr_tag[inner] == EXPR_IDENT:
+                parser_advance()
+                var one_params: [i64] = []
+                one_params.push(inner)
+                var one_body: [i64] = []
+                one_body.push(parse_expr())
+                return expr_lambda(one_params, one_body, 0)
         return inner
 
     if par_kind_get() == 144:
@@ -534,8 +662,12 @@ fn parse_primary_expr() -> i64:
         # For-first comprehension: [for x in items if cond: expr]
         if par_kind_get() == 45:
             parser_advance()
+            # `_` is a valid discard iteration variable: [0 for _ in 0..n]
             val comp_iter_var = par_text_get()
-            parser_expect(6)
+            if par_kind_get() == TOK_IDENT or par_kind_get() == TOK_UNDERSCORE:
+                parser_advance()
+            else:
+                parser_expect(TOK_IDENT)
             parser_expect(50)
             val comp_iterable = parse_expr()
             var comp_cond = -1
@@ -557,8 +689,12 @@ fn parse_primary_expr() -> i64:
         # For-last comprehension: [expr for x in items if cond]
         if par_kind_get() == 45:
             parser_advance()
+            # `_` is a valid discard iteration variable: [0 for _ in 0..n]
             val comp_iter_var = par_text_get()
-            parser_expect(6)
+            if par_kind_get() == TOK_IDENT or par_kind_get() == TOK_UNDERSCORE:
+                parser_advance()
+            else:
+                parser_expect(TOK_IDENT)
             parser_expect(50)
             val comp_iterable = parse_expr()
             var comp_cond = -1
@@ -812,8 +948,12 @@ fn parse_primary_expr() -> i64:
         # Dict comprehension for-first: {for x in items if cond: (key, val)}
         if par_kind_get() == 45:
             parser_advance()
+            # `_` is a valid discard iteration variable
             val dc_iter_var = par_text_get()
-            parser_expect(6)
+            if par_kind_get() == TOK_IDENT or par_kind_get() == TOK_UNDERSCORE:
+                parser_advance()
+            else:
+                parser_expect(TOK_IDENT)
             parser_expect(50)
             val dc_iterable = parse_expr()
             var dc_cond = -1
@@ -838,8 +978,12 @@ fn parse_primary_expr() -> i64:
         # Dict comprehension for-last: {k: v for x in items if cond}
         if par_kind_get() == 45:
             parser_advance()
+            # `_` is a valid discard iteration variable
             val dc_iter_var = par_text_get()
-            parser_expect(6)
+            if par_kind_get() == TOK_IDENT or par_kind_get() == TOK_UNDERSCORE:
+                parser_advance()
+            else:
+                parser_expect(TOK_IDENT)
             parser_expect(50)
             val dc_iterable = parse_expr()
             var dc_cond = -1

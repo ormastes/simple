@@ -1,7 +1,7 @@
 # RV64 SSH AES-GCM Post-NEWKEYS Stall
 
 Date: 2026-06-14
-Status: Open
+Status: Open (re-triaged 2026-09-13 — see the note at the end of this file)
 Severity: P0 for RV64 live SSH
 
 ## Summary
@@ -590,3 +590,10 @@ named fix and were deferred. AES-GCM already works bidirectionally on RV64 (tags
 correct both ends), so this alpha compare is log-only verification, not a
 functional blocker. The pure-only entry + diagnostic were reverted; tree is
 green.
+
+## Triage 2026-09-13 — LEFT OPEN (RV64 QEMU SSH lane unavailable)
+
+- **inferred**: this entry tracks a post-NEWKEYS AES-GCM stall observed against a live OpenSSH client talking to SimpleOS in riscv64 QEMU. That lane does not exist on this Windows host and `bin/simple native-build` fails here, so neither the stall nor a fix can be observed.
+- **measured**: 18 of the 20 repo paths it cites still exist. The two missing (`test/01_unit/os/apps/sshd/ssh_cipher_live_aes256_gcm_spec.spl`, `test/01_unit/os/crypto/ed25519_rv64_single_exchange_hash_spec.spl`) are focused specs that appear to have been moved or renamed; the sshd, crypto and lane sources remain. Not stale by removal.
+- Related and also left open in this pass: `rv64_ed25519_alpha_pure_sha512_timeout_2026-06-12.md`, same lane, same host constraint.
+- Verdict: OPEN.

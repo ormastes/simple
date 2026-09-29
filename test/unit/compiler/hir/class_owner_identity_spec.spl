@@ -1,0 +1,235 @@
+use std.spec.{describe, it, expect}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{SymbolTable, SymbolKind, HirType, HirTypeKind}
+use compiler.hir.hir_definitions.{SymbolId, HirExpr, HirExprKind, HirCallArg}
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir._MirLowering.provider_metadata.*
+use compiler.mir._MirLoweringExpr.switch_operators_calls.*
+use compiler.mir.mir_types.{MirSignature, MirType}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use test.helpers.module_surface_owner_fixture.{module_surfaces_from_test_modules}
+
+fn class_identity_logger() -> Logger:
+    Logger(level: 0)
+
+fn class_identity_module(source: text, name: text, log: Logger) -> Module:
+    parse_full_frontend(source, name, name, log)
+
+fn class_identity_surfaces(modules: Dict<text, Module>, sources: [SourceFile]):
+    module_surfaces_from_test_modules(modules, sources).unwrap()
+
+describe "class owner identity across imports":
+    it "keeps same-named class aliases distinct and does not leak the source spelling":
+        val log = class_identity_logger()
+        val left_source = "pub class Cell:\n    left: i64\n    static fn tag() -> i64:\n        11\n    fn value(self) -> i64:\n        self.left"
+        val right_source = "pub class Cell:\n    right: text\n    static fn tag() -> i64:\n        22\n    fn value(self) -> i64:\n        self.right.len()"
+        val consumer_source = "use identity.left.\{Cell as LeftCell\}\nuse identity.right.\{Cell as RightCell\}\nfn main() -> i64:\n    LeftCell.tag() + RightCell.tag()"
+        val left = class_identity_module(left_source, "identity.left", log)
+        val right = class_identity_module(right_source, "identity.right", log)
+        val consumer = class_identity_module(consumer_source, "identity.consumer", log)
+        var modules: Dict<text, Module> = {}
+        modules["identity.left"] = left
+        modules["identity.right"] = right
+        val surfaces = class_identity_surfaces(modules, [
+            SourceFile(path: "identity/left.spl", content: left_source, module_name: "identity.left"),
+            SourceFile(path: "identity/right.spl", content: right_source, module_name: "identity.right")])
+        var lowering = hirlowering_for_module("identity.consumer", surfaces)
+        val hir = lowering.lower_module(consumer)
+        val left_id = hir.symbols.lookup_qualified_type_raw("identity.left", "Cell")
+        val right_id = hir.symbols.lookup_qualified_type_raw("identity.right", "Cell")
+        expect(lowering.errors.len()).to_equal(0)
+        expect(left_id >= 0).to_equal(true)
+        expect(right_id >= 0).to_equal(true)
+        expect(left_id != right_id).to_equal(true)
+        expect(hir.symbols.lookup_or_invalid("LeftCell").is_valid()).to_equal(true)
+        expect(hir.symbols.lookup_or_invalid("RightCell").is_valid()).to_equal(true)
+        expect(hir.symbols.lookup_or_invalid("Cell").is_valid()).to_equal(false)
+
+    it "folds absolute and dotted owner spellings onto one qualified identity":
+        val table = SymbolTable.new()
+        val span = Span.empty()
+        val first = table.define("Cell", SymbolKind.Class, nil, span, Visibility.Public, false,
+            Some("C:/checkout/simple/src/identity/cell.spl"))
+        val second = table.define("Cell", SymbolKind.Class, nil, span, Visibility.Public, false,
+            Some("identity.cell"))
+        expect(first.id).to_equal(second.id)
+
+    it "relocates nested Named types despite provider and consumer numeric collisions":
+        val span = Span.empty()
+        var provider = SymbolTable.new()
+        val provider_cell = provider.define("Cell", SymbolKind.Class, nil, span, Visibility.Public, false, Some("identity.left"))
+        var consumer = SymbolTable.new()
+        val occupied = consumer.define("occupied", SymbolKind.Variable, nil, span, Visibility.Private, false, nil)
+        expect(provider_cell.id).to_equal(occupied.id)
+        var mir = MirLowering.new(consumer)
+        val nested = HirType(kind: HirTypeKind.Array(HirType(kind: HirTypeKind.Optional(
+            HirType(kind: HirTypeKind.Named(provider_cell, []), span: span)), span: span), nil), span: span)
+        val relocated = mir.relocate_provider_type(nested, provider)
+        val target = mir.symbols.lookup_qualified_type_raw("identity.left", "Cell")
+        expect(target >= 0).to_equal(true)
+        expect(target != occupied.id).to_equal(true)
+        expect(mir.symbols.get_symbol_raw(occupied.id).name).to_equal("occupied")
+        var leaf_id = -1
+        match relocated.kind:
+            case Array(element, _):
+                match element.kind:
+                    case Optional(inner):
+                        match inner.kind:
+                            case Named(id, _): leaf_id = id.id
+                            case _: ()
+                    case _: ()
+            case _: ()
+        expect(leaf_id).to_equal(target)
+        val again = mir.relocate_provider_type_symbol(provider_cell, provider)
+        expect(again.id).to_equal(target)
+
+    it "relocates default helper calls and rejects colliding consumer captures lazily":
+        val span = Span.empty()
+        val int_type = HirType.named("i64")
+        var provider = SymbolTable.new()
+        val helper_type = HirType(kind: HirTypeKind.Function([], int_type, []), span: span)
+        val helper = provider.define("default_value", SymbolKind.Function, Some(helper_type), span, Visibility.Private, false, Some("identity.left"))
+        val capture = provider.define("captured", SymbolKind.Variable, Some(int_type), span, Visibility.Private, false, nil)
+        var consumer = SymbolTable.new()
+        val occupied = consumer.define("wrong_helper", SymbolKind.Function, Some(helper_type), span, Visibility.Private, false, Some("identity.consumer"))
+        val wrong_capture = consumer.define("wrong_capture", SymbolKind.Variable, Some(int_type), span, Visibility.Private, false, nil)
+        expect(helper.id).to_equal(occupied.id)
+        expect(capture.id).to_equal(wrong_capture.id)
+        var mir = MirLowering.new(consumer)
+        val callee = HirExpr(kind: HirExprKind.NamedVar(helper, "default_value"), has_type_: true, type_: helper_type, span: span)
+        val call = HirExpr(kind: HirExprKind.Call(callee, [], []), has_type_: true, type_: int_type, span: span)
+        var links: Dict<i64, text> = {}
+        links[helper.id] = "identity.left.default_value"
+        val relocated = mir.relocate_provider_default(call, provider, links)
+        var relocated_name = ""
+        var relocated_id = -1
+        match relocated.kind:
+            case Call(relocated_callee, _, _):
+                match relocated_callee.kind:
+                    case NamedVar(id, name):
+                        relocated_name = name
+                        relocated_id = id.id
+                    case _: ()
+            case _: ()
+        expect(relocated_name).to_equal("identity.left.default_value")
+        expect(relocated_id != occupied.id).to_equal(true)
+        expect(mir.symbols.get_symbol_raw(occupied.id).name).to_equal("wrong_helper")
+        val captured = HirExpr(kind: HirExprKind.Var(capture), has_type_: true, type_: int_type, span: span)
+        val rejected = mir.relocate_provider_default(captured, provider, links)
+        var rejected_capture = false
+        match rejected.kind:
+            case Error: rejected_capture = true
+            case _: ()
+        expect(rejected_capture).to_equal(true)
+        expect(mir.errors.len()).to_equal(0)
+        # Explicit arguments do not evaluate unsupported provider defaults.
+        # Omitting that same argument must produce a fatal diagnostic.
+        val class_id = mir.symbols.define("Cell", SymbolKind.Class, nil, span, Visibility.Public, false, Some("identity.left"))
+        val class_key = "identity.left.Cell"
+        mir.struct_field_order[class_key] = ["value"]
+        mir.struct_field_has_default[class_key] = [true]
+        mir.struct_field_default_expr[class_key] = [rejected]
+        mir.struct_field_hir_type[class_key] = [int_type]
+        mir.class_type_names[class_key] = true
+        var builder = mir.builder
+        builder.begin_function(SymbolId(id: 99999), "default_guard_probe",
+            MirSignature(params: [], return_type: MirType.i64(), is_variadic: false), span)
+        mir.builder = builder
+        val argument = HirCallArg(has_name: true, name: "value",
+            value: HirExpr(kind: HirExprKind.IntLit(9, nil), has_type_: true, type_: int_type, span: span), span: span)
+        val explicit_value = mir.lower_struct_construct(class_id, class_key, [argument])
+        expect(mir.errors.len()).to_equal(0)
+        val omitted_value = mir.lower_struct_construct(class_id, class_key, [])
+        expect(mir.errors.len() > 0).to_equal(true)
+
+    it "publishes two provider layouts and helper defaults without a foreign bare-name winner":
+        val log = class_identity_logger()
+        val left_source = "fn default_value() -> i64:\n    11\npub class Cell:\n    left: i64 = default_value()"
+        val right_source = "fn default_value() -> i64:\n    33\npub class Cell:\n    padding: i64 = 22\n    right: i64 = default_value()"
+        val left_ast = class_identity_module(left_source, "identity.left", log)
+        val right_ast = class_identity_module(right_source, "identity.right", log)
+        var modules: Dict<text, Module> = {}
+        modules["identity.left"] = left_ast
+        modules["identity.right"] = right_ast
+        val surfaces = class_identity_surfaces(modules, [
+            SourceFile(path: "identity/left.spl", content: left_source, module_name: "identity.left"),
+            SourceFile(path: "identity/right.spl", content: right_source, module_name: "identity.right")])
+        var left_lowering = hirlowering_for_module("identity.left", surfaces)
+        var right_lowering = hirlowering_for_module("identity.right", surfaces)
+        val left = left_lowering.lower_module(left_ast)
+        val right = right_lowering.lower_module(right_ast)
+        expect(left_lowering.errors.len()).to_equal(0)
+        expect(right_lowering.errors.len()).to_equal(0)
+        var consumer = SymbolTable.new()
+        val occupied = consumer.define("consumer_local", SymbolKind.Variable, nil, Span.empty(), Visibility.Private, false, nil)
+        var mir = MirLowering.new(consumer)
+        var left_links: Dict<i64, text> = {}
+        for func in left.functions.values():
+            left_links[func.symbol.id] = mir_provider_function_name(left.name, left.symbols, func)
+        var right_links: Dict<i64, text> = {}
+        for func in right.functions.values():
+            right_links[func.symbol.id] = mir_provider_function_name(right.name, right.symbols, func)
+        mir.register_provider_class(right.classes.values()[0], right.symbols, right_links, false)
+        mir.register_provider_class(left.classes.values()[0], left.symbols, left_links, false)
+        expect(mir.struct_field_order["identity.left.Cell"]).to_equal(["left"])
+        expect(mir.struct_field_order["identity.right.Cell"]).to_equal(["padding", "right"])
+        expect(mir.class_type_names.has("Cell")).to_equal(false)
+        expect(mir.symbols.get_symbol_raw(occupied.id).name).to_equal("consumer_local")
+        var left_default_name = ""
+        var right_default_name = ""
+        match mir.struct_field_default_expr["identity.left.Cell"][0].kind:
+            case Call(callee, _, _):
+                match callee.kind:
+                    case NamedVar(_, name): left_default_name = name
+                    case _: ()
+            case _: ()
+        match mir.struct_field_default_expr["identity.right.Cell"][1].kind:
+            case Call(callee, _, _):
+                match callee.kind:
+                    case NamedVar(_, name): right_default_name = name
+                    case _: ()
+            case _: ()
+        expect(left_default_name).to_equal("identity.left.default_value")
+        expect(right_default_name).to_equal("identity.right.default_value")
+        expect(mir.errors.len()).to_equal(0)
+
+    it "preserves ABI functions while distinguishing a provider main from entry main":
+        val log = class_identity_logger()
+        val source = "extern fn rt_array_push(array: i64, value: i64) -> i64\n@global\nfn abi_global() -> i64:\n    1\nexport fn abi_export() -> i64:\n    2\nfn main() -> i64:\n    3"
+        val ast = class_identity_module(source, "identity.abi", log)
+        val surfaces = class_identity_surfaces({}, [])
+        var lowering = hirlowering_for_module("identity.abi", surfaces)
+        val module = lowering.lower_module(ast)
+        expect(lowering.errors.len()).to_equal(0)
+        var checked = 0
+        for func in module.functions.values():
+            val provider_name = mir_provider_function_name(module.name, module.symbols, func, false)
+            if func.name == "main":
+                expect(provider_name).to_equal("identity.abi.main")
+                expect(mir_provider_function_name(module.name, module.symbols, func, true)).to_equal("main")
+                checked = checked + 1
+            elif func.name == "rt_array_push" or func.name == "abi_global" or func.name == "abi_export":
+                expect(provider_name).to_equal(func.name)
+                checked = checked + 1
+        expect(checked).to_equal(4)
+
+    it "resolves ownerless bootstrap declarations and function values through the active owner":
+        val span = Span.empty()
+        var symbols = SymbolTable.new()
+        val helper = symbols.define("helper", SymbolKind.Function, nil, span, Visibility.Private, false, nil)
+        val global_fn = symbols.define("identity.entry.abi_guard", SymbolKind.Function, nil, span, Visibility.Public, false, nil)
+        var mir = MirLowering.new(symbols)
+        mir.current_module_id = "identity.entry"
+        mir.callable_link_names[mir_provider_callable_key("identity.entry", "helper")] = "identity.entry.helper"
+        mir.callable_link_names[mir_provider_callable_key("identity.entry", "abi_guard")] = "abi_guard"
+        expect(mir.provider_callable_symbol_name(helper, "helper")).to_equal("identity.entry.helper")
+        expect(mir.provider_callable_symbol_name(global_fn, "identity.entry.abi_guard")).to_equal("abi_guard")
+        expect(mir.is_known_top_level_function("helper", helper)).to_equal(true)
+        expect(mir.is_known_top_level_function("identity.entry.abi_guard", global_fn)).to_equal(true)

@@ -1,5 +1,15 @@
 # All four `gc_async_mut` GPU engine2d FFI facades are dangling re-exports
 
+## Triage 2026-09-13 — CLOSED, already fixed
+All four facades now point at existing modules
+(std.nogc_async_mut.gpu.engine2d.sffi_{cuda,vulkan,intel,rocm}, which
+themselves re-export the real ffi_* classes from
+std.nogc_sync_mut.gpu.engine2d.sffi_*) instead of the nonexistent
+ffi_*-under-nogc_async_mut path this doc originally found. Re-ran the doc's own repro verbatim (`CudaFfi.create_static()` then
+`f.api_name()`): now prints "CUDA Driver API" (was: "Function create_static
+not found"). Verified all four (cuda/vulkan/intel/rocm) resolve and load
+cleanly. No further action.
+
 Status: OPEN (P2)
 Status re-verified 2026-08-17 by source inspection (triage shard 01).
 

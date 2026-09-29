@@ -1,0 +1,105 @@
+# @req REQ-018 REQ-019 REQ-BOARD-VULKAN-SUBMIT-VENUS
+use std.spec.*
+use common.renderdoc.simpleos_render_target_evidence.{SimpleOsRenderTargetEvidence}
+use common.renderdoc.simpleos_board_vulkan_provenance.{
+    SimpleOsVulkanExecutionPlatform,
+    SimpleOsVulkanTransport,
+    SimpleOsBoardVulkanEvidence,
+    simpleos_board_vulkan_admit
+}
+
+val HASH: text = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+fn target(runtime: text) -> SimpleOsRenderTargetEvidence:
+    val board = runtime == "physical-board"
+    SimpleOsRenderTargetEvidence(
+        runtime_kind: runtime, architecture: "x86_64",
+        board_id: if board: "up-squared-01" else: "",
+        board_model: if board: "up-squared" else: "qemu-virt",
+        board_revision: if board: "rev-b" else: "virtual",
+        board_serial_hash: if board: HASH else: "", firmware_hash: HASH,
+        boot_transport: if board: "uefi-usb" else: "qemu-ovmf",
+        display_controller: if board: "intel-gen9" else: "virtio-gpu",
+        driver_id: if board: "simpleos-intel-gen9" else: "simpleos-venus",
+        scanout_id: 1, resource_id: 2, dma_mode: "coherent",
+        cache_mode: "write-combined", iommu_mode: "identity",
+        width: 4, height: 4, stride: 16, format: "argb-u32",
+        surface_handle: 42, present_sequence: 1, frame_complete: true,
+        guest_readback_source: "device_readback", guest_pixel_hash: HASH,
+        serial_log_path: "build/evidence/serial.log", serial_log_hash: HASH,
+        capture_kind: if board: "hdmi-capture" else: "qmp-screendump",
+        capture_path: "build/evidence/frame.bin", capture_hash: HASH,
+        capture_pixel_hash: HASH,
+        capture_tool: if board: "usb-capture-v1" else: "simple-qmp",
+        boot_id: "boot-1", frame_id: "frame-1",
+        capture_boot_id: "boot-1", capture_frame_id: "frame-1",
+        oracle_hash: HASH, oracle_mismatch_count: 0)
+
+fn evidence(platform: SimpleOsVulkanExecutionPlatform,
+            transport: SimpleOsVulkanTransport,
+            runtime: text) -> SimpleOsBoardVulkanEvidence:
+    SimpleOsBoardVulkanEvidence(
+        platform: platform, transport: transport, backend: "vulkan",
+        device_driver: if transport == SimpleOsVulkanTransport.VenusVirtioGpu:
+            "mesa-venus"
+        else:
+            "simpleos-intel-gen9",
+        device_identity: "gpu-0001", device_origin: true,
+        submit_count: 1, completed_fence: 7, target: target(runtime))
+
+describe "SimpleOS board Vulkan provenance":
+    it "admits Venus only as QEMU evidence":
+        val result = simpleos_board_vulkan_admit(evidence(
+            SimpleOsVulkanExecutionPlatform.Qemu,
+            SimpleOsVulkanTransport.VenusVirtioGpu, "qemu"))
+        expect(result.admitted).to_equal(true)
+        expect(result.status).to_equal("qemu-verified")
+
+    it "rejects Venus relabelled as a physical-board run":
+        val result = simpleos_board_vulkan_admit(evidence(
+            SimpleOsVulkanExecutionPlatform.PhysicalBoard,
+            SimpleOsVulkanTransport.VenusVirtioGpu, "physical-board"))
+        expect(result.admitted).to_equal(false)
+        expect(result.status).to_equal("qemu-only")
+        expect(result.reason).to_equal("venus-has-no-physical-board-transport")
+
+    it "admits a correlated native physical-board Vulkan receipt":
+        val result = simpleos_board_vulkan_admit(evidence(
+            SimpleOsVulkanExecutionPlatform.PhysicalBoard,
+            SimpleOsVulkanTransport.NativeGpu, "physical-board"))
+        expect(result.admitted).to_equal(true)
+        expect(result.status).to_equal("board-verified")
+
+    it "rejects a QEMU target relabelled as native board Vulkan":
+        val result = simpleos_board_vulkan_admit(evidence(
+            SimpleOsVulkanExecutionPlatform.PhysicalBoard,
+            SimpleOsVulkanTransport.NativeGpu, "qemu"))
+        expect(result.admitted).to_equal(false)
+        expect(result.reason).to_equal("physical-board-target-provenance")
+
+    it "rejects incomplete device execution independently of target metadata":
+        var candidate = evidence(
+            SimpleOsVulkanExecutionPlatform.PhysicalBoard,
+            SimpleOsVulkanTransport.NativeGpu, "physical-board")
+        candidate.completed_fence = 0
+        val result = simpleos_board_vulkan_admit(candidate)
+        expect(result.admitted).to_equal(false)
+        expect(result.reason).to_equal("device-execution-incomplete")
+
+    it "rejects a mixed-case Venus driver hidden behind the native transport enum":
+        var candidate = evidence(
+            SimpleOsVulkanExecutionPlatform.PhysicalBoard,
+            SimpleOsVulkanTransport.NativeGpu, "physical-board")
+        candidate.device_driver = "Mesa Venus"
+        val result = simpleos_board_vulkan_admit(candidate)
+        expect(result.admitted).to_equal(false)
+        expect(result.reason).to_equal("emulator-device-in-board-row")
+
+    it "rejects a virtual device identity hidden behind the native transport enum":
+        var candidate = evidence(
+            SimpleOsVulkanExecutionPlatform.PhysicalBoard,
+            SimpleOsVulkanTransport.NativeGpu, "physical-board")
+        candidate.device_identity = "VirtIO GPU"
+        val result = simpleos_board_vulkan_admit(candidate)
+        expect(result.admitted).to_equal(false)
+        expect(result.reason).to_equal("emulator-device-in-board-row")

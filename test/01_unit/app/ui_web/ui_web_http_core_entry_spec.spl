@@ -1,0 +1,45 @@
+use std.spec.*
+use app.ui.web.auth_params.{ui_web_content_length, ui_web_request_body_status, ui_web_request_path_allowed}
+
+describe "ui.web request entry on http_core":
+
+    it "parses Content-Length via http_core (valid, missing, invalid)":
+        expect(ui_web_content_length("Content-Length: 42\n")).to_be(42)
+        expect(ui_web_content_length("Host: x\n")).to_be(0)
+        expect(ui_web_content_length("Content-Length: -5\n")).to_be(-1)
+        expect(ui_web_content_length("Content-Length: 12abc\n")).to_be(-1)
+        expect(ui_web_content_length("Content-Length: 99999999999\n")).to_be(-1)
+
+    it "keeps the strict no-transfer-encoding rule":
+        expect(ui_web_request_body_status("Transfer-Encoding: chunked\n")).to_be("invalid_request_framing")
+        expect(ui_web_request_body_status("Transfer-Encoding: gzip\n")).to_be("invalid_request_framing")
+
+    it "rejects duplicate and invalid Content-Length as framing errors":
+        expect(ui_web_request_body_status("Content-Length: 5\nContent-Length: 6\n")).to_be("invalid_request_framing")
+        expect(ui_web_request_body_status("Content-Length: nope\n")).to_be("invalid_request_framing")
+
+    it "rejects oversized bodies and accepts bounded ones":
+        expect(ui_web_request_body_status("Content-Length: 8193\n")).to_be("request_body_too_large")
+        expect(ui_web_request_body_status("Content-Length: 8192\n")).to_be("ok")
+        expect(ui_web_request_body_status("Content-Length: 0\n")).to_be("ok")
+
+    it "gains http_core's duplicate singleton security header rejection":
+        expect(ui_web_request_body_status("Host: a\nHost: b\n")).to_be("invalid_request_framing")
+        expect(ui_web_request_body_status("Origin: a\nOrigin: a\n")).to_be("invalid_request_framing")
+        expect(ui_web_request_body_status("Authorization: x\nAuthorization: y\n")).to_be("invalid_request_framing")
+        expect(ui_web_request_body_status("Host: a\n")).to_be("ok")
+
+    it "applies http_core path safety at the request entry":
+        expect(ui_web_request_path_allowed("/ui/state")).to_be(true)
+        expect(ui_web_request_path_allowed("/ui/state?token=abc")).to_be(true)
+        expect(ui_web_request_path_allowed("/../etc/passwd")).to_be(false)
+        expect(ui_web_request_path_allowed("/a/..%2fb")).to_be(false)
+        expect(ui_web_request_path_allowed("/a//b")).to_be(false)
+        expect(ui_web_request_path_allowed("/a\\b")).to_be(false)
+        expect(ui_web_request_path_allowed("/a%00b")).to_be(false)
+        expect(ui_web_request_path_allowed("")).to_be(false)
+        expect(ui_web_request_path_allowed("etc/passwd")).to_be(false)
+
+    it "still allows legitimate dotted names":
+        expect(ui_web_request_path_allowed("/static/app..js")).to_be(true)
+        expect(ui_web_request_path_allowed("/static/retained_renderer.js")).to_be(true)

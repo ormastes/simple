@@ -1,173 +1,288 @@
-# # Async Buffered I/O Specification
-#
-# **Feature IDs:** #IO-ASYNC-BUFFER
-# **Category:** Stdlib
-# **Difficulty:** 3/5
-# **Status:** Implemented
-#
-# ## Overview
-#
-# AsyncBufferedReader and AsyncBufferedWriter wrap any AsyncRead/AsyncWrite,
-# reducing async call overhead with in-memory buffering. Same structure as
-# sync variants, with Future-wrapped operations.
-#
-# ## Syntax
-#
-# ```simple
-# val raw = await AsyncFileHandle.read_file("big.bin")?
-# val reader = AsyncBufferedReader.new(raw)
-# val line = await reader.read_line()?
-# await reader.close()?
-#
-# val out = await AsyncFileHandle.create("output.log")?
-# val writer = AsyncBufferedWriter.new(out)
-# await writer.write_text("buffered line\\n")?
-# await writer.flush()?
-# await writer.close()?
-# ```
-#
-# ## Key Concepts
-#
-# | Concept | Description |
-# |---------|-------------|
-# | AsyncBufferedReader | Wraps AsyncRead — buffers reads (default 8KB) |
-# | AsyncBufferedWriter | Wraps AsyncWrite — buffers writes (default 8KB) |
-# | with_capacity | Custom buffer size constructor |
-#
-# ## Behavior
-#
-# - AsyncBufferedReader reads from buffer first, refills from inner async
-# - AsyncBufferedWriter accumulates writes, flushes when full or on flush()
-# - close() on AsyncBufferedWriter flushes then closes inner
-# - Works with any AsyncRead/AsyncWrite (AsyncFileHandle, AsyncTcpStream, etc.)
-#
-# ## Sync vs Async Comparison
-#
-# ```simple
-# # Sync:
-# val reader = BufferedReader.new(file_handle)
-# val line = reader.read_line()?
-#
-# # Async — same API:
-# val reader = AsyncBufferedReader.new(async_file_handle)
-# val line = await reader.read_line()?
-# ```
+"""
+## Purpose and audience
+Pins the async buffered I/O wrappers: AsyncBufferedReader and
+AsyncBufferedWriter over any AsyncRead/AsyncWrite implementor, covering
+default and custom buffer sizes, buffered read/line-scan paths, write
+batching, large-write bypass, flush-on-full, and close auto-flush. Written
+for maintainers of src/lib/nogc_async_mut/io/buffer.spl and for authors of
+new AsyncRead/AsyncWrite implementors who must compose with the buffers.
+## Operator workflow
+./src/compiler_rust/target/bootstrap/simple run test/unit/lib/nogc_async_mut/io/async_buffer_spec.spl
+## Compatibility and limitations
+Interpreter-mode spec: no live AsyncFileHandle or AsyncTcpStream is opened.
+Scenarios that the original document drafted against files and sockets run
+against in-memory AsyncRead/AsyncWrite stand-ins defined in this file, and
+buffered state that a future-based API cannot reach in one awaited call is
+seeded through the wrapper's public fields instead. Each seeded scenario
+carries a NOTE naming the stand-in.
+## Verification guidance and troubleshooting
+A failure names the wrapper field, buffered path, or flush contract that
+drifted. The oracle comment on each expect line states the buffering
+semantics the expected value comes from. If a scenario fails to compile
+with "method not found on type Future", that is the known receiver-retype
+defect: this spec deliberately makes exactly one async call per wrapper
+object, so the defect means a second async call crept into a scenario.
+"""
+# Lifecycle: doc/01_research/lib/networking/io_uring_vs_mmap_performance.md ;
+# doc/03_plan/lib/host_io_layering/plan.md ;
+# doc/04_architecture/lib/host_io_layering/three_tier_lib.md ;
+# doc/05_design/lib/networking/net_tcp_socket_data_path.md
 
+use std.io.async_traits.{AsyncRead, AsyncWrite, AsyncClose}
+use std.async.future.{Future}
+use std.io.types.{IoError}
+use std.nogc_async_mut.io.buffer.{AsyncBufferedReader, AsyncBufferedWriter}
+use std.spec.step
 
-# ============================================================================
-# AsyncBufferedReader
-# ============================================================================
+# In-memory AsyncRead stand-in for files and sockets under the interpreter.
+class AsyncStringReader with AsyncRead:
+    data: text
 
+    fn read(size: i64) -> Future<Result<[u8], IoError>>:
+        Future.from_value(Ok(_spec_text_to_bytes(self.data)))
+
+    fn read_exact(size: i64) -> Future<Result<[u8], IoError>>:
+        self.read(size)
+
+    fn read_all() -> Future<Result<[u8], IoError>>:
+        self.read(0)
+
+    fn read_text() -> Future<Result<text, IoError>>:
+        Future.from_value(Ok(self.data))
+
+    fn read_line() -> Future<Result<text, IoError>>:
+        Future.from_value(Ok(self.data))
+
+# In-memory AsyncWrite + AsyncClose stand-in that records what reached it.
+class SpecMemoryWriter with AsyncWrite, AsyncClose:
+    written: text
+
+    fn write(data: [u8]) -> Future<Result<i64, IoError>>:
+        self.written = self.written + _spec_bytes_to_text(data)
+        Future.from_value(Ok(data.len()))
+
+    fn write_all(data: [u8]) -> Future<Result<(), IoError>>:
+        self.write(data).then(\r:
+            Future.from_value(Ok(())))
+
+    fn write_text(s: text) -> Future<Result<(), IoError>>:
+        self.write_all(_spec_text_to_bytes(s))
+
+    fn flush() -> Future<Result<(), IoError>>:
+        Future.from_value(Ok(()))
+
+    me close() -> Future<Result<(), IoError>>:
+        Future.from_value(Ok(()))
+
+    fn is_open() -> bool:
+        true
+
+fn _spec_text_to_bytes(s: text) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < s.len():
+        out.push(s.byte_at(i))
+        i = i + 1
+    out
+
+fn _spec_bytes_to_text(bytes: [u8]) -> text:
+    var result = ""
+    var i = 0
+    while i < bytes.len():
+        result = result + (bytes[i] as i64 as char)
+        i = i + 1
+    result
+
+# @manual_section: async-buffered-reader
 describe "AsyncBufferedReader":
-    # ## Async Buffered Read Wrapper
-    #
-    # Reduces async read calls with an in-memory buffer.
+    it "default construction":
+        # @req REQ-IO-ASYNC-BUF-001
+        # @capture(statistics): default reader buffer size vs the 8KB default
+        step("Construct the buffered reader with the default factory and read back its buffer size")
+        # NOTE: field reads precede any async call — the receiver is untouched.
+        val reader = AsyncBufferedReader.new(AsyncStringReader(data: "alpha\nbeta"))
+        expect(reader.buf_size).to_equal(8192)  # oracle: DEFAULT_BUF_SIZE pins the default buffer at 8KB to bound per-reader memory
+        expect(reader.pos).to_equal(0)  # oracle: a fresh reader has consumed nothing, so the read cursor starts at 0
 
-    context "construction":
-        it "documents default construction":
-            # val raw = await AsyncFileHandle.read_file("data.csv")?
-            # val reader = AsyncBufferedReader.new(raw)
-            # expect reader.buf_size == 8192
-            pass
+    it "custom capacity":
+        # @req REQ-IO-ASYNC-BUF-002
+        # @capture(statistics): custom reader buffer size vs the 16KB request
+        step("Construct the buffered reader with with_capacity(16384) and read back its buffer size")
+        val reader = AsyncBufferedReader.with_capacity(AsyncStringReader(data: "alpha\nbeta"), 16384)  # oracle: the requested capacity is honored verbatim in bytes
+        expect(reader.buf_size).to_equal(16384)  # oracle: with_capacity must size the buffer to the caller's 16KB request, not the 8KB default
 
-        it "documents custom capacity":
-            # val raw = await AsyncFileHandle.read_file("data.csv")?
-            # val reader = AsyncBufferedReader.with_capacity(raw, 16384)
-            # expect reader.buf_size == 16384
-            pass
+    it "documents read_text":
+        # @req REQ-IO-ASYNC-BUF-003
+        # @capture(protocol_json): buffered read_text payload vs the source text
+        step("Read the whole stand-in payload through the buffered reader's text path")
+        val reader = AsyncBufferedReader.new(AsyncStringReader(data: "alpha\nbeta"))
+        val fut = reader.read_text()
+        val poll_result = fut.poll()
+        val call_result = poll_result.unwrap()
+        expect(call_result.is_ok()).to_equal(true)  # oracle: an in-memory read cannot fail, so the text path must report Ok
+        val content = call_result.unwrap()
+        expect(content).to_equal("alpha\nbeta")  # oracle: read_text returns the full source payload verbatim
 
-    context "reading":
-        # ### Async Buffered Reading
+    it "documents read_line":
+        # @req REQ-IO-ASYNC-BUF-004
+        # @capture(protocol_json): buffered read_line payload vs the first line
+        step("Seed the reader buffer with two lines and read exactly the first line through the buffered line scanner")
+        # NOTE: interpreter mode cannot drive two awaited calls on one wrapper
+        # (receiver-retype defect), so the buffer is seeded through the public
+        # fields to reach the buffered line-scan path in a single call.
+        # "header,row\n" is 11 bytes; filled=11 marks all of it buffered.
+        val reader = AsyncBufferedReader(
+            inner: AsyncStringReader(data: ""),
+            buf: _spec_text_to_bytes("header,row\nrest"),
+            buf_size: 8192,
+            pos: 0,
+            filled: 11  # oracle: 11 bytes covers exactly "header,row\n", the first buffered line
+        )
+        val fut = reader.read_line()
+        val poll_result = fut.poll()
+        val call_result = poll_result.unwrap()
+        expect(call_result.is_ok()).to_equal(true)  # oracle: a seeded in-memory line read cannot fail
+        val line = call_result.unwrap()
+        expect(line).to_equal("header,row\n")  # oracle: the buffered line scan returns through the newline, leaving "rest" unconsumed
 
-        it "documents read_text":
-            # val raw = await AsyncFileHandle.read_file("data.txt")?
-            # val reader = AsyncBufferedReader.new(raw)
-            # val content = await reader.read_text()?
-            pass
+    it "documents read_all":
+        # @req REQ-IO-ASYNC-BUF-005
+        # @capture(protocol_binary): buffered read_all payload length vs the source length
+        step("Read the whole stand-in payload through the buffered reader's read_all path")
+        val reader = AsyncBufferedReader.new(AsyncStringReader(data: "abcdefghij"))
+        val fut = reader.read_all()
+        val poll_result = fut.poll()
+        val call_result = poll_result.unwrap()
+        expect(call_result.is_ok()).to_equal(true)  # oracle: an in-memory read cannot fail
+        val data = call_result.unwrap()
+        expect(data.len()).to_equal(10)  # oracle: the stand-in payload is exactly 10 bytes, and read_all must deliver every one
 
-        it "documents read_line":
-            # val raw = await AsyncFileHandle.read_file("data.csv")?
-            # val reader = AsyncBufferedReader.new(raw)
-            # val header = await reader.read_line()?
-            # val row1 = await reader.read_line()?
-            pass
+    it "documents async close":
+        # @req REQ-IO-ASYNC-BUF-006
+        # @capture(bit_table): closed-reader state vs the open-flag contract
+        step("Close a buffered reader and require the close future to resolve successfully, then check a fresh reader reports open")
+        # NOTE: legitimately RED — product defect at
+        # src/lib/nogc_async_mut/io/buffer.spl:190-199: AsyncBufferedReader.close()
+        # (and is_open) downcast the AsyncRead-typed inner via `as AsyncClose`,
+        # which the seed rejects at semantic time ("cannot cast object to
+        # AsyncClose"), so close() cannot run against any reader. This scenario
+        # pins the intended contract until that cast is repaired.
+        val reader = AsyncBufferedReader.new(AsyncStringReader(data: "alpha\nbeta"))
+        val fut = reader.close()
+        val poll_result = fut.poll()
+        val call_result = poll_result.unwrap()
+        expect(call_result.is_ok()).to_equal(true)  # oracle: closing an in-memory reader has no failure mode, so close must resolve Ok
+        val fresh_reader = AsyncBufferedReader.new(AsyncStringReader(data: "x"))
+        expect(fresh_reader.is_open()).to_equal(true)  # oracle: is_open tracks the inner source, and a fresh in-memory source starts open
 
-        it "documents read_all":
-            # val raw = await AsyncFileHandle.read_file("data.bin")?
-            # val reader = AsyncBufferedReader.new(raw)
-            # val data = await reader.read_all()?
-            pass
-
-    context "close":
-        it "documents async close":
-            # val raw = await AsyncFileHandle.read_file("data.txt")?
-            # val reader = AsyncBufferedReader.new(raw)
-            # await reader.close()?
-            pass
-
-# ============================================================================
-# AsyncBufferedWriter
-# ============================================================================
-
+# @manual_section: async-buffered-writer
 describe "AsyncBufferedWriter":
-    # ## Async Buffered Write Wrapper
-    #
-    # Batches async writes in an in-memory buffer.
+    it "default construction":
+        # @req REQ-IO-ASYNC-BUF-007
+        # @capture(statistics): default writer buffer size vs the 8KB default
+        step("Construct the buffered writer with the default factory and read back its buffer size and cursor")
+        val writer = AsyncBufferedWriter.new(SpecMemoryWriter(written: ""))
+        expect(writer.buf_size).to_equal(8192)  # oracle: DEFAULT_BUF_SIZE pins the default write buffer at 8KB
+        expect(writer.pos).to_equal(0)  # oracle: a fresh writer has buffered nothing, so the fill cursor starts at 0
 
-    context "construction":
-        it "documents default construction":
-            # val raw = await AsyncFileHandle.create("output.log")?
-            # val writer = AsyncBufferedWriter.new(raw)
-            pass
+    it "custom capacity":
+        # @req REQ-IO-ASYNC-BUF-008
+        # @capture(statistics): custom writer buffer size vs the 32KB request
+        step("Construct the buffered writer with with_capacity(32768) and read back its buffer size")
+        val writer = AsyncBufferedWriter.with_capacity(SpecMemoryWriter(written: ""), 32768)  # oracle: the requested capacity is honored verbatim in bytes
+        expect(writer.buf_size).to_equal(32768)  # oracle: with_capacity must size the write buffer to the caller's 32KB request
 
-        it "documents custom capacity":
-            # val raw = await AsyncFileHandle.create("output.log")?
-            # val writer = AsyncBufferedWriter.with_capacity(raw, 32768)
-            pass
+    it "documents buffered write + flush":
+        # @req REQ-IO-ASYNC-BUF-009
+        # @capture(bit_table): batched vs bypassed write routing against the inner sink
+        step("Write below capacity and require the bytes to stay batched, then write above a 4-byte capacity and require the bypass to reach the sink")
+        # Two wrapper objects, one async call each (receiver-retype defect):
+        # a small write must stay in the buffer, a write at or above capacity
+        # must bypass the buffer and reach the inner sink directly.
+        val batch_inner = SpecMemoryWriter(written: "")
+        val batch_writer = AsyncBufferedWriter.new(batch_inner)
+        val batch_fut = batch_writer.write_text("line 1\n")
+        val batch_poll = batch_fut.poll()
+        expect(batch_poll.unwrap().is_ok()).to_equal(true)  # oracle: a buffered write accepts the bytes even though nothing is flushed yet
+        expect(batch_inner.written).to_equal("")  # oracle: below-capacity writes are batched in memory, so the sink sees nothing until flush
+        # NOTE: the bypass half below is legitimately RED — product defect:
+        # trait-typed receiver dispatch (AsyncWrite-typed `inner`) passes the
+        # receiver by value, so bytes written through `self.inner.write(...)`
+        # land on a copy and never reach a Simple-implemented sink. Only
+        # extern-backed handles (AsyncFileHandle) observe bypass writes today.
+        val bypass_inner = SpecMemoryWriter(written: "")
+        val bypass_writer = AsyncBufferedWriter.with_capacity(bypass_inner, 4)  # oracle: a 4-byte capacity makes the 8-byte payload a large write
+        val bypass_fut = bypass_writer.write_text("12345678")
+        val bypass_poll = bypass_fut.poll()
+        expect(bypass_poll.unwrap().is_ok()).to_equal(true)  # oracle: a large write reports the accepted byte count as Ok
+        expect(bypass_inner.written).to_equal("12345678")  # oracle: a write at or above capacity bypasses the buffer and lands on the sink in full
 
-    context "writing":
-        # ### Async Buffered Writing
+    it "documents close auto-flush":
+        # @req REQ-IO-ASYNC-BUF-010
+        # @capture(bit_table): close-time flush payload vs the buffered bytes
+        step("Seed the writer buffer with 4 pending bytes and close, requiring close to flush them to the sink")
+        # NOTE: legitimately RED — product defect at
+        # src/lib/nogc_async_mut/io/buffer.spl:331-346: AsyncBufferedWriter.close()
+        # fails semantic analysis under the seed (receiver-retype: after
+        # self.flush() the lambda sees self as Future, reporting "method
+        # `flush` not found on type `Future`"), so close-time auto-flush cannot
+        # run. The 4 buffered bytes are seeded through the public fields
+        # because two awaited calls on one wrapper are otherwise unreachable.
+        val inner = SpecMemoryWriter(written: "")
+        val writer = AsyncBufferedWriter(
+            inner: inner,
+            buf: _spec_text_to_bytes("auto"),
+            buf_size: 8192,
+            pos: 4  # oracle: 4 bytes of "auto" are pending in the buffer when close runs
+        )
+        val fut = writer.close()
+        val poll_result = fut.poll()
+        val call_result = poll_result.unwrap()
+        expect(call_result.is_ok()).to_equal(true)  # oracle: close reports Ok only after the buffered bytes reached the sink
+        expect(inner.written).to_equal("auto")  # oracle: close must flush pending buffer bytes to the inner writer before closing it
 
-        it "documents buffered write + flush":
-            # val raw = await AsyncFileHandle.create("output.log")?
-            # val writer = AsyncBufferedWriter.new(raw)
-            # await writer.write_text("line 1\\n")?
-            # await writer.write_text("line 2\\n")?
-            # await writer.flush()?
-            pass
-
-    context "close flushes":
-        # ### Auto-Flush on Close
-
-        it "documents close auto-flush":
-            # val raw = await AsyncFileHandle.create("output.log")?
-            # val writer = AsyncBufferedWriter.new(raw)
-            # await writer.write_text("auto-flushed\\n")?
-            # await writer.close()?  # flushes then closes inner
-            pass
-
-# ============================================================================
-# Composition with Different Async Types
-# ============================================================================
-
+# @manual_section: async-buffer-composition
 describe "Async Buffer Composition":
-    # ## Wrapping Different AsyncRead/AsyncWrite Types
-    #
-    # AsyncBufferedReader/Writer work with any async I/O implementor.
+    it "documents file buffering":
+        # @req REQ-IO-ASYNC-BUF-011
+        # @capture(protocol_json): file-style buffered line payload vs the CSV header line
+        step("Seed a reader with a CSV-style payload and read the header line through the buffered wrapper")
+        # NOTE: AsyncFileHandle needs a live host runtime file, unavailable in
+        # interpreter mode; the in-memory AsyncRead stand-in carries the same
+        # buffered-reader contract for the file-shaped payload.
+        # "col1,col2\n" is 10 bytes; filled=10 marks the buffered prefix.
+        val reader = AsyncBufferedReader(
+            inner: AsyncStringReader(data: ""),
+            buf: _spec_text_to_bytes("col1,col2\nrow1\n"),
+            buf_size: 8192,
+            pos: 0,
+            filled: 10  # oracle: 10 bytes covers exactly "col1,col2\n", the CSV header line
+        )
+        val fut = reader.read_line()
+        val poll_result = fut.poll()
+        val call_result = poll_result.unwrap()
+        expect(call_result.is_ok()).to_equal(true)  # oracle: a seeded in-memory line read cannot fail
+        val header = call_result.unwrap()
+        expect(header).to_equal("col1,col2\n")  # oracle: line-at-a-time file buffering yields the header line including its newline
 
-    context "wrapping AsyncFileHandle":
-        it "documents file buffering":
-            # val fh = await AsyncFileHandle.read_file("big.csv")?
-            # val reader = AsyncBufferedReader.new(fh)
-            # while true:
-            #     val line = await reader.read_line()?
-            #     if line.is_empty(): break
-            #     process(line)
-            pass
-
-    context "wrapping AsyncTcpStream":
-        it "documents network buffering":
-            # val stream = await AsyncTcpStream.connect("127.0.0.1:8080")?
-            # val reader = AsyncBufferedReader.new(stream)
-            # val header = await reader.read_line()?
-            pass
+    it "documents network buffering":
+        # @req REQ-IO-ASYNC-BUF-012
+        # @capture(protocol_json): network-style buffered line payload vs the status line
+        step("Seed a reader with an HTTP-style payload and read the status line through the buffered wrapper")
+        # NOTE: AsyncTcpStream needs a live socket, unavailable in interpreter
+        # mode; the in-memory AsyncRead stand-in carries the same
+        # buffered-reader contract for the network-shaped payload.
+        # "HTTP/1.1 200 OK\n" is 17 bytes; filled=17 marks the buffered prefix.
+        val reader = AsyncBufferedReader(
+            inner: AsyncStringReader(data: ""),
+            buf: _spec_text_to_bytes("HTTP/1.1 200 OK\nbody"),
+            buf_size: 8192,
+            pos: 0,
+            filled: 17  # oracle: 17 bytes covers exactly "HTTP/1.1 200 OK\n", the HTTP status line
+        )
+        val fut = reader.read_line()
+        val poll_result = fut.poll()
+        val call_result = poll_result.unwrap()
+        expect(call_result.is_ok()).to_equal(true)  # oracle: a seeded in-memory line read cannot fail
+        val status_line = call_result.unwrap()
+        expect(status_line).to_equal("HTTP/1.1 200 OK\n")  # oracle: stream buffering yields the status line including its newline, before any body bytes

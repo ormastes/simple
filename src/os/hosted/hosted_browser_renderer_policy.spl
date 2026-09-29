@@ -21,8 +21,6 @@ pub struct HostedBrowserNavigationPermit:
     body: text
     content_type: text
     redirect_count: i64
-    form_action_policy: text = ""
-    form_action_document_url: text = ""
 
 pub struct HostedBrowserRequestPolicy:
     ok: bool
@@ -32,8 +30,6 @@ pub struct HostedBrowserRequestPolicy:
     canonical_url: text
     sanitized_headers: text
     consumes_navigation: bool
-    form_action_policy: text = ""
-    form_action_document_url: text = ""
 
 pub fn hosted_browser_transport_host(host: text) -> text:
     if (host.len() < 4 or not host.starts_with("[") or
@@ -49,23 +45,6 @@ pub fn hosted_browser_transport_host(host: text) -> text:
         inner.contains("]")):
         return host
     inner
-
-pub fn hosted_browser_network_error(
-    scheme: text, error: text
-) -> text:
-    if error == "":
-        return ""
-    if (error == "network: Network request failed" or
-        error == "network-timeout: Network request timed out"):
-        return error
-    if scheme == "https" and (
-        error == "tls-certificate: TLS certificate validation failed" or
-        error == "tls-hostname: TLS certificate identity validation failed" or
-        error == "tls-protocol: TLS protocol negotiation failed" or
-        error == "tls-timeout: TLS connection timed out"
-    ):
-        return error
-    "network: Network request failed"
 
 fn _renderer_header_name_valid(name: text) -> bool:
     if name == "":
@@ -132,9 +111,7 @@ pub fn hosted_browser_empty_navigation_permit(
         headers: "",
         body: "",
         content_type: "",
-        redirect_count: 0,
-        form_action_policy: "",
-        form_action_document_url: ""
+        redirect_count: 0
     )
 
 fn _request_policy_reject(reason: text) -> HostedBrowserRequestPolicy:
@@ -148,7 +125,7 @@ fn _request_policy_reject(reason: text) -> HostedBrowserRequestPolicy:
         consumes_navigation: false
     )
 
-pub fn hosted_browser_canonical_navigation_url(raw: text) -> text:
+pub fn hosted_browser_canonical_http_url(raw: text) -> text:
     if (raw == "" or raw.contains("\0") or raw.contains("\r") or
         raw.contains("\n") or raw != raw.trim() or
         rt_text_to_bytes(raw).len() > 8192):
@@ -165,12 +142,7 @@ pub fn hosted_browser_canonical_navigation_url(raw: text) -> text:
     val parsed_opt = Url.parse(normalized)
     if not parsed_opt.?:
         return ""
-    parsed_opt!.to_text()
-
-pub fn hosted_browser_canonical_http_url(raw: text) -> text:
-    val rendered = hosted_browser_canonical_navigation_url(raw)
-    if rendered == "":
-        return ""
+    val rendered = parsed_opt!.to_text()
     val fragment_at = rendered.index_of("#")
     if fragment_at >= 0:
         return rendered.slice(0, fragment_at)
@@ -326,8 +298,7 @@ pub fn hosted_browser_renderer_request_policy(
             value
     val method = request.method.to_upper()
     if request.kind == "document":
-        val permit_url = hosted_browser_canonical_http_url(permit.url)
-        if (not permit.active or request_url != permit_url or
+        if (not permit.active or request_url != permit.url or
             canonical_url != request_url or
             method != permit.method or sanitized_headers != permit.headers or
             request.body != permit.body or
@@ -341,11 +312,9 @@ pub fn hosted_browser_renderer_request_policy(
             reason: "ok",
             mode: RequestMode.Navigate,
             credentials: request.credentials,
-            canonical_url: permit.url,
+            canonical_url: canonical_url,
             sanitized_headers: sanitized_headers,
-            consumes_navigation: true,
-            form_action_policy: permit.form_action_policy,
-            form_action_document_url: permit.form_action_document_url
+            consumes_navigation: true
         )
     if document_origin == "":
         return _request_policy_reject("missing-document-origin")
@@ -354,10 +323,6 @@ pub fn hosted_browser_renderer_request_policy(
         return _request_policy_reject("mixed-content-blocked")
     if (request.kind != "fetch" and method != "GET" and method != "HEAD"):
         return _request_policy_reject("invalid-resource-method")
-    if (request.kind != "fetch" and
-        (sanitized_headers != "" or request.body != "" or
-            request.content_type != "")):
-        return _request_policy_reject("invalid-resource-request")
     val request_origin = hosted_browser_network_origin(canonical_url)
     if request_origin == document_origin:
         return HostedBrowserRequestPolicy(
@@ -369,6 +334,10 @@ pub fn hosted_browser_renderer_request_policy(
             sanitized_headers: sanitized_headers,
             consumes_navigation: false
         )
+    if ((method != "GET" and method != "HEAD") or
+        sanitized_headers != "" or request.body != "" or
+        request.content_type != ""):
+        return _request_policy_reject("cross-origin-preflight-unavailable")
     if request.kind == "image":
         return HostedBrowserRequestPolicy(
             ok: true,
@@ -385,7 +354,6 @@ pub fn hosted_browser_renderer_request_policy(
         mode: RequestMode.Cors,
         credentials: request.credentials,
         canonical_url: canonical_url,
-        # FetchEngine owns the browser-generated Origin header and preflight.
-        sanitized_headers: sanitized_headers,
+        sanitized_headers: "Origin: {document_origin}",
         consumes_navigation: false
     )

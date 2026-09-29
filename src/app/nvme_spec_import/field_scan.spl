@@ -1,0 +1,232 @@
+"""
+field_scan — extract REGISTER FIELD ROWS (name, bit range, access, reset) from
+the figure tables of the PDF-extracted specification text.
+
+These rows are short factual field data - offset, width, access, reset - which
+is what the bitfield-table test form needs, and is the category of content this
+repo may hold. THE DESCRIPTION COLUMN IS NEVER READ INTO A ROW: it is spec
+prose, so it is skipped entirely rather than truncated or summarized.
+
+HOW THE TABLE IS RECOVERED, and why the result is often a review record.
+PDF text extraction does not preserve table cells. A register figure comes out
+as COLUMN RUNS: a run of bit-range tokens, a run of access tokens, a run of
+reset tokens, and the description text interleaved. There is no delimiter tying
+one row's four cells together. This scanner therefore:
+
+  1. delimits a table region by its `Figure N:` caption and the next caption;
+  2. collects, in document order, the tokens of each of the three machine
+     recognizable column kinds (bit range, access, reset) plus every field
+     abbreviation appearing as `Long Name (ABBR):`;
+  3. pairs them BY ORDINAL POSITION.
+
+Ordinal pairing is only sound when all four runs have the same length. When
+they do not - which is common - the whole table is emitted as a single
+`needs_human_review` record carrying the counts and the caption line number,
+and NO field rows are emitted for it. A confidently wrong offset/width is worse
+than an admitted gap, so there is deliberately no heuristic that guesses.
+"""
+
+use text_norm.*
+
+struct FieldRow:
+    figure:      text   # figure caption identifier, e.g. "Figure 36"
+    register:    text   # register abbreviation from the caption, e.g. "CAP"
+    field:       text   # field abbreviation, e.g. "MQES"
+    bits:        text   # e.g. "63:62" or "61"
+    width_bits:  i64
+    access:      text   # RO | RW | RWC | RW1C | RWS | WO | RWO
+    reset:       text   # e.g. "0h", "Impl Spec"
+    source_line: i64
+
+struct TableStats:
+    figures_seen:      i64   # every `Figure N:` caption
+    register_tables:   i64   # attempted: captions naming a register offset
+    tables_parsed:     i64   # all four column runs agreed in length
+    tables_review:     i64   # column runs disagreed - no rows emitted
+    rows:              i64
+
+struct TableReview:
+    figure:      text
+    source_line: i64
+    why:         text
+
+struct FieldScanResult:
+    rows:    [FieldRow]
+    reviews: [TableReview]
+    stats:   TableStats
+
+"""True for a token that is a bit range (`63:62`) or a single bit (`61`)."""
+fn is_bits_token(s: text) -> bool:
+    if s.len() == 0 or s.len() > 6:
+        return false
+    val parts = s.split(":")
+    if parts.len() > 2:
+        return false
+    var i: i64 = 0
+    while i < parts.len():
+        if not all_digits(parts[i]):
+            return false
+        i = i + 1
+    true
+
+"""Number of bits a bit-range token covers. 0 when unparseable."""
+fn bits_width(s: text) -> i64:
+    val parts = s.split(":")
+    if parts.len() == 1:
+        return 1
+    if parts.len() != 2:
+        return 0
+    val hi: i64 = parts[0].to_i64()
+    val lo: i64 = parts[1].to_i64()
+    if hi < lo:
+        return 0
+    hi - lo + 1
+
+fn is_access_token(s: text) -> bool:
+    s == "RO" or s == "RW" or s == "RWC" or s == "RW1C" or s == "RWS" or s == "WO" or s == "RWO" or s == "RWL"
+
+"""A reset token: a hex literal with an `h` suffix, or the implementation marker."""
+fn is_reset_token(s: text) -> bool:
+    if s == "Impl Spec":
+        return true
+    if s.len() < 2:
+        return false
+    if s[s.len() - 1] != "h":
+        return false
+    var i: i64 = 0
+    while i < s.len() - 1:
+        if not is_hex_ch(s[i]):
+            return false
+        i = i + 1
+    true
+
+"""Field abbreviation from a `Long Name (ABBR):` line. "" when absent."""
+fn field_abbrev(s: text) -> text:
+    val open: i64 = s.index_of("(")
+    if open < 0:
+        return ""
+    val rest: text = s.substring(open + 1, s.len())
+    val close: i64 = rest.index_of("):")
+    if close <= 0 or close > 12:
+        return ""
+    val abbr: text = rest.substring(0, close)
+    var i: i64 = 0
+    while i < abbr.len():
+        val c: text = abbr[i]
+        if not (is_upper_ch(c) or is_digit_ch(c)):
+            return ""
+        i = i + 1
+    abbr
+
+"""Register abbreviation from a caption like `Offset 0h: CAP - Controller ...`."""
+fn caption_register(cap: text) -> text:
+    val at: i64 = cap.index_of(":")
+    if at < 0:
+        return ""
+    var rest: text = cap.substring(at + 1, cap.len()).trim()
+    if not rest.starts_with("Offset"):
+        return ""
+    val colon2: i64 = rest.index_of(":")
+    if colon2 < 0:
+        return ""
+    rest = rest.substring(colon2 + 1, rest.len()).trim()
+    var out: text = ""
+    var i: i64 = 0
+    while i < rest.len():
+        val c: text = rest[i]
+        if is_upper_ch(c) or is_digit_ch(c) or c == ".":
+            out = out + c
+        else:
+            break
+        i = i + 1
+    out
+
+"""Figure caption identifier `Figure N`. "" when the line is not a caption."""
+fn caption_id(ln: text) -> text:
+    if not ln.starts_with("Figure "):
+        return ""
+    val rest: text = ln.substring(7, ln.len())
+    var num: text = ""
+    var i: i64 = 0
+    while i < rest.len():
+        if is_digit_ch(rest[i]):
+            num = num + rest[i]
+        else:
+            break
+        i = i + 1
+    if num.len() == 0:
+        return ""
+    "Figure " + num
+
+fn scan_fields(raw: text) -> FieldScanResult:
+    val raw_lines = raw.split("\n")
+    var lines: [text] = []
+    var i: i64 = 0
+    while i < raw_lines.len():
+        lines.push(norm_line(raw_lines[i]))
+        i = i + 1
+
+    var st = TableStats(figures_seen: 0, register_tables: 0, tables_parsed: 0, tables_review: 0, rows: 0)
+    var rows: [FieldRow] = []
+    var reviews: [TableReview] = []
+
+    var j: i64 = 0
+    while j < lines.len():
+        val fid: text = caption_id(lines[j])
+        if fid.len() == 0:
+            j = j + 1
+            continue
+        st.figures_seen = st.figures_seen + 1
+        val reg: text = caption_register(lines[j])
+        if reg.len() == 0:
+            j = j + 1
+            continue
+        st.register_tables = st.register_tables + 1
+        val cap_line: i64 = j + 1
+
+        # Collect the three machine-recognizable column runs plus field names,
+        # up to the next figure caption.
+        var bits: [text] = []
+        var bit_lines: [i64] = []
+        var access: [text] = []
+        var resets: [text] = []
+        var names: [text] = []
+        var k: i64 = j + 1
+        while k < lines.len():
+            if caption_id(lines[k]).len() > 0:
+                break
+            var tok: text = lines[k]
+            # `Impl Spec` arrives as two consecutive lines.
+            if tok == "Impl" and k + 1 < lines.len() and lines[k + 1] == "Spec":
+                tok = "Impl Spec"
+                k = k + 1
+            if is_bits_token(tok):
+                bits.push(tok)
+                bit_lines.push(k + 1)
+            elif is_access_token(tok):
+                access.push(tok)
+            elif is_reset_token(tok):
+                resets.push(tok)
+            else:
+                val ab: text = field_abbrev(tok)
+                if ab.len() > 0:
+                    names.push(ab)
+            k = k + 1
+
+        if bits.len() > 0 and bits.len() == access.len() and bits.len() == resets.len() and bits.len() == names.len():
+            st.tables_parsed = st.tables_parsed + 1
+            var r: i64 = 0
+            while r < bits.len():
+                rows.push(FieldRow(figure: fid, register: reg, field: names[r], bits: bits[r], width_bits: bits_width(bits[r]), access: access[r], reset: resets[r], source_line: bit_lines[r]))
+                st.rows = st.rows + 1
+                r = r + 1
+        else:
+            st.tables_review = st.tables_review + 1
+            reviews.push(TableReview(figure: fid, source_line: cap_line, why: "column runs disagree after PDF extraction: bits=" + "{bits.len()}" + " access=" + "{access.len()}" + " reset=" + "{resets.len()}" + " names=" + "{names.len()}" + " - ordinal pairing would be a guess, so no field rows were emitted"))
+        j = k
+
+    FieldScanResult(rows: rows, reviews: reviews, stats: st)
+
+export FieldRow, TableStats, TableReview, FieldScanResult
+export scan_fields, is_bits_token, bits_width, is_access_token, is_reset_token
+export field_abbrev, caption_register, caption_id

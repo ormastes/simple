@@ -1,0 +1,174 @@
+use std.common.crypto.sha256.sha256_bytes
+use compiler.driver.environment_variant_composite_publication_v1.{EnvironmentCompositePublicationV1, environment_composite_publication_sidecars_valid_v1}
+use compiler.loader.parser_structural_mask_mapping_authorization_v1.ParserStructuralMappingAuthorizationV1
+use compiler.loader.parser_structural_mask_mapper_v1.{ParserStructuralMapperOwnerV1, ParserStructuralMappedKernelV1,
+    ParserStructuralKernelCallTokenV1, parser_structural_mapper_authorization_live_v1,
+    parser_structural_mapper_call_retain_v1, parser_structural_mapper_call_release_v1}
+use std.nogc_sync_mut.composition.environment_variants.contracts_v1.*
+use std.nogc_sync_mut.composition.environment_variants.provider_generation_v2.*
+
+pub enum ParserStructuralProviderActivationErrorV2:
+    InvalidPublication
+    AuthorizationMismatch
+    MappingNotLive
+    ActivationRejected
+    UnknownOrSubstituted
+    CapacityExceeded
+    PinsLive
+    AlreadyRetired
+    CleanupFailed
+
+pub struct ParserStructuralProviderActivationV2:
+    activation_id: u64
+struct _ParserActivationRecordV2:
+    token: ParserStructuralProviderActivationV2
+    activation: ProviderGenerationActivationV2
+    evidence: ProviderActivationEvidenceV2
+    mapped: ParserStructuralMappedKernelV1
+    authorization: ParserStructuralMappingAuthorizationV1
+    mapping_retain: ParserStructuralKernelCallTokenV1
+    draining: bool
+    generation_retired: bool
+    retired: bool
+pub class ParserStructuralProviderActivationOwnerV2:
+    var records: [_ParserActivationRecordV2]
+    var next_id: u64
+    pub static fn create() -> ParserStructuralProviderActivationOwnerV2:
+        ParserStructuralProviderActivationOwnerV2(records: [], next_id: 1u64)
+
+fn _same_pa(a: EnvironmentDigest256V1, b: EnvironmentDigest256V1) -> bool:
+    a.w0 == b.w0 and a.w1 == b.w1 and a.w2 == b.w2 and a.w3 == b.w3
+fn _push64_pa(out: [i64], v: u64):
+    for i in 0..8: out.push(((v >> ((i as u64) * 8u64)) & 255u64) as i64)
+fn _pushd_pa(out: [i64], v: EnvironmentDigest256V1):
+    _push64_pa(out, v.w0); _push64_pa(out, v.w1); _push64_pa(out, v.w2); _push64_pa(out, v.w3)
+fn _read64_pa(raw: [i64], at: i64) -> u64:
+    var v = 0u64
+    for i in 0..8: v = v | ((raw[at + i] as u64) << ((i as u64) * 8u64))
+    v
+fn _authority_pa(p: EnvironmentCompositePublicationV1, a: ParserStructuralMappingAuthorizationV1,
+                 m: ParserStructuralMappedKernelV1) -> EnvironmentDigest256V1:
+    var bytes: [i64] = []; _push64_pa(bytes, 1u64)
+    for d in [a.provider_identity, a.variant_identity, a.artifact_digest, a.abi_digest,
+              a.contract_identity, a.semantic_identity, a.grammar_identity, a.program_identity,
+              a.plan_digest, a.environment_identity, p.root_descriptor_digest,
+              a.eligible_receipt.metadata_digest, a.eligible_receipt.self_check_digest,
+              a.eligible_receipt.eligibility_digest]: _pushd_pa(bytes, d)
+    for v in [a.environment_generation, a.provider_generation, m.mapped_handle, a.code_size,
+              a.provider_interface_handle, a.required_cpu_features.architecture as u64,
+              a.required_cpu_features.words.offset as u64, a.required_cpu_features.words.count as u64,
+              a.required_vector_state_mode as u64, a.required_vector_length_bits as u64,
+              a.parser_interface_major as u64, a.parser_interface_minor as u64]: _push64_pa(bytes, v)
+    val raw = sha256_bytes(bytes)
+    EnvironmentDigest256V1(w0: _read64_pa(raw, 0), w1: _read64_pa(raw, 8),
+        w2: _read64_pa(raw, 16), w3: _read64_pa(raw, 24))
+fn _matches_pa(p: EnvironmentCompositePublicationV1, a: ParserStructuralMappingAuthorizationV1) -> bool:
+    _same_pa(a.provider_identity, p.root_descriptor.provider_identity) and
+    _same_pa(a.variant_identity, p.root_descriptor.variant_identity) and
+    _same_pa(a.artifact_digest, p.root_descriptor.artifact_digest) and
+    _same_pa(a.plan_digest, p.admission.plan.plan_digest) and
+    _same_pa(a.environment_identity, p.admission.plan.environment_identity) and
+    a.environment_generation == p.admission.plan.environment_generation and
+    _same_pa(a.abi_digest, p.root_descriptor.abi_digest) and
+    _same_pa(a.contract_identity, p.root_descriptor.contract_identity) and
+    _same_pa(a.semantic_identity, p.root_descriptor.semantic_identity) and
+    _same_pa(a.grammar_identity, p.root_descriptor.grammar_identity) and
+    _same_pa(a.program_identity, p.root_descriptor.program_identity) and
+    a.required_cpu_features == p.root_descriptor.required_cpu_features and
+    a.required_vector_state_mode == p.root_descriptor.required_vector_state_mode and
+    a.required_vector_length_bits == p.root_descriptor.required_vector_length_bits
+
+pub fn parser_structural_provider_activate_v2(owner: ParserStructuralProviderActivationOwnerV2,
+    generations: ProviderGenerationManagerV2, mappings: ParserStructuralMapperOwnerV1,
+    publication: EnvironmentCompositePublicationV1, authorization: ParserStructuralMappingAuthorizationV1,
+    mapped: ParserStructuralMappedKernelV1
+) -> Result<ParserStructuralProviderActivationV2, ParserStructuralProviderActivationErrorV2>:
+    if not environment_composite_publication_sidecars_valid_v1(publication): return Err(ParserStructuralProviderActivationErrorV2.InvalidPublication)
+    if not _matches_pa(publication, authorization) or mapped.provider_generation != authorization.provider_generation or
+       not _same_pa(mapped.artifact_digest, authorization.artifact_digest) or mapped.code_size != authorization.code_size:
+        return Err(ParserStructuralProviderActivationErrorV2.AuthorizationMismatch)
+    if not parser_structural_mapper_authorization_live_v1(mappings, mapped, authorization): return Err(ParserStructuralProviderActivationErrorV2.MappingNotLive)
+    if owner.records.len() >= 256 or owner.next_id == 0u64 or owner.next_id == 0xffffffffffffffffu64: return Err(ParserStructuralProviderActivationErrorV2.CapacityExceeded)
+    val evidence = ProviderActivationEvidenceV2(provider_identity: authorization.provider_identity,
+        variant_identity: authorization.variant_identity, artifact_identity: authorization.artifact_digest,
+        abi_identity: authorization.abi_digest, contract_identity: authorization.contract_identity,
+        semantic_identity: authorization.semantic_identity, grammar_identity: authorization.grammar_identity,
+        program_identity: authorization.program_identity, plan_identity: authorization.plan_digest,
+        environment_identity: authorization.environment_identity, environment_generation: authorization.environment_generation,
+        mapped_handle: mapped.mapped_handle, callable_binding_identity: publication.root_descriptor_digest,
+        activation_authority_identity: _authority_pa(publication, authorization, mapped))
+    val persistent = match parser_structural_mapper_call_retain_v1(mappings, mapped, authorization):
+        case Ok(v): v
+        case Err(_): return Err(ParserStructuralProviderActivationErrorV2.MappingNotLive)
+    val activation = match provider_generation_activate_v2(generations, evidence):
+        case Ok(v): v
+        case Err(_):
+            if not parser_structural_mapper_call_release_v1(mappings, persistent):
+                return Err(ParserStructuralProviderActivationErrorV2.CleanupFailed)
+            return Err(ParserStructuralProviderActivationErrorV2.ActivationRejected)
+    val token = ParserStructuralProviderActivationV2(activation_id: owner.next_id); owner.next_id = owner.next_id + 1u64
+    owner.records.push(_ParserActivationRecordV2(token: token, activation: activation,
+        evidence: evidence, mapped: mapped, authorization: authorization,
+        mapping_retain: persistent, draining: false, generation_retired: false,
+        retired: false))
+    Ok(token)
+
+pub fn parser_structural_provider_pin_v2(owner: ParserStructuralProviderActivationOwnerV2,
+    generations: ProviderGenerationManagerV2, mappings: ParserStructuralMapperOwnerV1,
+    token: ParserStructuralProviderActivationV2, authorization: ParserStructuralMappingAuthorizationV1,
+    mapped: ParserStructuralMappedKernelV1
+) -> Result<ProviderGenerationPinV2, ParserStructuralProviderActivationErrorV2>:
+    var index: i64 = -1; var i = 0
+    while i < owner.records.len():
+        if owner.records[i].token == token: index = i
+        i = i + 1
+    if index < 0: return Err(ParserStructuralProviderActivationErrorV2.UnknownOrSubstituted)
+    val r = owner.records[index]
+    if r.draining or r.retired or r.mapped != mapped or r.authorization != authorization or
+       not parser_structural_mapper_authorization_live_v1(mappings, mapped, authorization) or
+       not provider_generation_active_matches_v2(generations, r.activation, r.evidence):
+        return Err(ParserStructuralProviderActivationErrorV2.UnknownOrSubstituted)
+    match provider_generation_pin_v2(generations, r.activation):
+        case Ok(v): Ok(v)
+        case Err(_): Err(ParserStructuralProviderActivationErrorV2.ActivationRejected)
+
+pub fn parser_structural_provider_activation_live_v2(
+    owner: ParserStructuralProviderActivationOwnerV2, generations: ProviderGenerationManagerV2,
+    mappings: ParserStructuralMapperOwnerV1, token: ParserStructuralProviderActivationV2,
+    authorization: ParserStructuralMappingAuthorizationV1,
+    mapped: ParserStructuralMappedKernelV1) -> bool:
+    var index: i64 = -1; var i = 0
+    while i < owner.records.len():
+        if owner.records[i].token == token: index = i
+        i = i + 1
+    if index < 0: return false
+    val r = owner.records[index]
+    not r.draining and not r.retired and r.mapped == mapped and
+    r.authorization == authorization and
+    parser_structural_mapper_authorization_live_v1(mappings, mapped, authorization) and
+    provider_generation_active_matches_v2(generations, r.activation, r.evidence)
+
+pub fn parser_structural_provider_retire_v2(owner: ParserStructuralProviderActivationOwnerV2,
+    generations: ProviderGenerationManagerV2, mappings: ParserStructuralMapperOwnerV1,
+    token: ParserStructuralProviderActivationV2
+) -> Result<(), ParserStructuralProviderActivationErrorV2>:
+    var index: i64 = -1; var i = 0
+    while i < owner.records.len():
+        if owner.records[i].token == token: index = i
+        i = i + 1
+    if index < 0: return Err(ParserStructuralProviderActivationErrorV2.UnknownOrSubstituted)
+    if owner.records[index].retired: return Err(ParserStructuralProviderActivationErrorV2.AlreadyRetired)
+    var r = owner.records[index]
+    if not r.generation_retired:
+        val count = match provider_generation_exact_pin_count_v2(generations, r.activation, r.evidence):
+            case Ok(v): v
+            case Err(_): return Err(ParserStructuralProviderActivationErrorV2.UnknownOrSubstituted)
+        r.draining = true; owner.records[index] = r
+        if count > 0u64: return Err(ParserStructuralProviderActivationErrorV2.PinsLive)
+        if provider_generation_retire_exact_v2(generations, r.activation, r.evidence).is_err():
+            return Err(ParserStructuralProviderActivationErrorV2.ActivationRejected)
+        r.generation_retired = true; owner.records[index] = r
+    if not parser_structural_mapper_call_release_v1(mappings, r.mapping_retain):
+        return Err(ParserStructuralProviderActivationErrorV2.CleanupFailed)
+    r.retired = true; owner.records[index] = r
+    Ok(())

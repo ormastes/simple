@@ -1,0 +1,50 @@
+#!/bin/sh
+set -eu
+
+ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+TMP_BASE="${TMPDIR:-/tmp}"
+TMP="$(mktemp -d "$TMP_BASE/simple-gpu-provider-unload-race.XXXXXX")"
+cleanup() {
+    case "$TMP" in
+        "$TMP_BASE"/simple-gpu-provider-unload-race.*) rm -rf "$TMP" ;;
+        *) exit 2 ;;
+    esac
+}
+trap cleanup EXIT HUP INT TERM
+
+SOURCE="$ROOT/test/02_integration/runtime/gpu_provider_unload_load_race.c"
+COMMON="-D_GNU_SOURCE -std=gnu11 -O1 -g -Wall -Wextra -Werror"
+
+build_and_run() {
+    suffix="$1"
+    sanitize="$2"
+    cc $COMMON $sanitize -shared -fPIC -fvisibility=hidden \
+        -DSIMPLE_GPU_RACE_PROVIDER=1 -DSIMPLE_GPU_RACE_SLOW_CALL=1 \
+        -DSIMPLE_GPU_RACE_DEVICE_COUNT=7 -I"$ROOT/src/runtime" \
+        "$SOURCE" -o "$TMP/slow-$suffix.so"
+    cc $COMMON $sanitize -shared -fPIC -fvisibility=hidden \
+        -DSIMPLE_GPU_RACE_PROVIDER=1 -DSIMPLE_GPU_RACE_DEVICE_COUNT=9 \
+        -I"$ROOT/src/runtime" "$SOURCE" -o "$TMP/replacement-$suffix.so"
+    cc $COMMON -Wno-error=misleading-indentation -Wno-error=unused-result \
+        $sanitize -ffunction-sections -fdata-sections \
+        -DSIMPLE_RUNTIME_DYNLOAD_OWNER=1 -I"$ROOT/src/runtime" \
+        -I"$ROOT/src/runtime/platform" -c "$ROOT/src/runtime/runtime_native.c" \
+        -o "$TMP/runtime-native-$suffix.o"
+    cc $COMMON $sanitize -ffunction-sections -fdata-sections \
+        -DSIMPLE_GPU_PROVIDER_TEST_HOOKS=1 -I"$ROOT/src/runtime" \
+        -I"$ROOT/src/runtime/platform" \
+        -c "$ROOT/src/runtime/runtime_dynload.c" \
+        -o "$TMP/runtime-dynload-$suffix.o"
+    cc $COMMON $sanitize -Wl,--gc-sections -I"$ROOT/src/runtime" "$SOURCE" \
+        "$TMP/runtime-native-$suffix.o" "$TMP/runtime-dynload-$suffix.o" \
+        -ldl -lm -pthread -o "$TMP/harness-$suffix"
+    "$TMP/harness-$suffix" "$TMP/slow-$suffix.so" \
+        "$TMP/replacement-$suffix.so" "$TMP/entered-$suffix" \
+        "$TMP/closed-$suffix"
+}
+
+build_and_run normal ""
+ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 \
+UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
+    build_and_run sanitized "-fsanitize=address,undefined -fno-omit-frame-pointer"
+echo "gpu_provider_unload_load_race_status=pass"

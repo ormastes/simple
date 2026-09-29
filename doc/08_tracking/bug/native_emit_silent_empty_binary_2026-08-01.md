@@ -1,4 +1,8 @@
 # `--native` silent empty-binary emit — scope, root cause, and evidence retraction (2026-08-01)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** root cause identified and already fixed at origin
 `e1150d003b7c4e39f170ce40626b7155e087faa6`; hardening added here so the failure
@@ -464,3 +468,4 @@ Rust seed vs. deployed pure-Simple `bin/simple`), **which subcommand**
 and the latter often runs interpreted), and **which env**. Then assert a positive
 artifact: non-trivial byte size plus expected stdout from a live control compiled
 in the same run.
+

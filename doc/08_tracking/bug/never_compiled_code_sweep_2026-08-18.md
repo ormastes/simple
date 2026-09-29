@@ -1,4 +1,8 @@
 # Never-compiled code sweep — src/lib, 2026-08-18
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Defect class (from `051ccaea260`): product code in `src/lib` that contains a hard
 type error at a call site, and therefore **has never successfully run**, sitting
@@ -57,3 +61,4 @@ arguments in `text_to_bytes`, exactly as `auth_middleware.spl:379` already does 
 or drop the local `bytes_to_hex` call, since `hmac_sha256` already returns
 lowercase hex. **Every fix must ship with a spec that actually calls the
 function**, since the absence of one is the root cause here, not the type error.
+

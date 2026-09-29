@@ -1,13 +1,17 @@
-# SimpleOS WM Fullscreen Evidence Simple Binary Contract
+# SimpleOS WM Fullscreen Evidence Binary Contract
 
-> The live fullscreen check requires QEMU and a running SimpleOS `wm-simple-web` target, but its binary-selection and interaction contracts can be verified without launching either. Rust seed overrides must fail before launch artifacts are produced.
+> **Current result: BLOCKED / no live QEMU PASS (2026-07-24).**
+> Executable source:
+> `test/03_system/check/simpleos_wm_fullscreen_evidence_simple_bin_spec.spl`.
+> This manual is synchronized by hand because pure-Simple docgen was
+> unavailable; it does not claim generated zero-stub evidence.
 
-| Tests | Active | Skipped | Pending |
-|-------|--------|---------|--------:|
-| 14 | 14 | 0 | 0 |
+## Purpose
 
-<details>
-<summary>Full Scenario Manual</summary>
+This SSpec checks the fail-closed source and launcher contract around
+`scripts/check/check-simpleos-wm-fullscreen-evidence.shs`. Static source
+assertions are supporting evidence. Only a fresh successful wrapper run can
+prove guest font pixels and correlated QEMU input.
 
 # SimpleOS WM Fullscreen Evidence Simple Binary Contract
 
@@ -217,6 +221,87 @@ expect(script.index_of("[wm-demo] fullscreen-exit")).to_equal(-1)
 
 #### pins the guest font source and correlates pointer IRQ state and frame markers
 
+- pins the guest font source and correlates pointer IRQ state and frame markers
+- Load the pinned multilingual font manifest
+- Accept exact-face-bound simple-script shaping
+- Trace the production font and event boundary
+- Prepare one shared font batch for 2D and 3D
+- Emit the selected font composite program and plan compilation
+- Submit the boundary output to its canonical consumer
+- Correlate visible pixels and input with one frame identity
+   - Expected: script.index_of("window_id=.* status=engine2d_rendered") equals `-1`
+- Prove native submission and device readback
+- Reject disconnected stale or replayed evidence
+
+## Primary flow
+
+1. Load the pinned multilingual font manifest.
+2. Require the deterministic guest path `/SYS/FONTS/NOTOSANS`, byte length
+   `1708408`, and SHA-256
+   `2cb2adb378a8f574213e23df697050b83c54c27df465a2015552740b2769a081`.
+3. Boot only the production x86_64 `gui_entry_desktop.spl` with an accepted
+   pure-Simple self-hosted binary. Its live `SharedWmScene` snapshot is rendered
+   through Draw IR and the `Engine2dWmFrameExecutor`; the guest emits the pinned
+   taskbar-clock `route=shared-wm-draw-ir` marker rather than a private font path.
+4. Derive framebuffer address, dimensions, pitch, format, and size only from
+   the guest `[scanout-evidence]` marker.
+5. Capture baseline, maximized, and restored frames through QMP `pmemsave`;
+   extract the 8,064-byte taskbar-clock RGB crop from that device-origin
+   baseline.
+6. Correlate F11 maximize/restore through guest IRQ, WM state, and frame
+   generation with strictly increasing `input_seq` values.
+7. Move to the center of the guest-reported restored-window titlebar and press
+   the left button. Accept only `window_focus` or `window_drag_begin` when the
+   command window equals the positive focused window.
+8. Release the left button. Require a newer sequence, the same focused window,
+   `command=ignored`, `handled=false`, and a positive frame generation.
+9. Copy the crop, XOR exactly one byte, preserve its 8,064-byte length, compute
+   its SHA-256 with the wrapper’s existing hash helper, and require the shared
+   crop oracle to reject it before PASS.
+10. Retain only valid PPM captures: maximize must change more than 4,096 scanout
+    bytes and restore must reproduce the baseline hash. The evidence record names
+    all three PPM magic statuses and the QMP `pmemsave` device origin.
+
+Runnable source: 30 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val script = file_read("scripts/check/check-simpleos-wm-fullscreen-evidence.shs")
+expect(script).to_contain("[scanout-evidence]")
+expect(script).to_contain("scanout_size=$((scanout_stride * scanout_height))")
+expect(script).to_contain("baseline = pmem(f, baseline_ppm)")
+expect(script).to_contain("fullscreen = pmem(f, fullscreen_ppm)")
+expect(script).to_contain("restored = pmem(f, restored_ppm)")
+expect(script).to_contain("send_f11(f)")
+expect(script).to_contain("wait_press_correlation(baseline_seq, \"maximize\")")
+expect(script).to_contain("wait_press_correlation(max_release_seq, \"restore\", target_window)")
+expect(script).to_contain("wait_pointer_correlation(restore_release_seq, 1)")
+expect(script.contains(
+    "wait_pointer_correlation(restore_seq, 1)")).to_equal(false)
+expect(script).to_contain(
+    "pointer_release_serial_offset = serial_size()")
+expect(script).to_contain(
+    "wait_pointer_correlation(pointer_seq, 2, pointer_window, pointer_release_serial_offset)")
+expect(script.contains(
+    "wait_pointer_correlation(pointer_seq, 2, pointer_window)")).to_equal(false)
+expect(script).to_contain("\"type\":\"rel\"")
+expect(script).to_contain("\"type\":\"btn\"")
+expect(script).to_contain("ENTRY=\"examples/09_embedded/simple_os/arch/x86_64/gui_entry_desktop.spl\"")
+expect(script).to_contain("host_nonce=%s baseline_seq=%d maximize_seq=%d maximize_release_seq=%d restore_seq=%d restore_release_seq=%d qcode=f11")
+expect(script).to_contain("maximize-semantic-hash-not-distinct")
+expect(script).to_contain("if restored_hash != base_hash")
+expect(script).to_contain("restore-semantic-hash-mismatch")
+expect(script).to_contain("simpleos_wm_fullscreen_baseline_ppm_magic_status=")
+expect(script).to_contain("simpleos_wm_fullscreen_maximized_ppm_magic_status=")
+expect(script).to_contain("simpleos_wm_fullscreen_restored_ppm_magic_status=")
+expect(script.index_of("[wm-demo] fullscreen-enter")).to_equal(-1)
+expect(script.index_of("[wm-demo] fullscreen-exit")).to_equal(-1)
+```
+
+</details>
+
+#### pins the guest font source and correlates pointer IRQ state and frame markers
+
 - Load the pinned multilingual font manifest
 - Accept exact-face-bound simple-script shaping
 - "[font-evidence] guest path=" + literal braces
@@ -224,19 +309,41 @@ expect(script.index_of("[wm-demo] fullscreen-exit")).to_equal(-1)
 - Trace the production font and event boundary
 - Prepare one shared font batch for 2D and 3D
 - Emit the selected font composite program and plan compilation
-- Boot SimpleOS with the pinned font asset
 - Submit the boundary output to its canonical consumer
-- Deliver correlated focus keyboard and pointer events
 - Correlate visible pixels and input with one frame identity
 - "remote browser window=\"$
    - Expected: script.index_of("window_id=.* status=engine2d_rendered") equals `-1`
 - Prove native submission and device readback
 - Reject disconnected stale or replayed evidence
-- Reject a bounded corrupt copy through the same font crop oracle
 
+## Primary flow
 
-<details>
-<summary>Executable SSpec</summary>
+1. Load the pinned multilingual font manifest.
+2. Require the deterministic guest path `/SYS/FONTS/NOTOSANS`, byte length
+   `1708408`, and SHA-256
+   `2cb2adb378a8f574213e23df697050b83c54c27df465a2015552740b2769a081`.
+3. Boot only the production x86_64 `gui_entry_desktop.spl` with an accepted
+   pure-Simple self-hosted binary. Its live `SharedWmScene` snapshot is rendered
+   through Draw IR and the `Engine2dWmFrameExecutor`; the guest emits the pinned
+   taskbar-clock `route=shared-wm-draw-ir` marker rather than a private font path.
+4. Derive framebuffer address, dimensions, pitch, format, and size only from
+   the guest `[scanout-evidence]` marker.
+5. Capture baseline, maximized, and restored frames through QMP `pmemsave`;
+   extract the 8,064-byte taskbar-clock RGB crop from that device-origin
+   baseline.
+6. Correlate F11 maximize/restore through guest IRQ, WM state, and frame
+   generation with strictly increasing `input_seq` values.
+7. Move to the center of the guest-reported restored-window titlebar and press
+   the left button. Accept only `window_focus` or `window_drag_begin` when the
+   command window equals the positive focused window.
+8. Release the left button. Require a newer sequence, the same focused window,
+   `command=ignored`, `handled=false`, and a positive frame generation.
+9. Copy the crop, XOR exactly one byte, preserve its 8,064-byte length, compute
+   its SHA-256 with the wrapper’s existing hash helper, and require the shared
+   crop oracle to reject it before PASS.
+10. Retain only valid PPM captures: maximize must change more than 4,096 scanout
+    bytes and restore must reproduce the baseline hash. The evidence record names
+    all three PPM magic statuses and the QMP `pmemsave` device origin.
 
 Runnable source: 56 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -256,53 +363,21 @@ expect(entry).to_contain(
     "[font-evidence] guest_path=" + literal_braces("font_guest_path") +
     " asset_bytes=" + literal_braces("font_blob.len()"))
 
-step("Trace the production font and event boundary")
-step("Prepare one shared font batch for 2D and 3D")
-step("Emit the selected font composite program and plan compilation")
-step("Boot SimpleOS with the pinned font asset")
-expect(entry).to_contain("route=shared-wm-draw-ir component_id=taskbar-clock")
-expect(shell).to_contain("Render one authoritative WM snapshot through Draw IR + Engine2D")
-expect(shell).to_contain("val scene = self.runtime_scene_snapshot()")
-expect(shell).to_contain("executor.render(scene, taskbar, content_frames")
-expect(shell).to_contain("fn runtime_scene_snapshot() -> SharedWmScene")
+## Current retained result
 
-step("Submit the boundary output to its canonical consumer")
-step("Deliver correlated focus keyboard and pointer events")
-expect(compositor).to_contain("if ((status as i32) & 0x20) != 0:")
-expect(shell).to_contain("[wm-pointer-irq] input_seq=")
-expect(shell).to_contain("[wm-pointer-state] input_seq=")
-expect(shell).to_contain("[wm-pointer-frame] input_seq=")
-expect(shell).to_contain("handled=" + literal_braces("handled_text"))
-expect(script).to_contain("guest-pointer-irq-state-frame-correlation-missing")
-expect(script).to_contain("window=([1-9]\\d*)")
-expect(script).to_contain("window_focus|window_drag_begin")
-expect(script).to_contain("window=\\1 handled=true")
-expect(script).to_contain("command=ignored target= app= window= handled=false")
-expect(script).to_contain("handled=true")
+Command attempted:
 
-step("Correlate visible pixels and input with one frame identity")
-expect(script).to_contain(
-    "remote_browser_window=\"$(marker_field \"$remote_browser_ready_marker\" window)\"")
-expect(script).to_contain("window_id=$remote_browser_window status=engine2d_rendered")
-expect(script).to_contain(
-    "content-presented scene_revision=$browser_content_presented_generation")
-expect(script.contains(
-    "content-presented scene_revision=[1-9][0-9]* path=")).to_equal(false)
-expect(script.index_of("window_id=.* status=engine2d_rendered")).to_equal(-1)
-expect(script).to_contain(
-    "simpleos_wm_fullscreen_remote_browser_window=$remote_browser_window")
-step("Prove native submission and device readback")
-step("Reject disconnected stale or replayed evidence")
-step("Reject a bounded corrupt copy through the same font crop oracle")
-expect(script).to_contain("corrupt_region[0] ^= 1")
-expect(script).to_contain("font_region_oracle_status \"$FONT_REGION_CORRUPT_COPY\"")
-expect(script).to_contain("font-region-corrupt-copy-calibration-failed")
-expect(script).to_contain("simpleos_wm_fullscreen_font_region_corrupt_rejection_status=")
+```sh
+sh scripts/check/check-simpleos-wm-fullscreen-evidence.shs
 ```
 
-</details>
+Result: `simpleos_wm_fullscreen_reason=wm-simple-web-build-failed`.
+The self-hosted native build exceeded the requested 300-second timeout and was
+terminated after roughly 13 minutes. It produced no fresh kernel, QEMU launch,
+serial markers, framebuffer, font crop, pointer evidence, or corrupt-copy
+calibration.
 
-#### fails closed for disconnected QMP, replayed guest input, and corrupt visible evidence
+Retained artifacts:
 
 <details>
 <summary>Executable SSpec</summary>

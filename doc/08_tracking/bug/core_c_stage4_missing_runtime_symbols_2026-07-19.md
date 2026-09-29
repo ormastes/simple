@@ -1,7 +1,10 @@
 # Core-C Stage4 missing runtime symbols — 2026-07-19
+## Open 2026-09-16 — needs owner triage
 
-Status: FIXED
-Status re-verified 2026-08-17 by source inspection (triage shard 00).
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
+
+**Status:** SOURCE FIXED / STAGE 4 QUALIFICATION PENDING
 
 ## Reproduction
 
@@ -32,3 +35,4 @@ The settled-tree replay reached its 1200-second cap with exit 124, produced no
 candidate, and left an empty diagnostic log. The 222 MiB cache (2,713 files) is
 retained; do not start another replay without first instrumenting the silent
 pre-output phase.
+

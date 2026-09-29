@@ -138,6 +138,13 @@ fn parse_context_statement() {
 }
 
 #[test]
+fn parse_context_as_bare_trailing_identifier() {
+    parse_ok("fn a_ctx() -> i64:\n    var context = 7\n    context\n");
+    parse_ok("fn a_ctx() -> i64:\n    var context = 7\n    context");
+    parse_ok("fn a_ctx() -> i64:\n    if true:\n        context\n    0\n");
+}
+
+#[test]
 fn parse_newunit_statement() {
     let items = parse("newunit UserId: i64 as uid");
     match &items[0] {

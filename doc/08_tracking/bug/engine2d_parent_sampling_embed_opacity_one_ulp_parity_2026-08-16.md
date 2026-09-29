@@ -1,4 +1,9 @@
 # BUG: parent-sampling glass embed opacity (930) is one ulp off the spec oracle
+## Closed 2026-09-16 — ...n inactive-window glass) - Status: FIXED - Status re-verified 2026-08-17 by source inspect
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - id: engine2d-parent-sampling-embed-opacity-one-ulp-parity
 - date: 2026-08-16
@@ -110,3 +115,4 @@ bin/simple test test/01_unit/lib/gc_async_mut/gpu/engine2d/draw_ir_adv_spec.spl
 # render the spec's 12x12 BLUE parent + window-surface-glass box at
 # embedding opacity 500 / 930 and read pixel (5,5).
 ```
+

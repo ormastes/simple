@@ -1,19 +1,65 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+use std.spec.step
+
 use std.spec
-use std.io_runtime.{file_read}
+use compiler.hir.hir_types.{SymbolTable, HirSymbol, SymbolId, ScopeId, SymbolKind}
+use compiler.hir.hir_symbol_table_methods
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+
+fn probe_symbol(raw: i64, name: text, module: text?) -> HirSymbol:
+    HirSymbol(
+        id: SymbolId(id: raw),
+        name: name,
+        kind: SymbolKind.Function,
+        type_: nil,
+        scope: ScopeId(id: 0),
+        span: Span(start: 0, end: 1, line: 1, col: 1, file: "probe.spl", length: 1),
+        visibility: Visibility.Public,
+        is_public: true,
+        is_mutable: false,
+        defining_module: module
+    )
 
 describe "HIR symbol table strict shared bindings":
+    # @manual scenario evidence
     it "returns raw symbol lookups without a mutable optional accumulator":
-        val source = file_read("src/compiler/20.hir/hir_types.spl")
+        # @req REQ-SSPEC-COMPILER
+        step("returns raw symbol lookups without a mutable optional accumulator")
+        val table = SymbolTable.new()
+        table.register_preserved_symbol(probe_symbol(7, "compute_a", Some("m.alpha")))
+        # oracle: registered raw id must come back with the exact name
+        val hit = table.get_symbol_raw(7)
+        assert_true(hit != nil)
+        expect(hit.?.name).to_equal("compute_a")
+        # oracle: an absent raw id must answer nil, not a stale accumulator value
+        assert_nil(table.get_symbol_raw(999))
 
-        expect(source).to_contain("fn get_symbol_raw(raw: i64) -> HirSymbol?:")
-        expect(source).to_contain("if self.symbols.has(raw):\n            return self.symbols[raw]\n        nil")
-        expect(source.contains("var found: HirSymbol? = nil")).to_equal(false)
-        expect(source).to_contain("val found: HirSymbol? = self.symbols[raw]")
-        expect(source).to_contain("val renamed = HirSymbol(")
-        expect(source).to_contain("name: new_name,")
-        expect(source.contains("var renamed = sym")).to_equal(false)
-        expect(source.contains("renamed.name = new_name")).to_equal(false)
-        expect(source).to_contain("fn _hir_symbol_owner_module(path: text) -> text:")
-        expect(source).to_contain("return _hir_symbol_owner_module(path.substring(3))")
-        expect(source).to_contain("val owner_module = _hir_symbol_owner_module(type_symbol.defining_module ?? \"\")")
-        expect(source.contains("var owner_module = type_symbol.defining_module")).to_equal(false)
+    it "renames a symbol in place without disturbing the raw id mapping":
+        # @req REQ-SSPEC-COMPILER
+        step("rename_symbol overwrites the stored name for the same raw id")
+        val table = SymbolTable.new()
+        table.register_preserved_symbol(probe_symbol(11, "helper_fn", Some("m.beta")))
+        table.rename_symbol(SymbolId(id: 11), "m.beta.helper_fn")
+        # oracle: same id resolves to the renamed entry after an immutable rebuild
+        expect(table.get_symbol_raw(11).?.name).to_equal("m.beta.helper_fn")
+        expect(table.symbol_display_name(SymbolId(id: 11), "fallback")).to_equal("m.beta.helper_fn")
+        # oracle: display name falls back only for an unknown id
+        expect(table.symbol_display_name(SymbolId(id: 404), "fallback")).to_equal("fallback")
+
+    it "indexes module callables for defining-module lookups in O(1)":
+        # @req REQ-SSPEC-COMPILER
+        step("register_preserved_symbol answers module_callable_raw without a table sweep")
+        val table = SymbolTable.new()
+        table.register_preserved_symbol(probe_symbol(21, "dotted.field_fn", Some("m.gamma")))
+        # oracle: both full name and last dotted segment are indexed to the raw id
+        expect(table.module_callable_raw("m.gamma", "dotted.field_fn")).to_equal(21)
+        expect(table.module_callable_raw("m.gamma", "field_fn")).to_equal(21)
+        # oracle: an unindexed (module, field) pair answers -1
+        # oracle: -1 is the documented miss sentinel, not 0 and not nil
+        expect(table.module_callable_raw("m.gamma", "absent_fn")).to_equal(-1)
+        # oracle: exact-name type lookup misses for a Function-kind symbol
+        assert_nil(table.lookup_exact_type("dotted.field_fn"))

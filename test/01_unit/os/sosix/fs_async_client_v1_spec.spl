@@ -1,13 +1,5 @@
 # @cover src/os/sosix/fs/async_client_v1.spl 80%
-"""Canonical typed SOSIX filesystem asynchronous client contract.
-
-## Purpose and audience
-Purpose: begins correlated state but never submits an unconfirmed receipt
-Audience: compiler and tooling engineers who maintain this spec
-"""
-
-# @req: REQ-OS-FsAsynClieV1-001
-
+"""Canonical typed SOSIX filesystem asynchronous client contract."""
 
 use std.spec.*
 use os.sosix.core.operation.{
@@ -22,6 +14,9 @@ use os.sosix.fs.async_transport_state.{
     sosix_fs_transport_record_progress
 }
 use os.sosix.fs.operation_adapter.SOSIX_FS_READ_AT
+use os.sosix.fs.ipc_codec_v1.{
+    SosixFsIpcCompletionV1, sosix_fs_ipc_encode_completion_v1
+}
 use os.sosix.fs.registered_buffer_client_v1.*
 use os.sosix.fs.async_client_v1.*
 
@@ -52,12 +47,37 @@ fn _pending_client() -> SosixFsAsyncClientV1:
         transport_state: transport.state, key: transport.key,
         service_endpoint: 70, reply_endpoint: 71,
         api_id: SOSIX_FS_READ_AT,
-        submission_attempted: false, submitted: false)
+        submission_attempted: false, submitted: false, provider_retired: false)
+
+fn _push_u32(out: [u8], value: u32):
+    out.push((value & 0xff) as u8)
+    out.push(((value >> 8) & 0xff) as u8)
+    out.push(((value >> 16) & 0xff) as u8)
+    out.push(((value >> 24) & 0xff) as u8)
+
+fn _push_u64(out: [u8], value: u64):
+    _push_u32(out, (value & 0xffffffff) as u32)
+    _push_u32(out, ((value >> 32) & 0xffffffff) as u32)
+
+fn _retirement_envelope(client: SosixFsAsyncClientV1, source: u64) -> [u8]:
+    val encoded = sosix_fs_ipc_encode_completion_v1(SosixFsIpcCompletionV1(
+        api_id: client.api_id, flags: 0,
+        operation_slot: client.operation.slot,
+        operation_generation: client.operation.generation,
+        request_token: client.key.request_token,
+        status: 0, transferred: 2, payload: [1u8, 2u8]))
+    var out: [u8] = []
+    _push_u64(out, source)
+    _push_u64(out, client.reply_endpoint)
+    _push_u32(out, client.api_id)
+    _push_u32(out, 1)
+    _push_u32(out, encoded.bytes.len() as u32)
+    _push_u32(out, 0)
+    for byte in encoded.bytes: out.push(byte)
+    out
 
 describe "SOSIX typed filesystem async client v1":
     it "begins correlated state but never submits an unconfirmed receipt":
-        step("Verify: begins correlated state but never submits an unconfirmed receipt")
-        # @req: REQ-OS-FsAsynClieV1-001
         step("Start one typed request with an unauthenticated service receipt")
         val result = rejected_start(100)
         expect(result.accepted).to_be(false)
@@ -66,11 +86,9 @@ describe "SOSIX typed filesystem async client v1":
         expect(result.client.submitted).to_be(false)
         expect(result.client.operation_slot.state).to_equal(SOSIX_OPERATION_FREE)
         expect(result.client.transport_state.phase).to_equal(SOSIX_FS_TRANSPORT_FREE)
-        expect(result.client.key.request_token).to_equal(0)  # oracle: value fixed by the spec contract
+        expect(result.client.key.request_token).to_equal(0)
 
     it "terminalizes a rejected syscall 132 result for consume and release":
-        step("Verify: terminalizes a rejected syscall 132 result for consume and release")
-        # @req: REQ-OS-FsAsynClieV1-001
         val begun = sosix_operation_begin(4, sosix_operation_slot_new(), 0)
         val transport = sosix_fs_transport_submit(
             sosix_fs_transport_state_new(), begun.operation, 2)
@@ -79,7 +97,7 @@ describe "SOSIX typed filesystem async client v1":
             transport_state: transport.state, key: transport.key,
             service_endpoint: 70, reply_endpoint: 71,
             api_id: SOSIX_FS_READ_AT,
-            submission_attempted: false, submitted: false)
+            submission_attempted: false, submitted: false, provider_retired: false)
         val rejected = sosix_fs_async_client_apply_send_result_v1(
             pending, 2, false, "owned-send-rejected", -5)
         expect(rejected.accepted).to_be(false)
@@ -93,8 +111,6 @@ describe "SOSIX typed filesystem async client v1":
         expect(released.client.transport_state.phase).to_equal(SOSIX_FS_TRANSPORT_FREE)
 
     it "rejects inconsistent send receipts without mutating pending state":
-        step("Verify: rejects inconsistent send receipts without mutating pending state")
-        # @req: REQ-OS-FsAsynClieV1-001
         val pending = _pending_client()
         val bad_success = sosix_fs_async_client_apply_send_result_v1(
             pending, 2, true, "submitted", 1)
@@ -108,8 +124,6 @@ describe "SOSIX typed filesystem async client v1":
         expect(bad_failure.client.transport_state.phase).to_equal(SOSIX_FS_TRANSPORT_PENDING)
 
     it "terminalizes cancellation and deadline across operation and transport":
-        step("Verify: terminalizes cancellation and deadline across operation and transport")
-        # @req: REQ-OS-FsAsynClieV1-001
         val begun_cancel = sosix_operation_begin(4, sosix_operation_slot_new(), 100)
         val cancel_transport = sosix_fs_transport_submit(
             sosix_fs_transport_state_new(), begun_cancel.operation, 2)
@@ -117,7 +131,7 @@ describe "SOSIX typed filesystem async client v1":
             operation: begun_cancel.operation, operation_slot: begun_cancel.slot,
             transport_state: cancel_transport.state, key: cancel_transport.key,
             service_endpoint: 70, reply_endpoint: 71, api_id: SOSIX_FS_READ_AT,
-            submission_attempted: true, submitted: true)
+            submission_attempted: true, submitted: true, provider_retired: false)
         val canceled = sosix_fs_async_client_cancel_v1(cancel_client)
         expect(canceled.accepted).to_be(true)
         expect(canceled.client.operation_slot.state).to_equal(SOSIX_OPERATION_CANCELED)
@@ -126,7 +140,28 @@ describe "SOSIX typed filesystem async client v1":
         val cancel_consumed = sosix_fs_async_client_consume_v1(canceled.client)
         expect(cancel_consumed.accepted).to_be(true)
         val cancel_released = sosix_fs_async_client_release_v1(cancel_consumed.client)
-        expect(cancel_released.accepted).to_be(true)
+        expect(cancel_released.accepted).to_be(false)
+        expect(cancel_released.reason).to_equal("provider-retirement-unproven")
+
+        step("Reject a spoofed retirement reply and retain the submitted buffer")
+        val spoofed = _retirement_envelope(cancel_consumed.client, 99)
+        val rejected_retirement = sosix_fs_async_client_progress_owned_result_v1(
+            cancel_consumed.client, spoofed.len() as i64, spoofed)
+        expect(rejected_retirement.accepted).to_be(false)
+        expect(rejected_retirement.client.provider_retired).to_be(false)
+        val rejected_release = sosix_fs_async_client_release_v1(rejected_retirement.client)
+        expect(rejected_release.accepted).to_be(false)
+
+        step("Retire after the authenticated service completion without a second notification")
+        val authentic = _retirement_envelope(cancel_consumed.client, 70)
+        val retired = sosix_fs_async_client_progress_owned_result_v1(
+            cancel_consumed.client, authentic.len() as i64, authentic)
+        expect(retired.accepted).to_be(true)
+        expect(retired.reason).to_equal("provider-retired")
+        expect(retired.receive.pump.notify).to_be(false)
+        expect(retired.client.provider_retired).to_be(true)
+        val retired_release = sosix_fs_async_client_release_v1(retired.client)
+        expect(retired_release.accepted).to_be(true)
 
         val deadline_client = cancel_client
         val early = sosix_fs_async_client_expire_deadline_v1(deadline_client, 99)
@@ -140,11 +175,10 @@ describe "SOSIX typed filesystem async client v1":
         val deadline_consumed = sosix_fs_async_client_consume_v1(expired.client)
         expect(deadline_consumed.accepted).to_be(true)
         val deadline_released = sosix_fs_async_client_release_v1(deadline_consumed.client)
-        expect(deadline_released.accepted).to_be(true)
+        expect(deadline_released.accepted).to_be(false)
+        expect(deadline_released.reason).to_equal("provider-retirement-unproven")
 
     it "preserves transport progress identically across cancel and deadline":
-        step("Verify: preserves transport progress identically across cancel and deadline")
-        # @req: REQ-OS-FsAsynClieV1-001
         val pending = _pending_client()
         val transport_progress = sosix_fs_transport_record_progress(
             pending.transport_state, pending.key, 1)
@@ -153,12 +187,12 @@ describe "SOSIX typed filesystem async client v1":
             transport_state: transport_progress.state, key: pending.key,
             service_endpoint: pending.service_endpoint,
             reply_endpoint: pending.reply_endpoint, api_id: pending.api_id,
-            submission_attempted: true, submitted: true)
+            submission_attempted: true, submitted: true, provider_retired: false)
 
         val canceled = sosix_fs_async_client_cancel_v1(progressed)
         expect(canceled.accepted).to_be(true)
-        expect(canceled.client.operation_slot.transferred).to_equal(1)  # oracle: value fixed by the spec contract
-        expect(canceled.client.transport_state.transferred).to_equal(1)  # oracle: value fixed by the spec contract
+        expect(canceled.client.operation_slot.transferred).to_equal(1)
+        expect(canceled.client.transport_state.transferred).to_equal(1)
         expect(canceled.client.operation_slot.partial_progress).to_be(true)
 
         val begun_deadline = sosix_operation_begin(5, sosix_operation_slot_new(), 100)
@@ -170,16 +204,14 @@ describe "SOSIX typed filesystem async client v1":
             operation: begun_deadline.operation, operation_slot: begun_deadline.slot,
             transport_state: deadline_progress.state, key: deadline_transport.key,
             service_endpoint: 70, reply_endpoint: 71, api_id: SOSIX_FS_READ_AT,
-            submission_attempted: true, submitted: true)
+            submission_attempted: true, submitted: true, provider_retired: false)
         val expired = sosix_fs_async_client_expire_deadline_v1(deadline_client, 100)
         expect(expired.accepted).to_be(true)
-        expect(expired.client.operation_slot.transferred).to_equal(1)  # oracle: value fixed by the spec contract
-        expect(expired.client.transport_state.transferred).to_equal(1)  # oracle: value fixed by the spec contract
+        expect(expired.client.operation_slot.transferred).to_equal(1)
+        expect(expired.client.transport_state.transferred).to_equal(1)
         expect(expired.client.operation_slot.partial_progress).to_be(true)
 
     it "does not consume or release before a completion is published":
-        step("Verify: does not consume or release before a completion is published")
-        # @req: REQ-OS-FsAsynClieV1-001
         val client = rejected_start(0).client
         val consumed = sosix_fs_async_client_consume_v1(client)
         expect(consumed.accepted).to_be(false)

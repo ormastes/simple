@@ -71,6 +71,7 @@ pub const KNOWN_ATTRIBUTE_NAMES: &[&str] = &[
     "interrupt",
     "boot",
     "align",
+    "global",
     "export",
     // Driver framework (FR-DRIVER-0001): @driver(...) / @native_lib(...)
     // routed through the attribute (not decorator) path so named args like
@@ -81,6 +82,7 @@ pub const KNOWN_ATTRIBUTE_NAMES: &[&str] = &[
     // SIMD/GPU optimization requirements (Phase 1 implementation)
     "must",
     "prefer",
+    "collection_algorithm",
     "error_not",
     "warn_not",
 ];
@@ -91,6 +93,200 @@ pub fn is_known_attribute_name(name: &str) -> bool {
 }
 
 impl<'a> Parser<'a> {
+    pub(crate) fn collection_owner_push(&mut self, name: &str) -> String {
+        let previous = self.collection_owner.clone();
+        self.collection_owner = if previous.is_empty() {
+            name.to_string()
+        } else {
+            format!("{previous}/{name}")
+        };
+        previous
+    }
+
+    pub(crate) fn collection_site_id(&mut self, name: &str, declaration: Span, field: bool) -> String {
+        // FNV-1a is the hash_text ABI used by the self-hosted parser. Hash the
+        // declaration without its attribute so a policy switch reuses feedback.
+        let text = self.source.get(declaration.start..declaration.end).unwrap_or("");
+        let hash = text.bytes().fold(0xcbf29ce484222325_u64, |value, byte| {
+            (value ^ u64::from(byte)).wrapping_mul(0x100000001b3)
+        }) as i64;
+        let module = if self.collection_module_path.is_empty() {
+            "<unknown>".to_string()
+        } else {
+            self.collection_module_path.replace(';', "_").replace('\n', "_").replace('\r', "_")
+        };
+        let owner = &self.collection_owner;
+        let stem = if field {
+            format!("ast://{module}/{owner}/{name}#{hash}")
+        } else if owner.is_empty() {
+            format!("ast://{module}/local/{name}#{hash}")
+        } else {
+            format!("ast://{module}/{owner}/local/{name}#{hash}")
+        };
+        if field {
+            return stem;
+        }
+        let ordinal = self.collection_site_ordinals.entry(stem.clone()).or_insert(0);
+        let site = if *ordinal == 0 { stem.clone() } else { format!("{stem}:{ordinal}") };
+        *ordinal += 1;
+        site
+    }
+
+    pub(crate) fn is_at_collection_algorithm(&mut self) -> bool {
+        self.check(&TokenKind::At)
+            && matches!(&self.peek_next().kind, TokenKind::Identifier { name, .. } if name == "collection_algorithm")
+    }
+
+    pub(crate) fn collection_algorithm_attribute(
+        &self,
+        attributes: &[Attribute],
+    ) -> Result<Option<String>, ParseError> {
+        let mut algorithm = None;
+        for attribute in attributes {
+            if attribute.name != "collection_algorithm" {
+                continue;
+            }
+            if algorithm.is_some() {
+                return Err(ParseError::contextual_error(
+                    "collection algorithm",
+                    "duplicate @collection_algorithm on one declaration",
+                    attribute.span,
+                ));
+            }
+            let name = match (&attribute.args, &attribute.named_args) {
+                (Some(args), None) if args.len() == 1 => match &args[0] {
+                    Expr::String(name) => name.as_str(),
+                    Expr::FString { parts, .. } => match parts.as_slice() {
+                        [FStringPart::Literal(name)] => name.as_str(),
+                        _ => {
+                            return Err(ParseError::contextual_error(
+                                "collection algorithm",
+                                "@collection_algorithm requires one literal string algorithm name",
+                                attribute.span,
+                            ));
+                        }
+                    },
+                    _ => {
+                        return Err(ParseError::contextual_error(
+                            "collection algorithm",
+                            "@collection_algorithm requires one string algorithm name",
+                            attribute.span,
+                        ));
+                    }
+                },
+                _ => {
+                    return Err(ParseError::contextual_error(
+                        "collection algorithm",
+                        "@collection_algorithm requires one string algorithm name",
+                        attribute.span,
+                    ));
+                }
+            };
+            if !matches!(name, "auto" | "linear" | "hash" | "ordered") {
+                return Err(ParseError::contextual_error(
+                    "collection algorithm",
+                    format!("unknown collection algorithm: {name}"),
+                    attribute.span,
+                ));
+            }
+            algorithm = Some(name.to_string());
+        }
+        Ok(algorithm)
+    }
+
+    pub(crate) fn collection_attributed_value(
+        &self,
+        value: Expr,
+        algorithm: &str,
+        site_id: &str,
+        span: Span,
+        declared_type: Option<&Type>,
+    ) -> Result<Expr, ParseError> {
+        let (receiver, constructor) = match &value {
+            Expr::MethodCall { receiver, method, .. } => (receiver.as_ref(), method.as_str()),
+            Expr::Call { callee, .. } => match callee.as_ref() {
+                Expr::FieldAccess { receiver, field } => (receiver.as_ref(), field.as_str()),
+                _ => (&value, ""),
+            },
+            _ => (&value, ""),
+        };
+        let receiver_family = match receiver {
+            Expr::Identifier(name) if matches!(name.as_str(), "AdaptiveTextSet" | "AdaptiveTextMap" | "AdaptiveSet" | "AdaptiveMap") => Some(name.as_str()),
+            _ => None,
+        };
+        let declared_family = match declared_type {
+            Some(Type::Simple(name) | Type::Generic { name, .. })
+                if matches!(name.as_str(), "AdaptiveTextSet" | "AdaptiveTextMap" | "AdaptiveSet" | "AdaptiveMap") => Some(name.as_str()),
+            _ => None,
+        };
+        let common_constructor = matches!(constructor, "new" | "with_profile" | "with_site_and_target");
+        let text_constructor = matches!(constructor, "with_site" | "with_attribute")
+            && matches!(receiver_family, Some("AdaptiveTextSet" | "AdaptiveTextMap"));
+        let direct_family = if common_constructor || text_constructor { receiver_family } else { None };
+        if receiver_family.is_some() && direct_family.is_none() && declared_family != receiver_family {
+            return Err(ParseError::contextual_error(
+                "collection algorithm",
+                "@collection_algorithm requires a written adaptive family for this method",
+                span,
+            ));
+        }
+        if direct_family.is_some() && declared_family.is_some() && direct_family != declared_family {
+            return Err(ParseError::contextual_error(
+                "collection algorithm",
+                "@collection_algorithm constructor conflicts with the written adaptive family",
+                span,
+            ));
+        }
+        let family = direct_family.or(declared_family).ok_or_else(|| ParseError::contextual_error(
+            "collection algorithm",
+            "@collection_algorithm requires an adaptive set or map initializer with a known family",
+            span,
+        ))?;
+        let effective_site = if direct_family.is_some() && matches!(constructor, "with_site" | "with_site_and_target" | "with_attribute") {
+            let args = match &value {
+                Expr::MethodCall { args, .. } | Expr::Call { args, .. } => args,
+                _ => unreachable!("validated collection constructor is a call"),
+            };
+            let literal_site = match args.get(1).map(|argument| &argument.value) {
+                Some(Expr::String(explicit)) => Some(explicit.as_str()),
+                Some(Expr::FString { parts, .. }) if parts.len() == 1 => match &parts[0] {
+                    FStringPart::Literal(explicit) => Some(explicit.as_str()),
+                    _ => None,
+                },
+                _ => None,
+            };
+            match literal_site {
+                Some(explicit) if explicit.starts_with("ast://") => explicit.to_string(),
+                Some(_) => {
+                    return Err(ParseError::contextual_error(
+                        "collection algorithm",
+                        "@collection_algorithm requires an ast:// explicit site",
+                        span,
+                    ));
+                }
+                _ => {
+                    return Err(ParseError::contextual_error(
+                        "collection algorithm",
+                        "@collection_algorithm requires a literal ast:// explicit site",
+                        span,
+                    ));
+                }
+            }
+        } else {
+            site_id.to_string()
+        };
+        Ok(Expr::MethodCall {
+            receiver: Box::new(Expr::Identifier(family.to_string())),
+            method: "attributed_at_site".to_string(),
+            args: vec![
+                Argument::with_span(None, value, span),
+                Argument::with_span(None, Expr::String(algorithm.to_string()), span),
+                Argument::with_span(None, Expr::String(effective_site), span),
+            ],
+            generic_args: Vec::new(),
+        })
+    }
+
     /// Check if current token is @ followed by a known attribute name.
     /// Used to distinguish lint-style attributes from effect decorators such as
     /// `@async`.

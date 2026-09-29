@@ -4,9 +4,6 @@
 **Date:** 2026-08-17
 **Severity:** P2 — silent wrong value, no diagnostic. Narrower than the `[u64]`
 copy defect because it needs an `[i8]` array, which is rare in this tree.
-Status: OPEN (P1)
-Status re-verified 2026-08-17 by source inspection (triage shard 01).
-**Status:** OPEN — noticed and measured, not investigated.
 Status: **FIXED 2026-08-17** — the missing GREEN below has now been observed on a
 rebuilt seed. See "GREEN observed" at the end of this record.
 

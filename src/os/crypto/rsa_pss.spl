@@ -21,6 +21,7 @@
 #
 # tag: crypto, rsa, pss
 
+use std.common.math.bigint.{bi_mod_exp_montgomery}
 use os.crypto.sha256.{sha256}
 use os.crypto.sha512.{sha512}
 
@@ -198,39 +199,14 @@ fn _pss_bi_mod(a: list, m: list) -> list:
     _pss_bi_normalize(r)
 
 fn _pss_bi_mod_exp(base: list, exp: list, modulus: list) -> list:
-    # Fixed 4-bit sliding window, MSB-first.
+    # Montgomery exponentiation from the shared pure bigint module
+    # (doc/03_plan/lib/crypto/rsa_modexp_montgomery_barrett.md Phase 3).
+    # RSA moduli (n, and the CRT primes p and q) are always odd, which is
+    # exactly Montgomery's precondition; a zero or even modulus returns zero
+    # rather than a wrong residue.
     if _pss_bi_is_zero(modulus):
         return _pss_bi_zero()
-    var powers: list = []
-    powers.push(_pss_bi_one())
-    powers.push(_pss_bi_mod(base, modulus))
-    var p: i64 = 2
-    while p < 16:
-        powers.push(_pss_bi_mod(_pss_bi_mul(powers[p - 1], powers[1]), modulus))
-        p = p + 1
-
-    var result = _pss_bi_one()
-    val bits = _pss_bi_bit_length(exp)
-    var i: i64 = bits - 1
-    while i >= 0:
-        if _pss_bi_get_bit(exp, i) == 0:
-            result = _pss_bi_mod(_pss_bi_mul(result, result), modulus)
-            i = i - 1
-        else:
-            var low = i - 3
-            if low < 0:
-                low = 0
-            while _pss_bi_get_bit(exp, low) == 0:
-                low = low + 1
-            var win: i64 = 0
-            var j = i
-            while j >= low:
-                win = win * 2 + _pss_bi_get_bit(exp, j)
-                result = _pss_bi_mod(_pss_bi_mul(result, result), modulus)
-                j = j - 1
-            result = _pss_bi_mod(_pss_bi_mul(result, powers[win]), modulus)
-            i = low - 1
-    result
+    bi_mod_exp_montgomery(base, exp, modulus)
 
 fn _pss_bytes_to_bigint_be(bytes: [u8]) -> list:
     # Big-endian bytes -> bigint

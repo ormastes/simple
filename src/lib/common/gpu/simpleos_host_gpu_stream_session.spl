@@ -1,0 +1,97 @@
+"""Single-owner state machine for one-in-flight host-GPU stream sessions."""
+
+use std.common.gpu.simpleos_host_gpu_protocol.{SIMPLEOS_HOST_GPU_STATUS_IDLE, SIMPLEOS_HOST_GPU_STATUS_PASS}
+use std.common.gpu.simpleos_host_gpu_stream_protocol.{
+    SIMPLEOS_HOST_GPU_STREAM_HELLO_REQUEST,
+    SIMPLEOS_HOST_GPU_STREAM_HELLO_RESPONSE,
+    SIMPLEOS_HOST_GPU_STREAM_SUBMIT_REQUEST,
+    SIMPLEOS_HOST_GPU_STREAM_SUBMIT_RESPONSE,
+    SIMPLEOS_HOST_GPU_STREAM_ERROR_RESPONSE,
+    SimpleOsHostGpuStreamHeader,
+    simpleos_host_gpu_stream_header_valid,
+    simpleos_host_gpu_stream_response_correlates
+}
+
+struct SimpleOsHostGpuStreamSession:
+    negotiated: bool
+    pending: bool
+    last_generation: i64
+    run_id_hash: i64
+    last_frame_id: i64
+    negotiated_backend_code: i64
+    pending_request: SimpleOsHostGpuStreamHeader
+
+struct SimpleOsHostGpuStreamSessionResult:
+    ok: bool
+    reason: text
+    session: SimpleOsHostGpuStreamSession
+
+fn _empty_header() -> SimpleOsHostGpuStreamHeader:
+    SimpleOsHostGpuStreamHeader(message_type: 0, body_bytes: 0, body_checksum: 0, generation: 0, run_id_hash: 0, frame_id: 0, backend_code: 0, kind_or_status: 0)
+
+fn simpleos_host_gpu_stream_session_new() -> SimpleOsHostGpuStreamSession:
+    SimpleOsHostGpuStreamSession(negotiated: false, pending: false, last_generation: 0, run_id_hash: 0, last_frame_id: 0, negotiated_backend_code: 0, pending_request: _empty_header())
+
+fn _session_result(ok: bool, reason: text, session: SimpleOsHostGpuStreamSession) -> SimpleOsHostGpuStreamSessionResult:
+    SimpleOsHostGpuStreamSessionResult(ok: ok, reason: reason, session: session)
+
+fn _session_clear_pending(session: SimpleOsHostGpuStreamSession, negotiated: bool, generation: i64, run_id_hash: i64, frame_id: i64, backend_code: i64) -> SimpleOsHostGpuStreamSession:
+    SimpleOsHostGpuStreamSession(negotiated: negotiated, pending: false, last_generation: generation, run_id_hash: run_id_hash, last_frame_id: frame_id, negotiated_backend_code: backend_code, pending_request: _empty_header())
+
+fn _session_fail_closed(session: SimpleOsHostGpuStreamSession) -> SimpleOsHostGpuStreamSession:
+    val pending_generation = if session.pending: session.pending_request.generation else: 0
+    val high_water = if pending_generation > session.last_generation: pending_generation else: session.last_generation
+    _session_clear_pending(session, false, high_water, 0, 0, 0)
+
+fn simpleos_host_gpu_stream_session_reset(session: SimpleOsHostGpuStreamSession) -> SimpleOsHostGpuStreamSession:
+    _session_fail_closed(session)
+
+fn simpleos_host_gpu_stream_session_begin(session: SimpleOsHostGpuStreamSession, request: SimpleOsHostGpuStreamHeader) -> SimpleOsHostGpuStreamSessionResult:
+    if session.pending:
+        return _session_result(false, "request-in-flight", session)
+    if not simpleos_host_gpu_stream_header_valid(request):
+        return _session_result(false, "invalid-request", session)
+    if request.message_type != SIMPLEOS_HOST_GPU_STREAM_HELLO_REQUEST and request.message_type != SIMPLEOS_HOST_GPU_STREAM_SUBMIT_REQUEST:
+        return _session_result(false, "request-type", session)
+    if request.generation <= session.last_generation:
+        return _session_result(false, "stale-generation", session)
+    if request.message_type == SIMPLEOS_HOST_GPU_STREAM_SUBMIT_REQUEST:
+        if not session.negotiated:
+            return _session_result(false, "hello-required", session)
+        if session.run_id_hash != 0 and request.run_id_hash != session.run_id_hash:
+            return _session_result(false, "cross-session", session)
+        if request.backend_code != session.negotiated_backend_code:
+            return _session_result(false, "backend-mismatch", session)
+        if request.frame_id <= session.last_frame_id:
+            return _session_result(false, "stale-frame", session)
+    val next_run = if request.message_type == SIMPLEOS_HOST_GPU_STREAM_SUBMIT_REQUEST: request.run_id_hash else: 0
+    val next = SimpleOsHostGpuStreamSession(
+        negotiated: if request.message_type == SIMPLEOS_HOST_GPU_STREAM_HELLO_REQUEST: false else: session.negotiated,
+        pending: true,
+        last_generation: session.last_generation,
+        run_id_hash: next_run,
+        last_frame_id: session.last_frame_id,
+        negotiated_backend_code: session.negotiated_backend_code,
+        pending_request: request
+    )
+    _session_result(true, "pending", next)
+
+fn simpleos_host_gpu_stream_session_accept(session: SimpleOsHostGpuStreamSession, response: SimpleOsHostGpuStreamHeader) -> SimpleOsHostGpuStreamSessionResult:
+    if not session.pending:
+        return _session_result(false, "no-request", _session_fail_closed(session))
+    if not simpleos_host_gpu_stream_response_correlates(session.pending_request, response):
+        return _session_result(false, "response-mismatch", _session_fail_closed(session))
+    val request = session.pending_request
+    if request.message_type == SIMPLEOS_HOST_GPU_STREAM_HELLO_REQUEST:
+        if response.message_type != SIMPLEOS_HOST_GPU_STREAM_HELLO_RESPONSE or response.kind_or_status != SIMPLEOS_HOST_GPU_STATUS_PASS:
+            return _session_result(false, "hello-rejected", _session_fail_closed(session))
+        return _session_result(true, "negotiated", _session_clear_pending(session, true, request.generation, 0, 0, request.backend_code))
+    if response.message_type == SIMPLEOS_HOST_GPU_STREAM_ERROR_RESPONSE:
+        return _session_result(false, "remote-error", _session_fail_closed(session))
+    if response.message_type != SIMPLEOS_HOST_GPU_STREAM_SUBMIT_RESPONSE or response.kind_or_status == SIMPLEOS_HOST_GPU_STATUS_IDLE:
+        return _session_result(false, "nonterminal-response", _session_fail_closed(session))
+    _session_result(true, "accepted", _session_clear_pending(session, true, request.generation, request.run_id_hash, request.frame_id, session.negotiated_backend_code))
+
+export SimpleOsHostGpuStreamSession, SimpleOsHostGpuStreamSessionResult
+export simpleos_host_gpu_stream_session_new, simpleos_host_gpu_stream_session_reset
+export simpleos_host_gpu_stream_session_begin, simpleos_host_gpu_stream_session_accept

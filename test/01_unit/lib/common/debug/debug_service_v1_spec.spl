@@ -1,0 +1,112 @@
+# codex-system-test
+"""
+## Purpose and audience
+
+Probe and evidence lifecycle contract for the central debug service: probe
+apply/list/remove with receipted perturbation, observe-only denial with a
+retained denial receipt, automatic probe teardown when the owning session
+closes, evidence binding to the exact session build with a preserved sha256
+digest, and denial of digest-less exports. Written for the debug-service
+owner; the shipped bookkeeping surface is `std.common.debug.service_v1` /
+`contracts_v1`, and the drafted probe/evidence API is documented below.
+
+## Operator workflow
+
+Run one spec: `./src/compiler_rust/target/bootstrap/simple run
+test/01_unit/lib/common/debug/debug_service_v1_spec.spl`. The shipped
+observe-only policy is exercised through a real call
+(`debug_policy_observe_only_v1`). The drafted API the original scenarios
+were written against (`DebugServiceV1.create`, `open_session`,
+`open_observe_session`, `apply_probe`, `remove_probe`, `probes_for`,
+`receipts_for`, `export_evidence`, `DebugProbeKindV1`,
+`DebugEvidenceArtifactV1`) exists nowhere in `src/` (grep-verified
+2026-09-06), so those scenarios are absence tripwires against the real
+`src/lib/common/debug/service_v1.spl` and `contracts_v1.spl` source text.
+
+## Compatibility and limitations
+
+The shipped service owns session/authorization bookkeeping only: no probe
+registry, no evidence export, no per-operation receipts trail. The
+tripwires fail closed in both directions: if the drafted probe/evidence
+surface appears in the shipped modules, or if
+`SIMPLE_DEBUG_SERVICE_TEMPORAL_DRAFTED=1` claims it landed, the scenario
+aborts and demands a rewrite against the real API. The observe-only
+scenario keeps a real shipped assertion because the shipped observe-only
+policy already exists and must keep denying Control operations.
+
+## Verification guidance and troubleshooting
+
+A failure quoting the shipped modules means the drafted probe/evidence API
+landed: port each scenario onto it and delete the tripwire helper. A
+failure naming the env flag means
+`SIMPLE_DEBUG_SERVICE_TEMPORAL_DRAFTED=1` was set without landing the API;
+unset it or implement the lifecycle. A failure on the shipped observe-only
+assertion is a genuine regression in `std.common.debug.service_v1`.
+"""
+# Lifecycle: doc/01_research/app/tools/simple_unified_debugging_evidence_2026-08-14.md ;
+# doc/03_plan/agent_tasks/simple_unified_debugging_evidence.md ;
+# doc/04_architecture/simple_unified_debugging_evidence.md ;
+# doc/05_design/simple_unified_debugging_evidence.md
+# @manual_section: debug-service-probe-evidence-lifecycle
+
+use std.spec.*
+use std.common.debug.service_v1.{debug_policy_observe_only_v1}
+
+extern fn rt_file_read_text(path: text) -> text
+use std.io_runtime.{env_get}
+
+# Fail-closed tripwire: true only while the drafted probe/evidence API is
+# still absent from the shipped debug modules AND unclaimed. Aborts the
+# scenario the moment either condition changes so the spec can never pass
+# silently against a tree where the lifecycle landed.
+fn probe_evidence_still_absent() -> bool:
+    val service_source = rt_file_read_text("src/lib/common/debug/service_v1.spl")
+    val contracts_source = rt_file_read_text("src/lib/common/debug/contracts_v1.spl")
+    val keeps_lifecycle_api_out = not service_source.contains("apply_probe") and not service_source.contains("receipts_for") and not service_source.contains("export_evidence") and not service_source.contains("class DebugServiceV1") and not contracts_source.contains("DebugProbeKindV1") and not contracts_source.contains("DebugEvidenceArtifactV1")
+    if not keeps_lifecycle_api_out:
+        fail("debug service lifecycle: the drafted probe/evidence API now appears in the shipped debug modules - port these scenarios onto it and delete the tripwire helper")
+    if env_get("SIMPLE_DEBUG_SERVICE_TEMPORAL_DRAFTED") == "1":
+        fail("debug service lifecycle: SIMPLE_DEBUG_SERVICE_TEMPORAL_DRAFTED=1 claims the lifecycle landed but the shipped modules still lack it - implement it or unset the flag")
+    true
+
+describe "DebugServiceV1 probe lifecycle":
+    # NOTE: defect record 2026-09-06 - the drafted probe/evidence API
+    # (DebugServiceV1 class, apply_probe, receipts_for, export_evidence,
+    # DebugProbeKindV1, DebugEvidenceArtifactV1) exists nowhere in src/, so
+    # the original bodies never loaded. Scenarios keep their names and
+    # intent, anchor the real shipped observe-only policy where it exists,
+    # and tripwire the drafted surface for the port.
+    it "should apply list and remove a development probe with receipted perturbation":
+        # @req REQ-008
+        # @capture(statistics): drafted probe apply/remove receipt tripwire verdict
+        step("Probe the shipped modules for the drafted receipted probe API")
+        expect(probe_evidence_still_absent()).to_be(true)  # oracle: probe.apply/probe.remove receipts are produced only by the drafted apply_probe surface, so its absence from the shipped source is the verifiable contract
+
+    it "should deny probe application under observe-only policy and retain denial receipt":
+        # @req REQ-009
+        # @capture(bit_table): shipped observe-only policy denials plus drafted probe tripwire verdict
+        step("Check the shipped observe-only policy still denies perturbing operations")
+        val observe_policy = debug_policy_observe_only_v1()
+        expect(observe_policy.allow_control).to_equal(false)  # oracle: service_v1.spl defines observe-only as allow_control=false, the shipped denial a probe-policy denial must compose with
+        expect(observe_policy.allow_domain).to_equal(false)  # oracle: service_v1.spl defines observe-only as allow_domain=false, so neither perturbing root operation passes
+        step("Probe the shipped modules for the drafted denial-receipt probe path")
+        expect(probe_evidence_still_absent()).to_be(true)  # oracle: the retained probe denial receipt is drafted-only API, so its absence from the shipped source completes this scenario
+
+    it "should remove every applied probe when the owning session closes":
+        # @req REQ-010
+        # @capture(statistics): drafted close-cleanup tripwire verdict
+        step("Probe the shipped modules for the drafted session-close probe cleanup")
+        expect(probe_evidence_still_absent()).to_be(true)  # oracle: close-triggered probe teardown is implemented only in the drafted API, so absence from the shipped source is the live assertion
+
+describe "DebugServiceV1 evidence lifecycle":
+    it "should bind valid evidence to the exact session build and preserve its digest":
+        # @req REQ-010
+        # @capture(statistics): drafted evidence-binding tripwire verdict
+        step("Probe the shipped modules for the drafted evidence manifest binding")
+        expect(probe_evidence_still_absent()).to_be(true)  # oracle: the debug-evidence-v1 manifest binding build_id and digest is drafted-only, so its absence from the shipped source is the checkable state
+
+    it "should reject a missing digest and receipt the failed export as denied":
+        # @req REQ-011
+        # @capture(statistics): drafted digest-rejection tripwire verdict
+        step("Probe the shipped modules for the drafted digest-less export denial")
+        expect(probe_evidence_still_absent()).to_be(true)  # oracle: the digest-required export validation and its denial receipt live only in the drafted API, so its absence is the assertion

@@ -1,0 +1,131 @@
+# @cover src/lib/nogc_sync_mut/rt_hal/exact_io_schema.spl 80%
+
+use std.spec.*
+use std.common.rt_hal.model.{RtHalOperationKind}
+use std.common.rt_hal.exact_type_id.{RtHalExactTypeForeignCandidate, rt_hal_exact_type_id_i64, rt_hal_exact_type_foreign_candidate}
+use std.nogc_sync_mut.rt_hal.exact_io_schema.*
+use std.nogc_sync_mut.rt_hal.exact_type_identity_owner.{
+    rt_hal_exact_type_registry_create, rt_hal_exact_type_registry_freeze,
+    rt_hal_exact_type_registry_release
+}
+
+fn span(offset: i64, length: i64) -> RtHalExactByteSpan:
+    RtHalExactByteSpan(offset: offset, length: length)
+
+fn wire_i64() -> RtHalExactTypeForeignCandidate:
+    rt_hal_exact_type_foreign_candidate(rt_hal_exact_type_id_i64())
+
+fn receipt(effect_offset: i64) -> RtHalExactIoReceiptRow:
+    RtHalExactIoReceiptRow(
+        version: RT_HAL_EXACT_IO_VERSION_V2,
+        case_id: 7, request_index: 0, provider_ordinal: 0,
+        schema_id: 3, output_type: wire_i64(), output_type_descriptor: span(0, 6),
+        output_encoding: RtHalExactEncoding.RawBytes,
+        error_type: wire_i64(), error_type_descriptor: span(0, 6), error_encoding: RtHalExactEncoding.Unit,
+        effect_type: wire_i64(), effect_type_descriptor: span(0, 6), effect_encoding: RtHalExactEncoding.RawBytes,
+        output_domain: RtHalExactIoDomain.Output,
+        error_domain: RtHalExactIoDomain.Error,
+        effect_domain: RtHalExactIoDomain.Effect,
+        outcome: RtHalExactOutcomeKind.Value,
+        output: span(0, 3), error: span(3, 0), effect: span(effect_offset, 2),
+        output_events: span(0, 0), error_events: span(0, 0), effect_events: span(0, 0),
+        observed_once: true, truncated: false)
+
+fn arena(bytes: [u8], value: RtHalExactIoReceiptRow) -> RtHalExactIoArena:
+    RtHalExactIoArena(
+        bytes: bytes,
+        requests: [RtHalExactIoRequestRow(
+            version: RT_HAL_EXACT_IO_VERSION_V2,
+            case_id: 7, operation: RtHalOperationKind.Effectful,
+            operation_type: wire_i64(), operation_type_descriptor: span(0, 6),
+            operation_encoding: RtHalExactEncoding.RawBytes,
+            operation_domain: RtHalExactIoDomain.Operation,
+            operation_identity: span(0, 1),
+            operation_events: span(0, 0),
+            schema_id: 3, input_type: wire_i64(), input_type_descriptor: span(0, 6),
+            input_encoding: RtHalExactEncoding.RawBytes,
+            input_domain: RtHalExactIoDomain.Input,
+            input: span(0, 3), input_events: span(0, 0))],
+        receipts: [value])
+
+describe "RT/HAL exact general IO schema":
+    it "compares output error and effect bytes exactly":
+        val bounds = RtHalExactIoBounds(max_rows: 2, max_arena_bytes: 16, max_field_bytes: 8)
+        val pure = arena([1, 2, 3, 9, 8, 0], receipt(3))
+        expect(rt_hal_exact_io_arena_error(pure, bounds)).to_equal("")
+        var owner = RtHalExactIoOwner(arena: RtHalExactIoArena(
+            bytes: [1, 2, 3, 9, 8, 1, 2, 3, 9, 8], requests: [],
+            receipts: [receipt(3), RtHalExactIoReceiptRow(
+                version: RT_HAL_EXACT_IO_VERSION_V2, case_id: 7, request_index: 0, provider_ordinal: 1, schema_id: 3,
+                output_type: wire_i64(), output_type_descriptor: span(0, 6), output_encoding: RtHalExactEncoding.RawBytes,
+                error_type: wire_i64(), error_type_descriptor: span(0, 6), error_encoding: RtHalExactEncoding.Unit,
+                effect_type: wire_i64(), effect_type_descriptor: span(0, 6), effect_encoding: RtHalExactEncoding.RawBytes,
+                output_domain: RtHalExactIoDomain.Output, error_domain: RtHalExactIoDomain.Error,
+                effect_domain: RtHalExactIoDomain.Effect, outcome: RtHalExactOutcomeKind.Value,
+                output: span(5, 3), error: span(8, 0), effect: span(8, 2),
+                output_events: span(0, 0), error_events: span(0, 0), effect_events: span(0, 0),
+                observed_once: true, truncated: false)]))
+        expect(owner.receipts_equal(0, 1)).to_equal(false)
+
+    it "fails closed for truncated or out-of-range payloads":
+        val bounds = RtHalExactIoBounds(max_rows: 2, max_arena_bytes: 8, max_field_bytes: 4)
+        val bad_span = arena([1, 2, 3, 4, 5, 6], RtHalExactIoReceiptRow(
+            version: RT_HAL_EXACT_IO_VERSION_V2,
+            case_id: 7, request_index: 0, provider_ordinal: 0, schema_id: 3, output_type: wire_i64(), output_type_descriptor: span(0, 6),
+            output_encoding: RtHalExactEncoding.RawBytes,
+            error_type: wire_i64(), error_type_descriptor: span(0, 6), error_encoding: RtHalExactEncoding.Unit,
+            effect_type: wire_i64(), effect_type_descriptor: span(0, 6), effect_encoding: RtHalExactEncoding.Unit,
+            output_domain: RtHalExactIoDomain.Output,
+            error_domain: RtHalExactIoDomain.Error,
+            effect_domain: RtHalExactIoDomain.Effect,
+            outcome: RtHalExactOutcomeKind.Value,
+            output: span(5, 2), error: span(0, 0), effect: span(0, 0),
+            output_events: span(0, 0), error_events: span(0, 0), effect_events: span(0, 0),
+            observed_once: true, truncated: false))
+        expect(rt_hal_exact_io_arena_error(bad_span, bounds)).to_equal("RTHAL-E-IO-SPAN")
+
+        val truncated = arena([1, 2, 3, 4, 5, 6], RtHalExactIoReceiptRow(
+            version: RT_HAL_EXACT_IO_VERSION_V2,
+            case_id: 7, request_index: 0, provider_ordinal: 0, schema_id: 3, output_type: wire_i64(), output_type_descriptor: span(0, 6),
+            output_encoding: RtHalExactEncoding.RawBytes,
+            error_type: wire_i64(), error_type_descriptor: span(0, 6), error_encoding: RtHalExactEncoding.Unit,
+            effect_type: wire_i64(), effect_type_descriptor: span(0, 6), effect_encoding: RtHalExactEncoding.Unit,
+            output_domain: RtHalExactIoDomain.Output,
+            error_domain: RtHalExactIoDomain.Error,
+            effect_domain: RtHalExactIoDomain.Effect,
+            outcome: RtHalExactOutcomeKind.Value,
+            output: span(0, 3), error: span(0, 0), effect: span(0, 0),
+            output_events: span(0, 0), error_events: span(0, 0), effect_events: span(0, 0),
+            observed_once: true, truncated: true))
+        expect(rt_hal_exact_io_arena_error(truncated, bounds)).to_equal("RTHAL-E-IO-RECEIPT")
+
+    it "accounts for all provider receipts payload arenas and wave scratch":
+        val bounds = RtHalExactIoBounds(max_rows: 2, max_arena_bytes: 16, max_field_bytes: 8)
+        var owner = RtHalExactIoOwner(arena: arena([1, 2, 3, 9, 8, 0], receipt(3)))
+        val retained = owner.retained_bytes(bounds, 3, 2, 4096)
+        expect(retained).to_be_greater_than(3 * RT_HAL_EXACT_IO_RECEIPT_CHARGE)
+        expect(owner.retained_bytes(bounds, 3, 2, retained - 1)).to_equal(-1)
+
+    it "keeps protocol failure distinct from timeout":
+        val malformed = RtHalExactIoJoinReceipt(
+            status: RtHalExactIoJoinStatus.ProtocolFailure,
+            receipt_index: -1, child_exit_code: 0, reaped: true)
+        val timed_out = RtHalExactIoJoinReceipt(
+            status: RtHalExactIoJoinStatus.TimedOut,
+            receipt_index: -1, child_exit_code: -1, reaped: false)
+        expect(malformed.status == timed_out.status).to_equal(false)
+
+    it "atomically readmits all five wire identities before publication":
+        val canonical = [118, 50, 59, 105, 54, 52]
+        val exact_arena = arena(canonical, receipt(0))
+        var builder = RtHalExactIoAdmissionBuilder(
+            arena: exact_arena, batches: [], poisoned: false)
+        val registry = rt_hal_exact_type_registry_create(8, 4096)
+        expect(builder.readmit_case(registry, 0,
+            "v2;i64", "v2;i64", "v2;i64", "v2;i64", "v2;i64")).to_equal(true)
+        expect(builder.complete()).to_equal(true)
+        val seal = rt_hal_exact_type_registry_freeze(registry)
+        var admitted = RtHalExactIoAdmittedOwner(
+            arena: exact_arena, batches: builder.batches, seal: seal)
+        expect(admitted.batch_valid(0)).to_equal(true)
+        expect(rt_hal_exact_type_registry_release(registry, seal)).to_equal(true)

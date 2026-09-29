@@ -1,26 +1,31 @@
-# @cover src/lib/nogc_async_mut/async/mod.spl 80%
 """
 ## Purpose and audience
-Purpose: should create a pending promise and resolve it
-Audience: compiler and tooling engineers who maintain this spec
-
-# Async/Promise System Tests
-
-**Feature IDs:** #RT-020
-**Category:** Runtime
-**Difficulty:** 3/5
-**Status:** In Progress
-**Requirements:** doc/requirement/async_promise_intensive_tests.md
-**Plan:** doc/03_plan/async_promise_intensive_tests.md
-**Design:** doc/05_design/async_promise_intensive_tests.md
-
-## Overview
-End-to-end system tests verifying complete async workflows combining
-promises, futures, channels, combinators, and work-stealing queues.
-These tests verify components work together, not in isolation.
+End-to-end system tests for async workflows built from the promise, future,
+channel, combinator, and work-stealing-queue primitives declared inline below
+(feature #RT-020, category Runtime). These scenarios verify the components
+work together, not in isolation. Audience: runtime engineers and reviewers of
+the async stack.
+## Operator workflow
+Run: src/compiler_rust/target/bootstrap/simple run test/03_system/stdlib/async_promise_system_spec.spl
+and read the SPEC FILE VERDICT line; every scenario must pass.
+## Compatibility and limitations
+The async primitives are exercised through the inline stub classes declared in
+this file (no function-typed fields), so a failure here indicts the composed
+workflows or the language semantics they lean on, not a shipped stdlib module
+directly. All scenarios are deterministic — no real concurrency or timers.
+## Verification guidance and troubleshooting
+A failure names the composed workflow under test (creation/resolution,
+promise-to-future flow, channels, combinators, error propagation, work
+stealing, chaining, close semantics, full pipeline). Re-run after touching the
+inline Promise/SimpleFuture/Channel/WorkStealingQueue declarations; a chain
+failure usually means value extraction through the state enum drifted.
 """
-
-# @req: REQ-STDLIB-AsynPromSyst-001
+# Lifecycle: doc/01_research/domain/sspec_documentization_maintenance.md ;
+# doc/03_plan/sspec_modernization_plan.md ;
+# doc/04_architecture/sspec_documentization_maintenance.md ;
+# doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+# @manual_section: async-promise-workflows
+# tag: slow, system
 
 # tag: slow, system
 
@@ -319,9 +324,10 @@ fn select_first_future(futures) -> SimpleFuture:
 # Test Suites
 # ============================================================
 
-use std.spec.step
 describe "Promise Creation and Resolution":
     it "should create a pending promise and resolve it":
+        # @req REQ-STDLIB-001
+        # @capture(statistics): promise state flags before and after resolve
         step("Verify: should create a pending promise and resolve it")
         # @req: REQ-STDLIB-AsynPromSyst-001
         var p = Promise(state: PromiseState.Pending)
@@ -331,11 +337,12 @@ describe "Promise Creation and Resolution":
         p.resolve(42)
         expect(p.is_resolved()).to_equal(true)
         expect(p.is_pending()).to_equal(false)
-        expect(p.value()).to_equal(42)  # oracle: value fixed by the spec contract
+        expect(p.value()).to_equal(42)  # oracle: expected value pinned by the constructed promise and channel inputs in this scenario
 
     it "should create a pending promise and reject it":
-        step("Verify: should create a pending promise and reject it")
-        # @req: REQ-STDLIB-AsynPromSyst-001
+        # @req REQ-STDLIB-001
+        # @capture(statistics): promise state flags and error text after reject
+        step("Reject a pending promise and read its error")
         var p = Promise(state: PromiseState.Pending)
         p.reject("something went wrong")
         expect(p.is_rejected()).to_equal(true)
@@ -343,8 +350,9 @@ describe "Promise Creation and Resolution":
 
 describe "Promise-to-Future Data Flow":
     it "should flow data from promise resolution through to future completion":
-        step("Verify: should flow data from promise resolution through to future completion")
-        # @req: REQ-STDLIB-AsynPromSyst-001
+        # @req REQ-STDLIB-001
+        # @capture(statistics): resolved value carried into the future
+        step("Carry a resolved promise value into a pending future")
         var p = Promise(state: PromiseState.Resolved(42))
         var future = future_pending()
 
@@ -355,11 +363,12 @@ describe "Promise-to-Future Data Flow":
             case _:
                 expect("promise should already be resolved").to_equal("")
         expect(future.is_ready()).to_equal(true)
-        expect(future.value()).to_equal(42)  # oracle: value fixed by the spec contract
+        expect(future.value()).to_equal(42)  # oracle: expected value pinned by the constructed promise and channel inputs in this scenario
 
     it "should flow rejection from promise to failed future":
-        step("Verify: should flow rejection from promise to failed future")
-        # @req: REQ-STDLIB-AsynPromSyst-001
+        # @req REQ-STDLIB-001
+        # @capture(statistics): rejection error text carried into the future
+        step("Carry a promise rejection into a failed future")
         var p = Promise(state: PromiseState.Pending)
         p.reject("upstream error")
 
@@ -369,35 +378,38 @@ describe "Promise-to-Future Data Flow":
 
 describe "Channel Producer-Consumer":
     it "should deliver all messages from producer to consumer in order":
-        step("Verify: should deliver all messages from producer to consumer in order")
-        # @req: REQ-STDLIB-AsynPromSyst-001
+        # @req REQ-STDLIB-001
+        # @capture(bit_table): receive order across the five queued messages
+        step("Drain a five-message channel and check FIFO order")
         var ch = Channel(buffer: [0, 10, 20, 30, 40], closed: false, count: 5)
 
-        expect(ch.size()).to_equal(5)  # oracle: value fixed by the spec contract
+        expect(ch.size()).to_equal(5)  # oracle: expected value pinned by the constructed promise and channel inputs in this scenario
 
         var r0 = ch.receive()
         var r1 = ch.receive()
         var r2 = ch.receive()
         var r3 = ch.receive()
         var r4 = ch.receive()
-        expect(r0).to_equal(0)  # oracle: value fixed by the spec contract
-        expect(r1).to_equal(10)  # oracle: value fixed by the spec contract
-        expect(r2).to_equal(20)  # oracle: value fixed by the spec contract
-        expect(r3).to_equal(30)  # oracle: value fixed by the spec contract
-        expect(r4).to_equal(40)  # oracle: value fixed by the spec contract
+        expect(r0).to_equal(0)  # oracle: expected value pinned by the constructed promise and channel inputs in this scenario
+        expect(r1).to_equal(10)  # oracle: expected value pinned by the constructed promise and channel inputs in this scenario
+        expect(r2).to_equal(20)  # oracle: expected value pinned by the constructed promise and channel inputs in this scenario
+        expect(r3).to_equal(30)  # oracle: expected value pinned by the constructed promise and channel inputs in this scenario
+        expect(r4).to_equal(40)  # oracle: expected value pinned by the constructed promise and channel inputs in this scenario
         expect(ch.is_empty()).to_equal(true)
 
     it "should return nil when receiving from empty channel":
-        step("Verify: should return nil when receiving from empty channel")
-        # @req: REQ-STDLIB-AsynPromSyst-001
+        # @req REQ-STDLIB-001
+        # @capture(statistics): receive result on an empty channel
+        step("Receive from an empty channel")
         var ch = Channel(buffer: [], closed: false, count: 0)
         var result = ch.receive()
         expect(result).to_be_nil()
 
 describe "Future Combinators - join_all and select":
     it "should join all ready futures into a single result list":
-        step("Verify: should join all ready futures into a single result list")
-        # @req: REQ-STDLIB-AsynPromSyst-001
+        # @req REQ-STDLIB-001
+        # @capture(statistics): joined result list order
+        step("Join three ready futures into one result list")
         var f1 = future_ready(10)
         var f2 = future_ready(20)
         var f3 = future_ready(30)
@@ -405,26 +417,28 @@ describe "Future Combinators - join_all and select":
         var joined = join_all_futures([f1, f2, f3])
         expect(joined.is_ready()).to_equal(true)
         var vals = joined.value()
-        expect(vals.len()).to_equal(3)  # oracle: value fixed by the spec contract
-        expect(vals[0]).to_equal(10)  # oracle: value fixed by the spec contract
-        expect(vals[1]).to_equal(20)  # oracle: value fixed by the spec contract
-        expect(vals[2]).to_equal(30)  # oracle: value fixed by the spec contract
+        expect(vals.len()).to_equal(3)  # oracle: expected value pinned by the constructed promise and channel inputs in this scenario
+        expect(vals[0]).to_equal(10)  # oracle: expected value pinned by the constructed promise and channel inputs in this scenario
+        expect(vals[1]).to_equal(20)  # oracle: expected value pinned by the constructed promise and channel inputs in this scenario
+        expect(vals[2]).to_equal(30)  # oracle: expected value pinned by the constructed promise and channel inputs in this scenario
 
     it "should select the first ready future from a mixed set":
-        step("Verify: should select the first ready future from a mixed set")
-        # @req: REQ-STDLIB-AsynPromSyst-001
+        # @req REQ-STDLIB-001
+        # @capture(statistics): selected future value from a mixed set
+        step("Select the ready future out of a pending/ready/pending set")
         var f1 = future_pending()
         var f2 = future_ready(99)
         var f3 = future_pending()
 
         var selected = select_first_future([f1, f2, f3])
         expect(selected.is_ready()).to_equal(true)
-        expect(selected.value()).to_equal(99)  # oracle: value fixed by the spec contract
+        expect(selected.value()).to_equal(99)  # oracle: expected value pinned by the constructed promise and channel inputs in this scenario
 
 describe "Error Propagation":
     it "should propagate rejection from promise through future to combinator":
-        step("Verify: should propagate rejection from promise through future to combinator")
-        # @req: REQ-STDLIB-AsynPromSyst-001
+        # @req REQ-STDLIB-001
+        # @capture(statistics): error text propagated through the join combinator
+        step("Propagate a promise rejection through a future into join_all")
         var p = Promise(state: PromiseState.Pending)
         p.reject("upstream failure")
         expect(p.is_rejected()).to_equal(true)
@@ -440,8 +454,9 @@ describe "Error Propagation":
 
 describe "Work-Stealing Queue Distribution":
     it "should distribute and steal tasks across worker queues":
-        step("Verify: should distribute and steal tasks across worker queues")
-        # @req: REQ-STDLIB-AsynPromSyst-001
+        # @req REQ-STDLIB-001
+        # @capture(bit_table): task movement between worker queues
+        step("Push tasks, steal across workers, and pop from the owner queue")
         var wsq = WorkStealingQueue(q0: [], q1: [], q2: [])
 
         wsq.push(0, 10)
@@ -449,29 +464,31 @@ describe "Work-Stealing Queue Distribution":
         wsq.push(0, 30)
         wsq.push(1, 40)
 
-        expect(wsq.total_tasks()).to_equal(4)  # oracle: value fixed by the spec contract
+        expect(wsq.total_tasks()).to_equal(4)  # oracle: expected value pinned by the constructed promise and channel inputs in this scenario
 
         # Worker 2 steals from worker 0 (takes from front)
         var stolen = wsq.steal(from_id: 0)
-        expect(stolen).to_equal(10)  # oracle: value fixed by the spec contract
+        expect(stolen).to_equal(10)  # oracle: expected value pinned by the constructed promise and channel inputs in this scenario
 
         # Worker 0 pops from own queue (takes from back)
         var own = wsq.pop(worker_id: 0)
-        expect(own).to_equal(30)  # oracle: value fixed by the spec contract
+        expect(own).to_equal(30)  # oracle: expected value pinned by the constructed promise and channel inputs in this scenario
 
-        expect(wsq.total_tasks()).to_equal(2)  # oracle: value fixed by the spec contract
+        expect(wsq.total_tasks()).to_equal(2)  # oracle: expected value pinned by the constructed promise and channel inputs in this scenario
 
     it "should return nil when stealing from empty queue":
-        step("Verify: should return nil when stealing from empty queue")
-        # @req: REQ-STDLIB-AsynPromSyst-001
+        # @req REQ-STDLIB-001
+        # @capture(statistics): steal result on an empty queue
+        step("Steal from an empty worker queue")
         var wsq = WorkStealingQueue(q0: [], q1: [], q2: [])
         var result = wsq.steal(from_id: 0)
         expect(result).to_be_nil()
 
 describe "Promise Chaining":
     it "should chain multiple promise resolutions producing correct final result":
-        step("Verify: should chain multiple promise resolutions producing correct final result")
-        # @req: REQ-STDLIB-AsynPromSyst-001
+        # @req REQ-STDLIB-001
+        # @capture(bit_table): transformed values across the three-chain
+        step("Chain three promises through additive and multiplicative transforms")
         # Without function-typed fields, we chain manually
         var p1 = Promise(state: PromiseState.Pending)
         var p2 = Promise(state: PromiseState.Pending)
@@ -488,15 +505,16 @@ describe "Promise Chaining":
         var v2 = p2.value()
         p3.resolve(v2 * 2)
 
-        expect(p1.value()).to_equal(5)  # oracle: value fixed by the spec contract
-        expect(p2.value()).to_equal(15)  # oracle: value fixed by the spec contract
-        expect(p3.value()).to_equal(30)  # oracle: value fixed by the spec contract
+        expect(p1.value()).to_equal(5)  # oracle: expected value pinned by the constructed promise and channel inputs in this scenario
+        expect(p2.value()).to_equal(15)  # oracle: expected value pinned by the constructed promise and channel inputs in this scenario
+        expect(p3.value()).to_equal(30)  # oracle: expected value pinned by the constructed promise and channel inputs in this scenario
         expect(p3.is_resolved()).to_equal(true)
 
 describe "Mixed Ready and Pending Futures":
     it "should handle join_all with all ready futures":
-        step("Verify: should handle join_all with all ready futures")
-        # @req: REQ-STDLIB-AsynPromSyst-001
+        # @req REQ-STDLIB-001
+        # @capture(statistics): joined list length for all-ready input
+        step("Join an all-ready future set")
         var futures = [
             future_ready(1),
             future_ready(2),
@@ -505,11 +523,12 @@ describe "Mixed Ready and Pending Futures":
         var joined = join_all_futures(futures)
         expect(joined.is_ready()).to_equal(true)
         var vals = joined.value()
-        expect(vals.len()).to_equal(3)  # oracle: value fixed by the spec contract
+        expect(vals.len()).to_equal(3)  # oracle: expected value pinned by the constructed promise and channel inputs in this scenario
 
     it "should select first ready from mixed ready/pending set":
-        step("Verify: should select first ready from mixed ready/pending set")
-        # @req: REQ-STDLIB-AsynPromSyst-001
+        # @req REQ-STDLIB-001
+        # @capture(statistics): selected value from the mixed set
+        step("Select the single ready future from a mostly-pending set")
         var futures = [
             future_pending(),
             future_pending(),
@@ -518,11 +537,12 @@ describe "Mixed Ready and Pending Futures":
         ]
         var result = select_first_future(futures)
         expect(result.is_ready()).to_equal(true)
-        expect(result.value()).to_equal(77)  # oracle: value fixed by the spec contract
+        expect(result.value()).to_equal(77)  # oracle: expected value pinned by the constructed promise and channel inputs in this scenario
 
     it "should return pending when no futures are ready":
-        step("Verify: should return pending when no futures are ready")
-        # @req: REQ-STDLIB-AsynPromSyst-001
+        # @req REQ-STDLIB-001
+        # @capture(statistics): selector verdict on an all-pending set
+        step("Select from an all-pending future set")
         var futures = [
             future_pending(),
             future_pending()
@@ -533,18 +553,20 @@ describe "Mixed Ready and Pending Futures":
 
 describe "Channel Close Semantics":
     it "should stop accepting messages after channel is closed":
-        step("Verify: should stop accepting messages after channel is closed")
-        # @req: REQ-STDLIB-AsynPromSyst-001
+        # @req REQ-STDLIB-001
+        # @capture(statistics): channel size after post-close send
+        step("Send after closing a text channel and check the size")
         var ch = TextChannel(buffer: [], closed: false, count: 0)
         ch.send("before")
         ch.close()
         ch.send("after")
-        expect(ch.size()).to_equal(1)  # oracle: value fixed by the spec contract
+        expect(ch.size()).to_equal(1)  # oracle: expected value pinned by the constructed promise and channel inputs in this scenario
         expect(ch.receive()).to_equal("before")
 
     it "should drain remaining messages after close":
-        step("Verify: should drain remaining messages after close")
-        # @req: REQ-STDLIB-AsynPromSyst-001
+        # @req REQ-STDLIB-001
+        # @capture(bit_table): drained message order after close
+        step("Close a loaded channel and drain it in order")
         var ch = Channel(buffer: [], closed: false, count: 0)
         ch.send(1)
         ch.send(2)
@@ -555,15 +577,16 @@ describe "Channel Close Semantics":
         var r1 = ch.receive()
         var r2 = ch.receive()
         var r3 = ch.receive()
-        expect(r1).to_equal(1)  # oracle: value fixed by the spec contract
-        expect(r2).to_equal(2)  # oracle: value fixed by the spec contract
-        expect(r3).to_equal(3)  # oracle: value fixed by the spec contract
+        expect(r1).to_equal(1)  # oracle: expected value pinned by the constructed promise and channel inputs in this scenario
+        expect(r2).to_equal(2)  # oracle: expected value pinned by the constructed promise and channel inputs in this scenario
+        expect(r3).to_equal(3)  # oracle: expected value pinned by the constructed promise and channel inputs in this scenario
         expect(ch.is_empty()).to_equal(true)
 
 describe "Full Pipeline Simulation":
     it "should run a complete pipeline with promises, futures, channel, and combinator":
-        step("Verify: should run a complete pipeline with promises, futures, channel, and combinator")
-        # @req: REQ-STDLIB-AsynPromSyst-001
+        # @req REQ-STDLIB-001
+        # @capture(protocol_json): end-to-end pipeline values joined from the channel
+        step("Run promises through a channel into joined futures end to end")
         var ch = Channel(buffer: [], closed: false, count: 0)
 
         # Simulate 3 async tasks resolving promises and sending to channel
@@ -590,12 +613,12 @@ describe "Full Pipeline Simulation":
         var joined = join_all_futures([f1, f2, f3])
         expect(joined.is_ready()).to_equal(true)
         var final_vals = joined.value()
-        expect(final_vals[0]).to_equal(100)  # oracle: value fixed by the spec contract
-        expect(final_vals[1]).to_equal(200)  # oracle: value fixed by the spec contract
-        expect(final_vals[2]).to_equal(300)  # oracle: value fixed by the spec contract
+        expect(final_vals[0]).to_equal(100)  # oracle: expected value pinned by the constructed promise and channel inputs in this scenario
+        expect(final_vals[1]).to_equal(200)  # oracle: expected value pinned by the constructed promise and channel inputs in this scenario
+        expect(final_vals[2]).to_equal(300)  # oracle: expected value pinned by the constructed promise and channel inputs in this scenario
 
         # Verify total sum
         var total = 0
         for v in final_vals:
             total = total + v
-        expect(total).to_equal(600)  # oracle: value fixed by the spec contract
+        expect(total).to_equal(600)  # oracle: expected value pinned by the constructed promise and channel inputs in this scenario

@@ -1,4 +1,8 @@
 # Native enum text payload becomes a decimal pointer
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status (2026-07-15):** Pure-Simple enum payload typing fix landed. Strict
 default-LLVM + explicit-Cranelift callback/match/field-assignment regression added to
@@ -35,3 +39,4 @@ Owner: native enum construction/pattern-binding lowering. Fix once in the
 compiler; do not add UI-local pointer formatting, runtime aliases, or fake
 history events. Add a minimal native regression that constructs a text-bearing
 enum, passes it through a callback, pattern-matches it, and asserts the text.
+

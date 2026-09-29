@@ -31,334 +31,64 @@ common value function alone is not an atomic synchronization primitive.
 
 ## Status
 
-These are common/compiler contract foundations, not a claim that every current
-actor, process, thread-pool, generic channel, or backend layout path already
-enforces them. The snapshot transition does not itself interpret payloads or
-run an application verifier. Runtime adapters, typed bounded public transport,
-structured task groups, physical layout lowering, and end-to-end process/device
-evidence remain work-package gates. Consult the receipt and the matching
-runtime gate before relying on a path in production.
-
-Actor mailboxes also have finite admission by default: zero or negative
-capacity resolves to 256 rather than enabling an unbounded queue. A positive
-capacity remains an explicit override. This prevents accidental unbounded
-retention. The actor FIFO uses a bounded head cursor and compacts only when a
-full backing buffer needs reuse; a native execution gate and typed public
-backpressure receipt remain open.
-
-This contract applies to `std.actor` only. The separate legacy `std.actors`
-runtime remains excluded: it copies mailbox state into actor references, drops
-oldest messages on overflow, and retains unbounded ask replies. Do not use it
-as a bounded or ownership-safe parallel boundary; its migration requires the
-typed mailbox and result-lifecycle work packages.
-
-The legacy actor mailbox now uses one class-backed state owned through its
-scheduler. `ActorRef` retains only its actor ID and admitting scheduler, so
-public send, ask, pending-work queries, and stop cannot enqueue through a
-separate mailbox handle. This repairs the previous copied-queue split,
-and actor stop now closes that shared state before it discards queued work, so
-future sends are rejected through every copy. Native actor send now has an
-additive checked ABI that reports accepted versus invalid/full/disconnected;
-the legacy void symbol delegates to it for generated-code compatibility. The
-hosted Rust provider also has additive cooperative `rt_actor_stop`: the first
-stop closes the retained senders, removes scheduler mailbox admission, wakes a
-blocked receive, keeps the worker joinable, and makes `rt_actor_is_alive`
-false; later stops report false. Simple native `ActorRef.stop()` uses that
-checked lifecycle boundary. There is no C actor provider yet, and native ask
-plus typed transfer envelopes remain required before this becomes a complete
-ownership-safe actor transport.
-Mailbox reads, fullness checks, and statistics now take the same state mutex as
-enqueue/dequeue, and the mailbox exposes a retained-message high-water count
-for bounded-memory evidence. That metric does not establish native actor
-lifecycle or typed transfer safety.
-The single-threaded actor scheduler also uses a consumed-prefix cursor for its
-ready IDs. It reclaims a half-consumed large prefix in bounded batches rather
-than slicing the front after every dispatch; this is an amortized scheduling
-storage repair, not evidence of multi-threaded actor execution.
-The scheduler itself is a class-backed authority. Every `ActorRef` retains the
-scheduler that admitted it, and send/ask/stop resolve the actor through that
-registry rather than falling back to the ambient global scheduler or calling a
-mailbox from the reference. References copied from that actor retain the same
-routing identity. The scheduler records its creator OS-thread identity and
-rejects registry, send, ask, stop, query, and dispatch operations from other
-threads. The registry, ready queue, and reply store therefore remain an
-enforced single-threaded execution domain; cross-thread producers need a future
-synchronized command ingress. `ActorRef.stop()` drains queued asks and releases their reservations
-before close. A second stop reports `false`, exposing exactly one successful
-terminal removal without recreating discarded work.
-Each `Actor` is likewise class-backed: lifecycle state and error/dispatch
-counters remain with the scheduler’s actor handle instead of disappearing in
-value-array iteration.
-Legacy `ask()` replies now reserve a finite scheduler-owned result slot at
-admission. That credit remains consumed through handler completion until the
-caller consumes or calls `cancel_ask(reply_id)`; an exhausted store rejects the ask rather
-than silently dropping a completed result. This remains a scalar legacy actor
-convention, not a typed transfer/parent-commit channel. Use
-`ActorScheduler.with_reply_capacity(n)` to select one finite scheduler-wide
-budget; zero and negative values resolve to the finite default, never to
-unbounded storage. `reply_capacity()` and `outstanding_reply_count()` expose
-the admitted limit and current retained work.
-
-The domain guard applies to observations as well as admission. Off-domain
-`get_reply`/`consume_reply` return nil, cancellation returns false, count and
-capacity queries return zero, error text is empty, and `stats_string()` returns
-`Scheduler(unavailable: wrong thread)`. Those sentinels disclose no scheduler
-state and do not consume, cancel, or otherwise mutate retained work. Code must
-not treat the sentinels as an authoritative empty scheduler; it must execute
-through the creator domain or a future synchronized ingress.
-
-The legacy `PriorityMailbox` compatibility spelling `unbounded()` also now
-selects its finite default capacity. Queue owners normalize non-positive or
-forged capacities before admission, so zero cannot reopen an unbounded queue.
-The high-priority reserve is active only when priority admission is enabled;
-the default normal-only mailbox retains its full configured finite capacity.
-
-The compiler-private `PoolStateV1` wrapper is a separate internal runtime
-pilot: it accepts only a direct `fn(i64) -> i64` plus inline `i64` input,
-holds bounded credit until the caller joins and releases the scalar result, and
-uses opaque runtime handles. It is not exported as `ThreadPool`, does not
-accept closures or heap graphs, and requires native-runtime evidence before a
-public task API can rely on it.
-
-The scalar `BoundedChannel` implementation also uses a consumed-prefix cursor:
-receive is normally O(1), and backing storage is compacted only when a later
-send needs capacity. This retains its existing scalar sentinel API and does
-not turn it into a typed task/process transport; task envelopes still require
-their own ownership and lifecycle contract.
-
-Parent commit order is independent of child completion order. The bounded
-commit engine uses stable merge ordering, so equal keys preserve their
-left-to-right input order while large result batches avoid quadratic selection
-work. `ParentCommitOwnerV1` owns those responsibilities for its narrow
-payload-token application root: it applies canonical ordered tokens to an
-off-root candidate, verifies the complete candidate, and publishes that root
-with revision/token metadata under one mutex.
-
-`ParentCommitOwnerV1` is the current internal runtime owner for that root. It
-serializes the live revision/token with a mutex and commits only fully
-validated batches. Process-to-parent results use a framed, pointer-free `SPRS`
-payload: the frame route/checksum and the typed result codec must both validate
-before the owner builds a submission. `ParentCommitFrameInboxV1` provides the
-matching parent ingress boundary. It copies accepted frames, rejects malformed
-ones before retention, limits both frame count and copied bytes (16 MiB by
-default), drains after close, and uses a head cursor rather than repeatedly
-slicing the FIFO front. The parent may drain an explicit bounded batch and
-commit it in one canonical transition. Its mutex-protected counters expose
-accepted/rejected totals and frame/byte high-water marks for deterministic
-bounded-memory checks.
-
-`ParentCommitPipedResultReaderV1` is the bounded adapter for the existing
-native piped-child stdout surface. It accepts only newline-terminated `SPRF1`
-ASCII armor containing canonical lowercase-hex frame bytes, reassembles
-partial reads, and passes verified frames into the inbox. It never decodes
-arbitrary stdout as a frame, and it discards overlong lines through their next
-newline rather than retaining unbounded partial text. Its default maximum line
-matches the process-frame codec maximum; an application may pass a smaller
-line budget, but cannot enlarge that transport bound.
-Non-ASCII stdout is rejected before it is retained, keeping this an actual
-byte bound even though the host pipe surface is `text`.
-The reader also records its retained partial-line high-water mark, so a focused
-memory gate can assert its maximum without relying on host RSS. That metric is
-per reader lifetime and does not represent child-side or pipe-kernel buffering.
-Closing the reader clears any partial line and makes later stdout chunks fail
-at the reader boundary; a closed inbox alone is not used as a reason to retain
-more child output.
-
-This is still not a complete application process API or an implicit retry
-queue. `ParentCommitPipedProcessSessionV1` owns one piped child launch, reader,
-cancellation, natural-exit cleanup, and at-most-once native close attempt. A
-structured stdin request protocol and admitted native backpressure evidence
-remain application/runtime work. A frame is consumed
-once the parent drains it; a stale or conflicting batch remains rejected and
-the application must produce a new result against a new snapshot. The local
-deployed self-hosted runner currently fails its bounded `test --help` ABI probe
-with status 139, so native child delivery, backpressure, and cleanup execution
-evidence remain required before using this internal path as production
-transport.
-
-Obtain the generation from the sole long-lived
-`ParentCommitOwnerV1.issue_process_session_generation()`, construct the inbox
-with `parent_commit_frame_inbox_v1_for_generation(capacity, generation)`, and
-pass both to `parent_commit_piped_process_session_v1`. The generation must
-match or the child is not spawned; allocator exhaustion fails closed.
-Within that finite session, the parent rejects frames
-from another generation and repeated region IDs before retention. Poll only
-through the session owner and call `close()` or `cancel()` when appropriate;
-poll reaps an observed natural exit. Close is idempotent and the status receipt
-reports cancellation/natural-exit state and the native close-attempt count.
-
-## Focused Modern SSpec evidence
-
-Two focused system specifications document the implemented compatibility
-surfaces without promoting them to complete actor/process transport:
-
-- `test/03_system/feature/language/actor_channel_authority_spec.spl` covers
-  same-thread scheduler authority, copied scalar-text arguments, finite mailbox
-  and reply credit, unknown/stopped rejection, unique terminal removal, and a
-  deterministic owner-identity mismatch over populated state. The latter
-  proves guard rejection and state preservation but does not claim live
-  cross-thread transport. Its authored mirror is
-  `doc/06_spec/03_system/feature/language/actor_channel_authority_spec.md`.
-- `test/03_system/feature/language/parent_commit_piped_result_spec.spl` covers
-  fragmented/replayed encoded child output, copied frame retention, parent
-  candidate apply/verify/publish, rollback, cancellation/revocation, and
-  close-once receipts. Its authored mirror is
-  `doc/06_spec/03_system/feature/language/parent_commit_piped_result_spec.md`.
-
-Both primary scenarios convert observations into closed Modern SSpec evidence
-and compare them with independently declared `check_exact` oracles. Diagnostic
-text is not its own oracle. The actor schemas are
-`actor-channel-authority/v1` and `actor-owner-domain-rejection/v1`; the process schema is
-`parent-commit-piped-result/v1`. Missing/extra fields, unresolved selectors,
-and mismatches fail closed.
-
-Run the intended native gates only through a qualified pure-Simple self-hosted
-test surface:
-
-```sh
-SIMPLE_LIB=src bin/release/simple test test/03_system/feature/language/actor_channel_authority_spec.spl --mode=native
-SIMPLE_LIB=src bin/release/simple test test/03_system/feature/language/parent_commit_piped_result_spec.spl --mode=native
-```
-
-Then run `spipe-docgen` and `sspec-maintain scan` for each executable as listed
-in `doc/03_plan/sys_test/actor_channel_authority.md` and
-`doc/03_plan/sys_test/parent_authoritative_actor_process.md`. The admitted
-Stage-2 compiler has no qualified test/docgen/maintenance surface, so neither
-spec executes through it. Their Markdown files are therefore authored mirrors,
-not accepted generated manuals; no Rust seed or Stage-2 direct compile result
-may substitute for self-hosted test/docgen/maintenance evidence.
-
-WP-18 now has internal runtime groundwork for a deliberately narrow bounded
-scalar pool-state pilot. Capacity counts pending, running, and completed but
-unreleased tasks; credit returns only on release. Tagged generation handles are
-pinned during runtime calls, so stale and wrong-kind handles fail closed. The
-runtime ABI validates and copies a compiler-produced noncapturing direct-function
-descriptor before returning from submit. This ABI is not public Simple API:
-the attempted native facade spec timed out in the runner before a callback
-assertion verdict, so end-to-end native Simple callback evidence and
-alternate-provider execution,
-language-enforced handle uniqueness, captured closures, heap results,
-cancellation, blocking submit, and migration of legacy globals remain open.
-
-The native runtime currently has one deliberately narrow heap-copy building
-block: boxed `f64`, boxed `u64`, and immutable UTF-8 strings can be encoded by
-logical content with a bounded `EncodedCopy` packet and reconstructed with a
-new heap identity. This is not a general object-graph codec. Arrays, mappings,
-tuples, objects, capabilities, device values, and unauthenticated remote routes
-remain rejected until their schema, ownership, or lease contract lands.
-
-The compiler also has an initial logical storage-access analysis. Given region
-identities established by ownership analysis, MIR constant-index loads and
-stores retain known half-open ranges, while dynamic indices, nested indices,
-unbound pointers, and field paths remain conservative. Field names are useful
-layout-planning evidence but do not yet prove physical disjointness. No current
-backend may infer `noalias` or claim AoS/SoA lowering from these facts alone.
-
-The layout advisory uses a separate typed terminal-event view. A conservative
-record Load remains visible to ownership/conflict analysis, but is excluded
-from locality counts only when all of its uses are direct field projections.
-This deliberate difference never flows backward: a SoA recommendation cannot
-prove field disjointness, ownership, or parallel scheduling safety.
-
-Native typed-storage evidence is frozen as a deep-copied module-qualified
-registry before cache lookup. The parent then creates immutable-lease class
-capsules pairing MIR, storage sites, and compile identity; the builder callback
-does not read mutable driver context or cache authority. Codegen revalidates
-the complete MIR/storage identity around compilation, emits an object-hash
-receipt, and a parent-only completion hook validates and checkpoints each
-successful cache entry. The current
-builder executes its batch sequentially, so this is concurrency-ready transport
-parity, not real parallel `T[]` compilation. Process workers remain blocked on
-a complete MIR-plus-storage codec.
-
-The common storage contract also includes a checked reference conversion oracle
-for fixed-size records. It can convert non-overlapping fields among AoS, SoA,
-and tail-padded AoSoA plans and verify exact logical round trips. The oracle is
-limited to 64 MiB, copies value-semantic byte arrays, and rejects malformed or
-overlapping physical mappings. It is test evidence, not the optimized typed
-array view or backend lowering promised by WP-22.
-
-The compiler now has a first explicitly bound typed fixed-record host view.
-Given the frozen storage plan, revision, element count, logical stride, and
-exact field schema, it derives an overflow-checked affine address recipe:
-`base + index * stride + field_offset` for AoS or
-`base + column_offset + index * field_size` for SoA. The custom x86 native
-selector lowers that canonical MIR intrinsic to real multiply/add addressing.
-Address-observed or ABI-pinned records, malformed schemas, unknown fields, and
-specialized layouts fail closed. This does not reinterpret ordinary dynamic
-`T[]`; automatic typed-array allocation/binding and complete load/store
-rewriting remain open.
-
-Logical typed-view producers use `mir.storage.project_field.v1`. A late MIR
-rewrite resolves an exact `(function symbol, base local)` sidecar entry before
-emitting the validated affine address intrinsic. Missing or duplicate bindings,
-dynamic field IDs, observed addresses, ABI-pinned plans, and unsupported layouts
-fail closed. The site must also carry a proven index bound and a byte-capacity
-that contains the maximum projected address. Driver-owned registration and a public `StorageView<T>` allocation
-owner are still planned; ordinary arrays must not be inferred into this path.
-
-The compiler driver owns these bindings per module for one compile session.
-They freeze before parallel code generation, are removed with MIR eviction,
-and their complete sorted semantics participate in native cache identity. The
-rewrite happens atomically after generic MIR optimization and immediately
-before backend dispatch, leaving canonical MIR unchanged on success or failure.
-Current production admission is deliberately limited to custom-native x86_64
-and 8-byte fields; other backends and widths fail rather than emitting a NOP or
-using the wrong scalar load/store width.
-
-Mapped-byte evidence uses the canonical exact-width `rt_ptr_read_u8` boundary.
-The loader performs one direct copy into its result array; it no longer lowers
-raw `*u8` dereference (which the current MIR path misclassifies) or builds an
-intermediate slice. This also avoids an i32/i64 over-read at the last byte of a
-mapping. A fresh runtime artifact containing the symbol is required before the
-W^X parity scenario can be admitted again.
-
-The MIR optimizer now also checks whether an AoSoA block is compatible with a
-selected fixed-width SIMD route. Matching AVX/NEON-style widths are admitted;
-AoS and SoA retain the scalar/reference fallback; ABI-pinned or mismatched
-storage is rejected. SVE and RVV are recorded as explicitly deferred because
-the native scalable-vector lowering path is not yet implemented. Admission is
-only a legality gate: it emits no vector instructions, tail mask, or alias
-metadata.
-
-For admitted fixed-width plans, the optimizer can now derive a bounded physical
-block schedule. Exact blocks are eligible for later vector lowering; a partial
-last block always records its logical start/count as a scalar tail. The
-schedule checks byte capacity, block budgets, forged admission shapes, and
-arithmetic overflow. It never treats padded AoSoA lanes as logical elements and
-does not manufacture a generic masked tail that current native backends cannot
-yet prove safe.
-
-A storage-aware emitter can now turn one proven full block into typed MIR SIMD
-loads, arithmetic, and a store. It accepts only concrete MIR vector shapes and
-only the OpenCL backend, whose lowering is exercised by an emitted-source
-fixture. Callers pass pointers already projected to the requested physical
-block and iterate only across `full_block_count`; scalar tails are never handed
-to the emitter. Native x86/AArch64/RISC-V targets reject before emission because
-their current selectors would otherwise reduce these operations to NOPs.
-
-The x86 native route accepts only an explicit `native-x86_64-avx2` storage
-selection with a 32-byte projection-alignment proof. It lowers f32x8 aligned
-loads, Add/Sub/Mul/Div, and aligned stores through machine selection, low-eight
-YMM assignment, scalar pointer allocation, and exact VEX encoding. Unsupported
-shapes, missing alignment evidence, missing target-capability receipts, and
-true overlapping vector pressure fail closed. Straight-line regions reuse
-YMM lanes after a value's exact last use, so a chain may contain more than
-eight destinations without manufacturing spill support. Multi-block SIMD
-regions and calls are rejected because CFG liveness is not authoritative and
-the supported SysV YMM lanes are caller-clobbered. A compiled-only system spec maps the emitted
-bytes W^X, runs them only after the canonical CPUID/XGETBV AVX2 probe, and
-checks eight exact f32 results plus unchanged input. CFG vector liveness,
-32-byte aligned spills/reloads, high vector registers, and broader application
-migration remain required before this is a production route.
+The common structured owner/task lifecycle, multicore-green task adapter, and
+bounded actor-message adapter are implemented. This is not a claim that every
+process, generic channel, or backend layout path already enforces the same
+protocol. Process codecs, physical layout lowering, runtime trap catching, and
+end-to-end process/device evidence remain work-package gates. Consult the
+receipt and matching runtime gate before relying on a path in production.
 
 ## Recommended shape
 
+The first concrete parent-authoritative API uses
+`StructuredOwnerV1` and `RuntimeStructuredTaskGroupV1`:
+
 ```simple
-val snapshot = owner.snapshot()
-val results = TaskGroup.map(parts, snapshot, build_child_result)
-owner.commit(results)?
+var owner = StructuredOwnerV1.create(1, 0, [10, 20])
+var tasks = RuntimeStructuredTaskGroupV1.create(owner.snapshot(), 2, true)
+val mapped = tasks.map([11, 22], [1, 2], ParallelResultKind.Patch,
+    "partition", StructuredScalarWorker.ReturnInput)
+val waited = tasks.join_all()
+val receipt = owner.commit(tasks.lifecycle_state(),
+    ParallelCommitOrder.TaskIdThenSequence, ParallelConflictPolicy.Reject)
 ```
 
 Do not use a raw pointer or unclassified dynamic object as a cross-domain
 payload. Do not infer that two different index variables are disjoint.
+
+## Current provider status
+
+| Surface | Current status |
+|---|---|
+| C scalar `rt_channel_*` | fixed capacity; focused direct C evidence only |
+| Rust `rt_value_channel_*` | bounded, typed inline admission, close/send locked |
+| Compiler Crossbeam provider | bounded; mutable dynamic values reject |
+| Object-handle capability registry | pure-Simple bounded model; runtime/process integration pending |
+| Actor send/reply | explicit accepted/full/closed/invalid/cancelled result ABI |
+| Common structured lifecycle | scalar result codec, bounded leases, failure receipts, deterministic atomic commit |
+| Multicore-green task adapter | capability-free named scalar worker; close/free after mandatory join |
+| Actor structured adapter | text adapter for the scalar wire; bounded `ActorMessage` transport remains mailbox-owned |
+
+The canonical structured-result transport format is exactly eleven signed
+scalar words in the order defined by `structured_task_wire_words`. Every word
+must fit Simple's native tagged-integer interval `[-2^60, 2^60-1]`. The hosted
+channel adapter carries those words through typed `rt_channel_*_i64` calls.
+The actor adapter only serializes each word as one decimal `ActorMessage.args`
+entry and safely parses it back; `ActorMailbox`/`ActorSend` remain the transport
+owners. This is an adapter boundary, not a claim that the generic actor send
+stack internally uses the channel codec or lifecycle.
+
+Owner commit recomputes the expected snapshot and compares owner, revision,
+generation, frozen token, capacity, digest, and every copied value. The digest
+is diagnostic only: exact value equality prevents a hash collision from
+authorizing a commit.
+
+`RuntimeStructuredTaskGroupV1.cancel_task/cancel_all` revoke publication leases.
+They do not physically preempt a running pool closure because the hosted pool
+does not yet expose `rt_pool_cancel`; `join_all` always drains every handle.
+The hosted pool also has no trap-catching boundary. Use the explicit
+`ReportFailure` worker result for recoverable failure; an abort/panic is outside
+this lifecycle and is not reported as `StructuredTaskFailureV1`.
+
+Blocked resume command with an admitted self-hosted CLI:
+`bin/simple test test/01_unit/common/structural/parallel_transport_provider_matrix_spec.spl --mode=interpreter`.

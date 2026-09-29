@@ -1,0 +1,76 @@
+# @cover src/lib/common/ui/render_opt/retained_draw_ir_frame.spl 90%
+# @tag: unit, ui, render_perf, render_opt, draw_ir, frame_switch
+
+use std.spec.{describe, it, expect}
+use common.ui.draw_ir.{DrawIrCommand, draw_ir_rect}
+use common.ui.draw_ir.draw_ir_text
+use common.ui.render_opt.draw_ir_delta.DrawIrDeltaResult
+use common.ui.render_opt.retained_draw_ir_frame.{
+    RetainedDrawIrFrame, RETAINED_FRAME_IDLE, RETAINED_FRAME_FULL_SEED,
+    RETAINED_FRAME_PATCH, RETAINED_FRAME_REJECTED
+}
+
+fn commands() -> [DrawIrCommand]:
+    [draw_ir_rect("a", 0, 0, 10, 10, 0xFF000001u32),
+     draw_ir_rect("b", 10, 0, 10, 10, 0xFF000002u32),
+     draw_ir_rect("c", 20, 0, 10, 10, 0xFF000003u32),
+     draw_ir_rect("d", 30, 0, 10, 10, 0xFF000004u32)]
+
+fn delta(indices: [i64], changed: [DrawIrCommand], total: i64) -> DrawIrDeltaResult:
+    DrawIrDeltaResult(
+        changed_indices: indices, changed_commands: changed,
+        built_count: indices.len(), reused_count: total - indices.len(),
+        total_count: total)
+
+describe "backend-neutral retained DrawIR frame owner":
+    it "seeds once, patches one command in place, then emits a zero-write idle receipt":
+        var frame = RetainedDrawIrFrame.create(100, 100)
+        val seed = frame.seed(commands())
+        expect(seed.mode).to_equal(RETAINED_FRAME_FULL_SEED)
+        expect(seed.command_writes).to_equal(4)
+        val before0 = frame.commands[0]
+        val before1 = frame.commands[1]
+        val before3 = frame.commands[3]
+        val replacement = draw_ir_rect("c", 20, 0, 12, 10, 0xFFABCDEFu32)
+        val patch = frame.apply(delta([2], [replacement], 4))
+        expect(patch.mode).to_equal(RETAINED_FRAME_PATCH)
+        expect(patch.command_writes).to_equal(1)
+        expect(patch.damage_rects).to_equal([20, 0, 10, 10, 20, 0, 12, 10])
+        expect(frame.commands[2]).to_equal(replacement)
+        expect(frame.commands[0]).to_equal(before0)
+        expect(frame.commands[1]).to_equal(before1)
+        expect(frame.commands[3]).to_equal(before3)
+        val idle = frame.apply(delta([], [], 4))
+        expect(idle.mode).to_equal(RETAINED_FRAME_IDLE)
+        expect(idle.command_writes).to_equal(0)
+        expect(frame.total_command_writes).to_equal(5)
+        expect(frame.frame_generation).to_equal(3)
+
+    it "reports old plus new bounds for a move and full damage for unbounded text":
+        var frame = RetainedDrawIrFrame.create(100, 80)
+        frame.seed(commands())
+        val moved = draw_ir_rect("b", 40, 20, 10, 10, 0xFF000002u32)
+        val move_receipt = frame.apply(delta([1], [moved], 4))
+        expect(move_receipt.damage_rects).to_equal(
+            [10, 0, 10, 10, 40, 20, 10, 10])
+        val text_command = draw_ir_text("b", 40, 20, "unknown metrics", 0xFFFFFFFFu32)
+        val text_receipt = frame.apply(delta([1], [text_command], 4))
+        expect(text_receipt.damage_rects).to_equal([0, 0, 100, 80])
+        expect(text_receipt.reason).to_equal("delta-patch-full-damage")
+
+    it "rejects unseeded, duplicate, unsorted, and count-changing deltas without mutation":
+        var frame = RetainedDrawIrFrame.create()
+        val replacement = draw_ir_rect("x", 0, 0, 1, 1, 0xFFFFFFFFu32)
+        expect(frame.apply(delta([0], [replacement], 1)).mode).to_equal(
+            RETAINED_FRAME_REJECTED)
+        frame.seed(commands())
+        val before = frame.commands
+        expect(frame.apply(delta([1, 1], [replacement, replacement], 4)).mode).to_equal(
+            RETAINED_FRAME_REJECTED)
+        expect(frame.apply(delta([2, 1], [replacement, replacement], 4)).mode).to_equal(
+            RETAINED_FRAME_REJECTED)
+        expect(frame.apply(delta([0], [replacement], 5)).mode).to_equal(
+            RETAINED_FRAME_REJECTED)
+        expect(frame.commands).to_equal(before)
+        expect(frame.total_command_writes).to_equal(4)
+        expect(frame.rejected_count).to_equal(4)

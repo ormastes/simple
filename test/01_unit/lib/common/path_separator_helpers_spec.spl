@@ -1,0 +1,87 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-LIB
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+# @req REQ-SSPEC-LIB
+#
+# GENERALIZING SPEC for the commonized separator helpers:
+#   std.common.path_pure.to_backslash  (pure: forward slash -> backslash)
+#   std.common.path_pure.to_slash      (pure: backslash -> forward slash)
+#   std.platform.to_native_path        (platform seam; identity off Windows)
+#
+# These replace the hand-rolled replace("/", ...) sites the census found, and the
+# three dead, duplicated private helpers deleted from
+# nogc_sync_mut/fs/path.spl and nogc_async_mut/fs/path.spl.
+#
+# The pure pair takes no platform reading, so EVERY case below runs identically
+# on every host -- which is what makes the POSIX half of this design testable
+# from a Windows machine. Only the to_native_path cases branch on the host.
+#
+# Backslash literals are built via a named constant rather than inline escapes:
+# an inline hex-looking escape and an inline backspace escape both silently
+# corrupted an earlier draft of this table.
+
+use std.spec.step
+
+use std.spec.{describe, it, assert_equal, assert_true}
+use std.platform.{to_native_path, is_windows}
+use std.common.path_pure.{to_backslash, to_slash}
+
+describe "path separator helpers - the full case table":
+
+    it "converts forward to backslash across every path shape":
+        # @req REQ-SSPEC-LIB
+        step("converts forward to backslash across every path shape")
+        assert_equal(to_backslash("C:/tmp/a.txt"), "C:" + "\\" + "tmp" + "\\" + "a.txt")
+        assert_equal(to_backslash("a/b/c"), "a" + "\\" + "b" + "\\" + "c")
+        assert_equal(to_backslash("plain.txt"), "plain.txt")
+        assert_equal(to_backslash(""), "")
+        assert_equal(to_backslash("/"), "\\")
+        # Trailing separator preserved, not trimmed.
+        assert_equal(to_backslash("C:/tmp/"), "C:" + "\\" + "tmp" + "\\")
+        # UNC stays well-formed: a double leading slash becomes two backslashes.
+        assert_equal(to_backslash("//srv/share/f"), "\\" + "\\" + "srv" + "\\" + "share" + "\\" + "f")
+
+    it "handles the mixed-separator shape produced by joining a Windows env var onto a literal":
+        # @req REQ-SSPEC-LIB
+        step("handles the mixed-separator shape produced by joining a Windows env var onto a literal")
+        val mixed = "C:" + "\\" + "Users" + "/proj/out"
+        assert_equal(to_backslash(mixed), "C:" + "\\" + "Users" + "\\" + "proj" + "\\" + "out")
+        assert_equal(to_slash(mixed), "C:/Users/proj/out")
+
+    it "is idempotent in both directions":
+        # @req REQ-SSPEC-LIB
+        step("is idempotent in both directions")
+        val p = "C:/tmp/a.txt"
+        assert_equal(to_backslash(to_backslash(p)), to_backslash(p))
+        assert_equal(to_slash(to_slash(p)), to_slash(p))
+        assert_equal(to_native_path(to_native_path(p)), to_native_path(p))
+
+    it "round-trips losslessly for a path containing no literal backslash":
+        # @req REQ-SSPEC-LIB
+        step("round-trips losslessly for a path containing no literal backslash")
+        assert_equal(to_slash(to_backslash("C:/a/b/c.txt")), "C:/a/b/c.txt")
+        assert_equal(to_slash(to_backslash("rel/path")), "rel/path")
+        assert_equal(to_slash(to_backslash("")), "")
+
+    it "documents that to_backslash must NOT be applied to non-path text":
+        # @req REQ-SSPEC-LIB
+        step("documents that to_backslash must NOT be applied to non-path text")
+        # Pinned as a WARNING, not an endorsement: a URL also contains "/", and
+        # blanket-converting one mangles it. The helper is correct; applying it
+        # to the wrong kind of value is the caller bug. This assertion exists so
+        # nobody "fixes" the helper to special-case URLs -- the fix is to convert
+        # only values already known to be filesystem paths.
+        assert_equal(to_backslash("https://x/y"), "https:" + "\\" + "\\" + "x" + "\\" + "y")
+
+    it "keeps to_native_path consistent with the pure pair on the current host":
+        # @req REQ-SSPEC-LIB
+        step("keeps to_native_path consistent with the pure pair on the current host")
+        val p = "C:/tmp/a.txt"
+        if is_windows():
+            assert_equal(to_native_path(p), to_backslash(p))
+        else:
+            assert_equal(to_native_path(p), p)
+        # True on BOTH platforms: converting to native then back to canonical
+        # yields the canonical form, which is what lets callers hold "/" form.
+        assert_equal(to_slash(to_native_path(p)), p)

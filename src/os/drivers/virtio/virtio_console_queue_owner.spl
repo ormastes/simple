@@ -1,0 +1,220 @@
+# codex-impl
+# Shared bounded queue/IRQ owner for VirtIO console PCI and MMIO transports.
+
+val VIRTIO_CONSOLE_CONTROL_RX_SLOT: i64 = 0
+val VIRTIO_CONSOLE_CONTROL_TX_SLOT: i64 = 1
+val VIRTIO_CONSOLE_DATA_RX_SLOT: i64 = 2
+val VIRTIO_CONSOLE_DATA_TX_SLOT: i64 = 3
+val VIRTIO_CONSOLE_QUEUE_SLOTS: i64 = 4
+val VIRTIO_CONSOLE_MAX_DESCRIPTORS_PER_QUEUE: i64 = 64
+val VIRTIO_CONSOLE_MAX_FRAME_BYTES: i64 = 65536
+
+struct VirtioConsoleQueueLease:
+    admitted: bool
+    reason: text
+    owner_id: u64
+    generation: u64
+    sequence: u64
+    queue_slot: i64
+    queue_id: u16
+    descriptor_id: i64
+    byte_count: i64
+
+struct VirtioConsoleIrqReceipt:
+    accepted: bool
+    reason: text
+    ready_mask: u32
+    acknowledged_status: u32
+
+struct VirtioConsoleQueueSelection:
+    ready: bool
+    queue_slot: i64
+    queue_id: u16
+
+class VirtioConsoleQueueOwner:
+    """Single mutable owner for the four queues of one named console port.
+
+    Architecture adapters retain PCI/MMIO discovery and interrupt registration.
+    They pass copied status/mask values here; descriptor memory and leases never
+    cross owners. Fixed arrays make memory independent of traffic volume.
+    """
+    configured: bool
+    owner_id: u64
+    transport: text
+    interrupt_id: u32
+    port_id: u32
+    generation: u64
+    next_sequence: u64
+    capacity: i64
+    next_ready_slot: i64
+    queue_ids: [u16; 4]
+    outstanding: [i64; 4]
+    ready: [bool; 4]
+    descriptor_owned: [bool; 256]
+    descriptor_sequence: [u64; 256]
+
+impl VirtioConsoleQueueOwner:
+    static fn create(owner_id: u64, capacity: i64) -> VirtioConsoleQueueOwner:
+        val valid = owner_id > 0u64 and capacity > 0 and capacity <= VIRTIO_CONSOLE_MAX_DESCRIPTORS_PER_QUEUE
+        VirtioConsoleQueueOwner(
+            configured: false,
+            owner_id: owner_id,
+            transport: "unbound",
+            interrupt_id: 0u32,
+            port_id: 0u32,
+            generation: 1u64,
+            next_sequence: 1u64,
+            capacity: if valid: capacity else: 0,
+            next_ready_slot: 0,
+            queue_ids: [0u16; 4],
+            outstanding: [0; 4],
+            ready: [false; 4],
+            descriptor_owned: [false; 256],
+            descriptor_sequence: [0u64; 256]
+        )
+
+    me bind_x86_pci(port_id: u32, irq_vector: u32) -> text:
+        self.bind_transport("x86-pci", port_id, irq_vector)
+
+    me bind_riscv_mmio(port_id: u32, plic_irq: u32) -> text:
+        self.bind_transport("riscv-mmio", port_id, plic_irq)
+
+    me bind_transport(transport: text, port_id: u32, interrupt_id: u32) -> text:
+        if self.capacity <= 0:
+            return "invalid-capacity"
+        if self.configured:
+            return "already-bound"
+        if port_id > 32766u32:
+            return "queue-id-overflow"
+        if interrupt_id == 0u32:
+            return "invalid-interrupt"
+        if transport != "x86-pci" and transport != "riscv-mmio":
+            return "unsupported-transport"
+
+        # Port 0 owns queues 0/1. VirtIO console reserves queues 2/3 for
+        # control; later multiport data pairs begin at 4 for port 1.
+        val data_rx = if port_id == 0u32: 0u32 else: 2u32 + port_id * 2u32
+        self.queue_ids[VIRTIO_CONSOLE_CONTROL_RX_SLOT] = 2u16
+        self.queue_ids[VIRTIO_CONSOLE_CONTROL_TX_SLOT] = 3u16
+        self.queue_ids[VIRTIO_CONSOLE_DATA_RX_SLOT] = data_rx.to_u16()
+        self.queue_ids[VIRTIO_CONSOLE_DATA_TX_SLOT] = (data_rx + 1u32).to_u16()
+        self.transport = transport
+        self.port_id = port_id
+        self.interrupt_id = interrupt_id
+        self.configured = true
+        "ready"
+
+    fn queue_id(queue_slot: i64) -> u16:
+        if queue_slot < 0 or queue_slot >= VIRTIO_CONSOLE_QUEUE_SLOTS:
+            return 0u16
+        self.queue_ids[queue_slot]
+
+    me acquire(queue_slot: i64, descriptor_id: i64, byte_count: i64) -> VirtioConsoleQueueLease:
+        if not self.configured:
+            return self.rejected_lease("not-bound", queue_slot, descriptor_id, byte_count)
+        if queue_slot < 0 or queue_slot >= VIRTIO_CONSOLE_QUEUE_SLOTS:
+            return self.rejected_lease("invalid-queue", queue_slot, descriptor_id, byte_count)
+        if descriptor_id < 0 or descriptor_id >= self.capacity:
+            return self.rejected_lease("invalid-descriptor", queue_slot, descriptor_id, byte_count)
+        if byte_count <= 0 or byte_count > VIRTIO_CONSOLE_MAX_FRAME_BYTES:
+            return self.rejected_lease("invalid-byte-count", queue_slot, descriptor_id, byte_count)
+        if self.outstanding[queue_slot] >= self.capacity:
+            return self.rejected_lease("queue-full", queue_slot, descriptor_id, byte_count)
+        if self.next_sequence == 18446744073709551615u64:
+            return self.rejected_lease("sequence-exhausted", queue_slot, descriptor_id, byte_count)
+        val ownership_index = queue_slot * VIRTIO_CONSOLE_MAX_DESCRIPTORS_PER_QUEUE + descriptor_id
+        if self.descriptor_owned[ownership_index]:
+            return self.rejected_lease("descriptor-owned", queue_slot, descriptor_id, byte_count)
+        self.descriptor_owned[ownership_index] = true
+        val sequence = self.next_sequence
+        self.next_sequence = self.next_sequence + 1u64
+        self.descriptor_sequence[ownership_index] = sequence
+        self.outstanding[queue_slot] = self.outstanding[queue_slot] + 1
+        VirtioConsoleQueueLease(admitted: true, reason: "acquired", owner_id: self.owner_id, generation: self.generation,
+            sequence: sequence,
+            queue_slot: queue_slot, queue_id: self.queue_ids[queue_slot], descriptor_id: descriptor_id,
+            byte_count: byte_count)
+
+    me complete(lease: VirtioConsoleQueueLease) -> text:
+        if not lease.admitted:
+            return "invalid-lease"
+        if lease.owner_id != self.owner_id:
+            return "owner-mismatch"
+        if lease.generation != self.generation:
+            return "stale-generation"
+        if lease.queue_slot < 0 or lease.queue_slot >= VIRTIO_CONSOLE_QUEUE_SLOTS:
+            return "invalid-queue"
+        if lease.queue_id != self.queue_ids[lease.queue_slot]:
+            return "queue-mismatch"
+        if lease.descriptor_id < 0 or lease.descriptor_id >= self.capacity:
+            return "invalid-descriptor"
+        val ownership_index = lease.queue_slot * VIRTIO_CONSOLE_MAX_DESCRIPTORS_PER_QUEUE + lease.descriptor_id
+        if not self.descriptor_owned[ownership_index]:
+            return "not-owned"
+        if lease.sequence != self.descriptor_sequence[ownership_index]:
+            return "stale-lease"
+        self.descriptor_owned[ownership_index] = false
+        self.descriptor_sequence[ownership_index] = 0u64
+        self.outstanding[lease.queue_slot] = self.outstanding[lease.queue_slot] - 1
+        "completed"
+
+    me record_irq(device_status: u32, used_queue_mask: u32) -> VirtioConsoleIrqReceipt:
+        """Record copied IRQ facts while the architecture adapter owns its IRQ critical section.
+
+        The adapter must acknowledge the device and serialize this mutation
+        against take_ready; this value owner does not enable interrupts or
+        manufacture a cross-CPU synchronization primitive.
+        """
+        if not self.configured:
+            return VirtioConsoleIrqReceipt(accepted: false, reason: "not-bound", ready_mask: 0u32, acknowledged_status: 0u32)
+        if (device_status & 1u32) == 0u32:
+            return VirtioConsoleIrqReceipt(accepted: false, reason: "not-used-ring", ready_mask: 0u32, acknowledged_status: device_status)
+        if (used_queue_mask & 0xFFFFFFF0u32) != 0u32:
+            return VirtioConsoleIrqReceipt(accepted: false, reason: "invalid-ready-mask", ready_mask: 0u32, acknowledged_status: device_status)
+        var slot: i64 = 0
+        while slot < VIRTIO_CONSOLE_QUEUE_SLOTS:
+            val bit = 1u32 << slot.to_u32()
+            if (used_queue_mask & bit) != 0u32:
+                self.ready[slot] = true
+            slot = slot + 1
+        VirtioConsoleIrqReceipt(accepted: true, reason: "ready", ready_mask: used_queue_mask, acknowledged_status: device_status)
+
+    me take_ready() -> VirtioConsoleQueueSelection:
+        var scanned: i64 = 0
+        while scanned < VIRTIO_CONSOLE_QUEUE_SLOTS:
+            val slot = (self.next_ready_slot + scanned) % VIRTIO_CONSOLE_QUEUE_SLOTS
+            if self.ready[slot]:
+                self.ready[slot] = false
+                self.next_ready_slot = (slot + 1) % VIRTIO_CONSOLE_QUEUE_SLOTS
+                return VirtioConsoleQueueSelection(ready: true, queue_slot: slot, queue_id: self.queue_ids[slot])
+            scanned = scanned + 1
+        VirtioConsoleQueueSelection(ready: false, queue_slot: -1, queue_id: 0u16)
+
+    me reset(device_quiesced: bool) -> text:
+        """Invalidate leases only after queues stop DMA and IRQ ingress is masked."""
+        if not device_quiesced:
+            return "device-not-quiesced"
+        if self.generation == 18446744073709551615u64:
+            self.configured = false
+            return "generation-exhausted"
+        self.generation = self.generation + 1u64
+        var slot: i64 = 0
+        while slot < VIRTIO_CONSOLE_QUEUE_SLOTS:
+            self.outstanding[slot] = 0
+            self.ready[slot] = false
+            slot = slot + 1
+        var descriptor: i64 = 0
+        while descriptor < 256:
+            self.descriptor_owned[descriptor] = false
+            self.descriptor_sequence[descriptor] = 0u64
+            descriptor = descriptor + 1
+        self.next_ready_slot = 0
+        "reset"
+
+    fn current_generation() -> u64:
+        self.generation
+
+    fn rejected_lease(reason: text, queue_slot: i64, descriptor_id: i64, byte_count: i64) -> VirtioConsoleQueueLease:
+        val id = if queue_slot >= 0 and queue_slot < VIRTIO_CONSOLE_QUEUE_SLOTS: self.queue_ids[queue_slot] else: 0u16
+        VirtioConsoleQueueLease(admitted: false, reason: reason, owner_id: self.owner_id, generation: self.generation, sequence: 0u64,
+            queue_slot: queue_slot, queue_id: id, descriptor_id: descriptor_id, byte_count: byte_count)

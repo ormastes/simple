@@ -1,0 +1,71 @@
+# Native reproduction of MirLowering's cross-module transient owner lifetime.
+# The shared value-struct owner predates both scopes. A mutable receiver has
+# no allocation in either scope; an explicit struct snapshot registers its
+# complete value graph while paused, making the escaping fields reachable.
+
+extern fn rt_transient_array_scope_begin() -> bool
+extern fn rt_transient_array_scope_pause() -> bool
+extern fn rt_transient_array_scope_end() -> bool
+extern fn rt_transient_heap_promote(value: Any) -> bool
+
+struct OwnerBuffer:
+    items: [text]
+
+struct LoweringOwner:
+    buffer: OwnerBuffer
+    names: [text]
+    current_module: text
+
+impl LoweringOwner:
+    me populate(module_name: text):
+        self.current_module = module_name + "|current"
+        self.names = self.names.push(module_name + "|name")
+        self.buffer.items = self.buffer.items.push(module_name + "|nested")
+
+    me promote_reference() -> bool:
+        rt_transient_heap_promote(self)
+
+    me promote_snapshot() -> bool:
+        val snapshot = LoweringOwner(..self)
+        rt_transient_heap_promote(snapshot)
+
+fn main() -> i64:
+    var owner = LoweringOwner(
+        buffer: OwnerBuffer(items: []), names: [], current_module: "initial")
+    var module_index = 0
+    while module_index < 2:
+        if not rt_transient_array_scope_begin():
+            return 10
+        val module_name = "module-{module_index}"
+        owner.populate(module_name)
+        val lowered = [module_name + "|lowered"]
+        if not rt_transient_array_scope_pause():
+            return 11
+        if not rt_transient_heap_promote(lowered):
+            return 12
+        # Exact old failure: the returned module promotes, but the older
+        # mutable owner is unknown to this scope's raw-allocation registry.
+        if owner.promote_reference():
+            return 13
+        if not owner.promote_snapshot():
+            return 14
+        if not rt_transient_array_scope_end():
+            return 15
+        # Use fresh expected text after scope end; module_name itself was a
+        # non-escaping temporary and must not be read after reclamation.
+        val expected = "module-{module_index}"
+        if owner.current_module != expected + "|current":
+            return 16
+        if owner.names.len() != module_index + 1:
+            return 17
+        if owner.names[module_index] != expected + "|name":
+            return 18
+        if owner.buffer.items[module_index] != expected + "|nested":
+            return 19
+        if lowered[0] != expected + "|lowered":
+            return 20
+        module_index = module_index + 1
+    if owner.names[0] != "module-0|name" or owner.buffer.items[0] != "module-0|nested":
+        return 21
+    print "PASS: MIR mutable-owner rejection and explicit snapshot retention across two scopes"
+    0

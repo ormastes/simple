@@ -1,0 +1,148 @@
+# Three-payload incremental frontend admission contract.
+#
+# The coordinator seals canonical records into the payloads.  The worker gets
+# no cache, filesystem, network, or reverse-reference handle through this DTO.
+
+pub enum ThreePayloadSemanticRefKindV1:
+    MacroExpansion
+    GenericBody
+    TraitDefaultBody
+    TraitCallable
+    AspectCallable
+    ConcreteFunction
+    CtfeBody
+
+pub enum ThreePayloadSemanticRefLocationV1:
+    # Bytes are already inside one admitted .tld payload, but decoding is lazy.
+    EmbeddedTldSection
+    # Frontend emits a dependency/call relocation without opening body bytes.
+    SymbolicObject
+
+pub struct ThreePayloadSemanticRefV1:
+    kind: ThreePayloadSemanticRefKindV1
+    stable_entity_id: text
+    callable_signature_digest: text
+    effect_digest: text
+    body_or_object_digest: text
+    location: ThreePayloadSemanticRefLocationV1
+    embedded_section_index: i64?
+
+pub struct ThreePayloadClosureSealV1:
+    generation_digest: text
+    source_payload_digest: text
+    prior_tld_payload_digest: text?
+    package_init_tld_payload_digest: text
+    membership_root_digest: text
+    absence_witness_root_digest: text
+    semantic_refs: [ThreePayloadSemanticRefV1]
+    section_count: i64
+    packed_bytes: i64
+    max_decode_bytes: i64
+
+pub struct ThreePayloadWorkerReadCountersV1:
+    source_payload_reads: i64
+    prior_tld_payload_reads: i64
+    package_init_tld_payload_reads: i64
+    imported_summary_reads: i64
+    exceptional_body_reads: i64
+    rr_reads: i64
+
+pub enum ThreePayloadAdmissionErrorV1:
+    InvalidSeal(reason: text)
+    InvalidSemanticReference(stable_entity_id: text)
+    InvalidWorkerReads(reason: text)
+
+fn _three_payload_digest_present_v1(value: text) -> bool:
+    value != ""
+
+pub fn three_payload_semantic_ref_valid_v1(reference: ThreePayloadSemanticRefV1) -> bool:
+    if reference.stable_entity_id == "" or
+        not _three_payload_digest_present_v1(reference.callable_signature_digest) or
+        not _three_payload_digest_present_v1(reference.effect_digest) or
+        not _three_payload_digest_present_v1(reference.body_or_object_digest):
+        return false
+
+    match reference.kind:
+        case MacroExpansion:
+            match reference.location:
+                case EmbeddedTldSection:
+                    match reference.embedded_section_index:
+                        case Some(index): index >= 0
+                        case nil: false
+                case SymbolicObject: false
+        case GenericBody:
+            match reference.location:
+                case EmbeddedTldSection:
+                    match reference.embedded_section_index:
+                        case Some(index): index >= 0
+                        case nil: false
+                case SymbolicObject: false
+        case TraitDefaultBody:
+            match reference.location:
+                case EmbeddedTldSection:
+                    match reference.embedded_section_index:
+                        case Some(index): index >= 0
+                        case nil: false
+                case SymbolicObject: false
+        case TraitCallable:
+            match reference.location:
+                case SymbolicObject: reference.embedded_section_index.is_none()
+                case EmbeddedTldSection: false
+        case AspectCallable:
+            match reference.location:
+                case SymbolicObject: reference.embedded_section_index.is_none()
+                case EmbeddedTldSection: false
+        case ConcreteFunction:
+            match reference.location:
+                case EmbeddedTldSection:
+                    match reference.embedded_section_index:
+                        case Some(index): index >= 0
+                        case nil: false
+                case SymbolicObject: false
+        case CtfeBody:
+            match reference.location:
+                case EmbeddedTldSection:
+                    match reference.embedded_section_index:
+                        case Some(index): index >= 0
+                        case nil: false
+                case SymbolicObject: false
+
+pub fn three_payload_worker_admit_v1(
+    seal: ThreePayloadClosureSealV1,
+    reads: ThreePayloadWorkerReadCountersV1,
+) -> Result<(), ThreePayloadAdmissionErrorV1>:
+    if not _three_payload_digest_present_v1(seal.generation_digest) or
+        not _three_payload_digest_present_v1(seal.source_payload_digest) or
+        not _three_payload_digest_present_v1(seal.package_init_tld_payload_digest) or
+        not _three_payload_digest_present_v1(seal.membership_root_digest) or
+        not _three_payload_digest_present_v1(seal.absence_witness_root_digest):
+        return Err(ThreePayloadAdmissionErrorV1.InvalidSeal("missing_identity"))
+    match seal.prior_tld_payload_digest:
+        case Some(digest):
+            if not _three_payload_digest_present_v1(digest):
+                return Err(ThreePayloadAdmissionErrorV1.InvalidSeal("missing_prior_tld_identity"))
+        case nil: pass
+    if seal.section_count < 0 or seal.packed_bytes < 0 or seal.max_decode_bytes < 0:
+        return Err(ThreePayloadAdmissionErrorV1.InvalidSeal("negative_bound"))
+
+    for reference in seal.semantic_refs:
+        if not three_payload_semantic_ref_valid_v1(reference):
+            return Err(ThreePayloadAdmissionErrorV1.InvalidSemanticReference(
+                reference.stable_entity_id))
+        match reference.embedded_section_index:
+            case Some(index):
+                if index >= seal.section_count:
+                    return Err(ThreePayloadAdmissionErrorV1.InvalidSemanticReference(
+                        reference.stable_entity_id))
+            case nil: pass
+
+    val expected_prior_reads = if seal.prior_tld_payload_digest.is_some(): 1 else: 0
+    if reads.source_payload_reads != 1 or
+        reads.prior_tld_payload_reads != expected_prior_reads or
+        reads.package_init_tld_payload_reads != 1:
+        return Err(ThreePayloadAdmissionErrorV1.InvalidWorkerReads("payload_cardinality"))
+    if reads.imported_summary_reads != 0 or reads.exceptional_body_reads != 0:
+        return Err(ThreePayloadAdmissionErrorV1.InvalidWorkerReads("external_payload"))
+    if reads.rr_reads != 0:
+        return Err(ThreePayloadAdmissionErrorV1.InvalidWorkerReads("rr_is_coordinator_only"))
+    Ok(())

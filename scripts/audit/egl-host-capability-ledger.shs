@@ -1,0 +1,444 @@
+#!/bin/sh
+# egl-host-capability-ledger.shs — deterministic EGL host-capability ledger.
+#
+# WHY THIS EXISTS
+# ---------------
+# The Environment-optimized dynamic Libraries (EGL) plan requires, for package 1
+# ("host matrix") and package 8 ("blocked-host ledger"), that every evidence
+# claim state what the measuring host can and cannot actually do, and that an
+# unavailable lane stay an explicit row rather than vanish. Today that statement
+# is written by hand into each report, which is how "no GPU assumed" reached a
+# brief on a box that has an NVIDIA GB10 — the GPU is present; what is refused is
+# the Vulkan device, for a specific and nameable reason.
+#
+# This script turns the host into rows. It probes nothing that requires a
+# compiler, a self-hosted binary or an admitted artifact, so it runs anywhere,
+# and it distinguishes three states that hand-written prose keeps conflating:
+#
+#   present  — the fact is observable here
+#   absent   — the fact is observably not here (wrong architecture, no flag)
+#   refused  — the thing exists but this host/user cannot use it; the exact
+#              refusal text is carried in the row's evidence field
+#   unprobed — the tool that would answer this question is not installed, so
+#              nothing is known either way
+#
+# `unprobed` exists because the alternative is the fail-open this script was
+# written to stop: with no nvidia-smi on PATH, "no device was enumerated" and
+# "nothing asked" are the same empty string, and reporting that as `absent`
+# would state a fact the host never supplied.
+#
+# "refused" is the state that matters. A ledger that folds it into "absent"
+# licenses the claim "this host has no GPU", which is false, and hides that the
+# blocker is a permission on /dev/dri rather than missing hardware.
+#
+# VOCABULARY
+# ----------
+# CPU feature ids are the EGL feature-registry serialized identifiers, so a row
+# joins to the registry without a translation table. They are read from
+# src/lib/nogc_sync_mut/composition/environment_variants/feature_registry_v1.spl
+# (ENV_FEATURE_* constants). That module is currently owned by another lane and
+# is not present on origin/main; the ids are stable serialized identities, so
+# binding to the numbers rather than the symbol names is deliberate and survives
+# the module landing. The alignment source is recorded in the receipt under
+# doc/08_tracking/todo/.
+#
+# THIS IS A PROBE, NOT A GATE
+# ---------------------------
+# It lives under scripts/audit/ rather than scripts/check/ on purpose: it
+# describes a host, it does not pass or fail a change, and it must never block a
+# push for running on a machine with fewer features. It is fail-closed only
+# about its own honesty — a run that probed nothing is an ERROR, never a pass,
+# and an unreadable CPU flag list on a known architecture is an ERROR rather
+# than a page of `absent` rows.
+#
+# KNOWN LIMIT: on a heterogeneous CPU (big.LITTLE) lscpu prints one flag line
+# per core model and this script takes their UNION. A feature present only on
+# the big cores is therefore reported present, though a thread migrated to a
+# little core would fault on it. Stated rather than silently assumed; intersect
+# per line before trusting this on an asymmetric host.
+#
+# Verdict, always the last line of stdout:
+#   PASS — <n> row(s) probed, <k> refused, <m> absent, <u> unprobed (arch=<arch>)  exit 0
+#   ERROR — nothing was checked (<reason>)                            exit 2
+#
+# --selftest runs before every probe and is fatal.
+#
+# Probe inputs are overridable so the selftest can drive synthetic hosts:
+#   EGL_PROBE_ARCH, EGL_PROBE_FLAGS, EGL_PROBE_GPU_LIST, EGL_PROBE_VULKAN,
+#   EGL_PROBE_TOOLS
+
+set -u
+
+SELF="$0"
+MODE="probe"
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --selftest) MODE="selftest"; shift ;;
+        --help|-h)
+            sed -n '2,56p' "$SELF"
+            exit 0
+            ;;
+        *)
+            echo "ERROR — nothing was checked (unknown argument: $1)"
+            exit 2
+            ;;
+    esac
+done
+
+# ---------------------------------------------------------------------------
+# Probe inputs. Each returns one line; the selftest replaces them wholesale.
+# ---------------------------------------------------------------------------
+
+probe_arch() {
+    if [ "${EGL_PROBE_ARCH+set}" = set ]; then
+        printf '%s\n' "$EGL_PROBE_ARCH"
+        return 0
+    fi
+    uname -m 2>/dev/null
+}
+
+probe_flags() {
+    if [ "${EGL_PROBE_FLAGS+set}" = set ]; then
+        printf '%s\n' "$EGL_PROBE_FLAGS"
+        return 0
+    fi
+    # lscpu prints Flags: on x86 and Features: on aarch64, once per core model.
+    _f=$(lscpu 2>/dev/null \
+        | sed -n 's/^[Ff]lags: *//p; s/^[Ff]eatures: *//p' \
+        | tr '\n' ' ')
+    if [ -z "$_f" ]; then
+        _f=$(sed -n 's/^[Ff]lags[[:space:]]*: *//p; s/^[Ff]eatures[[:space:]]*: *//p' \
+            /proc/cpuinfo 2>/dev/null | tr '\n' ' ')
+    fi
+    printf '%s\n' "$_f"
+}
+
+probe_gpu_list() {
+    if [ "${EGL_PROBE_GPU_LIST+set}" = set ]; then
+        printf '%s\n' "$EGL_PROBE_GPU_LIST"
+        return 0
+    fi
+    command -v nvidia-smi >/dev/null 2>&1 || { printf '__unprobed__\n'; return 0; }
+    _o=$(nvidia-smi -L 2>&1)
+    _rc=$?
+    if [ $_rc -ne 0 ]; then
+        printf '__refused__ %s\n' "$(printf '%s' "$_o" | head -1)"
+        return 0
+    fi
+    printf '%s\n' "$_o" | head -1
+}
+
+probe_vulkan() {
+    if [ "${EGL_PROBE_VULKAN+set}" = set ]; then
+        printf '%s\n' "$EGL_PROBE_VULKAN"
+        return 0
+    fi
+    command -v vulkaninfo >/dev/null 2>&1 || { printf '__unprobed__\n'; return 0; }
+    _o=$(vulkaninfo --summary 2>&1)
+    _rc=$?
+    # MEASURED 2026-09-12 on this host: `vulkaninfo --summary` exits 0 while
+    # printing `vkCreateDevice failed` and `Permission denied` for /dev/dri.
+    # So the exit code alone is fail-open for this tool and BOTH signals are
+    # read; either one is enough to call the device refused.
+    _why=$(printf '%s\n' "$_o" \
+        | sed -n 's/.*\(failed to open device [^ ]*\).*/\1/p
+                  s/.*\(Permission denied\).*/\1/p
+                  s/.*\(vkCreateDevice failed[^|]*\)/\1/p
+                  s/.*\(Failed to create device chain\).*/\1/p' | head -1)
+    if [ -z "$_why" ]; then
+        [ $_rc -eq 0 ] && return 0
+        _why="vulkaninfo --summary exited $_rc"
+    fi
+    printf '%s\n' "$_why"
+}
+
+probe_tools() {
+    if [ "${EGL_PROBE_TOOLS+set}" = set ]; then
+        printf '%s\n' "$EGL_PROBE_TOOLS"
+        return 0
+    fi
+    _out=""
+    for _t in llvm-readobj llvm-objdump readelf objdump clang; do
+        if command -v "$_t" >/dev/null 2>&1; then
+            _out="$_out $_t"
+        fi
+    done
+    printf '%s\n' "$_out"
+}
+
+# ---------------------------------------------------------------------------
+# Row emission
+# ---------------------------------------------------------------------------
+
+# _has <padded-flags> <flag>... — true only when EVERY flag is present.
+_has() {
+    _hay="$1"; shift
+    for _f in "$@"; do
+        case "$_hay" in
+            *" $_f "*) ;;
+            *) return 1 ;;
+        esac
+    done
+    return 0
+}
+
+# _feature_row <id> <evidence> <have?>
+_feature_row() {
+    if [ "$3" = yes ]; then
+        printf 'cpu-feature\t%s\tpresent\t%s\n' "$1" "$2"
+    else
+        printf 'cpu-feature\t%s\tabsent\t%s\n' "$1" "$2"
+    fi
+}
+
+_yn() { if "$@"; then echo yes; else echo no; fi; }
+
+# emit_rows writes tab-separated rows to stdout:
+#   <class>\t<id>\t<state>\t<evidence>
+emit_rows() {
+    _arch=$(probe_arch)
+    _flags=" $(probe_flags) "
+    _gpu=$(probe_gpu_list)
+    _vk=$(probe_vulkan)
+    _tools=" $(probe_tools) "
+
+    case "$_arch" in
+        aarch64|arm64) _archid=aarch64 ;;
+        x86_64|amd64)  _archid=x86_64 ;;
+        riscv64)       _archid=riscv64 ;;
+        *)             _archid=unknown ;;
+    esac
+    printf 'arch\t%s\tpresent\t%s\n' "$_archid" "$_arch"
+
+    # CPU features, as EGL feature-registry serialized ids. Ids are
+    # architecture-scoped: an x86 id is never emitted for a non-x86 host, so a
+    # ledger row can never admit a variant the host cannot execute.
+    case "$_archid" in
+        aarch64)
+            _feature_row 0x2201 "asimd" "$(_yn _has "$_flags" asimd)"
+            _feature_row 0x2202 "sve" "$(_yn _has "$_flags" sve)"
+            _feature_row 0x2203 "sve2" "$(_yn _has "$_flags" sve2)"
+            ;;
+        x86_64)
+            # x86-64 psABI micro-architecture levels, exact flag sets.
+            _v2=$(_yn _has "$_flags" cx16 lahf_lm popcnt pni sse4_1 sse4_2 ssse3)
+            _v3=no
+            [ "$_v2" = yes ] && _v3=$(_yn _has "$_flags" avx avx2 bmi1 bmi2 f16c fma abm movbe xsave)
+            _v4=no
+            [ "$_v3" = yes ] && _v4=$(_yn _has "$_flags" avx512f avx512bw avx512cd avx512dq avx512vl)
+            _vbmi=no
+            [ "$_v4" = yes ] && _vbmi=$(_yn _has "$_flags" avx512_vbmi)
+            _vbmi2=no
+            [ "$_v4" = yes ] && _vbmi2=$(_yn _has "$_flags" avx512_vbmi2)
+            _both=no
+            [ "$_vbmi" = yes ] && [ "$_vbmi2" = yes ] && _both=yes
+            _feature_row 0x1101 "x86-64 baseline" yes
+            _feature_row 0x1102 "x86-64-v2" "$_v2"
+            _feature_row 0x1103 "x86-64-v3" "$_v3"
+            _feature_row 0x1104 "x86-64-v4" "$_v4"
+            _feature_row 0x1110 "avx512_vbmi" "$_vbmi"
+            _feature_row 0x1111 "avx512_vbmi2" "$_vbmi2"
+            _feature_row 0x1112 "x86-64-v4+vbmi+vbmi2" "$_both"
+            ;;
+        riscv64)
+            _feature_row 0x3301 "rvv" "$(_yn _has "$_flags" v)"
+            ;;
+        *)
+            # No feature rows. An unrecognised architecture has no registry ids,
+            # and defaulting one to a baseline would be an invented capability.
+            ;;
+    esac
+
+    # GPU. Device presence and API usability are separate rows on purpose: a
+    # present device whose API is refused must never read as "no GPU".
+    case "$_gpu" in
+        __unprobed__)
+            printf 'gpu-device\tnvidia\tunprobed\tnvidia-smi is not on PATH\n'
+            printf 'gpu-api\tcuda\tunprobed\tno enumerator available\n'
+            ;;
+        __refused__*)
+            printf 'gpu-device\tnvidia\trefused\t%s\n' "${_gpu#__refused__ }"
+            printf 'gpu-api\tcuda\trefused\tenumeration failed\n'
+            ;;
+        "")
+            printf 'gpu-device\tnvidia\tabsent\tnvidia-smi enumerated no device\n'
+            printf 'gpu-api\tcuda\tabsent\tno enumerated nvidia device\n'
+            ;;
+        *)
+            printf 'gpu-device\tnvidia\tpresent\t%s\n' "$_gpu"
+            # Enumeration is not execution: -L proves a device is listed, not
+            # that a CUDA context can be created here.
+            printf 'gpu-api\tcuda\tunprobed\tdevice enumerated; no context was created\n'
+            ;;
+    esac
+    case "$_vk" in
+        __unprobed__) printf 'gpu-api\tvulkan\tunprobed\tvulkaninfo is not on PATH\n' ;;
+        "")
+            case "$_gpu" in
+                __unprobed__|__refused__*|"")
+                    printf 'gpu-api\tvulkan\tabsent\tno enumerated device and no refusal\n' ;;
+                *)  printf 'gpu-api\tvulkan\tpresent\tvulkaninfo --summary exited 0\n' ;;
+            esac
+            ;;
+        *) printf 'gpu-api\tvulkan\trefused\t%s\n' "$_vk" ;;
+    esac
+
+    # Inspector tools (6A.2 external inspector process consumes these).
+    for _t in llvm-readobj llvm-objdump readelf objdump clang; do
+        case "$_tools" in
+            *" $_t "*) printf 'inspector-tool\t%s\tpresent\ton PATH\n' "$_t" ;;
+            *)         printf 'inspector-tool\t%s\tabsent\tnot on PATH\n' "$_t" ;;
+        esac
+    done
+}
+
+# ---------------------------------------------------------------------------
+# Selftest
+# ---------------------------------------------------------------------------
+
+st_fail() {
+    echo "selftest: FAILED — $1"
+    exit 1
+}
+
+# st_case <name> <arch> <flags> <gpulist> <vulkan> <tools> <expected-row-regex>
+st_expect_row() {
+    _name="$1"; _arch="$2"; _flags="$3"; _gpu="$4"; _vk="$5"; _tools="$6"; _want="$7"
+    _got=$(EGL_PROBE_ARCH="$_arch" EGL_PROBE_FLAGS="$_flags" EGL_PROBE_GPU_LIST="$_gpu" \
+           EGL_PROBE_VULKAN="$_vk" EGL_PROBE_TOOLS="$_tools" emit_rows)
+    if ! printf '%s\n' "$_got" | grep -q "$_want"; then
+        st_fail "$_name: no row matching [$_want]"
+    fi
+}
+
+st_reject_row() {
+    _name="$1"; _arch="$2"; _flags="$3"; _gpu="$4"; _vk="$5"; _tools="$6"; _bad="$7"
+    _got=$(EGL_PROBE_ARCH="$_arch" EGL_PROBE_FLAGS="$_flags" EGL_PROBE_GPU_LIST="$_gpu" \
+           EGL_PROBE_VULKAN="$_vk" EGL_PROBE_TOOLS="$_tools" emit_rows)
+    if printf '%s\n' "$_got" | grep -q "$_bad"; then
+        st_fail "$_name: forbidden row matching [$_bad] was emitted"
+    fi
+}
+
+selftest() {
+    # 1. aarch64 with SVE reports NEON and SVE present, SVE2 absent.
+    st_expect_row "aarch64-sve" "aarch64" "fp asimd sve asimddp" "" "" "" \
+        '^cpu-feature	0x2202	present	'
+    st_expect_row "aarch64-neon" "aarch64" "fp asimd sve asimddp" "" "" "" \
+        '^cpu-feature	0x2201	present	'
+    st_expect_row "aarch64-no-sve2" "aarch64" "fp asimd sve asimddp" "" "" "" \
+        '^cpu-feature	0x2203	absent	'
+
+    # 2. An aarch64 host must never report an x86 feature as present — the
+    #    registry ids are architecture-scoped and mixing them would admit an
+    #    AVX2 variant on a machine that cannot execute one byte of it.
+    st_reject_row "aarch64-no-x86" "aarch64" "fp asimd sve" "" "" "" \
+        '^cpu-feature	0x110[0-9a-f]*	present	'
+
+    # 3. x86-64 with the v3 flag set reports v3 present and v4 absent.
+    st_expect_row "x86-v3" "x86_64" "fpu de tsc msr pae cx8 apic sep mtrr pge mca cmov pat clflush mmx fxsr sse sse2 ht syscall nx lm constant_tsc nopl cpuid pni pclmulqdq ssse3 fma cx16 sse4_1 sse4_2 x2apic movbe popcnt aes xsave avx f16c rdrand lahf_lm abm 3dnowprefetch bmi1 avx2 bmi2 rdseed adx clflushopt" \
+        "" "" "" '^cpu-feature	0x1103	present	'
+    st_expect_row "x86-no-v4" "x86_64" "fpu de tsc msr pae cx8 apic sep mtrr pge mca cmov pat clflush mmx fxsr sse sse2 ht syscall nx lm constant_tsc nopl cpuid pni pclmulqdq ssse3 fma cx16 sse4_1 sse4_2 x2apic movbe popcnt aes xsave avx f16c rdrand lahf_lm abm 3dnowprefetch bmi1 avx2 bmi2 rdseed adx clflushopt" \
+        "" "" "" '^cpu-feature	0x1104	absent	'
+
+    # 4. A present GPU whose Vulkan device is refused must report the device
+    #    present AND the api refused. Folding these licenses "this host has no
+    #    GPU", which is false; this is the incident this ledger exists for.
+    st_expect_row "gpu-present" "aarch64" "fp asimd" "GPU 0: NVIDIA GB10 (UUID: GPU-x)" \
+        "Permission denied" "" '^gpu-device	nvidia	present	'
+    st_expect_row "gpu-api-refused" "aarch64" "fp asimd" "GPU 0: NVIDIA GB10 (UUID: GPU-x)" \
+        "Permission denied" "" '^gpu-api	vulkan	refused	'
+    st_reject_row "gpu-not-absent" "aarch64" "fp asimd" "GPU 0: NVIDIA GB10 (UUID: GPU-x)" \
+        "Permission denied" "" '^gpu-device	nvidia	absent	'
+
+    # 5. No GPU at all is absent, not refused.
+    st_expect_row "gpu-absent" "aarch64" "fp asimd" "" "" "" \
+        '^gpu-device	nvidia	absent	'
+
+    # 5a. A MISSING ENUMERATOR is unprobed, never absent. Folding "nothing
+    #     asked" into "no device" is the fail-open this script exists to stop.
+    st_expect_row "gpu-unprobed" "aarch64" "fp asimd" "__unprobed__" "__unprobed__" "" \
+        '^gpu-device	nvidia	unprobed	'
+    st_reject_row "gpu-unprobed-not-absent" "aarch64" "fp asimd" "__unprobed__" "__unprobed__" "" \
+        '^gpu-device	nvidia	absent	'
+
+    # 5b. A present enumerator that FAILS is refused, not absent.
+    st_expect_row "gpu-enum-refused" "aarch64" "fp asimd" "__refused__ Driver/library version mismatch" "" "" \
+        '^gpu-device	nvidia	refused	Driver/library version mismatch'
+
+    # 5c. With a device present but no vulkaninfo installed, vulkan must not be
+    #     reported present. A missing tool is not a passing probe.
+    st_reject_row "vulkan-unprobed-not-present" "aarch64" "fp asimd" "GPU 0: NVIDIA GB10 (UUID: GPU-x)" \
+        "__unprobed__" "" '^gpu-api	vulkan	present	'
+    st_expect_row "vulkan-unprobed" "aarch64" "fp asimd" "GPU 0: NVIDIA GB10 (UUID: GPU-x)" \
+        "__unprobed__" "" '^gpu-api	vulkan	unprobed	'
+
+    # 5d. Enumeration is not execution: a listed device never claims a usable
+    #     CUDA context.
+    st_reject_row "cuda-not-present" "aarch64" "fp asimd" "GPU 0: NVIDIA GB10 (UUID: GPU-x)" "" "" \
+        '^gpu-api	cuda	present	'
+
+    # 6. Inspector tools are reported individually, present and absent both.
+    st_expect_row "tool-present" "aarch64" "fp asimd" "" "" " llvm-readobj clang" \
+        '^inspector-tool	llvm-readobj	present	'
+    st_expect_row "tool-absent" "aarch64" "fp asimd" "" "" " llvm-readobj clang" \
+        '^inspector-tool	objdump	absent	'
+
+    # 7. An unknown architecture emits an explicit row and no feature claims,
+    #    rather than silently defaulting to a baseline.
+    st_expect_row "arch-unknown" "sparc64" "anything" "" "" "" \
+        '^arch	unknown	present	'
+    st_reject_row "arch-unknown-no-features" "sparc64" "anything" "" "" "" \
+        '^cpu-feature	'
+
+    # 8. Vacuity: a probe that produced no rows must not be mistakable for a
+    #    clean host. emit_rows is required to be non-empty for a real arch.
+    _n=$(EGL_PROBE_ARCH=aarch64 EGL_PROBE_FLAGS="fp asimd" EGL_PROBE_GPU_LIST="" \
+         EGL_PROBE_VULKAN="" EGL_PROBE_TOOLS="" emit_rows | grep -c .)
+    if [ "$_n" -lt 5 ]; then
+        st_fail "vacuity: a known architecture produced only $_n row(s)"
+    fi
+
+    echo "selftest: PASS"
+}
+
+if [ "$MODE" = selftest ]; then
+    selftest
+    exit 0
+fi
+
+if ! selftest >/dev/null; then
+    selftest
+    echo "ERROR — nothing was checked (selftest failed; the probe was not run)"
+    exit 2
+fi
+
+ARCH=$(probe_arch)
+if [ -z "$ARCH" ]; then
+    echo "ERROR — nothing was checked (host architecture could not be determined)"
+    exit 2
+fi
+
+case "$ARCH" in
+    aarch64|arm64|x86_64|amd64|riscv64)
+        if [ -z "$(probe_flags)" ]; then
+            echo "ERROR — nothing was checked (cpu flags unreadable for arch=$ARCH; neither lscpu nor /proc/cpuinfo answered, so every feature row would be a silent absent)"
+            exit 2
+        fi
+        ;;
+esac
+
+ROWS=$(emit_rows)
+N=$(printf '%s\n' "$ROWS" | grep -c . || true)
+if [ "$N" -eq 0 ]; then
+    echo "ERROR — nothing was checked (0 capability rows produced for arch=$ARCH)"
+    exit 2
+fi
+
+printf '%s\n' "$ROWS"
+REFUSED=$(printf '%s\n' "$ROWS" | grep -c '	refused	' || true)
+ABSENT=$(printf '%s\n' "$ROWS" | grep -c '	absent	' || true)
+UNPROBED=$(printf '%s\n' "$ROWS" | grep -c '	unprobed	' || true)
+echo "PASS — $N row(s) probed, $REFUSED refused, $ABSENT absent, $UNPROBED unprobed (arch=$ARCH)"
+exit 0

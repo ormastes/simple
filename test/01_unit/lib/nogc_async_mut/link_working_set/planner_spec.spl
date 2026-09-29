@@ -1,0 +1,27 @@
+use std.spec
+use std.spec.step
+use std.nogc_async_mut.link_working_set.*
+
+describe "bounded linker working-set planner":
+    it "windows a large input beneath the resident limit":
+        step("Plan 20 GB of inputs with 512 MB input and output windows")
+        val plan = plan_link_working_set_v1(20000000000, 512000000, 512000000, 256000000, 6000000000)
+        assert_equal(plan.status, LinkWorkingSetStatus.Ok)
+        assert_equal(plan.resident_bytes, 1280000000u64)
+        assert_equal(plan.window_count, 40u64)
+        assert_true(plan.spill_required)
+
+    it "rejects invalid, overflowing, and over-budget plans":
+        step("Exercise every fail-closed planning result")
+        assert_equal(plan_link_working_set_v1(1, 1, 1, 1, 0).status, LinkWorkingSetStatus.InvalidLimit)
+        assert_equal(plan_link_working_set_v1(1, 0, 1, 1, 10).status, LinkWorkingSetStatus.InvalidWindow)
+        assert_equal(plan_link_working_set_v1(1, 0xffffffffffffffffu64, 1, 0, 10).status, LinkWorkingSetStatus.ArithmeticOverflow)
+        assert_equal(plan_link_working_set_v1(10, 6, 6, 1, 12).status, LinkWorkingSetStatus.ResidentBudgetExceeded)
+
+describe "bounded linker spill integrity":
+    it "detects payload corruption and truncation":
+        step("Checksum a staged output frame")
+        val frame = link_spill_frame_v1(4096, [1u8, 2u8, 3u8, 4u8])
+        assert_true(link_spill_frame_v1_valid(frame, [1u8, 2u8, 3u8, 4u8]))
+        assert_false(link_spill_frame_v1_valid(frame, [1u8, 2u8, 3u8, 5u8]))
+        assert_false(link_spill_frame_v1_valid(frame, [1u8, 2u8, 3u8]))

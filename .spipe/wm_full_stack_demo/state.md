@@ -636,15 +636,6 @@ implementation-in-progress
   admitted core capsule lacks required Web/GPU/SQLite symbols; `simple-core`
   is absent and the bounded Cranelift attempt produced no artifact. Runtime
   evidence remains red.
-- wm-host-content-owner: Host BrowserRenderer eligibility no longer derives
-  from `owner_port`. A scalar content owner is created explicitly, preserved
-  across lifecycle mutations, changed only after validated GUI/pixel frame
-  admission, and restored when the frame is released. This prevents hosted
-  Web frames from overwriting admitted GUI/pixel content. A no-stub
-  pure-Simple Stage-2 scalar probe linked and exited `0`; the real host
-  compositor closure compiled to an archive with zero failures. The deployed
-  remote host bridge and pixel-present protocol remain absent, so remote GUI
-  presentation and event delivery stay red.
 
 ## Remaining runtime gates
 
@@ -684,17 +675,3 @@ implementation-in-progress
   recipe avoids the prior link mistake but currently runs away before its first
   cached object. The attempted raw VBox cursor stack is also corrupted before
   it can establish an authoritative row position.
-- 2026-07-30 theme checkpoint: a scoped source repair restores the accepted
-  native-safe material serializer and projects exact package-CSS semantic
-  colors into `ThemePackage`; highest-capability review accepted the corrected
-  patch. Runtime/live-host proof is deliberately not claimed because the
-  released binary is stale and the external source-matched incremental build
-  remains unresolved. CPU/SIMD/Vulkan CPU-composited glass and Web ordered
-  shadows remain the next host lanes; x86/ARM QEMU remains postponed until a
-  current admitted capsule exists.
-- 2026-07-30 CPU glass checkpoint: source and discriminating unit coverage now
-  admit concrete CPU/software/CPU-SIMD/Vulkan targets to the bounded CPU
-  material compositor. Metal remains the only device-glass request; AUTO/GPU
-  remain opaque solid, and Engine2D's result—not producer metadata—owns the
-  execution receipt. Highest-capability review accepted the contract on cycle
-  3. Live runtime/capture evidence remains unverified.

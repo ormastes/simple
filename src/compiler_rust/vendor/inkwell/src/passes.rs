@@ -15,7 +15,9 @@ use llvm_sys::initialization::{LLVMInitializeInstrumentation, LLVMInitializeObjC
 use llvm_sys::prelude::LLVMPassManagerRef;
 #[llvm_versions(..=16)]
 use llvm_sys::prelude::LLVMPassRegistryRef;
-#[llvm_versions(10..=16)]
+#[llvm_versions(..=15)]
+use llvm_sys::transforms::aggressive_instcombine::LLVMAddAggressiveInstCombinerPass;
+#[llvm_versions(..=16)]
 use llvm_sys::transforms::ipo::LLVMAddMergeFunctionsPass;
 #[llvm_versions(..=15)]
 use llvm_sys::transforms::ipo::LLVMAddPruneEHPass;
@@ -51,9 +53,9 @@ use llvm_sys::transforms::vectorize::{LLVMAddLoopVectorizePass, LLVMAddSLPVector
 
 // LLVM12 removes the ConstantPropagation pass
 // Users should use the InstSimplify pass instead.
-#[llvm_versions(..=11)]
+#[cfg(feature = "llvm11-0")]
 use llvm_sys::transforms::ipo::LLVMAddIPConstantPropagationPass;
-#[llvm_versions(..=11)]
+#[cfg(feature = "llvm11-0")]
 use llvm_sys::transforms::scalar::LLVMAddConstantPropagationPass;
 
 #[llvm_versions(13..)]
@@ -69,10 +71,10 @@ use llvm_sys::transforms::pass_builder::{
 #[llvm_versions(12..=16)]
 use llvm_sys::transforms::scalar::LLVMAddInstructionSimplifyPass;
 
-use crate::module::Module;
-use crate::values::{AsValueRef, FunctionValue};
 #[llvm_versions(..=16)]
 use crate::OptimizationLevel;
+use crate::module::Module;
+use crate::values::{AsValueRef, FunctionValue};
 
 use std::borrow::Borrow;
 use std::marker::PhantomData;
@@ -148,6 +150,7 @@ impl PassManagerBuilder {
     ///
     /// pass_manager_builder.populate_function_pass_manager(&fpm);
     /// ```
+    #[allow(deprecated)]
     pub fn populate_function_pass_manager(&self, pass_manager: &PassManager<FunctionValue>) {
         unsafe {
             LLVMPassManagerBuilderPopulateFunctionPassManager(self.pass_manager_builder, pass_manager.pass_manager)
@@ -174,6 +177,7 @@ impl PassManagerBuilder {
     ///
     /// pass_manager_builder.populate_module_pass_manager(&fpm);
     /// ```
+    #[allow(deprecated)]
     pub fn populate_module_pass_manager(&self, pass_manager: &PassManager<Module>) {
         unsafe { LLVMPassManagerBuilderPopulateModulePassManager(self.pass_manager_builder, pass_manager.pass_manager) }
     }
@@ -198,6 +202,7 @@ impl PassManagerBuilder {
     ///
     /// pass_manager_builder.populate_lto_pass_manager(&lpm, false, false);
     /// ```
+    #[allow(deprecated)]
     #[llvm_versions(..=14)]
     pub fn populate_lto_pass_manager(&self, pass_manager: &PassManager<Module>, internalize: bool, run_inliner: bool) {
         use llvm_sys::transforms::pass_manager_builder::LLVMPassManagerBuilderPopulateLTOPassManager;
@@ -227,34 +232,37 @@ pub trait PassManagerSubType {
     type Input;
 
     unsafe fn create<I: Borrow<Self::Input>>(input: I) -> LLVMPassManagerRef;
+    #[allow(deprecated)]
     unsafe fn run_in_pass_manager(&self, pass_manager: &PassManager<Self>) -> bool
     where
         Self: Sized;
 }
 
+#[allow(deprecated)]
 impl PassManagerSubType for Module<'_> {
     type Input = ();
 
     unsafe fn create<I: Borrow<Self::Input>>(_: I) -> LLVMPassManagerRef {
-        LLVMCreatePassManager()
+        unsafe { LLVMCreatePassManager() }
     }
 
     unsafe fn run_in_pass_manager(&self, pass_manager: &PassManager<Self>) -> bool {
-        LLVMRunPassManager(pass_manager.pass_manager, self.module.get()) == 1
+        unsafe { LLVMRunPassManager(pass_manager.pass_manager, self.module.get()) == 1 }
     }
 }
 
 // With GATs https://github.com/rust-lang/rust/issues/44265 this could be
 // type Input<'a> = &'a Module;
+#[allow(deprecated)]
 impl<'ctx> PassManagerSubType for FunctionValue<'ctx> {
     type Input = Module<'ctx>;
 
     unsafe fn create<I: Borrow<Self::Input>>(input: I) -> LLVMPassManagerRef {
-        LLVMCreateFunctionPassManagerForModule(input.borrow().module.get())
+        unsafe { LLVMCreateFunctionPassManagerForModule(input.borrow().module.get()) }
     }
 
     unsafe fn run_in_pass_manager(&self, pass_manager: &PassManager<Self>) -> bool {
-        LLVMRunFunctionPassManager(pass_manager.pass_manager, self.as_value_ref()) == 1
+        unsafe { LLVMRunFunctionPassManager(pass_manager.pass_manager, self.as_value_ref()) == 1 }
     }
 }
 
@@ -263,11 +271,16 @@ impl<'ctx> PassManagerSubType for FunctionValue<'ctx> {
 /// documentation for specific passes is directly from the [LLVM
 /// documentation](https://llvm.org/docs/Passes.html).
 #[derive(Debug)]
+#[deprecated(
+    since = "0.9.0",
+    note = "Use [`PassBuilderOptions`] with [`Module::run_passes`] instead (new pass manager). This struct will be removed once LLVM 16 support is dropped."
+)]
 pub struct PassManager<T> {
     pub(crate) pass_manager: LLVMPassManagerRef,
     sub_type: PhantomData<T>,
 }
 
+#[allow(deprecated)]
 impl PassManager<FunctionValue<'_>> {
     /// Acquires the underlying raw pointer belonging to this `PassManager<T>` type.
     pub fn as_mut_ptr(&self) -> LLVMPassManagerRef {
@@ -284,6 +297,7 @@ impl PassManager<FunctionValue<'_>> {
     }
 }
 
+#[allow(deprecated)]
 impl<T: PassManagerSubType> PassManager<T> {
     pub unsafe fn new(pass_manager: LLVMPassManagerRef) -> Self {
         assert!(!pass_manager.is_null());
@@ -341,7 +355,7 @@ impl<T: PassManagerSubType> PassManager<T> {
     }
 
     /// Discovers identical functions and collapses them.
-    #[llvm_versions(10..=16)]
+    #[llvm_versions(..=16)]
     pub fn add_merge_functions_pass(&self) {
         unsafe { LLVMAddMergeFunctionsPass(self.pass_manager) }
     }
@@ -411,7 +425,7 @@ impl<T: PassManagerSubType> PassManager<T> {
     ///
     /// In LLVM 12 and later, this instruction is replaced by the
     /// [`add_instruction_simplify_pass`].
-    #[llvm_versions(..=11)]
+    #[cfg(feature = "llvm11-0")]
     pub fn add_ip_constant_propagation_pass(&self) {
         unsafe { LLVMAddIPConstantPropagationPass(self.pass_manager) }
     }
@@ -464,26 +478,6 @@ impl<T: PassManagerSubType> PassManager<T> {
     #[llvm_versions(..=16)]
     pub fn add_strip_symbol_pass(&self) {
         unsafe { LLVMAddStripSymbolsPass(self.pass_manager) }
-    }
-
-    /// This pass combines instructions inside basic blocks to form
-    /// vector instructions. It iterates over each basic block,
-    /// attempting to pair compatible instructions, repeating this
-    /// process until no additional pairs are selected for vectorization.
-    /// When the outputs of some pair of compatible instructions are
-    /// used as inputs by some other pair of compatible instructions,
-    /// those pairs are part of a potential vectorization chain.
-    /// Instruction pairs are only fused into vector instructions when
-    /// they are part of a chain longer than some threshold length.
-    /// Moreover, the pass attempts to find the best possible chain
-    /// for each pair of compatible instructions. These heuristics
-    /// are intended to prevent vectorization in cases where it would
-    /// not yield a performance increase of the resulting code.
-    #[cfg(feature = "llvm4-0")]
-    pub fn add_bb_vectorize_pass(&self) {
-        use llvm_sys::transforms::vectorize::LLVMAddBBVectorizePass;
-
-        unsafe { LLVMAddBBVectorizePass(self.pass_manager) }
     }
 
     /// No LLVM documentation is available at this time.
@@ -636,7 +630,7 @@ impl<T: PassManagerSubType> PassManager<T> {
     /// right-hand side.
     ///
     /// 2. Bitwise operators with constant operands are always grouped so that
-    /// shifts are performed first, then ors, then ands, then xors.
+    /// shifts are performed first, then ORs, then ANDs, then XORs.
     ///
     /// 3. Compare instructions are converted from <, >, ≤, or ≥ to = or ≠ if possible.
     ///
@@ -806,9 +800,6 @@ impl<T: PassManagerSubType> PassManager<T> {
     /// switch instruction until it is convenient.
     #[llvm_versions(..=16)]
     pub fn add_lower_switch_pass(&self) {
-        #[llvm_versions(..=6)]
-        use llvm_sys::transforms::scalar::LLVMAddLowerSwitchPass;
-        #[llvm_versions(7..=16)]
         use llvm_sys::transforms::util::LLVMAddLowerSwitchPass;
 
         unsafe { LLVMAddLowerSwitchPass(self.pass_manager) }
@@ -822,9 +813,6 @@ impl<T: PassManagerSubType> PassManager<T> {
     /// the standard SSA construction algorithm to construct "pruned" SSA form.
     #[llvm_versions(..=16)]
     pub fn add_promote_memory_to_register_pass(&self) {
-        #[llvm_versions(..=6)]
-        use llvm_sys::transforms::scalar::LLVMAddPromoteMemoryToRegisterPass;
-        #[llvm_versions(7..=16)]
         use llvm_sys::transforms::util::LLVMAddPromoteMemoryToRegisterPass;
 
         unsafe { LLVMAddPromoteMemoryToRegisterPass(self.pass_manager) }
@@ -906,7 +894,7 @@ impl<T: PassManagerSubType> PassManager<T> {
     /// returns something else (like constant 0), and can still be TRE’d. It can be
     /// TRE'd if all other return instructions in the function return the exact same value.
     ///
-    /// 4. If it can prove that callees do not access theier caller stack frame,
+    /// 4. If it can prove that callees do not access their caller stack frame,
     /// they are marked as eligible for tail call elimination (by the code generator).
     #[llvm_versions(..=16)]
     pub fn add_tail_call_elimination_pass(&self) {
@@ -932,7 +920,7 @@ impl<T: PassManagerSubType> PassManager<T> {
     ///
     /// In LLVM 12 and later, this instruction is replaced by the
     /// [`add_instruction_simplify_pass`].
-    #[llvm_versions(..=11)]
+    #[cfg(feature = "llvm11-0")]
     pub fn add_constant_propagation_pass(&self) {
         unsafe { LLVMAddConstantPropagationPass(self.pass_manager) }
     }
@@ -1071,45 +1059,40 @@ impl<T: PassManagerSubType> PassManager<T> {
         unsafe { LLVMAddBasicAliasAnalysisPass(self.pass_manager) }
     }
 
-    #[llvm_versions(7..=15)]
+    #[llvm_versions(..=15)]
     pub fn add_aggressive_inst_combiner_pass(&self) {
-        #[cfg(not(feature = "llvm7-0"))]
-        use llvm_sys::transforms::aggressive_instcombine::LLVMAddAggressiveInstCombinerPass;
-        #[cfg(feature = "llvm7-0")]
-        use llvm_sys::transforms::scalar::LLVMAddAggressiveInstCombinerPass;
-
         unsafe { LLVMAddAggressiveInstCombinerPass(self.pass_manager) }
     }
 
-    #[llvm_versions(7..=16)]
+    #[llvm_versions(..=16)]
     pub fn add_loop_unroll_and_jam_pass(&self) {
         use llvm_sys::transforms::scalar::LLVMAddLoopUnrollAndJamPass;
 
         unsafe { LLVMAddLoopUnrollAndJamPass(self.pass_manager) }
     }
 
-    #[llvm_versions(8..15)]
+    #[llvm_versions(..15)]
     pub fn add_coroutine_early_pass(&self) {
         use llvm_sys::transforms::coroutines::LLVMAddCoroEarlyPass;
 
         unsafe { LLVMAddCoroEarlyPass(self.pass_manager) }
     }
 
-    #[llvm_versions(8..15)]
+    #[llvm_versions(..15)]
     pub fn add_coroutine_split_pass(&self) {
         use llvm_sys::transforms::coroutines::LLVMAddCoroSplitPass;
 
         unsafe { LLVMAddCoroSplitPass(self.pass_manager) }
     }
 
-    #[llvm_versions(8..15)]
+    #[llvm_versions(..15)]
     pub fn add_coroutine_elide_pass(&self) {
         use llvm_sys::transforms::coroutines::LLVMAddCoroElidePass;
 
         unsafe { LLVMAddCoroElidePass(self.pass_manager) }
     }
 
-    #[llvm_versions(8..15)]
+    #[llvm_versions(..15)]
     pub fn add_coroutine_cleanup_pass(&self) {
         use llvm_sys::transforms::coroutines::LLVMAddCoroCleanupPass;
 
@@ -1117,6 +1100,7 @@ impl<T: PassManagerSubType> PassManager<T> {
     }
 }
 
+#[allow(deprecated)]
 impl<T> Drop for PassManager<T> {
     fn drop(&mut self) {
         unsafe { LLVMDisposePassManager(self.pass_manager) }
@@ -1199,7 +1183,7 @@ impl PassRegistry {
         unsafe { LLVMInitializeTarget(self.pass_registry) }
     }
 
-    #[llvm_versions(7..=15)]
+    #[llvm_versions(..=15)]
     pub fn initialize_aggressive_inst_combiner(&self) {
         use llvm_sys::initialization::LLVMInitializeAggressiveInstCombiner;
 

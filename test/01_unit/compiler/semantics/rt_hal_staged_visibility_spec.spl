@@ -1,0 +1,91 @@
+# @cover src/compiler/35.semantics/visibility_checker.spl 100%
+# @cover src/compiler/80.driver/driver_hir_pipeline_passes.spl 100%
+
+use std.spec.*
+use compiler.semantics.visibility_checker.{rt_hal_staged_entry_is_external_source_denied}
+use compiler.semantics.visibility_integration.{visibility_owner_key}
+use compiler.common.module_path_naming.{module_logical_name_from_path}
+use std.io_runtime.{process_run, env_get}
+
+val EXTERNAL_FIXTURE = "test/01_unit/compiler/semantics/fixtures/rt_hal_staged_external_advisory.spl"
+
+fn self_hosted_simple_bin() -> text:
+    val configured = env_get("SIMPLE_BIN")
+    if configured == "":
+        return "bin/simple"
+    configured
+
+fn run_external_fixture_under_advisory() -> text:
+    # This is deliberately the default/advisory profile.  The staged-entry
+    # diagnostic is an unconditional semantic error rather than an advisory
+    # visibility warning, so it must still prevent the external program from
+    # reaching main.
+    val command = "SIMPLE_RUST_SEED_WARNING=0 SIMPLE_TYPECHECK_PROFILE=advisory " +
+        self_hosted_simple_bin() + " run " + EXTERNAL_FIXTURE + " 2>&1; echo EXIT=$?"
+    val output = process_run("sh", ["-c", command])
+    output.0
+
+describe "compiler-staged RT/HAL visibility":
+    it "rejects external source use as a semantic boundary, not W0403":
+        expect(rt_hal_staged_entry_is_external_source_denied(
+            "rt_hal_compiler_stage_isolated_exact_host_from_plan_path_or_fail",
+            "app.io.env_access_host", "user.integration")).to_equal(true)
+
+    it "allows the compiler MIR owner to retain its linker-intrinsic lowering":
+        expect(rt_hal_staged_entry_is_external_source_denied(
+            "rt_hal_compiler_stage_isolated_exact_host_from_plan_path_or_fail",
+            "app.io.env_access_host",
+            "compiler.mir.mir_rt_hal_boundary")).to_equal(false)
+        expect(rt_hal_staged_entry_is_external_source_denied(
+            "ordinary_package_private_helper", "app.io.env_access_host",
+            "user.integration")).to_equal(false)
+
+    it "rejects suffix-spoofed host and accessor module paths":
+        expect(rt_hal_staged_entry_is_external_source_denied(
+            "rt_hal_compiler_stage_isolated_exact_host_from_plan_path_or_fail",
+            "attacker.app.io.env_access_host", "user.integration")).to_equal(false)
+        expect(rt_hal_staged_entry_is_external_source_denied(
+            "rt_hal_compiler_stage_isolated_exact_host_from_plan_path_or_fail",
+            "app.io.env_access_host",
+            "attacker.compiler.mir.mir_rt_hal_boundary")).to_equal(true)
+
+    it "normalizes a retained raw source owner before the exact capability gate":
+        val raw_owner = visibility_owner_key("src/app/io/env_access_host.spl")
+        val absolute_raw_owner = visibility_owner_key(
+            "/workspace/project/src/app/io/env_access_host.spl")
+        val raw_requester = visibility_owner_key(
+            "src/compiler/50.mir/mir_rt_hal_boundary.spl")
+        expect(raw_owner).to_equal("app.io.env_access_host")
+        expect(absolute_raw_owner).to_equal(raw_owner)
+        expect(raw_requester).to_equal("compiler.mir.mir_rt_hal_boundary")
+        expect(rt_hal_staged_entry_is_external_source_denied(
+            "rt_hal_compiler_stage_isolated_exact_host_from_plan_path_or_fail",
+            raw_owner, "user.integration")).to_equal(true)
+        expect(rt_hal_staged_entry_is_external_source_denied(
+            "rt_hal_compiler_stage_isolated_exact_host_from_plan_path_or_fail",
+            raw_owner, raw_requester)).to_equal(false)
+        # The executable Advisory fixture below exercises the external case
+        # through the raw-HIR source path carried by the imported host symbol.
+
+    it "derives the privileged MIR owner only from the canonical shared path":
+        val valid_path = "src/compiler/50.mir/mir_rt_hal_boundary.spl"
+        val valid_owner = visibility_owner_key(valid_path)
+        val host_owner = visibility_owner_key("src/app/io/env_access_host.spl")
+        expect(valid_owner).to_equal("compiler.mir.mir_rt_hal_boundary")
+        expect(valid_owner).to_equal(module_logical_name_from_path(valid_path))
+        expect(visibility_owner_key(
+            "src\\compiler\\50.mir\\mir_rt_hal_boundary.spl")).to_equal(valid_owner)
+        # A physical tier without its compiler root is not the compiler-owned
+        # module and must never gain the staged capability by normalization.
+        expect(visibility_owner_key(
+            "50.mir/mir_rt_hal_boundary.spl")).to_equal("mir.mir_rt_hal_boundary")
+        expect(rt_hal_staged_entry_is_external_source_denied(
+            "rt_hal_compiler_stage_isolated_exact_host_from_plan_path_or_fail",
+            host_owner, visibility_owner_key(
+                "50.mir/mir_rt_hal_boundary.spl"))).to_equal(true)
+
+    it "reports E-RTHAL-STAGED-PRIVATE for a real external program under Advisory":
+        val output = run_external_fixture_under_advisory()
+        expect(output).to_contain("E-RTHAL-STAGED-PRIVATE")
+        expect(output).to_not_contain("RTHAL_STAGED_EXTERNAL_FIXTURE_RAN")
+        expect(output).to_not_contain("EXIT=0")

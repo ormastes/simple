@@ -1,4 +1,8 @@
 # SFFI admitted receipt is not yet bound to the open provider handle
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** open  
 **Severity:** P0 for safe/critical dynamic-provider admission
@@ -65,3 +69,4 @@ is still unverified. Optimizer O3 analysis completed once for the three touched
 production Simple files (4.48--4.96 s, 288,308--290,928 KiB); it reported only
 the scanner's broad existing opportunity sets. Runtime call bodies did not
 change, so no per-call benchmark was repeated.
+

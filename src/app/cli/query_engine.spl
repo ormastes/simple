@@ -2,13 +2,23 @@
 #
 # Replaces grep-based query functions with scope-aware, line-based parsing.
 # Each function parses the target file into a lightweight outline and queries it.
-# Falls back to safe_grep for cross-file references.
+# Falls back to a BOUNDED pure-Simple walk for cross-file references (it used to
+# shell out to an unbounded `grep -rn`; see
+# src/lib/nogc_sync_mut/lsp/lsp_bounded_search.spl).
+#
+# Each public `engine_*` is a thin printer over an `engine_*_lines` core that
+# RETURNS its lines. The in-process MCP adapter
+# (app.simple_lsp_mcp.lsp_query_inproc) calls the cores directly, so it needs no
+# child process and stays byte-identical to the printed one-shot by construction.
 #
 # Functions: engine_find_definition, engine_find_references, engine_hover,
 #            engine_completions, engine_type_at, engine_signature_help,
 #            engine_document_symbols
 
-use app.cli.query_rich_common.{query_file_read_rich, query_process_run}
+use app.cli.query_rich_common.{query_file_read_rich}
+use std.nogc_sync_mut.lsp.lsp_bounded_search.{lsp_bounded_search_budget_default_v1,
+    lsp_bounded_search_word_v1, lsp_bounded_search_decl_v1,
+    lsp_bounded_search_truncation_note_v1}
 use app.cli.query_helpers.{_extract_params_from, _extract_ident_from, _extract_return_from, _count_indent}
 use app.cli.query_outline.{OutlineSymbol, OutlineImport, OutlineSnapshot,
     OutlineOptions, parse_outline_file, parse_outline_snapshot,
@@ -37,16 +47,25 @@ fn _parse_snapshot(file: text) -> OutlineSnapshot:
         extract_binding_types: true))
 
 # ============================================================================
-# Safe grep wrapper (local copy to avoid import issues)
+# Bounded cross-file search (replaces the unbounded `grep -rn` child)
 # ============================================================================
 
-fn _safe_grep(pattern: text, dir: text, include: text) -> (text, i64):
-    val (stdout, stderr, code) = query_process_run("grep", ["-rn", pattern, dir, "--include=" + include])
-    (stdout, code)
+# Both helpers return (lines, truncation_note). The note is "" when the walk
+# covered its whole root; callers append it so a short answer is never presented
+# as a complete one.
+fn _bounded_decl_search(symbol: text) -> ([text], text):
+    val found = lsp_bounded_search_decl_v1(
+        "src", ".spl", symbol, lsp_bounded_search_budget_default_v1())
+    (found.lines, lsp_bounded_search_truncation_note_v1(found))
 
-fn _safe_grep_file(pattern: text, file: text) -> (text, i64):
-    val (stdout, stderr, code) = query_process_run("grep", ["-n", pattern, file])
-    (stdout, code)
+fn _bounded_word_search(symbol: text) -> ([text], text):
+    val found = lsp_bounded_search_word_v1(
+        "src", ".spl", symbol, lsp_bounded_search_budget_default_v1())
+    (found.lines, lsp_bounded_search_truncation_note_v1(found))
+
+fn _print_lines(lines: [text]):
+    for line in lines:
+        print line
 
 fn _collect_imported_symbols(imports: [OutlineImport]) -> [_ImportedSym]:
     var imported: [_ImportedSym] = []
@@ -63,7 +82,8 @@ fn _collect_imported_symbols(imports: [OutlineImport]) -> [_ImportedSym]:
 # ============================================================================
 
 # Find definition of symbol — scope-aware, cross-file via imports
-fn engine_find_definition(file: text, symbol: text) -> i64:
+fn engine_find_definition_lines(file: text, symbol: text) -> ([text], i64):
+    var out: [text] = []
     val snapshot = _parse_snapshot(file)
     val symbols = snapshot.symbols
     var found = false
@@ -72,41 +92,50 @@ fn engine_find_definition(file: text, symbol: text) -> i64:
     for sym in symbols:
         if sym.name == symbol:
             if sym.parent != "":
-                print "{file}:{sym.line}: [{sym.kind}] {sym.parent}.{sym.name}"
+                out.push("{file}:{sym.line}: [{sym.kind}] {sym.parent}.{sym.name}")
             else:
-                print "{file}:{sym.line}: [{sym.kind}] {sym.signature}"
+                out.push("{file}:{sym.line}: [{sym.kind}] {sym.signature}")
             found = true
 
     if found:
-        return 0
+        return (out, 0)
 
     for imported in _collect_imported_symbols(
         parse_outline_import_lines(snapshot.lines)):
         val sym = imported.symbol
         if sym.name == symbol:
-            print "{imported.source_file}:{sym.line}: [{sym.kind}] {sym.signature}"
+            out.push("{imported.source_file}:{sym.line}: [{sym.kind}] {sym.signature}")
             found = true
 
     if found:
-        return 0
+        return (out, 0)
 
-    # Fallback: grep across src/
-    val (out, code) = _safe_grep("^fn " + symbol + "\\b\\|^class " + symbol + "\\b\\|^struct " + symbol + "\\b\\|^enum " + symbol + "\\b\\|^val " + symbol + " \\|^var " + symbol + " ", "src/", "*.spl")
-    if out.trim() != "":
+    # Fallback: bounded walk across src/
+    val (hits, note) = _bounded_decl_search(symbol)
+    if hits.len() > 0:
         # Limit output
-        val result_lines = out.split("\n")
         var count = 0
-        for rline in result_lines:
+        for rline in hits:
             if rline.trim() != "" and count < 20:
-                print rline
+                out.push(rline)
                 count = count + 1
-        return 0
+        if note != "":
+            out.push(note)
+        return (out, 0)
 
-    print "No definition found for: {symbol}"
-    1
+    out.push("No definition found for: {symbol}")
+    if note != "":
+        out.push(note)
+    (out, 1)
 
-# Find references to symbol — same-file outline + cross-file grep
-fn engine_find_references(file: text, symbol: text) -> i64:
+fn engine_find_definition(file: text, symbol: text) -> i64:
+    val (lines, code) = engine_find_definition_lines(file, symbol)
+    _print_lines(lines)
+    code
+
+# Find references to symbol — same-file outline + bounded cross-file walk
+fn engine_find_references_lines(file: text, symbol: text) -> ([text], i64):
+    var out: [text] = []
     val content = query_file_read_rich(file) ?? ""
     var found_count = 0
 
@@ -118,92 +147,107 @@ fn engine_find_references(file: text, symbol: text) -> i64:
             val line = lines[li]
             li = li + 1
             if _contains_word(line, symbol):
-                print "{file}:{li}: {line.trim()}"
+                out.push("{file}:{li}: {line.trim()}")
                 found_count = found_count + 1
 
-    # Cross-file references via safe_grep
-    val (out, code) = _safe_grep("\\b" + symbol + "\\b", "src/", "*.spl")
-    if out.trim() != "":
-        val result_lines = out.split("\n")
+    # Cross-file references via the bounded walk
+    val (hits, note) = _bounded_word_search(symbol)
+    if hits.len() > 0:
         var count = 0
-        for rline in result_lines:
+        for rline in hits:
             val rt = rline.trim()
             if rt != "" and not rt.starts_with(file + ":") and count < 50:
-                print rt
+                out.push(rt)
                 count = count + 1
                 found_count = found_count + 1
 
     if found_count == 0:
-        print "No references found for: {symbol}"
-        return 1
-    0
+        out.push("No references found for: {symbol}")
+        if note != "":
+            out.push(note)
+        return (out, 1)
+    if note != "":
+        out.push(note)
+    (out, 0)
+
+fn engine_find_references(file: text, symbol: text) -> i64:
+    val (lines, code) = engine_find_references_lines(file, symbol)
+    _print_lines(lines)
+    code
 
 # Hover info — type signature + doc comment + kind from outline
-fn engine_hover(file: text, line_num: i64, symbol: text) -> i64:
+fn engine_hover_lines(file: text, line_num: i64, symbol: text) -> ([text], i64):
     val snapshot = _parse_snapshot(file)
     val symbols = snapshot.symbols
 
     # First check in this file's symbols
     for sym in symbols:
         if sym.name == symbol:
-            _print_hover_info(sym, file)
-            return 0
+            return (_hover_info_lines(sym, file), 0)
 
     for imported in _collect_imported_symbols(
         parse_outline_import_lines(snapshot.lines)):
         val sym = imported.symbol
         if sym.name == symbol:
-            _print_hover_info(sym, imported.source_file)
-            return 0
+            return (_hover_info_lines(sym, imported.source_file), 0)
 
     # Fallback: basic info
-    print "Symbol: {symbol}"
-    print "Location: {file}:{line_num}"
+    var out: [text] = []
+    out.push("Symbol: {symbol}")
+    out.push("Location: {file}:{line_num}")
 
-    val (def_out, _) = _safe_grep("^fn " + symbol + "\\b\\|^class " + symbol + "\\b\\|^struct " + symbol + "\\b", "src/", "*.spl")
-    if def_out.trim() != "":
-        print ""
-        print "Definition:"
-        val def_lines = def_out.split("\n")
+    val (hits, note) = _bounded_decl_search(symbol)
+    if hits.len() > 0:
+        out.push("")
+        out.push("Definition:")
         var dc = 0
-        for dl in def_lines:
+        for dl in hits:
             if dl.trim() != "" and dc < 5:
-                print dl
+                out.push(dl)
                 dc = dc + 1
-    0
+    if note != "":
+        out.push(note)
+    (out, 0)
 
-fn _print_hover_info(sym: OutlineSymbol, file: text) -> i64:
-    print "Symbol: {sym.name}"
-    print "Kind: {sym.kind}"
-    print "Location: {file}:{sym.line}"
+fn engine_hover(file: text, line_num: i64, symbol: text) -> i64:
+    val (lines, code) = engine_hover_lines(file, line_num, symbol)
+    _print_lines(lines)
+    code
+
+fn _hover_info_lines(sym: OutlineSymbol, file: text) -> [text]:
+    var out: [text] = []
+    out.push("Symbol: {sym.name}")
+    out.push("Kind: {sym.kind}")
+    out.push("Location: {file}:{sym.line}")
     if sym.parent != "":
-        print "Parent: {sym.parent}"
-    print ""
-    print "Signature:"
-    print "  {sym.signature}"
+        out.push("Parent: {sym.parent}")
+    out.push("")
+    out.push("Signature:")
+    out.push("  {sym.signature}")
     if sym.return_type != "":
-        print "Return type: {sym.return_type}"
+        out.push("Return type: {sym.return_type}")
     if sym.params != "":
-        print "Parameters: {sym.params}"
+        out.push("Parameters: {sym.params}")
     if sym.doc_comment != "":
-        print ""
-        print "Documentation:"
+        out.push("")
+        out.push("Documentation:")
         val doc_lines = sym.doc_comment.split("\n")
         for dl in doc_lines:
-            print "  {dl}"
-    0
+            out.push("  {dl}")
+    out
 
 # Completions — collect local symbols + imported symbols + keywords
-fn engine_completions(file: text, line_num: i64, prefix: text) -> i64:
+fn engine_completions_lines(file: text, line_num: i64, prefix: text) -> ([text], i64):
+    var out: [text] = []
     var found: [text] = []
     val snapshot = _parse_snapshot(file)
     val symbols = snapshot.symbols
 
     # Local symbols matching prefix
-    print "--- Local ---"
+    out.push("--- Local ---")
     for sym in symbols:
         if sym.name.starts_with(prefix) and not _list_contains(found, sym.name):
-            print "{sym.name} [{sym.kind}]"
+            out.push("{sym.name} [{sym.kind}]")
             found.push(sym.name)
 
     var imp_found: [text] = []
@@ -214,60 +258,72 @@ fn engine_completions(file: text, line_num: i64, prefix: text) -> i64:
             imp_found.push(sym.name + " [" + sym.kind + "] (" + imported.module_path + ")")
 
     if imp_found.len() > 0:
-        print ""
-        print "--- Imported ---"
+        out.push("")
+        out.push("--- Imported ---")
         for entry in imp_found:
-            print entry
+            out.push(entry)
 
     # Keywords matching prefix
     val keywords = _matching_keywords(prefix)
     if keywords.len() > 0:
-        print ""
-        print "--- Keywords ---"
+        out.push("")
+        out.push("--- Keywords ---")
         for kw in keywords:
-            print kw
+            out.push(kw)
 
-    0
+    (out, 0)
+
+fn engine_completions(file: text, line_num: i64, prefix: text) -> i64:
+    val (lines, code) = engine_completions_lines(file, line_num, prefix)
+    _print_lines(lines)
+    code
 
 # Type at position — extract type from declaration
-fn engine_type_at(file: text, line_num: i64, symbol: text) -> i64:
+fn engine_type_at_lines(file: text, line_num: i64, symbol: text) -> ([text], i64):
+    var out: [text] = []
     val snapshot = _parse_snapshot(file)
     val symbols = snapshot.symbols
 
     # Read the line at position
     if line_num >= 1 and line_num <= snapshot.lines.len():
-        print "Line {line_num}: {snapshot.lines[line_num - 1].trim()}"
+        out.push("Line {line_num}: {snapshot.lines[line_num - 1].trim()}")
 
-    print "Symbol: {symbol}"
+    out.push("Symbol: {symbol}")
 
     for sym in symbols:
         if sym.name == symbol:
             if sym.return_type != "":
-                print "Type: {sym.return_type}"
+                out.push("Type: {sym.return_type}")
             elif sym.kind == "class" or sym.kind == "struct" or sym.kind == "enum" or sym.kind == "trait":
-                print "Type: {sym.kind} {sym.name}"
+                out.push("Type: {sym.kind} {sym.name}")
             else:
-                print "Type: (inferred)"
-            print "Kind: {sym.kind}"
-            print "Definition: {sym.signature}"
-            return 0
+                out.push("Type: (inferred)")
+            out.push("Kind: {sym.kind}")
+            out.push("Definition: {sym.signature}")
+            return (out, 0)
 
     for imported in _collect_imported_symbols(
         parse_outline_import_lines(snapshot.lines)):
         val sym = imported.symbol
         if sym.name == symbol:
             if sym.return_type != "":
-                print "Type: {sym.return_type}"
+                out.push("Type: {sym.return_type}")
             else:
-                print "Type: {sym.kind} {sym.name}"
-            print "Source: {imported.source_file}:{sym.line}"
-            return 0
+                out.push("Type: {sym.kind} {sym.name}")
+            out.push("Source: {imported.source_file}:{sym.line}")
+            return (out, 0)
 
-    print "Type: (unknown)"
-    0
+    out.push("Type: (unknown)")
+    (out, 0)
+
+fn engine_type_at(file: text, line_num: i64, symbol: text) -> i64:
+    val (lines, code) = engine_type_at_lines(file, line_num, symbol)
+    _print_lines(lines)
+    code
 
 # Signature help — function params with types, active param index
-fn engine_signature_help(file: text, line_num: i64, col: i64, symbol: text) -> i64:
+fn engine_signature_help_lines(file: text, line_num: i64, col: i64, symbol: text) -> ([text], i64):
+    var out: [text] = []
     var fn_sym: OutlineSymbol = OutlineSymbol(name: "", kind: "", line: 0, signature: "", doc_comment: "", parent: "", return_type: "", params: "")
     var found_fn = false
 
@@ -291,8 +347,8 @@ fn engine_signature_help(file: text, line_num: i64, col: i64, symbol: text) -> i
                 break
 
     if not found_fn:
-        print "No function definition found for: {symbol}"
-        return 1
+        out.push("No function definition found for: {symbol}")
+        return (out, 1)
 
     # Count commas before cursor to find active parameter
     var active_param = 0
@@ -311,25 +367,36 @@ fn engine_signature_help(file: text, line_num: i64, col: i64, symbol: text) -> i
                     active_param = active_param + 1
                 ci = ci + 1
 
-    print "Function: {fn_sym.name}"
-    print "Parameters: {fn_sym.params}"
+    out.push("Function: {fn_sym.name}")
+    out.push("Parameters: {fn_sym.params}")
     if fn_sym.return_type != "":
-        print "Returns: {fn_sym.return_type}"
-    print "Active parameter: {active_param}"
-    0
+        out.push("Returns: {fn_sym.return_type}")
+    out.push("Active parameter: {active_param}")
+    (out, 0)
+
+fn engine_signature_help(file: text, line_num: i64, col: i64, symbol: text) -> i64:
+    val (lines, code) = engine_signature_help_lines(file, line_num, col, symbol)
+    _print_lines(lines)
+    code
 
 # Document symbols — list all symbols with kind and line
-fn engine_document_symbols(file: text) -> i64:
+fn engine_document_symbols_lines(file: text) -> ([text], i64):
+    var out: [text] = []
     val symbols = _parse_file(file)
     if symbols.len() == 0:
-        print "No symbols found in {file}"
-        return 0
+        out.push("No symbols found in {file}")
+        return (out, 0)
     for sym in symbols:
         if sym.parent != "":
-            print "{sym.name}:{sym.kind}:{sym.line} (in {sym.parent})"
+            out.push("{sym.name}:{sym.kind}:{sym.line} (in {sym.parent})")
         else:
-            print "{sym.name}:{sym.kind}:{sym.line}"
-    0
+            out.push("{sym.name}:{sym.kind}:{sym.line}")
+    (out, 0)
+
+fn engine_document_symbols(file: text) -> i64:
+    val (lines, code) = engine_document_symbols_lines(file)
+    _print_lines(lines)
+    code
 
 # ============================================================================
 # Utility Helpers

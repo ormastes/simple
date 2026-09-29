@@ -1,0 +1,68 @@
+"""Finite kernel capability mint preserves exact rights and fresh identities."""
+
+use std.spec.{describe, it, expect}
+use os.kernel.ipc.capability.{CapabilityManager}
+use os.kernel.ipc.capability_mint
+use os.kernel.types.task_types.{TaskId}
+use os.kernel.types.capability_types.{CapabilityKind, CapabilityToken, CapabilitySet}
+
+describe "kernel task capability mint":
+    it "publishes one pledged exact-name set and rejects replacement":
+        var manager = CapabilityManager.new()
+        val task = TaskId(id: 71u64)
+        val issued = manager.mint_task_capability_set(
+            task, [CapabilityKind.IpcConnect(port_name: "vfs")])
+        expect(issued != nil).to_equal(true)
+        if val caps = issued:
+            expect(caps.is_pledged).to_equal(true)
+            expect(caps.caps.len()).to_equal(1)
+            expect(caps.caps[0].owner).to_equal(task.id)
+            expect(caps.caps[0].token_id).to_be_greater_than(0u64)
+            expect(caps.caps[0].generation).to_be_greater_than(0u64)
+            expect(caps.caps[0].parent_token_id).to_equal(0u64)
+        expect(manager.check(task, CapabilityKind.IpcConnect(port_name: "vfs"))).to_equal(true)
+        expect(manager.check(task, CapabilityKind.IpcConnect(port_name: "net"))).to_equal(false)
+        expect(manager.mint_task_capability_set(
+            task, [CapabilityKind.IpcConnect(port_name: "net")]) == nil).to_equal(true)
+
+    it "issues identities above an already installed scheduler pouch":
+        var manager = CapabilityManager.new()
+        val first = TaskId(id: 72u64)
+        val older = CapabilitySet(
+            caps: [CapabilityToken(
+                kind: CapabilityKind.IpcListen(port_name: "db"),
+                generation: 200u64, owner: first.id, token_id: 100u64,
+                parent_token_id: 0u64, depth: 2
+            )], is_pledged: true
+        )
+        expect(manager.install_scheduler_task_capabilities_v1(first, older)).to_equal(true)
+        val issued = manager.mint_task_capability_set(
+            TaskId(id: 73u64), [CapabilityKind.IpcConnect(port_name: "db")])
+        expect(issued != nil).to_equal(true)
+        if val caps = issued:
+            expect(caps.caps[0].token_id).to_be_greater_than(100u64)
+            expect(caps.caps[0].generation).to_be_greater_than(200u64)
+
+    it "refuses zero-task and empty authority without publishing records":
+        var manager = CapabilityManager.new()
+        expect(manager.mint_task_capability_set(
+            TaskId(id: 0u64), [CapabilityKind.ProcessSpawn]) == nil).to_equal(true)
+        expect(manager.mint_task_capability_set(TaskId(id: 74u64), []) == nil).to_equal(true)
+        expect(manager.capabilities_for_task(TaskId(id: 74u64)) == nil).to_equal(true)
+
+    it "tombstones exhausted identity space instead of wrapping a new grant":
+        var manager = CapabilityManager.new()
+        val first = TaskId(id: 75u64)
+        val exhausted = CapabilitySet(
+            caps: [CapabilityToken(
+                kind: CapabilityKind.IpcListen(port_name: "vfs"),
+                generation: 1u64, owner: first.id,
+                token_id: 0xFFFFFFFFFFFFFFFFu64,
+                parent_token_id: 0u64, depth: 2
+            )], is_pledged: true
+        )
+        expect(manager.install_scheduler_task_capabilities_v1(first, exhausted)).to_equal(true)
+        val second = TaskId(id: 76u64)
+        expect(manager.mint_task_capability_set(
+            second, [CapabilityKind.IpcConnect(port_name: "vfs")]) == nil).to_equal(true)
+        expect(manager.capabilities_for_task(second) == nil).to_equal(true)

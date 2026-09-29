@@ -1,3 +1,7 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
 """
 # Required Comment CLI Lint Coverage
 
@@ -37,20 +41,36 @@ describe "required comment lint CLI path":
         val results = lint_cli_source(linter, "sample.spl", "fn f():\n    pass_todo\n")
         assert_true(has_code(results, "REQC001"))
 
-    it "emits REQC001 (not REQC003) through lint_cli_source for a weak bare todo(...)":
-        # Real-parser finding, filed as
+    it "emits REQC003 (not REQC001) through lint_cli_source for a weak bare todo(...)":
+        # Fixed finding, filed as
         # doc/08_tracking/bug/todo_call_collapses_to_pass_todo_node_reqc003_unreachable_2026-08-07.md:
         # the parser (parser_stmts.spl / primary_expr.spl, `ident_text ==
-        # "todo"`) desugars `todo(...)` into the SAME `expr_pass_todo` AST
-        # node as bare `pass_todo(...)` — there is no `expr_call` with callee
-        # "todo" for real parsed source. `check_required_comment`'s dedicated
-        # REQC003 branch (which matches an `expr_call` callee) is therefore
-        # unreachable from real source; a weak `todo(...)` falls into the
-        # REQC001 pass_* branch instead. `required_comment_lint_spec.spl`
-        # still proves the REQC003 branch itself is correct by constructing
-        # the `expr_call` shape directly.
+        # "todo"`) desugars `todo(...)` into the same `expr_pass_todo` AST
+        # node (tag 40) as bare `pass_todo(...)`, but now via
+        # `expr_pass_todo_call`, which marks the node's `extra` field with 1
+        # to record it came from a real `todo(...)` call rather than the
+        # `pass_todo` keyword. `check_required_comment` reads that marker and
+        # applies the todo-specific two-string (what-remains + hint) check,
+        # so a weak `todo("fix")` is now REQC003, not REQC001.
+        # `required_comment_lint_spec.spl` still separately proves the
+        # hand-constructed `expr_call` shape's REQC003 branch is correct too.
         var linter = Linter.new()
         val results = lint_cli_source(linter, "sample.spl", "fn f():\n    todo(\"fix\")\n")
+        assert_true(has_code(results, "REQC003"))
+        assert_false(has_code(results, "REQC001"))
+
+    it "emits no REQC003 through lint_cli_source for a well-formed todo(...) with both strings":
+        var linter = Linter.new()
+        val results = lint_cli_source(linter, "sample_ok.spl", "fn f():\n    todo(\"finish the parser change\", \"see bug doc for the plan\")\n")
+        assert_false(has_code(results, "REQC003"))
+        assert_false(has_code(results, "REQC001"))
+
+    it "still emits REQC001 (not REQC003) through lint_cli_source for the bare pass_todo keyword":
+        # The pass_todo KEYWORD (not the todo(...) call) must keep its
+        # existing REQC001 semantics -- only real todo(...) calls get the
+        # extra==1 marker and the REQC003 two-string check.
+        var linter = Linter.new()
+        val results = lint_cli_source(linter, "sample_kw.spl", "fn f():\n    pass_todo(\"fix\")\n")
         assert_true(has_code(results, "REQC001"))
         assert_false(has_code(results, "REQC003"))
 
@@ -58,6 +78,24 @@ describe "required comment lint CLI path":
         var linter = Linter.new()
         val results = lint_cli_source(linter, "sample.spl", "fn f():\n    match x:\n        case _: 0\n")
         assert_true(has_code(results, "REQC004"))
+
+    it "emits REQC004 through the production lint path for if val wildcard binding":
+        var linter = Linter.new()
+        val source = "fn f(value: i64?):\n    if val _ = value:\n        return\n"
+        val results = lint_cli_source(linter, "if_val_wildcard.spl", source)
+        assert_true(has_code(results, "REQC004"))
+
+    it "emits REQC004 through the production lint path for if var wildcard binding":
+        var linter = Linter.new()
+        val source = "fn f(value: i64?):\n    if var _ = value:\n        return\n"
+        val results = lint_cli_source(linter, "if_var_wildcard.spl", source)
+        assert_true(has_code(results, "REQC004"))
+
+    it "accepts a rationalized wildcard if-binding through the production lint path":
+        var linter = Linter.new()
+        val source = "fn f(value: i64?):\n    if val _(\"all values intentionally ignored here\") = value:\n        return\n"
+        val results = lint_cli_source(linter, "if_val_rationale.spl", source)
+        assert_false(has_code(results, "REQC004"))
 
     it "emits exactly ONE REQC001 for a single-violation probe, not two":
         # Acceptance criterion (c): with the old text reimplementation

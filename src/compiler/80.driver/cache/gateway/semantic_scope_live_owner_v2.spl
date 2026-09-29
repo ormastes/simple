@@ -1,0 +1,2335 @@
+# codex-impl
+# Canonical live L7 semantic-scope owner.  All mutable attempt, grant, worker,
+# result and publication state is retained in this one owner instance.  Public
+# values are identity-only handles; copied DTOs and digests never recreate a
+# missing table row or advance its state.
+
+use std.io_runtime.{time_now_monotonic_ms}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.base_encoding.utilities.{validated_utf8_bytes_to_text_linear}
+use common.cache_host_authority_v1.{
+    CacheReaderPinAuthorityV1, cache_host_validate_reader_pin_v1
+}
+use compiler.common.cache_contract.direct_read_pin_v1.{DirectReadPinV1}
+use compiler.common.cache_contract.generation_manifest_v1.{
+    GenerationManifestV1, generation_manifest_encode_v1
+}
+use compiler.common.cache_contract.physical_tld_v1.{
+    physical_tld_header_encode_v1,
+    three_payload_contract_digest_valid_v1
+}
+use compiler.common.cache_contract.public_summary_v1.{
+    PublicSummaryTypedReferenceProfileV2,
+    public_summary_reference_payload_encode_v2,
+    public_summary_validate_live_set_v1
+}
+use compiler.common.cache_contract.semantic_scope_live_port_contract_v1.{
+    SemanticScopeLiveIdentityV1, SemanticScopeWriterLiveRequestV1,
+    SemanticScopeSummaryLiveRequestV1, SemanticScopeAttemptLiveRequestV1,
+    SemanticScopeContributionLiveRequestV1,
+    L78BoundaryErrorV4, L78AuthorityDomainV4, L78TokenKindV4,
+    L78AttemptKeyV4, L78OwnerTokenV4, L78LimitsV4, L78OwnedResultV4,
+    l78_attempt_key_digest_v4,
+    semantic_scope_live_requests_coherent_v1
+}
+use compiler.common.cache_contract.three_payload_compile_v2.{
+    ThreePayloadFallbackV1, three_payload_closure_seal_encode_v2
+}
+use compiler.common.cache_contract.three_payload_worker_v1.{
+    ThreePayloadWorkerPolicyV1, ThreePayloadWorkerResultV1,
+    three_payload_worker_result_encode_v1,
+    three_payload_worker_result_valid_v1
+}
+use compiler.common.cache_contract.three_payload_execution_v3.{
+    THREE_PAYLOAD_PARSE_EXECUTOR_PROFILE_V3,
+    ThreePayloadExecutionStateV3, ThreePayloadExecutionLimitsV3,
+    ThreePayloadExecutionBindingV3, ThreePayloadPhysicalReadReceiptV3,
+    ThreePayloadParsePreflightProjectionV3,
+    ThreePayloadCompiledResultProjectionV3,
+    three_payload_execution_limits_valid_v3,
+    three_payload_execution_binding_valid_v3,
+    three_payload_execution_binding_digest_v3,
+    three_payload_physical_read_receipt_valid_v3,
+    three_payload_parse_preflight_projection_valid_v3,
+    three_payload_compiled_result_projection_valid_v3,
+    three_payload_compiled_execution_available_v3
+}
+use compiler.common.cache_contract.canonical_cache_codec_v1.{
+    canonical_public_summary_encode_v1
+}
+use compiler.common.cache_contract.semantic_query_read_manifest_v1.{SemanticCoverageV1}
+use compiler.driver.cache.closure.three_payload_closure_packer_v2.{
+    PreparedThreePayloadV2, prepared_attempt_validate_live_v1,
+    verify_prepared_three_payload_v2
+}
+use compiler.driver.cache.gc.verified_generation_reachability_v1.{
+    VerifiedGenerationPinSnapshotV1, VerifiedCasClosureReceiptV1,
+    VerifiedGenerationDurableBindingV1
+}
+use compiler.driver.cache.gateway.cache_writer_v1.{
+    writer_validate_live_semantic_scope_v1
+}
+use compiler.driver.cache.gateway.semantic_scope_authority_v1.{
+    SemanticScopePreflightErrorV1, SemanticScopePreflightV1,
+    SemanticScopePublicSummaryBindingV1, SemanticScopeWriterBindingV1,
+    SemanticScopeConsumptionBindingV1, SemanticScopeGrantProjectionV1,
+    SemanticScopeContributionLiveBindingV1,
+    writer_semantic_scope_preflight_v1
+}
+use compiler.driver.cache.worker.three_payload_physical_file_broker_v1.{
+    ThreePayloadPhysicalFileSetV1, ThreePayloadPhysicalFileEvidenceV1,
+    read_three_payload_physical_files_v1,
+    three_payload_physical_receipt_project_v3
+}
+use compiler.frontend.core.parser.{parse_module_silent_checked}
+use compiler.semantics.semantic_scope_contribution_v1.{
+    SemanticScopeDimensionV1, SemanticScopeContributionProjectionV1,
+    SemanticScopeDependencyEnumerationV1,
+    SemanticScopeContributionCandidateV1,
+    semantic_scope_required_dimension_v1,
+    semantic_scope_contribution_candidate_valid_v1,
+    semantic_scope_contribution_candidate_digest_v1,
+    semantic_scope_source_universe_digest_v1,
+    semantic_owner_live_contribution_candidate_matches_v1
+}
+use compiler.semantics.semantic_scope_issuers_v2.{
+    SemanticIssuerAttemptContextV2,
+    SemanticScopeIssuedHandleV2,
+    SemanticScopeIssuerReceiptV2,
+    SemanticScopeIssuerEvidenceProjectionV2
+}
+
+val L78_KIND_SCOPE_V4: L78TokenKindV4 = L78TokenKindV4.Scope
+
+pub const SEMANTIC_SCOPE_LIVE_MAX_ATTEMPTS_V2: i64 = 64
+pub const SEMANTIC_SCOPE_LIVE_ISSUERS_V2: i64 = 5
+pub const SEMANTIC_SCOPE_LIVE_MAX_BODY_OBJECTS_V2: i64 = 1024
+pub const SEMANTIC_SCOPE_LIVE_MAX_DEPENDENCY_EDGES_V2: i64 = 65536
+pub const SEMANTIC_SCOPE_LIVE_MAX_RETAINED_BYTES_V2: i64 = 134217728
+
+# V4 registry state is private to the live owner. It is initially empty and
+# therefore cannot authorize production work without five real hook owners.
+struct L78ScopeRegistryEntryV4:
+    token: L78OwnerTokenV4
+    attempt: L78AttemptKeyV4
+    request: SemanticScopeAttemptLiveRequestV1
+    contributions: [L78OwnerTokenV4]
+    closed: bool
+
+struct L78ScopeRegistryV4:
+    owner_instance: i64
+    epoch: i64
+    next_slot: i64
+    limits: L78LimitsV4
+    entries: [L78ScopeRegistryEntryV4]
+
+fn _l78_scope_registry_new_v4(
+    owner_instance: i64,
+    limits: L78LimitsV4,
+) -> Result<L78ScopeRegistryV4, L78BoundaryErrorV4>:
+    if owner_instance <= 0 or limits.max_items <= 0 or
+            limits.max_items > 65536 or limits.max_bytes <= 0 or
+            limits.max_bytes > 16777216 or limits.max_steps <= 0 or
+            limits.max_steps > 65536:
+        return Err(L78BoundaryErrorV4.InvalidRequest)
+    Ok(L78ScopeRegistryV4(owner_instance: owner_instance, epoch: 1,
+        next_slot: 1, limits: limits, entries: []))
+
+fn _l78_attempt_request_same_v4(
+    left: SemanticScopeAttemptLiveRequestV1,
+    right: SemanticScopeAttemptLiveRequestV1,
+) -> bool:
+    val a = left.identity
+    val b = right.identity
+    a.writer_instance_digest == b.writer_instance_digest and
+        a.generation == b.generation and
+        a.manifest_digest == b.manifest_digest and
+        a.pin_snapshot_digest == b.pin_snapshot_digest and
+        a.generation_closure_digest == b.generation_closure_digest and
+        a.binding_digest == b.binding_digest and
+        a.query_domain_digest == b.query_domain_digest and
+        a.semantic_rules_digest == b.semantic_rules_digest and
+        a.cancellation_epoch == b.cancellation_epoch and
+        left.attempt_seal_digest == right.attempt_seal_digest and
+        left.source_content_digest == right.source_content_digest and
+        left.snapshot_semantic_digest == right.snapshot_semantic_digest
+
+fn _l78_scope_registry_entry_current_v4(
+    registry: L78ScopeRegistryV4,
+    entry: L78ScopeRegistryEntryV4,
+    request: SemanticScopeAttemptLiveRequestV1,
+    attempt: L78AttemptKeyV4,
+) -> Result<(), L78BoundaryErrorV4>:
+    if entry.closed: return Err(L78BoundaryErrorV4.StaleToken)
+    if entry.token.domain != L78AuthorityDomainV4.TestDouble:
+        return Err(L78BoundaryErrorV4.Unavailable)
+    if entry.token.kind != L78_KIND_SCOPE_V4:
+        return Err(L78BoundaryErrorV4.ForeignToken)
+    if entry.token.owner_instance != registry.owner_instance:
+        return Err(L78BoundaryErrorV4.ForeignToken)
+    if entry.token.slot <= 0 or entry.token.slot >= registry.next_slot or
+            entry.token.epoch != registry.epoch:
+        return Err(L78BoundaryErrorV4.StaleToken)
+    val attempt_digest = l78_attempt_key_digest_v4(attempt)?
+    val retained_attempt_digest = l78_attempt_key_digest_v4(entry.attempt)?
+    if attempt_digest != retained_attempt_digest or
+            entry.token.attempt_digest != retained_attempt_digest or
+            attempt.profile_digest != request.identity.semantic_rules_digest or
+            not _l78_attempt_request_same_v4(entry.request, request):
+        return Err(L78BoundaryErrorV4.ForeignToken)
+    if entry.contributions.len() != 5:
+        return Err(L78BoundaryErrorV4.Incomplete)
+    for index in 0..entry.contributions.len():
+        val contribution = entry.contributions[index]
+        if contribution.domain != L78AuthorityDomainV4.TestDouble or
+                contribution.kind != L78TokenKindV4.Candidate or
+                contribution.owner_instance <= 0 or
+                contribution.epoch != registry.epoch or
+                contribution.attempt_digest != attempt_digest or
+                contribution.slot <= 0:
+            return Err(L78BoundaryErrorV4.ForeignToken)
+        for prior_index in 0..index:
+            val prior = entry.contributions[prior_index]
+            if (prior.owner_instance == contribution.owner_instance and
+                    prior.slot == contribution.slot and
+                    prior.epoch == contribution.epoch):
+                return Err(L78BoundaryErrorV4.Conflict)
+    Ok(())
+
+# Resolve only through the retained registry row. A copied entry or token does
+# not create authority, and the empty production registry remains unavailable.
+fn _l78_scope_registry_validate_v4(
+    registry: L78ScopeRegistryV4,
+    token: L78OwnerTokenV4,
+    request: SemanticScopeAttemptLiveRequestV1,
+    attempt: L78AttemptKeyV4,
+) -> Result<(), L78BoundaryErrorV4>:
+    if registry.entries.len() > registry.limits.max_items:
+        return Err(L78BoundaryErrorV4.Bounds)
+    if token.owner_instance != registry.owner_instance:
+        return Err(L78BoundaryErrorV4.ForeignToken)
+    if token.slot <= 0 or token.epoch != registry.epoch:
+        return Err(L78BoundaryErrorV4.StaleToken)
+    var found = -1
+    for index in 0..registry.entries.len():
+        val retained = registry.entries[index].token
+        if retained.owner_instance == token.owner_instance and
+                retained.slot == token.slot and retained.epoch == token.epoch:
+            if found >= 0: return Err(L78BoundaryErrorV4.Conflict)
+            found = index
+    if found < 0: return Err(L78BoundaryErrorV4.Unavailable)
+    if registry.entries[found].token != token:
+        return Err(L78BoundaryErrorV4.ForeignToken)
+    _l78_scope_registry_entry_current_v4(
+        registry, registry.entries[found], request, attempt)
+
+# Admission for one registry row.  The owner instance is the only issuer and
+# the Live domain is refused outright: no default owner may mint live scope
+# authority, and no flag exists that would let it.
+fn _l78_scope_registry_issue_admits_v4(
+    registry: L78ScopeRegistryV4,
+    domain: L78AuthorityDomainV4,
+    request: SemanticScopeAttemptLiveRequestV1,
+    attempt: L78AttemptKeyV4,
+    contributions: [L78OwnerTokenV4],
+) -> Result<text, L78BoundaryErrorV4>:
+    if domain != L78AuthorityDomainV4.TestDouble:
+        return Err(L78BoundaryErrorV4.Unavailable)
+    if registry.owner_instance <= 0 or registry.epoch <= 0 or
+            registry.next_slot <= 0:
+        return Err(L78BoundaryErrorV4.InvalidRequest)
+    if registry.entries.len() >= registry.limits.max_items:
+        return Err(L78BoundaryErrorV4.Bounds)
+    if attempt.generation != request.identity.generation or
+            attempt.manifest_digest != request.identity.manifest_digest or
+            attempt.profile_digest != request.identity.semantic_rules_digest:
+        return Err(L78BoundaryErrorV4.InvalidRequest)
+    if contributions.len() != SEMANTIC_SCOPE_LIVE_ISSUERS_V2:
+        return Err(L78BoundaryErrorV4.Incomplete)
+    val attempt_digest = l78_attempt_key_digest_v4(attempt)?
+    for index in 0..contributions.len():
+        val contribution = contributions[index]
+        if contribution.domain != L78AuthorityDomainV4.TestDouble or
+                contribution.kind != L78TokenKindV4.Candidate or
+                contribution.owner_instance <= 0 or
+                contribution.epoch != registry.epoch or
+                contribution.attempt_digest != attempt_digest or
+                contribution.slot <= 0:
+            return Err(L78BoundaryErrorV4.ForeignToken)
+        for prior_index in 0..index:
+            val prior = contributions[prior_index]
+            if (prior.owner_instance == contribution.owner_instance and
+                    prior.slot == contribution.slot and
+                    prior.epoch == contribution.epoch):
+                return Err(L78BoundaryErrorV4.Conflict)
+    Ok(attempt_digest)
+
+# Issue one retained row and hand the updated registry back on every branch.
+# Slots are never reused: `next_slot` only advances, and a closed row stays as
+# a tombstone so a revoked token can never be revived.
+fn _l78_scope_registry_issue_v4(
+    registry: L78ScopeRegistryV4,
+    domain: L78AuthorityDomainV4,
+    request: SemanticScopeAttemptLiveRequestV1,
+    attempt: L78AttemptKeyV4,
+    contributions: [L78OwnerTokenV4],
+) -> L78OwnedResultV4<L78ScopeRegistryV4, L78OwnerTokenV4>:
+    val attempt_digest = match _l78_scope_registry_issue_admits_v4(
+            registry, domain, request, attempt, contributions):
+        case Ok(value): value
+        case Err(error):
+            return L78OwnedResultV4<L78ScopeRegistryV4, L78OwnerTokenV4>(
+                owner: registry, outcome: Err(error))
+    val token = L78OwnerTokenV4(domain: L78AuthorityDomainV4.TestDouble,
+        kind: L78_KIND_SCOPE_V4, owner_instance: registry.owner_instance,
+        slot: registry.next_slot, epoch: registry.epoch,
+        attempt_digest: attempt_digest)
+    var entries: [L78ScopeRegistryEntryV4] = []
+    for existing in registry.entries:
+        entries.push(existing)
+    entries.push(L78ScopeRegistryEntryV4(token: token, attempt: attempt,
+        request: request, contributions: contributions, closed: false))
+    val updated = L78ScopeRegistryV4(owner_instance: registry.owner_instance,
+        epoch: registry.epoch, next_slot: registry.next_slot + 1,
+        limits: registry.limits, entries: entries)
+    L78OwnedResultV4<L78ScopeRegistryV4, L78OwnerTokenV4>(
+        owner: updated, outcome: Ok(token))
+
+fn _l78_scope_registry_close_admits_v4(
+    registry: L78ScopeRegistryV4,
+    token: L78OwnerTokenV4,
+) -> Result<i64, L78BoundaryErrorV4>:
+    if registry.entries.len() > registry.limits.max_items:
+        return Err(L78BoundaryErrorV4.Bounds)
+    if token.owner_instance != registry.owner_instance:
+        return Err(L78BoundaryErrorV4.ForeignToken)
+    if token.slot <= 0 or token.epoch != registry.epoch:
+        return Err(L78BoundaryErrorV4.StaleToken)
+    var found = -1
+    for index in 0..registry.entries.len():
+        val retained = registry.entries[index].token
+        if retained.owner_instance == token.owner_instance and
+                retained.slot == token.slot and retained.epoch == token.epoch:
+            if found >= 0: return Err(L78BoundaryErrorV4.Conflict)
+            found = index
+    if found < 0: return Err(L78BoundaryErrorV4.Unavailable)
+    val entry = registry.entries[found]
+    if entry.token != token:
+        return Err(L78BoundaryErrorV4.ForeignToken)
+    if entry.token.domain != L78AuthorityDomainV4.TestDouble:
+        return Err(L78BoundaryErrorV4.Unavailable)
+    if entry.token.kind != L78_KIND_SCOPE_V4:
+        return Err(L78BoundaryErrorV4.ForeignToken)
+    if entry.closed:
+        return Err(L78BoundaryErrorV4.StaleToken)
+    Ok(found)
+
+# Close one retained row by tombstoning it in place.  The row is kept so the
+# revoked slot is never handed out again, and the caller must retain the
+# returned registry.
+fn _l78_scope_registry_close_v4(
+    registry: L78ScopeRegistryV4,
+    token: L78OwnerTokenV4,
+) -> L78OwnedResultV4<L78ScopeRegistryV4, ()>:
+    val found = match _l78_scope_registry_close_admits_v4(registry, token):
+        case Ok(value): value
+        case Err(error):
+            return L78OwnedResultV4<L78ScopeRegistryV4, ()>(
+                owner: registry, outcome: Err(error))
+    var entries: [L78ScopeRegistryEntryV4] = []
+    for index in 0..registry.entries.len():
+        val existing = registry.entries[index]
+        if index == found:
+            entries.push(L78ScopeRegistryEntryV4(token: existing.token,
+                attempt: existing.attempt, request: existing.request,
+                contributions: existing.contributions, closed: true))
+        else:
+            entries.push(existing)
+    val updated = L78ScopeRegistryV4(owner_instance: registry.owner_instance,
+        epoch: registry.epoch, next_slot: registry.next_slot,
+        limits: registry.limits, entries: entries)
+    L78OwnedResultV4<L78ScopeRegistryV4, ()>(owner: updated, outcome: Ok(()))
+
+# These states are owner-internal facts.  Handles never carry them.
+enum SemanticScopeAttemptStateV2:
+    Preparing
+    Sealed
+    Consumed
+    Cancelled
+
+enum SemanticScopeWorkerStateV2:
+    Unreserved
+    Reserved
+    Running
+    ResultReady
+    Publishing
+
+# Opaque identity-only handles.  Their constructors and fields are not public.
+struct LiveSemanticScopeV2:
+    owner_instance_identity: u64
+    slot: i64
+    session_serial: u64
+
+struct LiveSemanticCompletenessV2:
+    owner_instance_identity: u64
+    slot: i64
+    session_serial: u64
+    grant_serial: u64
+
+struct AdmittedThreePayloadWorkerV2:
+    owner_instance_identity: u64
+    slot: i64
+    session_serial: u64
+    grant_serial: u64
+    run_serial: u64
+
+struct VerifiedThreePayloadWorkerResultV2:
+    owner_instance_identity: u64
+    slot: i64
+    session_serial: u64
+    grant_serial: u64
+    run_serial: u64
+
+# V3 proof handles are identity-only.  Their constructors and fields remain
+# private to this owner module; result projections revalidate the live row.
+struct VerifiedThreePayloadParsePreflightV3:
+    owner_instance_identity: u64
+    slot: i64
+    session_serial: u64
+    grant_serial: u64
+    run_serial: u64
+    execution_binding_digest: text
+
+struct VerifiedThreePayloadCompiledResultV3:
+    owner_instance_identity: u64
+    slot: i64
+    session_serial: u64
+    grant_serial: u64
+    run_serial: u64
+    execution_binding_digest: text
+
+struct _SemanticScopeIssuerSlotV2:
+    dimension: SemanticScopeDimensionV1
+    receipt: SemanticScopeIssuerReceiptV2?
+    handle: SemanticScopeIssuedHandleV2?
+    issued: SemanticScopeContributionLiveBindingV1?
+
+struct _SemanticScopeLiveAttemptV2:
+    slot: i64
+    session_serial: u64
+    identity: SemanticScopeLiveIdentityV1
+    binding: SemanticScopeWriterBindingV1
+    manifest: GenerationManifestV1
+    pins: VerifiedGenerationPinSnapshotV1
+    closure: VerifiedCasClosureReceiptV1
+    durable: VerifiedGenerationDurableBindingV1
+    summaries: [SemanticScopePublicSummaryBindingV1]
+    prepared: PreparedThreePayloadV2
+    direct_pin: DirectReadPinV1
+    source_universe: [text]
+    issuers: [_SemanticScopeIssuerSlotV2]
+    attempt_state: SemanticScopeAttemptStateV2
+    worker_state: SemanticScopeWorkerStateV2
+    grant_serial: u64
+    run_serial: u64
+    exact_seal_digest: text
+    owner_grant_digest: text
+    worker_policy: ThreePayloadWorkerPolicyV1?
+    worker_result: ThreePayloadWorkerResultV1?
+    execution_v3_state: ThreePayloadExecutionStateV3
+    execution_v3_binding: ThreePayloadExecutionBindingV3?
+    execution_v3_parse_projection: ThreePayloadParsePreflightProjectionV3?
+    execution_v3_compiled_projection: ThreePayloadCompiledResultProjectionV3?
+    prepared_generation_digest: text
+    retained_body_objects: i64
+    retained_dependency_edges: i64
+    retained_bytes: i64
+
+struct _SemanticScopeRetiredAttemptV2:
+    owner_instance_identity: u64
+    slot: i64
+    session_serial: u64
+    grant_serial: u64
+    run_serial: u64
+    terminal_state: SemanticScopeAttemptStateV2
+
+class _SemanticScopeRetainedBudgetV2:
+    var bytes: i64
+    var ok: bool
+
+    static fn create() -> _SemanticScopeRetainedBudgetV2:
+        _SemanticScopeRetainedBudgetV2(bytes: 0, ok: true)
+
+    me add_bytes(amount: i64):
+        if (not self.ok or amount < 0 or
+                amount > SEMANTIC_SCOPE_LIVE_MAX_RETAINED_BYTES_V2 or
+                self.bytes > SEMANTIC_SCOPE_LIVE_MAX_RETAINED_BYTES_V2 - amount):
+            self.ok = false
+            return
+        self.bytes = self.bytes + amount
+
+    me add_text(value: text):
+        self.add_bytes(8)
+        self.add_bytes(value.len())
+
+    me add_texts(values: [text]):
+        self.add_bytes(8)
+        for value in values: self.add_text(value)
+
+    me add_blob(value: [u8]):
+        self.add_bytes(8)
+        self.add_bytes(value.len())
+
+var _next_semantic_scope_live_owner_identity_v2: u64 = 1u64
+
+class SemanticScopeLiveOwnerV2:
+    var owner_instance_identity: u64
+    var next_session_serial: u64
+    var next_grant_serial: u64
+    var next_run_serial: u64
+    var close_epoch: u64
+    var closed: bool
+    var writer_bound: bool
+    var writer_instance_digest: text
+    var generation: i64
+    var parent_manifest_digest: text
+    var manifest_digest: text
+    var cancellation_epoch: i64
+    var direct_pin_id: text
+    var process_instance_nonce: text
+    var boot_identity_digest: text
+    var namespace_entry_digest: text
+    var retained_body_objects: i64
+    var retained_dependency_edges: i64
+    var retained_bytes: i64
+    var attempts: [_SemanticScopeLiveAttemptV2]
+    var retired_attempts: [_SemanticScopeRetiredAttemptV2]
+
+    pub static fn create() -> SemanticScopeLiveOwnerV2:
+        val candidate = _next_semantic_scope_live_owner_identity_v2
+        val identity = if candidate == 0u64 or
+                candidate == 0xffffffffffffffffu64: 0u64 else: candidate
+        if identity != 0u64:
+            _next_semantic_scope_live_owner_identity_v2 = identity + 1u64
+        SemanticScopeLiveOwnerV2(owner_instance_identity: identity,
+            next_session_serial: 1u64, next_grant_serial: 1u64,
+            next_run_serial: 1u64, close_epoch: 0u64, closed: false,
+            writer_bound: false, writer_instance_digest: "", generation: -1,
+            parent_manifest_digest: "", manifest_digest: "",
+            cancellation_epoch: -1, direct_pin_id: "",
+            process_instance_nonce: "", boot_identity_digest: "",
+            namespace_entry_digest: "", retained_body_objects: 0,
+            retained_dependency_edges: 0, retained_bytes: 0,
+            attempts: [], retired_attempts: [])
+
+fn _preflight_fallback_v2(
+    error: SemanticScopePreflightErrorV1,
+) -> ThreePayloadFallbackV1:
+    match error:
+        case UnsupportedProfile: ThreePayloadFallbackV1.UnsupportedSemantics
+        case BoundsExceeded: ThreePayloadFallbackV1.BoundsExceeded
+        case ExactManifestMismatch | PinOrClosureMismatch:
+            ThreePayloadFallbackV1.ScopeGenerationMismatch
+        case PublicSummaryMismatch | DependencyEnumerationMismatch:
+            ThreePayloadFallbackV1.WitnessIncomplete
+        case InvalidBinding: ThreePayloadFallbackV1.CorruptPayload
+
+fn _live_identity_v2(
+    binding: SemanticScopeWriterBindingV1,
+    preflight: SemanticScopePreflightV1,
+) -> SemanticScopeLiveIdentityV1:
+    SemanticScopeLiveIdentityV1(
+        writer_instance_digest: binding.writer_instance_digest,
+        generation: preflight.generation,
+        manifest_digest: preflight.manifest_digest,
+        pin_snapshot_digest: preflight.pin_snapshot_digest,
+        generation_closure_digest: preflight.generation_closure_digest,
+        binding_digest: preflight.binding_digest,
+        query_domain_digest: binding.query_domain_digest,
+        semantic_rules_digest: binding.semantic_rules_digest,
+        cancellation_epoch: binding.cancellation_epoch)
+
+fn _semantic_scope_owner_digest_v2(owner_instance_identity: u64) -> text:
+    sha256_text("simple.semantic-scope-live-owner.v2\u0000" +
+        owner_instance_identity.to_string())
+
+fn _issuer_attempt_context_from_attempt_v2(
+    owner_instance_identity: u64,
+    attempt: _SemanticScopeLiveAttemptV2,
+) -> Result<SemanticIssuerAttemptContextV2, ThreePayloadFallbackV1>:
+    if (owner_instance_identity == 0u64 or
+            owner_instance_identity == 0xffffffffffffffffu64 or
+            attempt.session_serial == 0u64 or
+            attempt.session_serial > 0x7fffffffffffffffu64 or
+            semantic_scope_source_universe_digest_v1(
+                attempt.source_universe) == ""):
+        return Err(ThreePayloadFallbackV1.CorruptPayload)
+    Ok(SemanticIssuerAttemptContextV2(
+        scope_owner_instance_digest:
+            _semantic_scope_owner_digest_v2(owner_instance_identity),
+        scope_session_serial: attempt.session_serial as i64,
+        writer_instance_digest: attempt.identity.writer_instance_digest,
+        generation: attempt.identity.generation,
+        manifest_digest: attempt.identity.manifest_digest,
+        generation_closure_digest: attempt.identity.generation_closure_digest,
+        binding_digest: attempt.identity.binding_digest,
+        query_domain_digest: attempt.identity.query_domain_digest,
+        semantic_rules_digest: attempt.identity.semantic_rules_digest,
+        attempt_seal_digest: attempt.binding.attempt_seal_digest,
+        cancellation_epoch: attempt.identity.cancellation_epoch,
+        pin_id_digest: sha256_text(
+            "simple.cache.direct-pin-id.v2\u0000" +
+            attempt.direct_pin.pin_id),
+        pin_reader_epoch: attempt.direct_pin.reader_admission_epoch,
+        pin_generation: attempt.identity.generation,
+        pin_manifest_digest: attempt.direct_pin.pinned_manifest_digest,
+        pin_deadline_monotonic_ms: attempt.direct_pin.expires_monotonic,
+        process_instance_nonce_digest: sha256_text(
+            "simple.cache.process-instance-nonce.v2\u0000" +
+            attempt.direct_pin.process_instance_nonce),
+        boot_identity_digest: attempt.direct_pin.boot_identity_digest,
+        namespace_entry_digest: attempt.direct_pin.namespace_entry_digest,
+        source_universe: attempt.source_universe))
+
+fn _issuer_dimension_index_v2(value: SemanticScopeDimensionV1) -> i64:
+    match value:
+        case DeclarationsReexports: 0
+        case TraitCandidatesCoherence: 1
+        case AspectCandidatesOrdering: 2
+        case MacroCtfeLookup: 3
+        case BodyDependencyClosure: 4
+
+fn _issuer_candidate_v2(
+    attempt: _SemanticScopeLiveAttemptV2,
+    projection: SemanticScopeIssuerEvidenceProjectionV2,
+) -> Result<SemanticScopeContributionCandidateV1, ThreePayloadFallbackV1>:
+    if (not projection.gateway_install_available or
+            projection.source_universe != attempt.source_universe or
+            projection.source_universe_digest !=
+                semantic_scope_source_universe_digest_v1(
+                    attempt.source_universe)):
+        return Err(ThreePayloadFallbackV1.WitnessIncomplete)
+    if (projection.dimension == SemanticScopeDimensionV1.BodyDependencyClosure and
+            projection.dependency_enumeration !=
+                attempt.binding.dependency_enumeration):
+        return Err(ThreePayloadFallbackV1.WitnessIncomplete)
+    var candidate = SemanticScopeContributionCandidateV1(
+        dimension: projection.dimension,
+        scope_binding_digest: attempt.identity.binding_digest,
+        query_domain_digest: attempt.identity.query_domain_digest,
+        owner_rules_digest: projection.owner_revision_digest,
+        source_universe_digest: projection.source_universe_digest,
+        members: projection.members,
+        negative_witnesses: projection.negative_witnesses,
+        source_universe: projection.source_universe,
+        dependency_enumeration: projection.dependency_enumeration,
+        coverage: projection.coverage,
+        universe_complete: projection.universe_complete,
+        contribution_digest: "")
+    candidate.contribution_digest =
+        semantic_scope_contribution_candidate_digest_v1(candidate)
+    if not semantic_scope_contribution_candidate_valid_v1(candidate):
+        return Err(ThreePayloadFallbackV1.WitnessIncomplete)
+    Ok(candidate)
+
+fn _issuer_projection_matches_binding_v2(
+    projection: SemanticScopeIssuerEvidenceProjectionV2,
+    binding: SemanticScopeContributionLiveBindingV1,
+) -> bool:
+    val candidate = binding.candidate
+    projection.dimension == candidate.dimension and
+        projection.owner_revision_digest == candidate.owner_rules_digest and
+        projection.source_universe_digest == candidate.source_universe_digest and
+        projection.members == candidate.members and
+        projection.negative_witnesses == candidate.negative_witnesses and
+        projection.source_universe == candidate.source_universe and
+        projection.dependency_enumeration == candidate.dependency_enumeration and
+        projection.dependency_enumeration_digest ==
+            candidate.dependency_enumeration.enumeration_digest and
+        projection.coverage == candidate.coverage and
+        projection.universe_complete == candidate.universe_complete and
+        projection.issuer_instance_digest == binding.issuer_instance_digest and
+        projection.issuer_generation == binding.issuer_generation and
+        projection.authority_serial == binding.authority_serial
+
+fn _empty_issuer_slots_v2() -> [_SemanticScopeIssuerSlotV2]:
+    var slots: [_SemanticScopeIssuerSlotV2] = []
+    for index in 0..SEMANTIC_SCOPE_LIVE_ISSUERS_V2:
+        val dimension = match semantic_scope_required_dimension_v1(index):
+            case Some(value): value
+            case nil: return []
+        slots.push(_SemanticScopeIssuerSlotV2(
+            dimension: dimension, receipt: nil, handle: nil, issued: nil))
+    slots
+
+fn _pin_shape_matches_attempt_v2(
+    binding: SemanticScopeWriterBindingV1,
+    pins: VerifiedGenerationPinSnapshotV1,
+    direct_pin: DirectReadPinV1,
+) -> bool:
+    if (direct_pin.pin_id == "" or direct_pin.pin_id.to_i64() == nil or
+            direct_pin.pin_id.to_i64().unwrap() <= 0 or
+            direct_pin.reader_admission_epoch < 0 or
+            direct_pin.reader_admission_epoch % 2 != 0 or
+            direct_pin.created_monotonic < 0 or
+            direct_pin.expires_monotonic <= direct_pin.created_monotonic or
+            direct_pin.reader_admission_epoch != pins.epoch or
+            direct_pin.journal_superblock_generation != binding.root.generation or
+            direct_pin.pinned_manifest_digest != binding.root.manifest_digest):
+        return false
+    for root in pins.roots:
+        if (root.generation == binding.root.generation and
+                root.manifest_digest == binding.root.manifest_digest):
+            return true
+    false
+
+fn _pin_live_v2(direct_pin: DirectReadPinV1) -> Result<i64, ThreePayloadFallbackV1>:
+    val now = time_now_monotonic_ms()
+    if now < 0 or now < direct_pin.created_monotonic:
+        return Err(ThreePayloadFallbackV1.AuthorityUnavailable)
+    if now >= direct_pin.expires_monotonic:
+        return Err(ThreePayloadFallbackV1.ScopeGenerationMismatch)
+    val handle = direct_pin.pin_id.to_i64() ?? -1
+    if handle <= 0:
+        return Err(ThreePayloadFallbackV1.AuthorityUnavailable)
+    if not cache_host_validate_reader_pin_v1(
+            CacheReaderPinAuthorityV1(opaque_handle: handle),
+            direct_pin.reader_admission_epoch,
+            direct_pin.journal_superblock_generation,
+            direct_pin.pinned_manifest_digest,
+            direct_pin.process_instance_nonce,
+            direct_pin.boot_identity_digest,
+            direct_pin.namespace_entry_digest,
+            now):
+        return Err(ThreePayloadFallbackV1.AuthorityUnavailable)
+    Ok(now)
+
+fn _summary_arrays_v2(
+    summaries: [SemanticScopePublicSummaryBindingV1],
+) -> ([text], [PublicSummaryTypedReferenceProfileV2]):
+    var object_digests: [text] = []
+    var profiles: [PublicSummaryTypedReferenceProfileV2] = []
+    for summary in summaries:
+        object_digests.push(summary.object_digest)
+        profiles.push(summary.profile)
+    (object_digests, profiles)
+
+fn _base_ports_current_v2(
+    identity: SemanticScopeLiveIdentityV1,
+    binding: SemanticScopeWriterBindingV1,
+    pins: VerifiedGenerationPinSnapshotV1,
+    closure: VerifiedCasClosureReceiptV1,
+    durable: VerifiedGenerationDurableBindingV1,
+    summaries: [SemanticScopePublicSummaryBindingV1],
+    prepared: PreparedThreePayloadV2,
+) -> bool:
+    val writer_request = SemanticScopeWriterLiveRequestV1(identity: identity,
+        durable_binding_digest: closure.durable_journal_receipt_digest)
+    val summary_request = SemanticScopeSummaryLiveRequestV1(identity: identity,
+        public_summary_set_digest: _summary_set_digest_v2(summaries),
+        summary_count: summaries.len())
+    val attempt_request = SemanticScopeAttemptLiveRequestV1(identity: identity,
+        attempt_seal_digest: binding.attempt_seal_digest,
+        source_content_digest: binding.source_content_digest,
+        snapshot_semantic_digest: binding.snapshot_semantic_digest)
+    val (object_digests, profiles) = _summary_arrays_v2(summaries)
+    writer_validate_live_semantic_scope_v1(writer_request, pins, closure, durable) and
+        public_summary_validate_live_set_v1(summary_request, object_digests, profiles) and
+        prepared_attempt_validate_live_v1(attempt_request, prepared)
+
+fn _summary_set_digest_v2(
+    summaries: [SemanticScopePublicSummaryBindingV1],
+) -> text:
+    var canonical = "simple.semantic-scope.summary-set.v1\n"
+    for summary in summaries:
+        canonical = canonical + summary.object_digest + "\u0000" +
+            summary.profile_digest + "\n"
+    sha256_text(canonical)
+
+fn _add_dependency_enumeration_size_v2(
+    budget: _SemanticScopeRetainedBudgetV2,
+    enumeration: SemanticScopeDependencyEnumerationV1,
+):
+    budget.add_texts(enumeration.body_object_digests)
+    budget.add_bytes(8)
+    for edge in enumeration.edges:
+        budget.add_text(edge.body_object_digest)
+        budget.add_bytes(8)
+        budget.add_text(edge.caller_name)
+        budget.add_bytes(8)
+        budget.add_text(edge.callee_name)
+    budget.add_text(enumeration.enumeration_digest)
+
+fn _add_contribution_candidate_size_v2(
+    budget: _SemanticScopeRetainedBudgetV2,
+    candidate: SemanticScopeContributionCandidateV1,
+):
+    budget.add_bytes(1)
+    budget.add_text(candidate.scope_binding_digest)
+    budget.add_text(candidate.query_domain_digest)
+    budget.add_text(candidate.owner_rules_digest)
+    budget.add_text(candidate.source_universe_digest)
+    budget.add_texts(candidate.members)
+    budget.add_texts(candidate.negative_witnesses)
+    budget.add_texts(candidate.source_universe)
+    _add_dependency_enumeration_size_v2(budget,
+        candidate.dependency_enumeration)
+    budget.add_bytes(2)
+    budget.add_text(candidate.contribution_digest)
+
+fn _attempt_retained_bytes_v2(
+    attempt: _SemanticScopeLiveAttemptV2,
+) -> Result<i64, ThreePayloadFallbackV1>:
+    val budget = _SemanticScopeRetainedBudgetV2.create()
+
+    # Slot identity and both state machines.
+    budget.add_bytes(16)
+    budget.add_text(attempt.identity.writer_instance_digest)
+    budget.add_bytes(8)
+    budget.add_text(attempt.identity.manifest_digest)
+    budget.add_text(attempt.identity.pin_snapshot_digest)
+    budget.add_text(attempt.identity.generation_closure_digest)
+    budget.add_text(attempt.identity.binding_digest)
+    budget.add_text(attempt.identity.query_domain_digest)
+    budget.add_text(attempt.identity.semantic_rules_digest)
+    budget.add_bytes(8)
+
+    # The complete retained writer binding, including its seal and dependency
+    # enumeration, is accounted independently of duplicate evidence retained
+    # by the manifest/prepared objects.
+    budget.add_text(attempt.binding.writer_instance_digest)
+    budget.add_bytes(8)
+    budget.add_text(attempt.binding.root.manifest_digest)
+    budget.add_text(attempt.binding.expected_parent_manifest_digest)
+    budget.add_text(attempt.binding.snapshot_semantic_digest)
+    budget.add_text(attempt.binding.snapshot_cas_object_digest)
+    budget.add_text(attempt.binding.source_content_digest)
+    budget.add_text(attempt.binding.module_id)
+    budget.add_text(attempt.binding.query_domain_digest)
+    budget.add_text(attempt.binding.compiler_owner_digest)
+    budget.add_text(attempt.binding.grammar_digest)
+    budget.add_text(attempt.binding.semantic_rules_digest)
+    budget.add_text(attempt.binding.verifier_registry_digest)
+    budget.add_text(attempt.binding.access_policy_digest)
+    budget.add_bytes(8)
+    val binding_seal = three_payload_closure_seal_encode_v2(
+        attempt.binding.attempt_seal)
+    if binding_seal.len() == 0:
+        return Err(ThreePayloadFallbackV1.CorruptPayload)
+    budget.add_blob(binding_seal)
+    budget.add_text(attempt.binding.attempt_seal_digest)
+    budget.add_bytes(1)
+    _add_dependency_enumeration_size_v2(budget,
+        attempt.binding.dependency_enumeration)
+    budget.add_bytes(32)
+
+    val manifest_bytes = generation_manifest_encode_v1(attempt.manifest)
+    if manifest_bytes.len() == 0:
+        return Err(ThreePayloadFallbackV1.CorruptPayload)
+    budget.add_blob(manifest_bytes)
+
+    # Pin snapshot, closure and durable writer binding.
+    budget.add_bytes(16)
+    for root in attempt.pins.roots:
+        budget.add_bytes(8)
+        budget.add_text(root.manifest_digest)
+    budget.add_text(attempt.pins.snapshot_digest)
+    budget.add_bytes(24)
+    budget.add_text(attempt.closure.root_manifest_digest)
+    budget.add_bytes(8)
+    for identity in attempt.closure.ordered_closure:
+        budget.add_text(identity.kind)
+        budget.add_text(identity.digest)
+    budget.add_text(attempt.closure.closure_digest)
+    budget.add_text(attempt.closure.verifier_registry_digest)
+    budget.add_text(attempt.closure.pin_snapshot_digest)
+    budget.add_text(attempt.closure.accepted_journal_prefix_digest)
+    budget.add_text(attempt.closure.durable_journal_receipt_digest)
+    budget.add_text(attempt.closure.catalog_owner_receipt_digest)
+    budget.add_text(attempt.closure.owner_seal_digest)
+    budget.add_bytes(33)
+    budget.add_text(attempt.durable.operation_digest)
+    budget.add_text(attempt.durable.host_receipt_digest)
+    budget.add_text(attempt.durable.journal_digest)
+    budget.add_text(attempt.durable.accepted_journal_prefix_digest)
+    budget.add_text(attempt.durable.projection_digest)
+
+    # Every public-summary DTO and its nested summary/reference payloads.
+    budget.add_bytes(8)
+    for summary in attempt.summaries:
+        budget.add_text(summary.object_digest)
+        budget.add_text(summary.profile_digest)
+        budget.add_bytes(8)
+        val summary_bytes = canonical_public_summary_encode_v1(
+            summary.profile.summary)
+        val references = public_summary_reference_payload_encode_v2(
+            summary.profile.references)
+        val producer_references = public_summary_reference_payload_encode_v2(
+            summary.profile.producer_references)
+        val reverse_references = public_summary_reference_payload_encode_v2(
+            summary.profile.reverse_navigation_references)
+        if (summary_bytes.len() == 0 or references.len() == 0 or
+                producer_references.len() == 0 or
+                reverse_references.len() == 0):
+            return Err(ThreePayloadFallbackV1.CorruptPayload)
+        budget.add_blob(summary_bytes)
+        budget.add_blob(references)
+        budget.add_blob(producer_references)
+        budget.add_blob(reverse_references)
+        budget.add_text(summary.profile.producer_semantic_digest)
+
+    # Prepared closure: seal, all copied byte bodies, decoded headers and the
+    # complete verified semantic object list.
+    val prepared_seal = three_payload_closure_seal_encode_v2(
+        attempt.prepared.seal)
+    val init_header = physical_tld_header_encode_v1(
+        attempt.prepared.init_tld_header)
+    if prepared_seal.len() == 0 or init_header.len() == 0:
+        return Err(ThreePayloadFallbackV1.CorruptPayload)
+    budget.add_blob(prepared_seal)
+    budget.add_text(attempt.prepared.seal_digest)
+    budget.add_blob(attempt.prepared.source_bytes)
+    budget.add_bytes(1)
+    match attempt.prepared.prior_tld_bytes:
+        case Some(bytes): budget.add_blob(bytes)
+        case nil: pass
+    budget.add_bytes(1)
+    match attempt.prepared.prior_tld_header:
+        case Some(header):
+            val prior_header = physical_tld_header_encode_v1(header)
+            if prior_header.len() == 0:
+                return Err(ThreePayloadFallbackV1.CorruptPayload)
+            budget.add_blob(prior_header)
+        case nil: pass
+    budget.add_blob(attempt.prepared.init_tld_bytes)
+    budget.add_blob(init_header)
+    budget.add_texts(attempt.prepared.verified_semantic_object_digests)
+
+    budget.add_text(attempt.direct_pin.pin_id)
+    budget.add_text(attempt.direct_pin.process_instance_nonce)
+    budget.add_text(attempt.direct_pin.boot_identity_digest)
+    budget.add_bytes(32)
+    budget.add_text(attempt.direct_pin.pinned_manifest_digest)
+    budget.add_text(attempt.direct_pin.namespace_entry_digest)
+    budget.add_texts(attempt.source_universe)
+
+    # Empty issuer slots consume bounded state, and installed candidates are
+    # traversed in full rather than represented by their digest alone.
+    budget.add_bytes(8)
+    for issuer in attempt.issuers:
+        budget.add_bytes(4)
+        match issuer.receipt:
+            case Some(_): budget.add_bytes(8)
+            case nil: pass
+        match issuer.handle:
+            case Some(_): budget.add_bytes(24)
+            case nil: pass
+        match issuer.issued:
+            case Some(issued):
+                _add_contribution_candidate_size_v2(budget, issued.candidate)
+                budget.add_text(issued.issuer_instance_digest)
+                budget.add_bytes(16)
+            case nil: pass
+
+    budget.add_bytes(42)
+    budget.add_text(attempt.exact_seal_digest)
+    budget.add_text(attempt.owner_grant_digest)
+    budget.add_bytes(1)
+    match attempt.worker_policy:
+        case Some(policy):
+            budget.add_text(policy.executor_digest)
+            budget.add_bytes(27)
+        case nil: pass
+    budget.add_bytes(1)
+    match attempt.worker_result:
+        case Some(result):
+            val result_bytes = three_payload_worker_result_encode_v1(result)
+            if result_bytes.len() == 0:
+                return Err(ThreePayloadFallbackV1.CorruptPayload)
+            budget.add_blob(result_bytes)
+        case nil: pass
+    # V3 retains the owner-created binding.  On successful preflight the
+    # canonical prepared field is replaced with the broker-owned snapshot.
+    budget.add_bytes(1)
+    match attempt.execution_v3_binding:
+        case Some(binding):
+            budget.add_bytes(64)
+            budget.add_texts([binding.owner_grant_digest,
+                binding.attempt_seal_digest,
+                binding.semantic_completeness_seal_digest,
+                binding.closure_seal_digest, binding.parser_profile_digest,
+                binding.execution_limits_digest,
+                binding.dependency_enumeration_digest,
+                binding.issuer_set_digest, binding.body_set_digest,
+                binding.executor_digest])
+        case nil: pass
+    match attempt.execution_v3_parse_projection:
+        case Some(projection):
+            budget.add_text(projection.execution_binding_digest)
+            budget.add_text(projection.source_digest)
+            budget.add_bytes(1)
+            match projection.prior_tld_digest:
+                case Some(digest): budget.add_text(digest)
+                case nil: pass
+            budget.add_text(projection.init_tld_digest)
+            budget.add_bytes(145)
+            budget.add_text(projection.receipt_digest)
+        case nil: pass
+    match attempt.execution_v3_compiled_projection:
+        case Some(projection):
+            budget.add_texts([projection.execution_binding_digest,
+                projection.result_manifest_digest,
+                projection.summary_object_digest,
+                projection.diagnostic_object_digest,
+                projection.portable_object_set_digest,
+                projection.receipt_digest])
+        case nil: pass
+    budget.add_text(attempt.prepared_generation_digest)
+    budget.add_bytes(24)
+    if not budget.ok: return Err(ThreePayloadFallbackV1.BoundsExceeded)
+    Ok(budget.bytes)
+
+fn _retired_attempt_bytes_v2(
+    retired: _SemanticScopeRetiredAttemptV2,
+) -> Result<i64, ThreePayloadFallbackV1>:
+    val budget = _SemanticScopeRetainedBudgetV2.create()
+    budget.add_bytes(41)
+    if (retired.owner_instance_identity == 0u64 or retired.slot < 0 or
+            retired.session_serial == 0u64):
+        return Err(ThreePayloadFallbackV1.CorruptPayload)
+    if not budget.ok: return Err(ThreePayloadFallbackV1.BoundsExceeded)
+    Ok(budget.bytes)
+
+fn _next_free_slot_v2(attempts: [_SemanticScopeLiveAttemptV2]) -> i64:
+    for slot in 0..SEMANTIC_SCOPE_LIVE_MAX_ATTEMPTS_V2:
+        var used = false
+        for attempt in attempts:
+            if attempt.slot == slot: used = true
+        if not used: return slot
+    -1
+
+fn _issuer_set_digest_v3(attempt: _SemanticScopeLiveAttemptV2) -> text:
+    var canonical = "simple.compiler.three-payload.issuer-set.v3\n"
+    for slot in attempt.issuers:
+        val issued = match slot.issued:
+            case Some(value): value
+            case nil: return ""
+        canonical = canonical + slot.dimension.to_string() + "\u0000" +
+            issued.candidate.contribution_digest + "\u0000" +
+            issued.issuer_instance_digest + "\u0000" +
+            issued.issuer_generation.to_string() + "\u0000" +
+            issued.authority_serial.to_string() + "\n"
+    sha256_text(canonical)
+
+fn _body_set_digest_v3(attempt: _SemanticScopeLiveAttemptV2) -> text:
+    val enumeration = attempt.binding.dependency_enumeration
+    var canonical = "simple.compiler.three-payload.body-set.v3\n"
+    for digest in enumeration.body_object_digests:
+        canonical = canonical + digest.len().to_string() + ":" + digest + "\n"
+    for edge in enumeration.edges:
+        canonical = canonical + edge.body_object_digest + "\u0000" +
+            edge.caller_name.len().to_string() + ":" + edge.caller_name + "\u0000" +
+            edge.callee_name.len().to_string() + ":" + edge.callee_name + "\n"
+    sha256_text(canonical)
+
+fn _parser_profile_digest_v3(attempt: _SemanticScopeLiveAttemptV2) -> text:
+    sha256_text(THREE_PAYLOAD_PARSE_EXECUTOR_PROFILE_V3 + "\u0000" +
+        attempt.binding.grammar_digest + "\u0000" +
+        attempt.binding.semantic_rules_digest + "\u0000" +
+        attempt.prepared.seal.compiler_semantics_digest)
+
+fn _executor_digest_v3(attempt: _SemanticScopeLiveAttemptV2,
+                       parser_profile_digest: text) -> text:
+    sha256_text("simple.compiler.three-payload.owner-executor.v3\u0000" +
+        parser_profile_digest + "\u0000" + attempt.binding.compiler_owner_digest +
+        "\u0000" + attempt.binding.verifier_registry_digest)
+
+fn _execution_binding_v3(owner_instance_identity: u64,
+                         owner_close_epoch: u64,
+                         attempt: _SemanticScopeLiveAttemptV2,
+                         run_serial: u64,
+                         limits: ThreePayloadExecutionLimitsV3,
+) -> Result<ThreePayloadExecutionBindingV3, ThreePayloadFallbackV1>:
+    val issuer_set_digest = _issuer_set_digest_v3(attempt)
+    val body_set_digest = _body_set_digest_v3(attempt)
+    val parser_profile_digest = _parser_profile_digest_v3(attempt)
+    val executor_digest = _executor_digest_v3(attempt, parser_profile_digest)
+    val execution_limits_digest = sha256_text(
+        "simple.compiler.three-payload.execution-limits.v3\u0000" +
+        limits.max_read_bytes.to_string() + "\u0000" +
+        limits.max_decode_bytes.to_string() + "\u0000" +
+        limits.max_decoded_sections.to_string())
+    val binding = ThreePayloadExecutionBindingV3(
+        owner_instance_identity: owner_instance_identity,
+        session_serial: attempt.session_serial,
+        grant_serial: attempt.grant_serial,
+        run_serial: run_serial,
+        owner_close_epoch: owner_close_epoch,
+        scope_generation: attempt.identity.generation,
+        cancellation_epoch: attempt.identity.cancellation_epoch,
+        reader_admission_epoch: attempt.direct_pin.reader_admission_epoch,
+        owner_grant_digest: attempt.owner_grant_digest,
+        attempt_seal_digest: attempt.binding.attempt_seal_digest,
+        semantic_completeness_seal_digest: attempt.exact_seal_digest,
+        closure_seal_digest: attempt.closure.owner_seal_digest,
+        parser_profile_digest: parser_profile_digest,
+        execution_limits_digest: execution_limits_digest,
+        dependency_enumeration_digest:
+            attempt.binding.dependency_enumeration.enumeration_digest,
+        issuer_set_digest: issuer_set_digest,
+        body_set_digest: body_set_digest,
+        executor_digest: executor_digest)
+    if not three_payload_execution_binding_valid_v3(binding):
+        return Err(ThreePayloadFallbackV1.CorruptPayload)
+    Ok(binding)
+
+fn _parse_receipt_digest_v3(binding_digest: text,
+                            evidence: ThreePayloadPhysicalFileEvidenceV1,
+                            receipt: ThreePayloadPhysicalReadReceiptV3) -> text:
+    val snapshot = evidence.prepared_snapshot
+    sha256_text("simple.compiler.three-payload.parse-preflight-receipt.v3\n" +
+        binding_digest + "\n" + snapshot.seal.source_digest + "\n" +
+        (match snapshot.seal.prior_tld_digest:
+            case Some(digest): digest
+            case nil: "-") + "\n" + snapshot.seal.init_tld_digest + "\n" +
+        receipt.ordinary_input_count.to_string() + "\u0000" +
+        receipt.distinct_source.to_string() + "\u0000" +
+        receipt.distinct_prior.to_string() + "\u0000" +
+        receipt.distinct_init.to_string() + "\u0000" +
+        receipt.successful_bounded_facade_read_operations.to_string() + "\u0000" +
+        receipt.successful_file_read_bytes.to_string() + "\u0000" +
+        receipt.decoded_sections.to_string() + "\u0000" +
+        receipt.largest_declared_decode_bytes.to_string() + "\u0000" +
+        receipt.measured_peak_decode_bytes.to_string() + "\u0000" +
+        receipt.rr_file_reads.to_string() + "\u0000" +
+        receipt.external_file_reads.to_string() + "\u0000" +
+        receipt.denied_input_attempts.to_string() + "\u0000" +
+        receipt.macro_body_refs.to_string() + "\u0000" +
+        receipt.generic_body_refs.to_string() + "\u0000" +
+        receipt.trait_default_body_refs.to_string() + "\u0000" +
+        receipt.trait_callable_refs.to_string() + "\u0000" +
+        receipt.aspect_callable_refs.to_string() + "\u0000" +
+        receipt.semantic_object_file_reads.to_string())
+
+impl SemanticScopeLiveOwnerV2:
+    me _retired_scope_state_v2(
+        owner_instance_identity: u64,
+        slot: i64,
+        session_serial: u64,
+    ) -> SemanticScopeAttemptStateV2?:
+        if owner_instance_identity != self.owner_instance_identity:
+            return nil
+        for retired in self.retired_attempts:
+            if (retired.slot == slot and
+                    retired.session_serial == session_serial):
+                return Some(retired.terminal_state)
+        nil
+
+    me _retired_grant_known_v2(
+        owner_instance_identity: u64,
+        slot: i64,
+        session_serial: u64,
+        grant_serial: u64,
+    ) -> bool:
+        if owner_instance_identity != self.owner_instance_identity: return false
+        for retired in self.retired_attempts:
+            if (retired.slot == slot and
+                    retired.session_serial == session_serial and
+                    retired.grant_serial == grant_serial):
+                return true
+        false
+
+    me _retired_run_known_v2(
+        owner_instance_identity: u64,
+        slot: i64,
+        session_serial: u64,
+        grant_serial: u64,
+        run_serial: u64,
+    ) -> bool:
+        if owner_instance_identity != self.owner_instance_identity: return false
+        for retired in self.retired_attempts:
+            if (retired.slot == slot and
+                    retired.session_serial == session_serial and
+                    retired.grant_serial == grant_serial and
+                    retired.run_serial == run_serial):
+                return true
+        false
+
+    me _attempt_accounted_bytes_v2(
+        index: i64,
+    ) -> Result<i64, ThreePayloadFallbackV1>:
+        if index < 0 or index >= self.attempts.len():
+            return Err(ThreePayloadFallbackV1.AuthorityUnavailable)
+        val exact = _attempt_retained_bytes_v2(self.attempts[index])?
+        if (exact != self.attempts[index].retained_bytes or
+                self.retained_bytes < exact):
+            return Err(ThreePayloadFallbackV1.ScopeGenerationMismatch)
+        Ok(exact)
+
+    me _owner_accounting_current_v2(
+    ) -> Result<(), ThreePayloadFallbackV1>:
+        if self.retired_attempts.len() > SEMANTIC_SCOPE_LIVE_MAX_ATTEMPTS_V2:
+            return Err(ThreePayloadFallbackV1.ScopeGenerationMismatch)
+        val budget = _SemanticScopeRetainedBudgetV2.create()
+        var body_objects: i64 = 0
+        var dependency_edges: i64 = 0
+        for attempt in self.attempts:
+            val exact = _attempt_retained_bytes_v2(attempt)?
+            if (exact != attempt.retained_bytes or
+                    exact > attempt.binding.max_retained_bytes):
+                return Err(ThreePayloadFallbackV1.ScopeGenerationMismatch)
+            budget.add_bytes(exact)
+            if (attempt.retained_body_objects < 0 or
+                    attempt.retained_dependency_edges < 0 or
+                    body_objects > SEMANTIC_SCOPE_LIVE_MAX_BODY_OBJECTS_V2 -
+                        attempt.retained_body_objects or
+                    dependency_edges >
+                        SEMANTIC_SCOPE_LIVE_MAX_DEPENDENCY_EDGES_V2 -
+                        attempt.retained_dependency_edges):
+                return Err(ThreePayloadFallbackV1.ScopeGenerationMismatch)
+            body_objects = body_objects + attempt.retained_body_objects
+            dependency_edges = dependency_edges +
+                attempt.retained_dependency_edges
+        for retired in self.retired_attempts:
+            budget.add_bytes(_retired_attempt_bytes_v2(retired)?)
+        if (not budget.ok or budget.bytes != self.retained_bytes or
+                body_objects != self.retained_body_objects or
+                dependency_edges != self.retained_dependency_edges):
+            return Err(ThreePayloadFallbackV1.ScopeGenerationMismatch)
+        Ok(())
+
+    me _prospective_attempt_bytes_v2(
+        index: i64,
+        prospective: _SemanticScopeLiveAttemptV2,
+    ) -> Result<i64, ThreePayloadFallbackV1>:
+        self._owner_accounting_current_v2()?
+        val prior = self._attempt_accounted_bytes_v2(index)?
+        val next = _attempt_retained_bytes_v2(prospective)?
+        val other = self.retained_bytes - prior
+        if (other < 0 or next > prospective.binding.max_retained_bytes or
+                next > SEMANTIC_SCOPE_LIVE_MAX_RETAINED_BYTES_V2 or
+                other > SEMANTIC_SCOPE_LIVE_MAX_RETAINED_BYTES_V2 - next):
+            return Err(ThreePayloadFallbackV1.BoundsExceeded)
+        Ok(next)
+
+    me _commit_attempt_bytes_v2(index: i64, next: i64):
+        val prior = self.attempts[index].retained_bytes
+        self.attempts[index].retained_bytes = next
+        self.retained_bytes = self.retained_bytes - prior + next
+
+    me _retire_attempt_v2(
+        index: i64,
+        terminal_state: SemanticScopeAttemptStateV2,
+    ) -> Result<(), ThreePayloadFallbackV1>:
+        self._owner_accounting_current_v2()?
+        val released_bytes = self._attempt_accounted_bytes_v2(index)?
+        if (terminal_state != SemanticScopeAttemptStateV2.Consumed and
+                terminal_state != SemanticScopeAttemptStateV2.Cancelled):
+            return Err(ThreePayloadFallbackV1.CorruptPayload)
+        val attempt = self.attempts[index]
+        val tombstone = _SemanticScopeRetiredAttemptV2(
+            owner_instance_identity: self.owner_instance_identity,
+            slot: attempt.slot, session_serial: attempt.session_serial,
+            grant_serial: attempt.grant_serial, run_serial: attempt.run_serial,
+            terminal_state: terminal_state)
+        val tombstone_bytes = _retired_attempt_bytes_v2(tombstone)?
+        if self.retired_attempts.len() > SEMANTIC_SCOPE_LIVE_MAX_ATTEMPTS_V2:
+            return Err(ThreePayloadFallbackV1.ScopeGenerationMismatch)
+        var evicted_bytes: i64 = 0
+        if self.retired_attempts.len() == SEMANTIC_SCOPE_LIVE_MAX_ATTEMPTS_V2:
+            evicted_bytes = _retired_attempt_bytes_v2(
+                self.retired_attempts[0])?
+        val base = self.retained_bytes - released_bytes - evicted_bytes
+        if (base < 0 or base >
+                SEMANTIC_SCOPE_LIVE_MAX_RETAINED_BYTES_V2 - tombstone_bytes):
+            return Err(ThreePayloadFallbackV1.BoundsExceeded)
+
+        var retained: [_SemanticScopeLiveAttemptV2] = []
+        for attempt_index in 0..self.attempts.len():
+            if attempt_index != index: retained.push(self.attempts[attempt_index])
+        var retired: [_SemanticScopeRetiredAttemptV2] = []
+        val first = if self.retired_attempts.len() ==
+                SEMANTIC_SCOPE_LIVE_MAX_ATTEMPTS_V2: 1 else: 0
+        for retired_index in first..self.retired_attempts.len():
+            retired.push(self.retired_attempts[retired_index])
+        retired.push(tombstone)
+        if (self.retained_body_objects < attempt.retained_body_objects or
+                self.retained_dependency_edges <
+                    attempt.retained_dependency_edges):
+            return Err(ThreePayloadFallbackV1.ScopeGenerationMismatch)
+        for issuer in attempt.issuers:
+            match issuer.receipt:
+                case Some(receipt): _ = receipt.close_v2()
+                case nil: pass
+        self.attempts = retained
+        self.retired_attempts = retired
+        self.retained_body_objects = self.retained_body_objects -
+            attempt.retained_body_objects
+        self.retained_dependency_edges = self.retained_dependency_edges -
+            attempt.retained_dependency_edges
+        self.retained_bytes = base + tombstone_bytes
+        Ok(())
+
+    me _owner_bound_to_v2(
+        binding: SemanticScopeWriterBindingV1,
+        direct_pin: DirectReadPinV1,
+    ) -> bool:
+        not self.writer_bound or
+            (self.writer_instance_digest == binding.writer_instance_digest and
+             self.generation == binding.root.generation and
+             self.parent_manifest_digest == binding.expected_parent_manifest_digest and
+             self.manifest_digest == binding.root.manifest_digest and
+             self.cancellation_epoch == binding.cancellation_epoch and
+             self.direct_pin_id == direct_pin.pin_id and
+             self.process_instance_nonce == direct_pin.process_instance_nonce and
+             self.boot_identity_digest == direct_pin.boot_identity_digest and
+             self.namespace_entry_digest == direct_pin.namespace_entry_digest)
+
+    me _attempt_index_for_scope_v2(scope: LiveSemanticScopeV2) -> i64:
+        if scope.owner_instance_identity != self.owner_instance_identity:
+            return -1
+        for index in 0..self.attempts.len():
+            val attempt = self.attempts[index]
+            if attempt.slot == scope.slot and
+                    attempt.session_serial == scope.session_serial:
+                return index
+        -1
+
+    me _attempt_index_for_grant_v2(grant: LiveSemanticCompletenessV2) -> i64:
+        if grant.owner_instance_identity != self.owner_instance_identity:
+            return -1
+        for index in 0..self.attempts.len():
+            val attempt = self.attempts[index]
+            if (attempt.slot == grant.slot and
+                    attempt.session_serial == grant.session_serial and
+                    attempt.grant_serial == grant.grant_serial):
+                return index
+        -1
+
+    me _attempt_index_for_result_v2(
+        verified: VerifiedThreePayloadWorkerResultV2,
+    ) -> i64:
+        if verified.owner_instance_identity != self.owner_instance_identity:
+            return -1
+        for index in 0..self.attempts.len():
+            val attempt = self.attempts[index]
+            if (attempt.slot == verified.slot and
+                    attempt.session_serial == verified.session_serial and
+                    attempt.grant_serial == verified.grant_serial and
+                    attempt.run_serial == verified.run_serial):
+                return index
+        -1
+
+    me _attempt_index_for_parse_preflight_v3(
+        verified: VerifiedThreePayloadParsePreflightV3,
+    ) -> i64:
+        if verified.owner_instance_identity != self.owner_instance_identity:
+            return -1
+        for index in 0..self.attempts.len():
+            val attempt = self.attempts[index]
+            if (attempt.slot == verified.slot and
+                    attempt.session_serial == verified.session_serial and
+                    attempt.grant_serial == verified.grant_serial and
+                    attempt.run_serial == verified.run_serial):
+                val binding = match attempt.execution_v3_binding:
+                    case Some(value): value
+                    case nil: return -1
+                if three_payload_execution_binding_digest_v3(binding) ==
+                        verified.execution_binding_digest:
+                    return index
+        -1
+
+    me _attempt_index_for_compiled_result_v3(
+        verified: VerifiedThreePayloadCompiledResultV3,
+    ) -> i64:
+        if verified.owner_instance_identity != self.owner_instance_identity:
+            return -1
+        for index in 0..self.attempts.len():
+            val attempt = self.attempts[index]
+            if (attempt.slot == verified.slot and
+                    attempt.session_serial == verified.session_serial and
+                    attempt.grant_serial == verified.grant_serial and
+                    attempt.run_serial == verified.run_serial):
+                val binding = match attempt.execution_v3_binding:
+                    case Some(value): value
+                    case nil: return -1
+                if three_payload_execution_binding_digest_v3(binding) ==
+                        verified.execution_binding_digest:
+                    return index
+        -1
+
+    me _attempt_live_at_v2(index: i64) -> Result<(), ThreePayloadFallbackV1>:
+        if self.closed or index < 0 or index >= self.attempts.len():
+            return Err(ThreePayloadFallbackV1.AuthorityUnavailable)
+        self._owner_accounting_current_v2()?
+        val attempt = self.attempts[index]
+        if (attempt.attempt_state == SemanticScopeAttemptStateV2.Cancelled or
+                attempt.attempt_state == SemanticScopeAttemptStateV2.Consumed):
+            return Err(ThreePayloadFallbackV1.ScopeGenerationMismatch)
+        if not self._owner_bound_to_v2(attempt.binding, attempt.direct_pin):
+            return Err(ThreePayloadFallbackV1.ScopeGenerationMismatch)
+        match _pin_live_v2(attempt.direct_pin):
+            case Ok(_): pass
+            case Err(ThreePayloadFallbackV1.AuthorityUnavailable):
+                # This row was admitted with the exact handle.  A later failed
+                # validation is revocation/expiry, not authority reconstruction.
+                return Err(ThreePayloadFallbackV1.ScopeGenerationMismatch)
+            case Err(error): return Err(error)
+        if not _base_ports_current_v2(attempt.identity, attempt.binding,
+                attempt.pins, attempt.closure, attempt.durable,
+                attempt.summaries, attempt.prepared):
+            return Err(ThreePayloadFallbackV1.ScopeGenerationMismatch)
+        Ok(())
+
+    me _issuer_rows_current_v2(index: i64) -> bool:
+        if index < 0 or index >= self.attempts.len(): return false
+        val attempt = self.attempts[index]
+        if attempt.issuers.len() != SEMANTIC_SCOPE_LIVE_ISSUERS_V2: return false
+        val context = match _issuer_attempt_context_from_attempt_v2(
+                self.owner_instance_identity, attempt):
+            case Ok(value): value
+            case Err(_): return false
+        var requests: [SemanticScopeContributionLiveRequestV1] = []
+        for slot_index in 0..attempt.issuers.len():
+            val slot = attempt.issuers[slot_index]
+            val receipt = match slot.receipt:
+                case Some(value): value
+                case nil: return false
+            val handle = match slot.handle:
+                case Some(value): value
+                case nil: return false
+            val issued = match slot.issued:
+                case Some(value): value
+                case nil: return false
+            if issued.candidate.dimension != slot.dimension: return false
+            val projection = match receipt.validate_issued_scope_v2(
+                    handle, context):
+                case Ok(value): value
+                case Err(_): return false
+            if not _issuer_projection_matches_binding_v2(
+                    projection, issued): return false
+            requests.push(SemanticScopeContributionLiveRequestV1(
+                identity: attempt.identity, dimension_index: slot_index,
+                contribution_digest: issued.candidate.contribution_digest,
+                issuer_instance_digest: issued.issuer_instance_digest,
+                issuer_generation: issued.issuer_generation,
+                authority_serial: issued.authority_serial))
+        val writer_request = SemanticScopeWriterLiveRequestV1(
+            identity: attempt.identity,
+            durable_binding_digest: attempt.closure.durable_journal_receipt_digest)
+        val summary_request = SemanticScopeSummaryLiveRequestV1(
+            identity: attempt.identity,
+            public_summary_set_digest: _summary_set_digest_v2(attempt.summaries),
+            summary_count: attempt.summaries.len())
+        val attempt_request = SemanticScopeAttemptLiveRequestV1(
+            identity: attempt.identity,
+            attempt_seal_digest: attempt.binding.attempt_seal_digest,
+            source_content_digest: attempt.binding.source_content_digest,
+            snapshot_semantic_digest: attempt.binding.snapshot_semantic_digest)
+        if not semantic_scope_live_requests_coherent_v1(writer_request,
+                summary_request, attempt_request, requests): return false
+        for slot_index in 0..attempt.issuers.len():
+            val issued = attempt.issuers[slot_index].issued.unwrap()
+            if not semantic_owner_live_contribution_candidate_matches_v1(
+                    issued.candidate, requests[slot_index]): return false
+        true
+
+    me _worker_result_grant_index_v2(
+        verified: VerifiedThreePayloadWorkerResultV2,
+        grant: LiveSemanticCompletenessV2,
+    ) -> Result<i64, ThreePayloadFallbackV1>:
+        val result_index = self._attempt_index_for_result_v2(verified)
+        val grant_index = self._attempt_index_for_grant_v2(grant)
+        if result_index < 0:
+            if self._retired_run_known_v2(verified.owner_instance_identity,
+                    verified.slot, verified.session_serial,
+                    verified.grant_serial, verified.run_serial):
+                return Err(ThreePayloadFallbackV1.ScopeGenerationMismatch)
+            return Err(ThreePayloadFallbackV1.AuthorityUnavailable)
+        if grant_index < 0:
+            if self._retired_grant_known_v2(grant.owner_instance_identity,
+                    grant.slot, grant.session_serial, grant.grant_serial):
+                return Err(ThreePayloadFallbackV1.ScopeGenerationMismatch)
+            return Err(ThreePayloadFallbackV1.AuthorityUnavailable)
+        if result_index != grant_index:
+            return Err(ThreePayloadFallbackV1.ScopeGenerationMismatch)
+        self._attempt_live_at_v2(result_index)?
+        _ = self._attempt_accounted_bytes_v2(result_index)?
+        val attempt = self.attempts[result_index]
+        if (attempt.attempt_state != SemanticScopeAttemptStateV2.Sealed or
+                attempt.worker_state != SemanticScopeWorkerStateV2.ResultReady or
+                attempt.worker_result.is_none() or
+                not self._issuer_rows_current_v2(result_index)):
+            return Err(ThreePayloadFallbackV1.ScopeGenerationMismatch)
+        Ok(result_index)
+
+    pub me stage_generation_candidate_v2(
+        verified: VerifiedThreePayloadWorkerResultV2,
+        grant: LiveSemanticCompletenessV2,
+        prepared_generation_digest: text,
+    ) -> Result<(), ThreePayloadFallbackV1>:
+        if not three_payload_contract_digest_valid_v1(prepared_generation_digest):
+            return Err(ThreePayloadFallbackV1.CorruptPayload)
+        val index = self._worker_result_grant_index_v2(verified, grant)?
+        val prior = self.attempts[index].prepared_generation_digest
+        if prior != "" and prior != prepared_generation_digest:
+            return Err(ThreePayloadFallbackV1.ScopeGenerationMismatch)
+        var prospective = self.attempts[index]
+        prospective.prepared_generation_digest = prepared_generation_digest
+        val next = self._prospective_attempt_bytes_v2(index, prospective)?
+        self.attempts[index].prepared_generation_digest = prepared_generation_digest
+        self._commit_attempt_bytes_v2(index, next)
+        Ok(())
+
+    me _publication_candidate_index_v2(
+        prepared_generation_digest: text,
+    ) -> Result<i64, ThreePayloadFallbackV1>:
+        if not three_payload_contract_digest_valid_v1(prepared_generation_digest):
+            return Err(ThreePayloadFallbackV1.CorruptPayload)
+        var found: i64 = -1
+        for index in 0..self.attempts.len():
+            val attempt = self.attempts[index]
+            if attempt.prepared_generation_digest == prepared_generation_digest:
+                if found >= 0: return Err(ThreePayloadFallbackV1.AuthorityUnavailable)
+                found = index
+        if found < 0: return Err(ThreePayloadFallbackV1.AuthorityUnavailable)
+        self._attempt_live_at_v2(found)?
+        val attempt = self.attempts[found]
+        if (attempt.attempt_state != SemanticScopeAttemptStateV2.Sealed or
+                attempt.worker_state != SemanticScopeWorkerStateV2.ResultReady or
+                attempt.worker_result.is_none() or
+                not self._issuer_rows_current_v2(found)):
+            return Err(ThreePayloadFallbackV1.ScopeGenerationMismatch)
+        Ok(found)
+
+    pub me validate_publication_candidate_v2(
+        prepared_generation_digest: text,
+    ) -> Result<(), ThreePayloadFallbackV1>:
+        _ = self._publication_candidate_index_v2(
+            prepared_generation_digest)?
+        Ok(())
+
+    me _begin_publication_v2(
+        prepared_generation_digest: text,
+    ) -> Result<(), ThreePayloadFallbackV1>:
+        val index = self._publication_candidate_index_v2(
+            prepared_generation_digest)?
+        var prospective = self.attempts[index]
+        prospective.worker_state = SemanticScopeWorkerStateV2.Publishing
+        val next = self._prospective_attempt_bytes_v2(index, prospective)?
+        self.attempts[index].worker_state = SemanticScopeWorkerStateV2.Publishing
+        self._commit_attempt_bytes_v2(index, next)
+        Ok(())
+
+    me _consume_published_generation_v2(
+        prepared_generation_digest: text,
+    ) -> Result<(), ThreePayloadFallbackV1>:
+        var index: i64 = -1
+        for attempt_index in 0..self.attempts.len():
+            if self.attempts[attempt_index].prepared_generation_digest ==
+                    prepared_generation_digest:
+                if index >= 0: return Err(ThreePayloadFallbackV1.AuthorityUnavailable)
+                index = attempt_index
+        if index < 0: return Err(ThreePayloadFallbackV1.AuthorityUnavailable)
+        self._attempt_live_at_v2(index)?
+        if (self.attempts[index].attempt_state != SemanticScopeAttemptStateV2.Sealed or
+                self.attempts[index].worker_state !=
+                    SemanticScopeWorkerStateV2.Publishing):
+            return Err(ThreePayloadFallbackV1.ScopeGenerationMismatch)
+        self._retire_attempt_v2(index, SemanticScopeAttemptStateV2.Consumed)
+
+    pub me begin_scope_v2(
+        binding: SemanticScopeWriterBindingV1,
+        manifest: GenerationManifestV1,
+        pins: VerifiedGenerationPinSnapshotV1,
+        closure: VerifiedCasClosureReceiptV1,
+        durable: VerifiedGenerationDurableBindingV1,
+        summaries: [SemanticScopePublicSummaryBindingV1],
+        prepared: PreparedThreePayloadV2,
+        direct_pin: DirectReadPinV1,
+        source_universe: [text],
+    ) -> Result<LiveSemanticScopeV2, ThreePayloadFallbackV1>:
+        if self.closed or self.owner_instance_identity == 0u64 or
+                self.owner_instance_identity == 0xffffffffffffffffu64:
+            return Err(ThreePayloadFallbackV1.AuthorityUnavailable)
+        self._owner_accounting_current_v2()?
+        if (self.attempts.len() >= SEMANTIC_SCOPE_LIVE_MAX_ATTEMPTS_V2 or
+                self.next_session_serial == 0u64 or
+                self.next_session_serial == 0xffffffffffffffffu64):
+            return Err(ThreePayloadFallbackV1.BoundsExceeded)
+        val preflight = match writer_semantic_scope_preflight_v1(binding,
+                manifest, pins, closure, durable, summaries):
+            case Ok(value): value
+            case Err(error): return Err(_preflight_fallback_v2(error))
+        if (not verify_prepared_three_payload_v2(prepared) or
+                prepared.seal_digest != binding.attempt_seal_digest):
+            return Err(ThreePayloadFallbackV1.CorruptPayload)
+        if (binding.dependency_enumeration.body_object_digests.len() >
+                SEMANTIC_SCOPE_LIVE_MAX_BODY_OBJECTS_V2 or
+                binding.dependency_enumeration.edges.len() >
+                SEMANTIC_SCOPE_LIVE_MAX_DEPENDENCY_EDGES_V2):
+            return Err(ThreePayloadFallbackV1.BoundsExceeded)
+        val body_objects = binding.dependency_enumeration.body_object_digests.len()
+        val dependency_edges = binding.dependency_enumeration.edges.len()
+        if (self.retained_body_objects >
+                SEMANTIC_SCOPE_LIVE_MAX_BODY_OBJECTS_V2 - body_objects or
+                self.retained_dependency_edges >
+                SEMANTIC_SCOPE_LIVE_MAX_DEPENDENCY_EDGES_V2 - dependency_edges):
+            return Err(ThreePayloadFallbackV1.BoundsExceeded)
+        if not _pin_shape_matches_attempt_v2(binding, pins, direct_pin):
+            return Err(ThreePayloadFallbackV1.ScopeGenerationMismatch)
+        if semantic_scope_source_universe_digest_v1(source_universe) == "":
+            return Err(ThreePayloadFallbackV1.WitnessIncomplete)
+        match _pin_live_v2(direct_pin):
+            case Ok(_): pass
+            case Err(error): return Err(error)
+        val identity = _live_identity_v2(binding, preflight)
+        if not _base_ports_current_v2(identity, binding, pins, closure, durable,
+                summaries, prepared):
+            return Err(ThreePayloadFallbackV1.AuthorityUnavailable)
+        if not self._owner_bound_to_v2(binding, direct_pin):
+            return Err(ThreePayloadFallbackV1.ScopeGenerationMismatch)
+        val issuers = _empty_issuer_slots_v2()
+        if issuers.len() != SEMANTIC_SCOPE_LIVE_ISSUERS_V2:
+            return Err(ThreePayloadFallbackV1.AuthorityUnavailable)
+        val slot = _next_free_slot_v2(self.attempts)
+        if slot < 0: return Err(ThreePayloadFallbackV1.BoundsExceeded)
+        val session_serial = self.next_session_serial
+        var candidate = _SemanticScopeLiveAttemptV2(slot: slot,
+            session_serial: session_serial, identity: identity, binding: binding,
+            manifest: manifest, pins: pins, closure: closure, durable: durable,
+            summaries: summaries, prepared: prepared, direct_pin: direct_pin,
+            source_universe: source_universe,
+            issuers: issuers,
+            attempt_state: SemanticScopeAttemptStateV2.Preparing,
+            worker_state: SemanticScopeWorkerStateV2.Unreserved,
+            grant_serial: 0u64, run_serial: 0u64, exact_seal_digest: "",
+            owner_grant_digest: "", worker_policy: nil, worker_result: nil,
+            execution_v3_state: ThreePayloadExecutionStateV3.Unreserved,
+            execution_v3_binding: nil,
+            execution_v3_parse_projection: nil,
+            execution_v3_compiled_projection: nil,
+            prepared_generation_digest: "",
+            retained_body_objects: body_objects,
+            retained_dependency_edges: dependency_edges,
+            retained_bytes: 0)
+        val retained = _attempt_retained_bytes_v2(candidate)?
+        if (retained > binding.max_retained_bytes or
+                retained > SEMANTIC_SCOPE_LIVE_MAX_RETAINED_BYTES_V2 or
+                self.retained_bytes >
+                    SEMANTIC_SCOPE_LIVE_MAX_RETAINED_BYTES_V2 - retained):
+            return Err(ThreePayloadFallbackV1.BoundsExceeded)
+        candidate.retained_bytes = retained
+        self.next_session_serial = session_serial + 1u64
+        if not self.writer_bound:
+            self.writer_bound = true
+            self.writer_instance_digest = binding.writer_instance_digest
+            self.generation = binding.root.generation
+            self.parent_manifest_digest = binding.expected_parent_manifest_digest
+            self.manifest_digest = binding.root.manifest_digest
+            self.cancellation_epoch = binding.cancellation_epoch
+            self.direct_pin_id = direct_pin.pin_id
+            self.process_instance_nonce = direct_pin.process_instance_nonce
+            self.boot_identity_digest = direct_pin.boot_identity_digest
+            self.namespace_entry_digest = direct_pin.namespace_entry_digest
+        self.attempts.push(candidate)
+        self.retained_body_objects = self.retained_body_objects + body_objects
+        self.retained_dependency_edges =
+            self.retained_dependency_edges + dependency_edges
+        self.retained_bytes = self.retained_bytes + retained
+        Ok(LiveSemanticScopeV2(owner_instance_identity: self.owner_instance_identity,
+            slot: slot, session_serial: session_serial))
+
+    pub me issuer_attempt_context_v2(
+        scope: LiveSemanticScopeV2,
+    ) -> Result<SemanticIssuerAttemptContextV2, ThreePayloadFallbackV1>:
+        val index = self._attempt_index_for_scope_v2(scope)
+        if index < 0:
+            if self._retired_scope_state_v2(scope.owner_instance_identity,
+                    scope.slot, scope.session_serial).is_some():
+                return Err(ThreePayloadFallbackV1.ScopeGenerationMismatch)
+            return Err(ThreePayloadFallbackV1.AuthorityUnavailable)
+        self._attempt_live_at_v2(index)?
+        if self.attempts[index].attempt_state !=
+                SemanticScopeAttemptStateV2.Preparing:
+            return Err(ThreePayloadFallbackV1.ScopeGenerationMismatch)
+        _issuer_attempt_context_from_attempt_v2(
+            self.owner_instance_identity, self.attempts[index])
+
+    pub me install_semantic_issuer_v2(
+        scope: LiveSemanticScopeV2,
+        receipt: SemanticScopeIssuerReceiptV2,
+        handle: SemanticScopeIssuedHandleV2,
+    ) -> Result<(), ThreePayloadFallbackV1>:
+        val index = self._attempt_index_for_scope_v2(scope)
+        if index < 0:
+            if self._retired_scope_state_v2(scope.owner_instance_identity,
+                    scope.slot, scope.session_serial).is_some():
+                return Err(ThreePayloadFallbackV1.ScopeGenerationMismatch)
+            return Err(ThreePayloadFallbackV1.AuthorityUnavailable)
+        self._attempt_live_at_v2(index)?
+        if self.attempts[index].attempt_state !=
+                SemanticScopeAttemptStateV2.Preparing:
+            return Err(ThreePayloadFallbackV1.ScopeGenerationMismatch)
+        val context = _issuer_attempt_context_from_attempt_v2(
+            self.owner_instance_identity, self.attempts[index])?
+        val projection = receipt.validate_issued_scope_v2(handle, context)?
+        val slot_index = _issuer_dimension_index_v2(projection.dimension)
+        if (slot_index < 0 or slot_index >=
+                self.attempts[index].issuers.len() or
+                self.attempts[index].issuers[slot_index].dimension !=
+                    projection.dimension):
+            return Err(ThreePayloadFallbackV1.WitnessIncomplete)
+        val prior_slot = self.attempts[index].issuers[slot_index]
+        if (prior_slot.receipt.is_some() or prior_slot.handle.is_some() or
+                prior_slot.issued.is_some()):
+            return Err(ThreePayloadFallbackV1.ScopeGenerationMismatch)
+        for existing in self.attempts[index].issuers:
+            match existing.issued:
+                case Some(value):
+                    if value.issuer_instance_digest ==
+                            projection.issuer_instance_digest:
+                        return Err(ThreePayloadFallbackV1.AuthorityUnavailable)
+                case nil: pass
+        val candidate = _issuer_candidate_v2(
+            self.attempts[index], projection)?
+        val binding = SemanticScopeContributionLiveBindingV1(
+            candidate: candidate,
+            issuer_instance_digest: projection.issuer_instance_digest,
+            issuer_generation: projection.issuer_generation,
+            authority_serial: projection.authority_serial)
+        val request = SemanticScopeContributionLiveRequestV1(
+            identity: self.attempts[index].identity,
+            dimension_index: slot_index,
+            contribution_digest: candidate.contribution_digest,
+            issuer_instance_digest: binding.issuer_instance_digest,
+            issuer_generation: binding.issuer_generation,
+            authority_serial: binding.authority_serial)
+        if not semantic_owner_live_contribution_candidate_matches_v1(
+                candidate, request):
+            return Err(ThreePayloadFallbackV1.WitnessIncomplete)
+        var prospective = self.attempts[index]
+        prospective.issuers[slot_index] = _SemanticScopeIssuerSlotV2(
+            dimension: projection.dimension, receipt: Some(receipt),
+            handle: Some(handle), issued: Some(binding))
+        val next = self._prospective_attempt_bytes_v2(index, prospective)?
+        self.attempts[index].issuers[slot_index] =
+            prospective.issuers[slot_index]
+        self._commit_attempt_bytes_v2(index, next)
+        Ok(())
+
+    pub me seal_scope_v2(
+        scope: LiveSemanticScopeV2,
+    ) -> Result<LiveSemanticCompletenessV2, ThreePayloadFallbackV1>:
+        val index = self._attempt_index_for_scope_v2(scope)
+        if index < 0:
+            if self._retired_scope_state_v2(scope.owner_instance_identity,
+                    scope.slot, scope.session_serial).is_some():
+                return Err(ThreePayloadFallbackV1.ScopeGenerationMismatch)
+            return Err(ThreePayloadFallbackV1.AuthorityUnavailable)
+        self._attempt_live_at_v2(index)?
+        if self.attempts[index].attempt_state !=
+                SemanticScopeAttemptStateV2.Preparing:
+            return Err(ThreePayloadFallbackV1.ScopeGenerationMismatch)
+        # Every row must still have its retained receipt and opaque handle.
+        # Missing rows are authority absence, never an empty-universe success
+        # or a caller-reconstructed contribution.
+        if not self._issuer_rows_current_v2(index):
+            return Err(ThreePayloadFallbackV1.AuthorityUnavailable)
+        if self.next_grant_serial == 0u64 or
+                self.next_grant_serial == 0xffffffffffffffffu64:
+            return Err(ThreePayloadFallbackV1.BoundsExceeded)
+        var projections: [SemanticScopeContributionProjectionV1] = []
+        for issuer in self.attempts[index].issuers:
+            val issued = issuer.issued.unwrap()
+            projections.push(SemanticScopeContributionProjectionV1(
+                dimension: issued.candidate.dimension,
+                scope_binding_digest: issued.candidate.scope_binding_digest,
+                query_domain_digest: issued.candidate.query_domain_digest,
+                owner_rules_digest: issued.candidate.owner_rules_digest,
+                source_universe_digest: issued.candidate.source_universe_digest,
+                dependency_enumeration_digest:
+                    issued.candidate.dependency_enumeration.enumeration_digest,
+                contribution_digest: issued.candidate.contribution_digest,
+                issuer_instance_digest: issued.issuer_instance_digest,
+                issuer_generation: issued.issuer_generation,
+                authority_serial: issued.authority_serial))
+        var canonical = "simple.cache.semantic-completeness.seal.v1\n" +
+            self.attempts[index].identity.binding_digest + "\n" +
+            self.attempts[index].identity.manifest_digest + "\n" +
+            self.attempts[index].binding.attempt_seal_digest + "\n" +
+            self.attempts[index].binding.dependency_enumeration.enumeration_digest + "\n"
+        for projection in projections:
+            canonical = canonical + projection.contribution_digest + "\u0000" +
+                projection.issuer_instance_digest + "\u0000" +
+                projection.issuer_generation.to_string() + "\u0000" +
+                projection.authority_serial.to_string() + "\n"
+        val exact_seal_digest = sha256_text(canonical)
+        val grant_serial = self.next_grant_serial
+        var prospective = self.attempts[index]
+        prospective.attempt_state = SemanticScopeAttemptStateV2.Sealed
+        prospective.grant_serial = grant_serial
+        prospective.exact_seal_digest = exact_seal_digest
+        prospective.owner_grant_digest = sha256_text(
+            "simple.cache.semantic-completeness.grant.v1\u0000" +
+            prospective.identity.binding_digest + "\u0000" +
+            exact_seal_digest + "\u0000" +
+            prospective.identity.cancellation_epoch.to_string())
+        val next = self._prospective_attempt_bytes_v2(index, prospective)?
+        self.next_grant_serial = grant_serial + 1u64
+        self.attempts[index].attempt_state = SemanticScopeAttemptStateV2.Sealed
+        self.attempts[index].grant_serial = grant_serial
+        self.attempts[index].exact_seal_digest = exact_seal_digest
+        self.attempts[index].owner_grant_digest = prospective.owner_grant_digest
+        self._commit_attempt_bytes_v2(index, next)
+        Ok(LiveSemanticCompletenessV2(
+            owner_instance_identity: self.owner_instance_identity,
+            slot: self.attempts[index].slot,
+            session_serial: self.attempts[index].session_serial,
+            grant_serial: grant_serial))
+
+    pub me validate_scope_v2(
+        grant: LiveSemanticCompletenessV2,
+        expected: SemanticScopeConsumptionBindingV1,
+    ) -> Result<SemanticScopeGrantProjectionV1, ThreePayloadFallbackV1>:
+        val index = self._attempt_index_for_grant_v2(grant)
+        if index < 0:
+            if self._retired_grant_known_v2(grant.owner_instance_identity,
+                    grant.slot, grant.session_serial, grant.grant_serial):
+                return Err(ThreePayloadFallbackV1.ScopeGenerationMismatch)
+            return Err(ThreePayloadFallbackV1.AuthorityUnavailable)
+        self._attempt_live_at_v2(index)?
+        _ = self._attempt_accounted_bytes_v2(index)?
+        val attempt = self.attempts[index]
+        if attempt.attempt_state != SemanticScopeAttemptStateV2.Sealed:
+            return Err(ThreePayloadFallbackV1.ScopeGenerationMismatch)
+        if not self._issuer_rows_current_v2(index):
+            return Err(ThreePayloadFallbackV1.ScopeGenerationMismatch)
+        if (not three_payload_contract_digest_valid_v1(expected.binding_digest) or
+                expected.generation < 0 or
+                not three_payload_contract_digest_valid_v1(expected.manifest_digest) or
+                not three_payload_contract_digest_valid_v1(
+                    expected.attempt_seal_digest) or
+                not three_payload_contract_digest_valid_v1(
+                    expected.query_domain_digest) or
+                not three_payload_contract_digest_valid_v1(
+                    expected.semantic_rules_digest) or
+                expected.cancellation_epoch < 0 or
+                not three_payload_contract_digest_valid_v1(
+                    expected.dependency_enumeration_digest)):
+            return Err(ThreePayloadFallbackV1.CorruptPayload)
+        if (attempt.identity.binding_digest != expected.binding_digest or
+                attempt.identity.generation != expected.generation or
+                attempt.identity.manifest_digest != expected.manifest_digest or
+                attempt.binding.attempt_seal_digest != expected.attempt_seal_digest or
+                attempt.identity.query_domain_digest != expected.query_domain_digest or
+                attempt.identity.semantic_rules_digest != expected.semantic_rules_digest or
+                attempt.identity.cancellation_epoch != expected.cancellation_epoch or
+                attempt.binding.dependency_enumeration.enumeration_digest !=
+                    expected.dependency_enumeration_digest):
+            return Err(ThreePayloadFallbackV1.ScopeGenerationMismatch)
+        Ok(SemanticScopeGrantProjectionV1(
+            binding_digest: attempt.identity.binding_digest,
+            generation: attempt.identity.generation,
+            manifest_digest: attempt.identity.manifest_digest,
+            attempt_seal_digest: attempt.binding.attempt_seal_digest,
+            exact_seal_digest: attempt.exact_seal_digest,
+            dependency_enumeration_digest:
+                attempt.binding.dependency_enumeration.enumeration_digest,
+            owner_grant_digest: attempt.owner_grant_digest))
+
+    # V3 reserve/begin/complete are private owner transitions.  The public
+    # parse port below performs the complete transaction and never accepts an
+    # admitted-run handle, executor identity, receipt, or result DTO.
+    me _reserve_three_payload_execution_v3(
+        grant: LiveSemanticCompletenessV2,
+        limits: ThreePayloadExecutionLimitsV3,
+    ) -> Result<i64, ThreePayloadFallbackV1>:
+        if not three_payload_execution_limits_valid_v3(limits):
+            return Err(ThreePayloadFallbackV1.BoundsExceeded)
+        val index = self._attempt_index_for_grant_v2(grant)
+        if index < 0:
+            if self._retired_grant_known_v2(grant.owner_instance_identity,
+                    grant.slot, grant.session_serial, grant.grant_serial):
+                return Err(ThreePayloadFallbackV1.ScopeGenerationMismatch)
+            return Err(ThreePayloadFallbackV1.AuthorityUnavailable)
+        self._attempt_live_at_v2(index)?
+        _ = self._attempt_accounted_bytes_v2(index)?
+        val attempt = self.attempts[index]
+        if (attempt.attempt_state != SemanticScopeAttemptStateV2.Sealed or
+                attempt.worker_state != SemanticScopeWorkerStateV2.Unreserved or
+                attempt.execution_v3_state !=
+                    ThreePayloadExecutionStateV3.Unreserved or
+                not self._issuer_rows_current_v2(index)):
+            return Err(ThreePayloadFallbackV1.ScopeGenerationMismatch)
+        if self.next_run_serial == 0u64 or
+                self.next_run_serial == 0xffffffffffffffffu64:
+            return Err(ThreePayloadFallbackV1.BoundsExceeded)
+        val run_serial = self.next_run_serial
+        val binding = _execution_binding_v3(self.owner_instance_identity,
+            self.close_epoch, attempt, run_serial, limits)?
+        val policy = ThreePayloadWorkerPolicyV1(
+            executor_digest: binding.executor_digest,
+            max_read_bytes: limits.max_read_bytes,
+            max_decode_bytes: limits.max_decode_bytes,
+            max_decoded_sections: limits.max_decoded_sections,
+            request_external_input: false,
+            request_reverse_reference: false)
+        self.validate_worker_admission_v2(grant, attempt.prepared, policy)?
+        var prospective = attempt
+        prospective.worker_state = SemanticScopeWorkerStateV2.Reserved
+        prospective.worker_policy = Some(policy)
+        prospective.run_serial = run_serial
+        prospective.execution_v3_binding = Some(binding)
+        val next = self._prospective_attempt_bytes_v2(index, prospective)?
+        self.attempts[index].worker_state = SemanticScopeWorkerStateV2.Reserved
+        self.attempts[index].worker_policy = Some(policy)
+        self.attempts[index].run_serial = run_serial
+        self.attempts[index].execution_v3_binding = Some(binding)
+        self.next_run_serial = run_serial + 1u64
+        self._commit_attempt_bytes_v2(index, next)
+        Ok(index)
+
+    me _begin_three_payload_execution_v3(
+        index: i64,
+    ) -> Result<(), ThreePayloadFallbackV1>:
+        self._attempt_live_at_v2(index)?
+        _ = self._attempt_accounted_bytes_v2(index)?
+        val attempt = self.attempts[index]
+        val retained_binding = match attempt.execution_v3_binding:
+            case Some(value): value
+            case nil: return Err(ThreePayloadFallbackV1.ScopeGenerationMismatch)
+        val policy = match attempt.worker_policy:
+            case Some(value): value
+            case nil: return Err(ThreePayloadFallbackV1.ScopeGenerationMismatch)
+        val limits = ThreePayloadExecutionLimitsV3(
+            max_read_bytes: policy.max_read_bytes,
+            max_decode_bytes: policy.max_decode_bytes,
+            max_decoded_sections: policy.max_decoded_sections)
+        if not self._issuer_rows_current_v2(index):
+            return Err(ThreePayloadFallbackV1.ScopeGenerationMismatch)
+        val current_binding = _execution_binding_v3(self.owner_instance_identity,
+            self.close_epoch, attempt, attempt.run_serial, limits)?
+        if (attempt.execution_v3_state != ThreePayloadExecutionStateV3.Unreserved or
+                attempt.worker_state != SemanticScopeWorkerStateV2.Reserved or
+                three_payload_execution_binding_digest_v3(retained_binding) !=
+                    three_payload_execution_binding_digest_v3(current_binding)):
+            return Err(ThreePayloadFallbackV1.ScopeGenerationMismatch)
+        var prospective = attempt
+        prospective.execution_v3_state = ThreePayloadExecutionStateV3.Running
+        prospective.worker_state = SemanticScopeWorkerStateV2.Running
+        val next = match self._prospective_attempt_bytes_v2(index, prospective):
+            case Ok(value): value
+            case Err(error):
+                _ = self._fail_three_payload_execution_v3(index)
+                return Err(error)
+        self.attempts[index].execution_v3_state =
+            ThreePayloadExecutionStateV3.Running
+        self.attempts[index].worker_state = SemanticScopeWorkerStateV2.Running
+        self._commit_attempt_bytes_v2(index, next)
+        Ok(())
+
+    me _fail_three_payload_execution_v3(
+        index: i64,
+    ) -> Result<(), ThreePayloadFallbackV1>:
+        if index < 0 or index >= self.attempts.len():
+            return Err(ThreePayloadFallbackV1.AuthorityUnavailable)
+        val state = self.attempts[index].execution_v3_state
+        val worker_state = self.attempts[index].worker_state
+        if (state != ThreePayloadExecutionStateV3.Running and
+                not (state == ThreePayloadExecutionStateV3.Unreserved and
+                    worker_state == SemanticScopeWorkerStateV2.Reserved)):
+            return Err(ThreePayloadFallbackV1.ScopeGenerationMismatch)
+        var prospective = self.attempts[index]
+        prospective.execution_v3_state = ThreePayloadExecutionStateV3.Failed
+        val next = self._prospective_attempt_bytes_v2(index, prospective)?
+        self.attempts[index].execution_v3_state =
+            ThreePayloadExecutionStateV3.Failed
+        self._commit_attempt_bytes_v2(index, next)
+        Ok(())
+
+    me _complete_three_payload_parse_preflight_v3(
+        index: i64,
+        evidence: ThreePayloadPhysicalFileEvidenceV1,
+    ) -> Result<VerifiedThreePayloadParsePreflightV3,
+                ThreePayloadFallbackV1>:
+        self._attempt_live_at_v2(index)?
+        _ = self._attempt_accounted_bytes_v2(index)?
+        val attempt = self.attempts[index]
+        val binding = match attempt.execution_v3_binding:
+            case Some(value): value
+            case nil: return Err(ThreePayloadFallbackV1.ScopeGenerationMismatch)
+        val policy = match attempt.worker_policy:
+            case Some(value): value
+            case nil: return Err(ThreePayloadFallbackV1.ScopeGenerationMismatch)
+        val limits = ThreePayloadExecutionLimitsV3(
+            max_read_bytes: policy.max_read_bytes,
+            max_decode_bytes: policy.max_decode_bytes,
+            max_decoded_sections: policy.max_decoded_sections)
+        if not self._issuer_rows_current_v2(index):
+            _ = self._fail_three_payload_execution_v3(index)
+            return Err(ThreePayloadFallbackV1.ScopeGenerationMismatch)
+        val current_binding = _execution_binding_v3(self.owner_instance_identity,
+            self.close_epoch, attempt, attempt.run_serial, limits)?
+        val binding_digest = three_payload_execution_binding_digest_v3(binding)
+        if (attempt.execution_v3_state != ThreePayloadExecutionStateV3.Running or
+                binding_digest == "" or binding_digest !=
+                    three_payload_execution_binding_digest_v3(current_binding) or
+                evidence.prepared_snapshot != attempt.prepared):
+            _ = self._fail_three_payload_execution_v3(index)
+            return Err(ThreePayloadFallbackV1.ScopeGenerationMismatch)
+        val physical = three_payload_physical_receipt_project_v3(evidence)
+        if not three_payload_physical_read_receipt_valid_v3(physical):
+            _ = self._fail_three_payload_execution_v3(index)
+            return Err(ThreePayloadFallbackV1.CorruptPayload)
+        val source = match validated_utf8_bytes_to_text_linear(
+                evidence.prepared_snapshot.source_bytes):
+            case Ok(value): value
+            case Err(_):
+                _ = self._fail_three_payload_execution_v3(index)
+                return Err(ThreePayloadFallbackV1.CorruptPayload)
+        if source == "" or parse_module_silent_checked(source,
+                "sealed-three-payload-preflight-v3"):
+            _ = self._fail_three_payload_execution_v3(index)
+            return Err(ThreePayloadFallbackV1.UnsupportedSemantics)
+
+        # Parsing is not an authority-preserving critical section.  Recheck
+        # pin expiry/revocation, writer roots, cancellation, issuers, and the
+        # complete binding immediately before the Ready mutation.
+        match self._attempt_live_at_v2(index):
+            case Ok(_): pass
+            case Err(error):
+                _ = self._fail_three_payload_execution_v3(index)
+                return Err(error)
+        match self._attempt_accounted_bytes_v2(index):
+            case Ok(_): pass
+            case Err(error):
+                _ = self._fail_three_payload_execution_v3(index)
+                return Err(error)
+        if not self._issuer_rows_current_v2(index):
+            _ = self._fail_three_payload_execution_v3(index)
+            return Err(ThreePayloadFallbackV1.ScopeGenerationMismatch)
+        val final_attempt = self.attempts[index]
+        val final_policy = match final_attempt.worker_policy:
+            case Some(value): value
+            case nil:
+                _ = self._fail_three_payload_execution_v3(index)
+                return Err(ThreePayloadFallbackV1.ScopeGenerationMismatch)
+        val final_limits = ThreePayloadExecutionLimitsV3(
+            max_read_bytes: final_policy.max_read_bytes,
+            max_decode_bytes: final_policy.max_decode_bytes,
+            max_decoded_sections: final_policy.max_decoded_sections)
+        val final_binding = match _execution_binding_v3(
+                self.owner_instance_identity, self.close_epoch, final_attempt,
+                final_attempt.run_serial, final_limits):
+            case Ok(value): value
+            case Err(error):
+                _ = self._fail_three_payload_execution_v3(index)
+                return Err(error)
+        if (final_attempt.execution_v3_state !=
+                    ThreePayloadExecutionStateV3.Running or
+                three_payload_execution_binding_digest_v3(final_binding) !=
+                    binding_digest or
+                evidence.prepared_snapshot != final_attempt.prepared):
+            _ = self._fail_three_payload_execution_v3(index)
+            return Err(ThreePayloadFallbackV1.ScopeGenerationMismatch)
+        val receipt_digest = _parse_receipt_digest_v3(binding_digest,
+            evidence, physical)
+        val projection = ThreePayloadParsePreflightProjectionV3(
+            execution_binding_digest: binding_digest,
+            source_digest: evidence.prepared_snapshot.seal.source_digest,
+            prior_tld_digest: evidence.prepared_snapshot.seal.prior_tld_digest,
+            init_tld_digest: evidence.prepared_snapshot.seal.init_tld_digest,
+            physical_receipt: physical,
+            source_syntax_accepted: true,
+            receipt_digest: receipt_digest)
+        if not three_payload_parse_preflight_projection_valid_v3(projection):
+            _ = self._fail_three_payload_execution_v3(index)
+            return Err(ThreePayloadFallbackV1.CorruptPayload)
+        var prospective = final_attempt
+        prospective.execution_v3_state =
+            ThreePayloadExecutionStateV3.ParseComplete
+        prospective.prepared = evidence.prepared_snapshot
+        prospective.execution_v3_parse_projection = Some(projection)
+        val next = match self._prospective_attempt_bytes_v2(index, prospective):
+            case Ok(value): value
+            case Err(error):
+                _ = self._fail_three_payload_execution_v3(index)
+                return Err(error)
+        # The projection and accounting work above may allocate and traverse
+        # retained data.  Perform the live-authority gate again at the actual
+        # ParseComplete commit boundary.
+        match self._attempt_live_at_v2(index):
+            case Ok(_): pass
+            case Err(error):
+                _ = self._fail_three_payload_execution_v3(index)
+                return Err(error)
+        if not self._issuer_rows_current_v2(index):
+            _ = self._fail_three_payload_execution_v3(index)
+            return Err(ThreePayloadFallbackV1.ScopeGenerationMismatch)
+        val commit_attempt = self.attempts[index]
+        val commit_policy = match commit_attempt.worker_policy:
+            case Some(value): value
+            case nil:
+                _ = self._fail_three_payload_execution_v3(index)
+                return Err(ThreePayloadFallbackV1.ScopeGenerationMismatch)
+        val commit_limits = ThreePayloadExecutionLimitsV3(
+            max_read_bytes: commit_policy.max_read_bytes,
+            max_decode_bytes: commit_policy.max_decode_bytes,
+            max_decoded_sections: commit_policy.max_decoded_sections)
+        val commit_binding = match _execution_binding_v3(
+                self.owner_instance_identity, self.close_epoch, commit_attempt,
+                commit_attempt.run_serial, commit_limits):
+            case Ok(value): value
+            case Err(error):
+                _ = self._fail_three_payload_execution_v3(index)
+                return Err(error)
+        if (commit_attempt.execution_v3_state !=
+                    ThreePayloadExecutionStateV3.Running or
+                three_payload_execution_binding_digest_v3(commit_binding) !=
+                    binding_digest or
+                commit_attempt.prepared != evidence.prepared_snapshot):
+            _ = self._fail_three_payload_execution_v3(index)
+            return Err(ThreePayloadFallbackV1.ScopeGenerationMismatch)
+        self.attempts[index].execution_v3_state =
+            ThreePayloadExecutionStateV3.ParseComplete
+        self.attempts[index].prepared = evidence.prepared_snapshot
+        self.attempts[index].execution_v3_parse_projection = Some(projection)
+        self._commit_attempt_bytes_v2(index, next)
+        Ok(VerifiedThreePayloadParsePreflightV3(
+            owner_instance_identity: self.owner_instance_identity,
+            slot: final_attempt.slot,
+            session_serial: final_attempt.session_serial,
+            grant_serial: final_attempt.grant_serial,
+            run_serial: final_attempt.run_serial,
+            execution_binding_digest: binding_digest))
+
+    pub me preflight_three_payload_parse_v3(
+        grant: LiveSemanticCompletenessV2,
+        files: ThreePayloadPhysicalFileSetV1,
+        limits: ThreePayloadExecutionLimitsV3,
+    ) -> Result<VerifiedThreePayloadParsePreflightV3,
+                ThreePayloadFallbackV1>:
+        val index = self._reserve_three_payload_execution_v3(grant, limits)?
+        match self._begin_three_payload_execution_v3(index):
+            case Ok(_): pass
+            case Err(error):
+                _ = self._fail_three_payload_execution_v3(index)
+                return Err(error)
+        val attempt = self.attempts[index]
+        val policy = match attempt.worker_policy:
+            case Some(value): value
+            case nil:
+                _ = self._fail_three_payload_execution_v3(index)
+                return Err(ThreePayloadFallbackV1.ScopeGenerationMismatch)
+        val evidence = match read_three_payload_physical_files_v1(files,
+                attempt.prepared, attempt.prepared.seal, policy):
+            case Ok(value): value
+            case Err(error):
+                _ = self._fail_three_payload_execution_v3(index)
+                return Err(error)
+        match self._complete_three_payload_parse_preflight_v3(index, evidence):
+            case Ok(value): Ok(value)
+            case Err(error):
+                # Covers every early liveness/accounting/binding error in the
+                # private completion routine.  Failed runs never remain Running.
+                _ = self._fail_three_payload_execution_v3(index)
+                Err(error)
+
+    pub me execute_three_payload_compile_v3(
+        grant: LiveSemanticCompletenessV2,
+        files: ThreePayloadPhysicalFileSetV1,
+        limits: ThreePayloadExecutionLimitsV3,
+    ) -> Result<VerifiedThreePayloadCompiledResultV3,
+                ThreePayloadFallbackV1>:
+        # No owner-retained parser-state profile or complete semantic pipeline
+        # exists yet.  Therefore this port refuses before reserve and cannot
+        # manufacture a summary, diagnostic, or execution receipt.
+        if not three_payload_compiled_execution_available_v3():
+            return Err(ThreePayloadFallbackV1.AuthorityUnavailable)
+        Err(ThreePayloadFallbackV1.AuthorityUnavailable)
+
+    pub me three_payload_parse_preflight_projection_v3(
+        verified: VerifiedThreePayloadParsePreflightV3,
+    ) -> Result<ThreePayloadParsePreflightProjectionV3,
+                ThreePayloadFallbackV1>:
+        val index = self._attempt_index_for_parse_preflight_v3(verified)
+        if index < 0:
+            if self._retired_run_known_v2(verified.owner_instance_identity,
+                    verified.slot, verified.session_serial,
+                    verified.grant_serial, verified.run_serial):
+                return Err(ThreePayloadFallbackV1.ScopeGenerationMismatch)
+            return Err(ThreePayloadFallbackV1.AuthorityUnavailable)
+        self._attempt_live_at_v2(index)?
+        _ = self._attempt_accounted_bytes_v2(index)?
+        val attempt = self.attempts[index]
+        if attempt.execution_v3_state !=
+                ThreePayloadExecutionStateV3.ParseComplete or
+                not self._issuer_rows_current_v2(index):
+            return Err(ThreePayloadFallbackV1.ScopeGenerationMismatch)
+        val projection = match attempt.execution_v3_parse_projection:
+            case Some(value): value
+            case nil: return Err(ThreePayloadFallbackV1.AuthorityUnavailable)
+        val policy = match attempt.worker_policy:
+            case Some(value): value
+            case nil: return Err(ThreePayloadFallbackV1.ScopeGenerationMismatch)
+        val limits = ThreePayloadExecutionLimitsV3(
+            max_read_bytes: policy.max_read_bytes,
+            max_decode_bytes: policy.max_decode_bytes,
+            max_decoded_sections: policy.max_decoded_sections)
+        val current_binding = _execution_binding_v3(self.owner_instance_identity,
+            self.close_epoch, attempt, attempt.run_serial, limits)?
+        if (not three_payload_parse_preflight_projection_valid_v3(projection) or
+                projection.execution_binding_digest !=
+                    verified.execution_binding_digest or
+                three_payload_execution_binding_digest_v3(current_binding) !=
+                    verified.execution_binding_digest):
+            return Err(ThreePayloadFallbackV1.CorruptPayload)
+        Ok(projection)
+
+    pub me three_payload_compiled_result_projection_v3(
+        verified: VerifiedThreePayloadCompiledResultV3,
+    ) -> Result<ThreePayloadCompiledResultProjectionV3,
+                ThreePayloadFallbackV1>:
+        val index = self._attempt_index_for_compiled_result_v3(verified)
+        if index < 0:
+            if self._retired_run_known_v2(verified.owner_instance_identity,
+                    verified.slot, verified.session_serial,
+                    verified.grant_serial, verified.run_serial):
+                return Err(ThreePayloadFallbackV1.ScopeGenerationMismatch)
+            return Err(ThreePayloadFallbackV1.AuthorityUnavailable)
+        self._attempt_live_at_v2(index)?
+        _ = self._attempt_accounted_bytes_v2(index)?
+        val attempt = self.attempts[index]
+        if attempt.execution_v3_state !=
+                ThreePayloadExecutionStateV3.CompileComplete or
+                not self._issuer_rows_current_v2(index):
+            return Err(ThreePayloadFallbackV1.ScopeGenerationMismatch)
+        val projection = match attempt.execution_v3_compiled_projection:
+            case Some(value): value
+            case nil: return Err(ThreePayloadFallbackV1.AuthorityUnavailable)
+        val policy = match attempt.worker_policy:
+            case Some(value): value
+            case nil: return Err(ThreePayloadFallbackV1.ScopeGenerationMismatch)
+        val limits = ThreePayloadExecutionLimitsV3(
+            max_read_bytes: policy.max_read_bytes,
+            max_decode_bytes: policy.max_decode_bytes,
+            max_decoded_sections: policy.max_decoded_sections)
+        val current_binding = _execution_binding_v3(self.owner_instance_identity,
+            self.close_epoch, attempt, attempt.run_serial, limits)?
+        if (not three_payload_compiled_result_projection_valid_v3(projection) or
+                projection.execution_binding_digest !=
+                    verified.execution_binding_digest or
+                three_payload_execution_binding_digest_v3(current_binding) !=
+                    verified.execution_binding_digest):
+            return Err(ThreePayloadFallbackV1.CorruptPayload)
+        Ok(projection)
+
+    # Cross-module worker adapters may validate an opaque handle, but they do
+    # not receive a row index and cannot construct a new handle or mutate the
+    # owner.  Successful reserve/run transitions remain owner-file work for a
+    # future admitted descriptor/executor implementation.
+    pub me validate_worker_admission_v2(
+        grant: LiveSemanticCompletenessV2,
+        prepared: PreparedThreePayloadV2,
+        policy: ThreePayloadWorkerPolicyV1,
+    ) -> Result<(), ThreePayloadFallbackV1>:
+        val index = self._attempt_index_for_grant_v2(grant)
+        if index < 0:
+            if self._retired_grant_known_v2(grant.owner_instance_identity,
+                    grant.slot, grant.session_serial, grant.grant_serial):
+                return Err(ThreePayloadFallbackV1.ScopeGenerationMismatch)
+            return Err(ThreePayloadFallbackV1.AuthorityUnavailable)
+        self._attempt_live_at_v2(index)?
+        _ = self._attempt_accounted_bytes_v2(index)?
+        val attempt = self.attempts[index]
+        if (attempt.attempt_state != SemanticScopeAttemptStateV2.Sealed or
+                attempt.worker_state != SemanticScopeWorkerStateV2.Unreserved or
+                not self._issuer_rows_current_v2(index)):
+            return Err(ThreePayloadFallbackV1.ScopeGenerationMismatch)
+        if policy.request_external_input or policy.request_reverse_reference:
+            return Err(ThreePayloadFallbackV1.ExternalFacetRequired)
+        if (not three_payload_contract_digest_valid_v1(policy.executor_digest) or
+                policy.max_read_bytes <= 0 or policy.max_decode_bytes <= 0 or
+                policy.max_decoded_sections <= 0 or
+                prepared.seal.payload_bytes > policy.max_read_bytes or
+                prepared.seal.max_decode_bytes > policy.max_decode_bytes or
+                prepared.seal.section_count > policy.max_decoded_sections):
+            return Err(ThreePayloadFallbackV1.BoundsExceeded)
+        if (not verify_prepared_three_payload_v2(prepared) or
+                prepared != attempt.prepared):
+            return Err(ThreePayloadFallbackV1.CorruptPayload)
+        Ok(())
+
+    # Result projection is owner-checked and read-only.  It revalidates the
+    # reader pin, writer, cancellation epoch and all five issuer revisions;
+    # the token itself contains no result DTO.
+    pub me three_payload_worker_result_projection_v2(
+        verified: VerifiedThreePayloadWorkerResultV2,
+    ) -> Result<ThreePayloadWorkerResultV1, ThreePayloadFallbackV1>:
+        val index = self._attempt_index_for_result_v2(verified)
+        if index < 0:
+            if self._retired_run_known_v2(verified.owner_instance_identity,
+                    verified.slot, verified.session_serial,
+                    verified.grant_serial, verified.run_serial):
+                return Err(ThreePayloadFallbackV1.ScopeGenerationMismatch)
+            return Err(ThreePayloadFallbackV1.AuthorityUnavailable)
+        self._attempt_live_at_v2(index)?
+        _ = self._attempt_accounted_bytes_v2(index)?
+        val attempt = self.attempts[index]
+        if (attempt.attempt_state != SemanticScopeAttemptStateV2.Sealed or
+                (attempt.worker_state != SemanticScopeWorkerStateV2.ResultReady and
+                 attempt.worker_state != SemanticScopeWorkerStateV2.Publishing) or
+                not self._issuer_rows_current_v2(index)):
+            return Err(ThreePayloadFallbackV1.ScopeGenerationMismatch)
+        val result = match attempt.worker_result:
+            case Some(value): value
+            case nil: return Err(ThreePayloadFallbackV1.AuthorityUnavailable)
+        if not three_payload_worker_result_valid_v1(result):
+            return Err(ThreePayloadFallbackV1.CorruptPayload)
+        Ok(result)
+
+    pub me cancel_scope_v2(
+        scope: LiveSemanticScopeV2,
+    ) -> Result<(), ThreePayloadFallbackV1>:
+        val index = self._attempt_index_for_scope_v2(scope)
+        if self.closed:
+            return Err(ThreePayloadFallbackV1.AuthorityUnavailable)
+        if index < 0:
+            match self._retired_scope_state_v2(scope.owner_instance_identity,
+                    scope.slot, scope.session_serial):
+                case Some(SemanticScopeAttemptStateV2.Cancelled): return Ok(())
+                case Some(_):
+                    return Err(ThreePayloadFallbackV1.ScopeGenerationMismatch)
+                case nil: return Err(ThreePayloadFallbackV1.AuthorityUnavailable)
+        val state = self.attempts[index].attempt_state
+        if state == SemanticScopeAttemptStateV2.Consumed or
+                state == SemanticScopeAttemptStateV2.Cancelled:
+            return Err(ThreePayloadFallbackV1.ScopeGenerationMismatch)
+        self._retire_attempt_v2(index, SemanticScopeAttemptStateV2.Cancelled)
+
+    pub me close_v2() -> Result<(), ThreePayloadFallbackV1>:
+        if self.closed: return Err(ThreePayloadFallbackV1.AuthorityUnavailable)
+        self._owner_accounting_current_v2()?
+        if self.close_epoch == 0xffffffffffffffffu64:
+            return Err(ThreePayloadFallbackV1.BoundsExceeded)
+        for attempt in self.attempts:
+            for issuer in attempt.issuers:
+                match issuer.receipt:
+                    case Some(receipt): _ = receipt.close_v2()
+                    case nil: pass
+        self.close_epoch = self.close_epoch + 1u64
+        self.closed = true
+        self.attempts = []
+        self.retired_attempts = []
+        self.retained_body_objects = 0
+        self.retained_dependency_edges = 0
+        self.retained_bytes = 0
+        Ok(())
+
+export SemanticScopeAttemptStateV2, SemanticScopeWorkerStateV2,
+    SemanticScopeLiveOwnerV2, LiveSemanticScopeV2,
+    LiveSemanticCompletenessV2, AdmittedThreePayloadWorkerV2,
+    VerifiedThreePayloadWorkerResultV2,
+    VerifiedThreePayloadParsePreflightV3,
+    VerifiedThreePayloadCompiledResultV3

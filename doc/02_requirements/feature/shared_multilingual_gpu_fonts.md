@@ -104,3 +104,18 @@ Status: selected on 2026-07-11 (`L2+C1+S1+F1+R1+P1+G1`)
   dependencies.
 - Claims that upload, emitted source, simulation, CPU mirrors, or equal
   checksums alone prove GPU execution.
+
+## Selected GSUB/GPOS completion scope — 2026-07-25
+
+Option A is selected. Complete every active GSUB/GPOS lookup, flag, and format
+reached by the pinned Latin, Han, Devanagari, Arabic/Urdu, and Cyrillic
+witnesses. Build the union of required and explicitly enabled optional-feature
+lookups, deduplicate it, and execute it in ascending LookupList index order as
+OpenType specifies. Any unsupported active operation keeps the corresponding
+completion flag false.
+
+This is complete shaping for the selected pinned corpus, not specification-wide
+support for arbitrary fonts. Full GSUB types 1–8, GPOS types 1–9, all
+FeatureVariations, device/VariationIndex data, and arbitrary nested lookup
+behavior remain excluded unless the pinned default-instance corpus activates
+them.

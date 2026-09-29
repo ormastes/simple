@@ -1,7 +1,8 @@
 # Bug: `for x in <custom struct>` silently iterates zero times (no iterator protocol)
+## Open 2026-09-16 — needs owner triage
 
-Status: OPEN (P2)
-Status re-verified 2026-08-17 by source inspection (triage shard 01).
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **ID:** for_in_custom_struct_no_iterator_protocol_2026-06-15
 - **Filed:** 2026-06-15
@@ -68,15 +69,54 @@ type-checking and only surface via a value assertion.
   iteration under native driver); this is about user structs having no iterator
   hook at all.
 
-## PARTIAL — re-verified 2026-08-17 (P2 triage, compiler lane)
+## Re-measured 2026-09-06 — the SILENT half is gone, the feature gap remains
 
-The SILENT half is fixed: `src/compiler/10.frontend/core/interpreter/eval_stmts.spl:538`
-now raises `eval_set_error("cannot iterate over " + val_kind_name(...))` as the
-fall-through for a non-array/non-string receiver, so `for x in <custom struct>`
-is a diagnostic rather than zero silent iterations.
+Host: `bin/release/aarch64-unknown-linux-gnu/simple`, 50093192 bytes,
+mtime 2026-09-06 09:59 (aarch64 Linux), `SIMPLE_EXECUTION_MODE=interpret`.
 
-The PROTOCOL half is not: `src/compiler/10.frontend/core/interpreter/value.spl:268-275`
-`val_iterable_array` accepts only arrays and a struct literally NAMED `"List"`
-(unwrapping its `items` field). No `next`/`iter` method lookup exists anywhere in
-the interpreter directory, so a user-defined iterable is still not iterable.
-Retitle scope to the protocol gap. NOT FIXED by this lane (P1-owned path).
+Fixture (`build/wi/r_forin.spl`):
+
+```simple
+struct Bag:
+    items: [i64]
+
+fn main() -> void:
+    val b = Bag(items: [1, 2, 3])
+    var n = 0
+    for x in b:
+        n = n + 1
+    print("for-in custom struct iterations={n}")
+```
+
+Observed:
+
+```
+error: semantic: cannot iterate over this type: Object { class: "Bag", fields: {"items": Array([Int(1), Int(2), Int(3)])} }
+```
+
+The record's headline symptom — "iterates zero times **with no error or
+diagnostic**" — no longer holds: the loop now fails loudly and names the type.
+The dangerous, silent-wrong-answer half of this row is therefore closed.
+
+What is NOT closed, and this row should stay open for it: there is still **no
+iterator protocol**. A user type cannot opt in to `for x in <my type>` at all.
+That is a language capability gap, not a defect in the interpreter's loop
+evaluator, and closing it means designing the protocol (a trait with a
+`next()`/`iter()` contract, plus lowering in every engine), which is squarely
+out of scope for an interpreter bug-fix pass and must not be faked by making
+`for` guess at a struct's first array field.
+
+Recommended re-triage: downgrade from "silent wrong result" to a feature
+request for the iterator protocol, and re-file under language/type_system
+rather than interpreter.
+
+Scope: the **Rust seed's** interpreter lane. The pure-Simple interpreter
+(`eval_stmts.spl`, the file the work package attributed this row to) was not
+separately measured.
+
+## Triage 2026-09-13 — LEFT OPEN (still reproduces, exactly as filed)
+
+- **measured** (Rust seed `bin/simple` v1.0.0-rc.1, Windows): a `ByteSpan` built via `ByteBuffer.new()` + four `push_byte` + `freeze()` reads back correctly by index (`len=4`, values `222 173 190 239`), but `for b in span: n = n + 1` leaves `n` at `0` — printed `iter=0`. Zero iterations, no error, no diagnostic, exactly as reported.
+- **inferred**: this is a real language capability gap, not a stale report — there is no iterator protocol for user-defined structs, so the fix is compiler work (desugaring `for-in` to an `iter()`/`next()` protocol or equivalent). That lands in `src/compiler/**` or the Rust seed, both of which this session must not touch while a bootstrap runs concurrently.
+- Verdict: OPEN. The silent-zero-iterations behaviour is the dangerous part — a diagnostic on `for-in` over a type with no iterator would be a cheap partial mitigation.
+

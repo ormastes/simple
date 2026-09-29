@@ -1,0 +1,64 @@
+"""
+# sj plan entry
+
+Separate entry point for `sj plan <legacy-argv...>`. This exists as its own
+binary entry rather than an arm inside `src/app/sj/main.spl` because Simple
+resolves `use` eagerly: measured 2026-09-05 with `strace -e trace=openat`, a
+single `use app.sj.integrate_plan` in `main.spl` caused `sj --help` to open
+`src/app/sj/integrate_plan.spl`, `src/app/sj/lifecycle_policy.spl` and
+`src/lib/scv/lifecycle/**` 4 times each, where the unmodified file opened them
+zero times. `src/app/sj/main.spl` is the landing path (`scripts/check/land.shs`
+runs `sj git push --bookmark main` through it), so a parse break anywhere in the
+lifecycle modules would have broken every push. Keeping that import graph off
+`main.spl` confines the blast radius to this subcommand.
+
+Dry-run only: this entry prints a typed plan and exits. It mutates nothing.
+"""
+
+use std.io_runtime
+use std.io.{file_read}
+use app.sj.integrate_plan.{
+    legacy_argv_integrate_plan_with_policy,
+    PROTECTED_REF_POLICY_PATH,
+    PROTECTED_GATE_MANIFEST_PATH
+}
+
+extern fn rt_cli_get_args() -> [text]
+
+fn main() -> i64:
+    # The entry reads the committed authority sources; the planner itself stays
+    # pure. `file_read` yields "" for an absent or unreadable path, which the
+    # planner treats as fail-closed ERROR rather than a silent admission.
+    val report = legacy_argv_integrate_plan_with_policy(
+        sj_plan_legacy_args(),
+        file_read(PROTECTED_REF_POLICY_PATH),
+        file_read(PROTECTED_GATE_MANIFEST_PATH)
+    )
+    for line in report.lines:
+        print(line)
+    report.exit_code
+
+fn sj_plan_legacy_args() -> [text]:
+    sj_plan_legacy_args_from(rt_cli_get_args())
+
+fn sj_plan_legacy_args_from(all_args: [text]) -> [text]:
+    # Native rt_cli_get_args includes argv[0]; source execution additionally
+    # includes the entry .spl later in argv, so prefer that marker when found.
+    var start_idx = 1i64
+    var i = 0i64
+    while i < all_args.len():
+        val arg = all_args[i]
+        if arg.ends_with("/app/sj/plan_main.spl") or arg == "src/app/sj/plan_main.spl":
+            start_idx = i + 1i64
+        i = i + 1i64
+    # `bin/sj` forwards the full argv, so the `plan` selector is still present.
+    if start_idx < all_args.len() and all_args[start_idx] == "plan":
+        start_idx = start_idx + 1i64
+    var args: [text] = []
+    i = start_idx
+    while i < all_args.len():
+        args.push(all_args[i])
+        i = i + 1i64
+    args
+
+export sj_plan_legacy_args_from

@@ -1,0 +1,83 @@
+#!/usr/bin/env simple
+# TPL2 (pure-Simple mirror of TPL1, mission-critical hardening campaign).
+#
+# Bug: doc/08_tracking/bug/string_template_multi_placeholder_slot_not_found_2026-07-30.md
+# `xs.map("{_} -> {_}")` died with "variable __p1 not found". In
+# `src/compiler/10.frontend/desugar/placeholder_lambda.spl`, `count_placeholders`
+# and `replace_placeholders`'s `EXPR_INTERPOLATED_STRING` arms summed/replaced
+# bare `_` occurrences PER OCCURRENCE across a template's interpolation
+# regions -- correct for an ordinary expression (`_ + _` legitimately wants 2
+# params), but wrong for a template passed to a single-argument callback such
+# as `.map`, where every bare `_` in the SAME template refers to the one
+# implicit bound value. That over-counted and synthesized a lambda with more
+# params than `.map` ever supplies, leaving the extra `__pN` unbound.
+#
+# TPL1 landed the fix in the Rust seed (commit 92b91373855,
+# src/compiler_rust/parser/src/expressions/placeholder.rs): collapse bare-`_`
+# counting in an f-string to presence (<=1) and replace every occurrence with
+# ONE shared reserved slot. Numbered placeholders (`_1`, `_2`, ... — genuinely
+# distinct indices, as opposed to the SAME bare `_` referenced more than once)
+# are unaffected: they already collapse deterministically via
+# `find_max_numbered`/`replace_numbered_placeholders` and keep one param per
+# distinct number.
+#
+# This spec exercises the ported .spl fix directly at the AST-arena level
+# (mirroring the Rust unit tests), since `transform_placeholder_lambda` and
+# friends operate on i64 arena indices rather than a `syn`-style Expr enum.
+
+use std.spec.*
+use compiler.core.ast.{ast_reset}
+use compiler.core.ast_expr.{
+    EXPR_IDENT, EXPR_LAMBDA, EXPR_INTERPOLATED_STRING,
+    expr_tag, expr_args, expr_stmts, expr_s_val,
+    expr_ident, expr_interpolated_string
+}
+use compiler.frontend.desugar.placeholder_lambda.{transform_placeholder_lambda}
+
+describe "placeholder_lambda f-string shared-slot fix (TPL2)":
+    it "two bare `_` occurrences in one template share ONE param, not two":
+        ast_reset()
+        val parts: [i64] = [expr_ident("_", 0), expr_ident("_", 0)]
+        val node = expr_interpolated_string(parts, 0)
+
+        val result = transform_placeholder_lambda(node)
+
+        expect(expr_tag[result]).to_equal(EXPR_LAMBDA)
+        val params = expr_args[result]
+        # Load-bearing assertion: before the fix this was 2 (one slot per
+        # occurrence), and the second param was never bound by a
+        # single-argument caller like `.map`.
+        expect(params.len()).to_equal(1)
+        expect(expr_s_val[params[0]]).to_equal("__p0")
+
+        val body = expr_stmts[result][0]
+        expect(expr_tag[body]).to_equal(EXPR_INTERPOLATED_STRING)
+        val body_parts = expr_args[body]
+        expect(body_parts.len()).to_equal(2)
+        # Both occurrences must resolve to the SAME shared slot.
+        expect(expr_s_val[body_parts[0]]).to_equal("__p0")
+        expect(expr_s_val[body_parts[1]]).to_equal("__p0")
+
+    it "two DISTINCT numbered placeholders `_1` and `_2` in one template still produce two params":
+        ast_reset()
+        val parts: [i64] = [expr_ident("_1", 0), expr_ident("_2", 0)]
+        val node = expr_interpolated_string(parts, 0)
+
+        val result = transform_placeholder_lambda(node)
+
+        expect(expr_tag[result]).to_equal(EXPR_LAMBDA)
+        val params = expr_args[result]
+        # Numbered mode is untouched by the shared-slot fix: `_1` and `_2`
+        # are genuinely distinct positional references (unlike two bare `_`
+        # referring to the same implicit value), so they still get their
+        # own parameters (1-indexed to 0-indexed: _1 -> __p0, _2 -> __p1).
+        expect(params.len()).to_equal(2)
+        expect(expr_s_val[params[0]]).to_equal("__p0")
+        expect(expr_s_val[params[1]]).to_equal("__p1")
+
+        val body = expr_stmts[result][0]
+        expect(expr_tag[body]).to_equal(EXPR_INTERPOLATED_STRING)
+        val body_parts = expr_args[body]
+        expect(body_parts.len()).to_equal(2)
+        expect(expr_s_val[body_parts[0]]).to_equal("__p0")
+        expect(expr_s_val[body_parts[1]]).to_equal("__p1")

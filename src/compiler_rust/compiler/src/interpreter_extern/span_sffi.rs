@@ -28,9 +28,7 @@ fn next_handle() -> Result<i64, CompileError> {
 #[inline(always)]
 fn require_arity(args: &[Value], expected: usize, name: &str) -> Result<(), CompileError> {
     if args.len() != expected {
-        return Err(CompileError::runtime(format!(
-            "{name}: expected {expected} arguments"
-        )));
+        return Err(CompileError::runtime(format!("{name}: expected {expected} arguments")));
     }
     Ok(())
 }
@@ -57,9 +55,7 @@ pub fn rt_span_create(args: &[Value]) -> Result<Value, CompileError> {
     let column = usize::try_from(get_i64(args, 3, "rt_span_create")?)
         .map_err(|_| CompileError::runtime("rt_span_create: column is outside usize range"))?;
     if end < start {
-        return Err(CompileError::runtime(
-            "rt_span_create: end must not precede start",
-        ));
+        return Err(CompileError::runtime("rt_span_create: end must not precede start"));
     }
 
     let span = simple_parser::token::Span::new(start, end, line, column);
@@ -146,29 +142,12 @@ mod contract_tests {
     #[test]
     fn span_transport_rejects_invalid_ranges_and_double_free() {
         clear_span_sffi_registry();
-        assert!(rt_span_create(&[
-            Value::Int(-1),
-            Value::Int(1),
-            Value::Int(1),
-            Value::Int(1),
-        ])
-        .is_err());
-        assert!(rt_span_create(&[
-            Value::Int(2),
-            Value::Int(1),
-            Value::Int(1),
-            Value::Int(1),
-        ])
-        .is_err());
-        let handle = rt_span_create(&[
-            Value::Int(1),
-            Value::Int(2),
-            Value::Int(3),
-            Value::Int(4),
-        ])
-        .unwrap()
-        .as_int()
-        .unwrap();
+        assert!(rt_span_create(&[Value::Int(-1), Value::Int(1), Value::Int(1), Value::Int(1),]).is_err());
+        assert!(rt_span_create(&[Value::Int(2), Value::Int(1), Value::Int(1), Value::Int(1),]).is_err());
+        let handle = rt_span_create(&[Value::Int(1), Value::Int(2), Value::Int(3), Value::Int(4)])
+            .unwrap()
+            .as_int()
+            .unwrap();
         assert!(rt_span_start(&[Value::Int(handle), Value::Int(0)]).is_err());
         assert!(rt_span_free(&[Value::Int(handle)]).is_ok());
         assert!(rt_span_free(&[Value::Int(handle)]).is_err());

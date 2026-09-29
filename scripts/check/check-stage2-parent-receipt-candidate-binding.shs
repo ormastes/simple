@@ -1,0 +1,196 @@
+#!/bin/sh
+# Site 14: the Stage-2 parent-receipt publisher is fail-closed on the CANDIDATE
+# PATH, so the bootstrap driver must hand it the very path it recorded in the
+# admission receipt -- not a second, byte-identical copy at another path.
+#
+# Measured 2026-09-13 (doc/08_tracking/bug/
+# stage2_parent_receipt_publish_passes_wrong_candidate_path_2026-09-13.md):
+# `bootstrap-from-scratch.sh` wrote `candidate_path=${stage2_admitted_absolute}`
+# into the admission receipt and then called the publisher with
+# `$(absolute_path "${stage2_bin}")`. `publish-stage2-parent-receipts.shs:44`
+# asserts `[ "$(field candidate_path)" = "$candidate" ]` under `set -eu`, so the
+# publish exited, the parent receipts were never written, and Stage 3 refused
+# with `bootstrap-admission-error: parent-stage2-sanity-unavailable` -- on a run
+# whose Stage 2 was ADMITTED. Deterministic on every successful admission under
+# `--full-bootstrap`.
+#
+# Two halves, because neither alone catches it:
+#   behaviour -- run the REAL publisher both ways and prove it publishes on a
+#                matching path and refuses (writing nothing) on a mismatching
+#                one, even when the bytes are identical;
+#   wiring    -- prove the driver passes the publisher the SAME shell expression
+#                it records as the receipt's candidate_path. Compared as
+#                expressions, not against a hardcoded name, so renaming the
+#                variable keeps the gate true.
+#
+# Verdict is the last line of stdout: PASS/FAIL/ERROR, exit 0/1/2. A run that
+# checked 0 things is ERROR, never a pass.
+
+set -u
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+publisher=$root/scripts/bootstrap/publish-stage2-parent-receipts.shs
+driver=$root/scripts/bootstrap/bootstrap-from-scratch.sh
+checked=0
+failed=0
+failing=""
+
+note_fail() {
+    failed=$((failed + 1))
+    failing="$failing $1"
+    echo "check-stage2-parent-receipt-candidate-binding: FAILED $1: $2"
+}
+
+# --- wiring extraction -------------------------------------------------------
+# First argument of the publisher invocation in DRIVER_FILE.
+publish_candidate_expr() {
+    awk '
+        /^[ \t]*#/ { next }
+        /publish-stage2-parent-receipts\.shs/ { want = 1; next }
+        want { gsub(/^[ \t]+/, ""); gsub(/[ \t]*\\$/, ""); gsub(/"/, "")
+               if (length($0) == 0) next
+               print; exit }
+    ' "$1"
+}
+
+# Third argument of the admission-receipt writer in DRIVER_FILE. That position is
+# `bootstrap_stage3_admission_candidate` -- the value written as the receipt's
+# `candidate_path` (scripts/check/lib/bootstrap-stage3/sanity.shs:565).
+admission_candidate_expr() {
+    awk '
+        /^[ \t]*#/ { next }
+        /bootstrap_stage3_write_stage2_admission_receipt/ { want = 1; n = 0; next }
+        want { gsub(/^[ \t]+/, ""); gsub(/[ \t]*\\$/, ""); gsub(/"/, "")
+               if (length($0) == 0) next
+               n = n + 1
+               if (n == 3) { split($0, parts, " "); print parts[1]; exit } }
+    ' "$1"
+}
+
+check_wiring() {
+    wiring_file=$1 wiring_label=$2 wiring_expect=$3
+    checked=$((checked + 1))
+    wiring_publish=$(publish_candidate_expr "$wiring_file")
+    wiring_admission=$(admission_candidate_expr "$wiring_file")
+    if [ -z "$wiring_publish" ] || [ -z "$wiring_admission" ]; then
+        echo "check-stage2-parent-receipt-candidate-binding: ERROR — could not read both candidate expressions from $wiring_label"
+        exit 2
+    fi
+    if [ "$wiring_publish" = "$wiring_admission" ]; then wiring_got=same; else wiring_got=different; fi
+    [ "$wiring_got" = "$wiring_expect" ] || note_fail "$wiring_label" \
+        "publisher candidate '$wiring_publish' vs receipt candidate_path '$wiring_admission' ($wiring_got, expected $wiring_expect)"
+}
+
+# --- behavioural replay ------------------------------------------------------
+# Runs the REAL publisher exactly the way the driver does. `which` selects which
+# of two BYTE-IDENTICAL copies is offered as the candidate: the one the receipt
+# names, or the sibling at the stage2 output path.
+run_publisher() {
+    run_which=$1
+    work=$(mktemp -d "${TMPDIR:-/tmp}/stage2-parent-binding.XXXXXX") || exit 2
+    work=$(CDPATH= cd -- "$work" && pwd -P)
+    mkdir -p "$work/admitted" "$work/stage2"
+    printf '#!/bin/sh\nexit 0\n' >"$work/admitted/simple"
+    chmod 555 "$work/admitted/simple"
+    cp "$work/admitted/simple" "$work/stage2/simple"
+    for run_snap in source runtime tool; do
+        printf '%s snapshot\n' "$run_snap" >"$work/$run_snap.txt"
+    done
+    {
+        echo schema=simple-bootstrap-stage2-admission-v2
+        echo status=admitted
+        echo "candidate_path=$work/admitted/simple"
+        echo "candidate_sha256=$(sha256sum "$work/admitted/simple" | cut -d' ' -f1)"
+        echo "source_snapshot_path=$work/source.txt"
+        echo "source_snapshot_sha256=$(sha256sum "$work/source.txt" | cut -d' ' -f1)"
+        echo "runtime_snapshot_path=$work/runtime.txt"
+        echo "runtime_snapshot_sha256=$(sha256sum "$work/runtime.txt" | cut -d' ' -f1)"
+        echo "tool_authority_path=$work/tool.txt"
+        echo "tool_authority_sha256=$(sha256sum "$work/tool.txt" | cut -d' ' -f1)"
+    } >"$work/admission.env"
+    case "$run_which" in
+        admitted) run_candidate=$work/admitted/simple ;;
+        stage2)   run_candidate=$work/stage2/simple ;;
+        *) echo "check-stage2-parent-receipt-candidate-binding: ERROR — bad replay selector"; exit 2 ;;
+    esac
+    # Same bytes either way -- the ONLY difference is the path spelling.
+    if [ "$(sha256sum "$work/admitted/simple" | cut -d' ' -f1)" \
+         != "$(sha256sum "$work/stage2/simple" | cut -d' ' -f1)" ]; then
+        echo "check-stage2-parent-receipt-candidate-binding: ERROR — replay fixture copies differ"
+        exit 2
+    fi
+    sh "$publisher" "$run_candidate" "$work/admission.env" "$work/source.txt" \
+        "$work/runtime.txt" "$work/tool.txt" \
+        "$work/stage2/stage2-sanity.receipt" "$work/stage2/stage2-provenance.receipt" \
+        explicit-full-bootstrap-stage2-trust-root >/dev/null 2>&1
+    run_status=$?
+    run_receipts=0
+    [ -f "$work/stage2/stage2-sanity.receipt" ] && run_receipts=$((run_receipts + 1))
+    [ -f "$work/stage2/stage2-provenance.receipt" ] && run_receipts=$((run_receipts + 1))
+    run_pass=0
+    grep -q '^stage2-sanity: pass$' "$work/stage2/stage2-sanity.receipt" 2>/dev/null && run_pass=1
+    rm -rf "$work"
+}
+
+[ -f "$publisher" ] || { echo "check-stage2-parent-receipt-candidate-binding: ERROR — nothing was checked (no publisher at $publisher)"; exit 2; }
+[ -f "$driver" ] || { echo "check-stage2-parent-receipt-candidate-binding: ERROR — nothing was checked (no driver at $driver)"; exit 2; }
+
+# --- selftest (fatal, runs before every scan) --------------------------------
+selftest=$(mktemp -d "${TMPDIR:-/tmp}/stage2-parent-binding-self.XXXXXX") || exit 2
+cat >"$selftest/good.sh" <<'EOF'
+  bootstrap_stage3_write_stage2_admission_receipt \
+    "${stage2_admission_receipt_absolute}" \
+    "${stage2_admission_receipt_absolute}" \
+    "${stage2_admitted_absolute}" "${stage2_admitted_absolute}" \
+    "${repo_root}"
+  sh "${repo_root}/scripts/bootstrap/publish-stage2-parent-receipts.shs" \
+    "${stage2_admitted_absolute}" \
+    "${stage2_admission_receipt_absolute}"
+EOF
+cat >"$selftest/bad.sh" <<'EOF'
+  bootstrap_stage3_write_stage2_admission_receipt \
+    "${stage2_admission_receipt_absolute}" \
+    "${stage2_admission_receipt_absolute}" \
+    "${stage2_admitted_absolute}" "${stage2_admitted_absolute}" \
+    "${repo_root}"
+  sh "${repo_root}/scripts/bootstrap/publish-stage2-parent-receipts.shs" \
+    "$(absolute_path "${stage2_bin}")" \
+    "${stage2_admission_receipt_absolute}"
+EOF
+self_ok=1
+[ -n "$(publish_candidate_expr "$selftest/good.sh")" ] || self_ok=0
+[ -n "$(admission_candidate_expr "$selftest/good.sh")" ] || self_ok=0
+[ "$(publish_candidate_expr "$selftest/good.sh")" = "$(admission_candidate_expr "$selftest/good.sh")" ] || self_ok=0
+[ "$(publish_candidate_expr "$selftest/bad.sh")" != "$(admission_candidate_expr "$selftest/bad.sh")" ] || self_ok=0
+rm -rf "$selftest"
+[ "$self_ok" -eq 1 ] || { echo "check-stage2-parent-receipt-candidate-binding: ERROR — selftest failed (extractor does not discriminate)"; exit 2; }
+echo "check-stage2-parent-receipt-candidate-binding: selftest 2/2 fixtures correct"
+
+# --- 1. the publisher PUBLISHES when handed the path the receipt names -------
+checked=$((checked + 1))
+run_publisher admitted
+if [ "$run_status" -ne 0 ] || [ "$run_receipts" -ne 2 ] || [ "$run_pass" -ne 1 ]; then
+    note_fail publisher-accepts-receipt-path \
+        "real publisher exited $run_status with $run_receipts/2 receipts (sanity-pass=$run_pass) on the candidate its own receipt names"
+fi
+
+# --- 2. and REFUSES a byte-identical copy at another path, writing nothing ----
+checked=$((checked + 1))
+run_publisher stage2
+if [ "$run_status" -eq 0 ] || [ "$run_receipts" -ne 0 ]; then
+    note_fail publisher-refuses-other-path \
+        "real publisher exited $run_status and left $run_receipts receipt(s) for a byte-identical copy at a different path; the path assertion is not fail-closed"
+fi
+
+# --- 3. the driver must hand the publisher the path it recorded --------------
+check_wiring "$driver" bootstrap-from-scratch.sh same
+
+if [ "$checked" -eq 0 ]; then
+    echo "check-stage2-parent-receipt-candidate-binding: ERROR — nothing was checked"
+    exit 2
+fi
+if [ "$failed" -ne 0 ]; then
+    echo "check-stage2-parent-receipt-candidate-binding: FAIL — $checked check(s) run, $failed failed:$failing"
+    exit 1
+fi
+echo "check-stage2-parent-receipt-candidate-binding: PASS — $checked check(s) run, 0 failed (publisher is fail-closed on the candidate path and the driver supplies the recorded one)"
+exit 0

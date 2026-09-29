@@ -1,8 +1,6 @@
-<!-- codex-research -->
 # Simple Formal Verification 2.0 — Local Research
 
 **Date:** 2026-08-12
-**Recovered and revalidated:** 2026-08-14
 **Status:** Consolidated audit; implementation must revalidate line-level findings before editing
 
 ## Existing strengths
@@ -40,12 +38,7 @@ Relevant existing anchors include:
 - Extend current RISC-V HWIR, retirement, manifest, and fail-closed proof infrastructure.
 - Integrate the existing compiler translation-validation plan as the first backend-refinement strategy.
 
-## 2026-08-14 current-main annotation
-
-Current main now contains typed `DecisionProbe` and `ConditionProbe` MIR opcodes, deterministic JSON serialization, optimizer/visitor preservation, and fail-closed probe admission. This is an incremental evidence-identity bridge, not closure of gaps 1–10: admitted probes still report `MIRCOV-PROBE-E-UNLOWERED`, and no current-main search found the selected four-state claim model or a `VerificationIR` implementation. The historical gap analysis therefore remains applicable, with the MIR bridge recorded as partial progress rather than overwritten as completion.
-
-The listed architecture, design, plan, AOP research, and RISC-V HWIR anchor files remain present on current main. Exact corpus counts are intentionally not frozen here because concurrent formal lanes change them; verification must derive inventories from the revision under review.
-
 ## Required follow-up inventories
 
 Before FV-0/FV-1 implementation, record exact owning modules and tests for contract generation, Lean expression/type lowering, proof-result parsing, assurance resolution, AOP expansion/weaving, compiler pass manifests, HWIR retirement/RVFI generation, and artifact provenance. This research deliberately defines the cross-repository finding without assigning dirty files that may belong to concurrent lanes.
+

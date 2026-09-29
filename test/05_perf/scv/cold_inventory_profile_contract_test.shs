@@ -1,0 +1,53 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)
+profile="$root/test/05_perf/scv/cold_inventory_profile.shs"
+scratch=$(mktemp -d "${TMPDIR:-/tmp}/scv-cold-profile-contract.XXXXXX")
+trap 'rm -rf "$scratch"' EXIT HUP INT TERM
+
+mkdir -p "$scratch/bin"
+printf '%s\n' '#!/bin/sh' \
+    'printf "%s\n" "cold_inventory entries=16384 generation=16384 byte_sum=134225920"' \
+    >"$scratch/bin/runtime"
+printf '%s\n' '#!/bin/sh' 'shift' 'exec "$@"' >"$scratch/bin/timeout"
+printf '%s\n' '#!/bin/sh' \
+    'if [ "$1" = "-p" ]; then' \
+    '  shift 2; "$@"; status=$?' \
+    '  printf "real 1.25\nuser 0.50\nsys 0.10\n1024 maximum resident set size\n" >&2' \
+    '  exit "$status"' \
+    'fi' \
+    'shift; format=$1; shift; [ "$1" = "-o" ]; output=$2; shift 2' \
+    '"$@"; status=$?' \
+    'printf "elapsed_seconds=1.50\nmax_rss_kib=2048\n" >"$output"' \
+    'exit "$status"' >"$scratch/bin/time"
+chmod +x "$scratch/bin/runtime" "$scratch/bin/timeout" "$scratch/bin/time"
+
+run_profile() {
+    os=$1
+    report=$2
+    SCV_HOST_OS="$os" SCV_TIME_BIN="$scratch/bin/time" \
+        SCV_TIMEOUT_BIN="$scratch/bin/timeout" SCV_COLD_REPORT_DIR="$report" \
+        sh "$profile" "$scratch/bin/runtime"
+}
+
+run_profile Linux "$scratch/linux" >"$scratch/linux.out"
+grep -qx 'elapsed_seconds=1.50' "$scratch/linux/resources.txt"
+grep -qx 'max_rss_kib=2048' "$scratch/linux/resources.txt"
+grep -q '^PASS host_os=Linux ' "$scratch/linux.out"
+
+run_profile FreeBSD "$scratch/freebsd" >"$scratch/freebsd.out"
+grep -qx 'elapsed_seconds=1.25' "$scratch/freebsd/resources.txt"
+grep -qx 'max_rss_kib=1024' "$scratch/freebsd/resources.txt"
+grep -q '^PASS host_os=FreeBSD ' "$scratch/freebsd.out"
+
+if SCV_HOST_OS=FreeBSD SCV_TIME_BIN="$scratch/bin/time" \
+    SCV_TIMEOUT_BIN="$scratch/bin/timeout" SCV_COLD_REPORT_DIR="$scratch/over" \
+    SCV_COLD_MAX_RSS_KIB=1023 sh "$profile" "$scratch/bin/runtime" \
+    >"$scratch/over.out" 2>"$scratch/over.err"; then
+    echo "FAIL: FreeBSD RSS over-budget sample was accepted" >&2
+    exit 1
+fi
+grep -q 'FAIL cold inventory RSS: 1024 KiB > 1023 KiB' "$scratch/over.err"
+
+echo "PASS: SCV cold profiler parses GNU and FreeBSD time receipts"

@@ -1,4 +1,5 @@
 #include "cosmos_ftl.h"
+#include "cosmos_ftl_policy.h"
 
 #define COSMOS_FTL_LUN_BIT 20U
 #define COSMOS_FTL_DIE_SHIFT 21U
@@ -14,18 +15,12 @@ _Static_assert(sizeof(struct cosmos_ftl_checkpoint) == 56U,
                "FTL checkpoint format changed");
 
 static unsigned int crc32_step(unsigned int crc, unsigned char byte) {
-    unsigned int bit;
-
-    crc ^= byte;
-    for (bit = 0U; bit < 8U; ++bit) {
-        crc = (crc >> 1U) ^ (0xEDB88320U & (0U - (crc & 1U)));
-    }
-    return crc;
+    return cosmos_ftl_policy_crc32_step(crc, byte);
 }
 
 unsigned int cosmos_ftl_crc32(const void *data, unsigned int bytes) {
     const unsigned char *input = data;
-    unsigned int crc = 0xFFFFFFFFU;
+    unsigned int crc = cosmos_ftl_policy_crc32_begin(bytes);
     unsigned int index;
 
     for (index = 0U; index < bytes; ++index) {
@@ -34,70 +29,29 @@ unsigned int cosmos_ftl_crc32(const void *data, unsigned int bytes) {
     return ~crc;
 }
 
-static unsigned int crc32_u32(unsigned int crc, unsigned int value) {
-    unsigned int byte;
-
-    for (byte = 0U; byte < 4U; ++byte) {
-        crc = crc32_step(
-            crc, (unsigned char)(value >> (byte * 8U)));
-    }
-    return crc;
-}
-
-static unsigned int crc32_u64(
-    unsigned int crc, unsigned long long value) {
-    unsigned int byte;
-
-    for (byte = 0U; byte < 8U; ++byte) {
-        crc = crc32_step(
-            crc, (unsigned char)(value >> (byte * 8U)));
-    }
-    return crc;
-}
-
 static unsigned int checkpoint_crc(
     const struct cosmos_ftl_checkpoint *checkpoint) {
-    unsigned int crc = 0xFFFFFFFFU;
-
-    crc = crc32_u32(crc, checkpoint->magic);
-    crc = crc32_u32(crc, checkpoint->version);
-    crc = crc32_u64(crc, checkpoint->generation);
-    crc = crc32_u64(crc, checkpoint->journal_index);
-    crc = crc32_u32(crc, checkpoint->l2p_count);
-    crc = crc32_u32(crc, checkpoint->block_count);
-    crc = crc32_u32(crc, checkpoint->allocation_lane);
-    crc = crc32_u32(crc, checkpoint->journal_crc);
-    crc = crc32_u32(crc, checkpoint->l2p_crc);
-    crc = crc32_u32(crc, checkpoint->block_crc);
-    return ~crc;
+    return cosmos_ftl_policy_checkpoint_crc(
+        checkpoint->magic, checkpoint->version, checkpoint->generation,
+        checkpoint->journal_index, checkpoint->l2p_count,
+        checkpoint->block_count, checkpoint->allocation_lane,
+        checkpoint->journal_crc, checkpoint->l2p_crc, checkpoint->block_crc);
 }
 
 unsigned int cosmos_ftl_journal_record_crc(
     const struct cosmos_ftl_journal_record *record) {
-    unsigned int crc = 0xFFFFFFFFU;
-
-    crc = crc32_u32(crc, record->magic);
-    crc = crc32_u32(crc, record->type);
-    crc = crc32_u64(crc, record->sequence);
-    crc = crc32_u64(crc, record->generation);
-    crc = crc32_u32(crc, record->lpn);
-    crc = crc32_u32(crc, record->new_ppa);
-    crc = crc32_u32(crc, record->old_ppa);
-    crc = crc32_u32(crc, record->block_index);
-    crc = crc32_u32(crc, record->previous_crc);
-    return ~crc;
+    return cosmos_ftl_policy_journal_record_crc(
+        record->magic, record->type, record->sequence, record->generation,
+        record->lpn, record->new_ppa, record->old_ppa,
+        record->block_index, record->previous_crc);
 }
 
 static unsigned int l2p_crc(const unsigned int *l2p, unsigned int count) {
     unsigned int crc = 0xFFFFFFFFU;
     unsigned int index;
-    unsigned int byte;
 
     for (index = 0U; index < count; ++index) {
-        for (byte = 0U; byte < 4U; ++byte) {
-            crc = crc32_step(
-                crc, (unsigned char)(l2p[index] >> (byte * 8U)));
-        }
+        crc = cosmos_ftl_policy_l2p_crc_step(crc, l2p[index]);
     }
     return ~crc;
 }
@@ -108,16 +62,10 @@ static unsigned int blocks_crc(
     unsigned int index;
 
     for (index = 0U; index < count; ++index) {
-        crc = crc32_step(crc, (unsigned char)blocks[index].valid_pages);
-        crc = crc32_step(
-            crc, (unsigned char)(blocks[index].valid_pages >> 8U));
-        crc = crc32_step(crc, (unsigned char)blocks[index].erase_count);
-        crc = crc32_step(
-            crc, (unsigned char)(blocks[index].erase_count >> 8U));
-        crc = crc32_step(crc, blocks[index].bad);
-        crc = crc32_step(crc, blocks[index].state);
-        crc = crc32_step(crc, blocks[index].next_page);
-        crc = crc32_step(crc, blocks[index].reserved);
+        crc = cosmos_ftl_policy_blocks_crc_step(
+            crc, blocks[index].valid_pages, blocks[index].erase_count,
+            blocks[index].bad, blocks[index].state,
+            blocks[index].next_page, blocks[index].reserved);
     }
     return ~crc;
 }
@@ -125,15 +73,16 @@ static unsigned int blocks_crc(
 int cosmos_ftl_ppa_encode(unsigned int die, unsigned int lun,
                           unsigned int block, unsigned int page,
                           unsigned int *ppa) {
-    if (ppa == 0 || die >= COSMOS_FTL_DIE_COUNT ||
-        lun >= COSMOS_FTL_LUN_COUNT ||
-        block >= COSMOS_FTL_BLOCKS_PER_LUN ||
-        page >= COSMOS_FTL_PAGES_PER_BLOCK) {
+    unsigned long long receipt;
+
+    if (ppa == 0) {
         return COSMOS_INVALID;
     }
-    *ppa = (die << COSMOS_FTL_DIE_SHIFT) |
-        (lun << COSMOS_FTL_LUN_BIT) |
-        (block << COSMOS_FTL_BLOCK_SHIFT) | page;
+    receipt = cosmos_ftl_policy_ppa_encode(die, lun, block, page);
+    if (receipt == ~0ULL) {
+        return COSMOS_INVALID;
+    }
+    *ppa = (unsigned int)receipt;
     return COSMOS_OK;
 }
 
@@ -141,67 +90,63 @@ int cosmos_ftl_ppa_decode(unsigned int ppa, unsigned int *die,
                           unsigned int *lun, unsigned int *block,
                           unsigned int *page) {
     if (die == 0 || lun == 0 || block == 0 || page == 0 ||
-        ppa == COSMOS_FTL_PPA_NONE || (ppa >> 27U) != 0U) {
+        cosmos_ftl_policy_ppa_decode_valid(ppa) == 0U) {
         return COSMOS_INVALID;
     }
     *page = ppa & COSMOS_FTL_PAGE_MASK;
     *block = (ppa >> COSMOS_FTL_BLOCK_SHIFT) & COSMOS_FTL_BLOCK_MASK;
     *lun = (ppa >> COSMOS_FTL_LUN_BIT) & 1U;
     *die = (ppa >> COSMOS_FTL_DIE_SHIFT) & 0x3FU;
-    if (*block >= COSMOS_FTL_BLOCKS_PER_LUN) {
-        return COSMOS_INVALID;
-    }
     return COSMOS_OK;
 }
 
 int cosmos_ftl_ppa_row(unsigned int ppa, unsigned int *channel,
                        unsigned int *way, unsigned int *row) {
-    unsigned int die;
-    unsigned int lun;
-    unsigned int block;
-    unsigned int page;
+    unsigned long long receipt;
 
-    if (channel == 0 || way == 0 || row == 0 ||
-        cosmos_ftl_ppa_decode(ppa, &die, &lun, &block, &page) != COSMOS_OK) {
+    if (channel == 0 || way == 0 || row == 0) {
         return COSMOS_INVALID;
     }
-    *channel = die & 7U;
-    *way = die >> 3U;
-    *row = (lun == 0U ? 0U : 0x00200000U) + block * 256U +
-        (page == 0U ? 0U : page * 2U - 1U);
+    receipt = cosmos_ftl_policy_ppa_row(ppa);
+    if (receipt == ~0ULL) {
+        return COSMOS_INVALID;
+    }
+    *channel = (unsigned int)(receipt & 0xFFULL);
+    *way = (unsigned int)((receipt >> 8U) & 0xFFULL);
+    *row = (unsigned int)(receipt >> 16U);
     return COSMOS_OK;
 }
 
 static unsigned int block_index_from_parts(unsigned int die, unsigned int lun,
                                             unsigned int block) {
-    return (die * COSMOS_FTL_LUN_COUNT + lun) *
-        COSMOS_FTL_BLOCKS_PER_LUN + block;
+    return cosmos_ftl_policy_block_index_from_parts(die, lun, block);
 }
 
 static unsigned int lane_index_from_parts(unsigned int die, unsigned int lun) {
-    return die * COSMOS_FTL_LUN_COUNT + lun;
+    return cosmos_ftl_policy_lane_index_from_parts(die, lun);
 }
 
 static void block_parts_from_index(unsigned int index, unsigned int *die,
                                    unsigned int *lun, unsigned int *block) {
-    *block = index % COSMOS_FTL_BLOCKS_PER_LUN;
-    index /= COSMOS_FTL_BLOCKS_PER_LUN;
-    *lun = index % COSMOS_FTL_LUN_COUNT;
-    *die = index / COSMOS_FTL_LUN_COUNT;
+    unsigned long long receipt =
+        cosmos_ftl_policy_block_parts_from_index(index);
+
+    *block = (unsigned int)(receipt & 0xFFFFULL);
+    *lun = (unsigned int)((receipt >> 16U) & 1ULL);
+    *die = (unsigned int)(receipt >> 17U);
 }
 
 static int block_index_from_ppa(unsigned int ppa, unsigned int *index) {
-    unsigned int die;
-    unsigned int lun;
-    unsigned int block;
-    unsigned int page;
+    unsigned long long receipt;
 
-    if (index == 0 ||
-        cosmos_ftl_ppa_decode(ppa, &die, &lun, &block, &page) != COSMOS_OK) {
+    if (index == 0) {
         return COSMOS_INVALID;
     }
-    (void)page;
-    *index = block_index_from_parts(die, lun, block);
+    receipt = cosmos_ftl_policy_block_index_from_ppa(ppa);
+    if (receipt == ~0ULL) {
+        return COSMOS_INVALID;
+    }
+    *index = (unsigned int)receipt;
     return COSMOS_OK;
 }
 
@@ -209,13 +154,15 @@ static void clear_tables(struct cosmos_ftl *ftl) {
     unsigned int index;
 
     for (index = 0U; index < ftl->l2p_count; ++index) {
-        ftl->l2p[index] = COSMOS_FTL_PPA_NONE;
+        ftl->l2p[index] =
+            (unsigned int)cosmos_ftl_policy_clear_tables_value(0U);
     }
     for (index = 0U; index < ftl->block_count; ++index) {
         ftl->blocks[index].valid_pages = 0U;
         ftl->blocks[index].erase_count = 0U;
         ftl->blocks[index].bad = 0U;
-        ftl->blocks[index].state = COSMOS_FTL_BLOCK_FREE;
+        ftl->blocks[index].state = (unsigned char)
+            cosmos_ftl_policy_clear_tables_value(1U);
         ftl->blocks[index].next_page = 0U;
         ftl->blocks[index].reserved = 0U;
     }
@@ -226,18 +173,28 @@ int cosmos_ftl_init(struct cosmos_ftl *ftl,
                     unsigned int *l2p, unsigned int l2p_count,
                     struct cosmos_ftl_block *blocks,
                     unsigned int block_count) {
-    if (ftl == 0 || backend == 0 || l2p == 0 || l2p_count == 0U ||
-        blocks == 0 || l2p_count > COSMOS_FTL_NAMESPACE_PAGE_COUNT ||
-        block_count != COSMOS_FTL_BLOCK_COUNT ||
-        backend->program_data == 0 || backend->append_journal == 0 ||
-        backend->copy_data == 0 || backend->read_page_tag == 0 ||
-        backend->erase_block == 0 || backend->trim_journal == 0 ||
-        backend->journal_capacity == 0ULL ||
-        backend->read_journal == 0 ||
-        backend->read_checkpoint_header == 0 ||
-        backend->read_checkpoint_data == 0 ||
-        backend->write_checkpoint == 0) {
-        return COSMOS_INVALID;
+    unsigned int callback_mask = 0U;
+    unsigned int status;
+
+    if (backend != 0) {
+        callback_mask |= backend->program_data != 0 ? 1U : 0U;
+        callback_mask |= backend->append_journal != 0 ? 2U : 0U;
+        callback_mask |= backend->copy_data != 0 ? 4U : 0U;
+        callback_mask |= backend->read_page_tag != 0 ? 8U : 0U;
+        callback_mask |= backend->erase_block != 0 ? 16U : 0U;
+        callback_mask |= backend->trim_journal != 0 ? 32U : 0U;
+        callback_mask |= backend->read_journal != 0 ? 64U : 0U;
+        callback_mask |= backend->read_checkpoint_header != 0 ? 128U : 0U;
+        callback_mask |= backend->read_checkpoint_data != 0 ? 256U : 0U;
+        callback_mask |= backend->write_checkpoint != 0 ? 512U : 0U;
+    }
+    status = cosmos_ftl_policy_init_valid(
+        ftl != 0, backend != 0, l2p != 0, l2p_count, blocks != 0,
+        COSMOS_FTL_NAMESPACE_PAGE_COUNT, block_count,
+        COSMOS_FTL_BLOCK_COUNT, callback_mask,
+        backend != 0 ? backend->journal_capacity : 0ULL);
+    if (status != COSMOS_OK) {
+        return (int)status;
     }
     ftl->backend = *backend;
     ftl->l2p = l2p;
@@ -259,6 +216,12 @@ int cosmos_ftl_init(struct cosmos_ftl *ftl,
 }
 
 int cosmos_ftl_factory_initialize_erased(struct cosmos_ftl *ftl) {
+    int status = (int)cosmos_ftl_policy_factory_initialize_erased_valid(
+        ftl != 0);
+
+    if (status != COSMOS_OK) {
+        return status;
+    }
     return cosmos_ftl_factory_initialize_erased_with_bad_blocks(
         ftl, 0, 0U);
 }
@@ -271,7 +234,8 @@ int cosmos_ftl_factory_initialize_erased_with_bad_blocks(
     unsigned int lun;
     unsigned int block;
 
-    if (ftl == 0) {
+    if (cosmos_ftl_policy_factory_initialize_erased_valid(ftl != 0) !=
+        COSMOS_OK) {
         return COSMOS_INVALID;
     }
     if (bad_block_bitmap != 0 &&
@@ -283,20 +247,22 @@ int cosmos_ftl_factory_initialize_erased_with_bad_blocks(
         for (lun = 0U; lun < COSMOS_FTL_LUN_COUNT; ++lun) {
             for (block = 0U; block < COSMOS_FTL_BLOCKS_PER_LUN; ++block) {
                 index = block_index_from_parts(die, lun, block);
-                if (block < COSMOS_FTL_METADATA_BLOCKS_PER_LUN ||
-                    block >= COSMOS_FTL_MAIN_BLOCKS_PER_LUN) {
-                    ftl->blocks[index].state = COSMOS_FTL_BLOCK_RESERVED;
-                }
+                ftl->blocks[index].state = (unsigned char)
+                    cosmos_ftl_policy_factory_block_state(block, 0U);
             }
         }
     }
     if (bad_block_bitmap != 0) {
         for (index = 0U; index < ftl->block_count; ++index) {
-            ftl->blocks[index].bad =
+            unsigned int bad =
                 (bad_block_bitmap[index / 8U] >> (index & 7U)) & 1U;
-            if (ftl->blocks[index].bad != 0U) {
-                ftl->blocks[index].state = COSMOS_FTL_BLOCK_RETIRED;
-            }
+            unsigned int block_part =
+                index % COSMOS_FTL_BLOCKS_PER_LUN;
+            unsigned int receipt =
+                cosmos_ftl_policy_factory_block_state(block_part, bad);
+
+            ftl->blocks[index].bad = (unsigned char)(receipt >> 8U);
+            ftl->blocks[index].state = (unsigned char)receipt;
         }
     }
     for (index = 0U; index < COSMOS_FTL_LANE_COUNT; ++index) {
@@ -319,11 +285,10 @@ int cosmos_ftl_factory_initialize_erased_with_bad_blocks(
 static int checkpoint_valid(
     const struct cosmos_ftl *ftl,
     const struct cosmos_ftl_checkpoint *checkpoint) {
-    return checkpoint->magic == COSMOS_FTL_MAGIC &&
-        checkpoint->version == COSMOS_FTL_VERSION &&
-        checkpoint->l2p_count == ftl->l2p_count &&
-        checkpoint->block_count == ftl->block_count &&
-        checkpoint->header_crc == checkpoint_crc(checkpoint);
+    return (int)cosmos_ftl_policy_checkpoint_valid(
+        checkpoint->magic, checkpoint->version, checkpoint->l2p_count,
+        ftl->l2p_count, checkpoint->block_count, ftl->block_count,
+        checkpoint->header_crc, checkpoint_crc(checkpoint));
 }
 
 static int load_checkpoint(struct cosmos_ftl *ftl, unsigned int slot,
@@ -332,14 +297,13 @@ static int load_checkpoint(struct cosmos_ftl *ftl, unsigned int slot,
         ftl->backend.context, slot, ftl->l2p, ftl->l2p_count, ftl->blocks,
         ftl->block_count);
 
-    if (status != COSMOS_OK ||
-        checkpoint->l2p_crc != l2p_crc(ftl->l2p, ftl->l2p_count) ||
-        checkpoint->block_crc != blocks_crc(
-            ftl->blocks, ftl->block_count)) {
-        return COSMOS_HW_ERROR;
-    }
-    if (checkpoint->allocation_lane >= COSMOS_FTL_LANE_COUNT) {
-        return COSMOS_HW_ERROR;
+    status = (int)cosmos_ftl_policy_load_checkpoint_status(
+        (unsigned int)status, checkpoint->l2p_crc,
+        l2p_crc(ftl->l2p, ftl->l2p_count), checkpoint->block_crc,
+        blocks_crc(ftl->blocks, ftl->block_count),
+        checkpoint->allocation_lane);
+    if (status != COSMOS_OK) {
+        return status;
     }
     ftl->allocation_lane = checkpoint->allocation_lane;
     ftl->generation = checkpoint->generation;
@@ -352,16 +316,23 @@ static int load_checkpoint(struct cosmos_ftl *ftl, unsigned int slot,
 
 static void map_apply(struct cosmos_ftl *ftl, unsigned int lpn,
                       unsigned int new_ppa, unsigned int old_ppa) {
-    unsigned int block_index;
+    unsigned int old_index = 0U;
+    unsigned int new_index = 0U;
+    unsigned int old_valid = block_index_from_ppa(
+        old_ppa, &old_index) == COSMOS_OK;
+    unsigned int new_valid = block_index_from_ppa(
+        new_ppa, &new_index) == COSMOS_OK;
+    unsigned int actions = cosmos_ftl_policy_map_apply_actions(
+        old_ppa, old_valid,
+        old_valid != 0U ? ftl->blocks[old_index].valid_pages : 0U,
+        new_valid);
 
-    if (old_ppa != COSMOS_FTL_PPA_NONE &&
-        block_index_from_ppa(old_ppa, &block_index) == COSMOS_OK &&
-        ftl->blocks[block_index].valid_pages != 0U) {
-        --ftl->blocks[block_index].valid_pages;
+    if ((actions & 1U) != 0U) {
+        --ftl->blocks[old_index].valid_pages;
     }
     ftl->l2p[lpn] = new_ppa;
-    if (block_index_from_ppa(new_ppa, &block_index) == COSMOS_OK) {
-        ++ftl->blocks[block_index].valid_pages;
+    if ((actions & 2U) != 0U) {
+        ++ftl->blocks[new_index].valid_pages;
     }
 }
 
@@ -377,53 +348,19 @@ static int rebuild_runtime_state(struct cosmos_ftl *ftl) {
     }
     for (index = 0U; index < ftl->block_count; ++index) {
         const struct cosmos_ftl_block *entry = &ftl->blocks[index];
+        unsigned int receipt;
 
         block_parts_from_index(index, &die, &lun, &block);
         lane = lane_index_from_parts(die, lun);
-        if (entry->reserved != 0U ||
-            entry->valid_pages > COSMOS_FTL_PAGES_PER_BLOCK ||
-            entry->next_page > COSMOS_FTL_PAGES_PER_BLOCK) {
+        receipt = cosmos_ftl_policy_rebuild_runtime_state_entry(
+            block, entry->valid_pages, entry->bad, entry->state,
+            entry->next_page, entry->reserved,
+            ftl->open_block[lane] != COSMOS_FTL_BLOCK_NONE);
+        if ((receipt & 0xFFU) != COSMOS_OK) {
             return COSMOS_HW_ERROR;
         }
-        if (block < COSMOS_FTL_METADATA_BLOCKS_PER_LUN ||
-            block >= COSMOS_FTL_MAIN_BLOCKS_PER_LUN) {
-            if (entry->state != COSMOS_FTL_BLOCK_RESERVED &&
-                entry->state != COSMOS_FTL_BLOCK_RETIRED) {
-                return COSMOS_HW_ERROR;
-            }
-            continue;
-        }
-        if (entry->state == COSMOS_FTL_BLOCK_FREE) {
-            if (entry->valid_pages != 0U || entry->next_page != 0U ||
-                entry->bad != 0U) {
-                return COSMOS_HW_ERROR;
-            }
-        } else if (entry->state == COSMOS_FTL_BLOCK_OPEN) {
-            if (entry->next_page == 0U ||
-                entry->next_page >= COSMOS_FTL_PAGES_PER_BLOCK ||
-                entry->valid_pages > entry->next_page ||
-                entry->bad != 0U ||
-                ftl->open_block[lane] != COSMOS_FTL_BLOCK_NONE) {
-                return COSMOS_HW_ERROR;
-            }
+        if ((receipt >> 8U) != 0U) {
             ftl->open_block[lane] = (unsigned short)block;
-        } else if (entry->state == COSMOS_FTL_BLOCK_CLOSED ||
-                   entry->state == COSMOS_FTL_BLOCK_EVACUATE) {
-            if (entry->next_page == 0U ||
-                entry->valid_pages > entry->next_page ||
-                entry->bad != 0U) {
-                return COSMOS_HW_ERROR;
-            }
-        } else if (entry->state == COSMOS_FTL_BLOCK_ERASING) {
-            if (entry->valid_pages != 0U || entry->bad != 0U) {
-                return COSMOS_HW_ERROR;
-            }
-        } else if (entry->state == COSMOS_FTL_BLOCK_RETIRED) {
-            if (entry->bad == 0U || entry->valid_pages != 0U) {
-                return COSMOS_HW_ERROR;
-            }
-        } else {
-            return COSMOS_HW_ERROR;
         }
     }
     return COSMOS_OK;
@@ -431,27 +368,30 @@ static int rebuild_runtime_state(struct cosmos_ftl *ftl) {
 
 static int allocation_ppa_valid(const struct cosmos_ftl *ftl,
                                 unsigned int ppa) {
-    unsigned int die;
-    unsigned int index;
+    unsigned int die = 0U;
+    unsigned int index = 0U;
     unsigned int lane;
-    unsigned int lun;
-    unsigned int block;
-    unsigned int page;
+    unsigned int lun = 0U;
+    unsigned int block = 0U;
+    unsigned int page = 0U;
     const struct cosmos_ftl_block *entry;
 
-    if (cosmos_ftl_ppa_decode(ppa, &die, &lun, &block, &page) != COSMOS_OK ||
-        block < COSMOS_FTL_METADATA_BLOCKS_PER_LUN ||
-        block >= COSMOS_FTL_MAIN_BLOCKS_PER_LUN) {
-        return 0;
+    unsigned int ppa_valid = cosmos_ftl_ppa_decode(
+        ppa, &die, &lun, &block, &page) == COSMOS_OK;
+
+    if (ppa_valid == 0U) {
+        return (int)cosmos_ftl_policy_allocation_ppa_valid(
+            0U, 0U, 0U, 0U, 0U, COSMOS_FTL_BLOCK_NONE);
     }
     index = block_index_from_parts(die, lun, block);
     lane = lane_index_from_parts(die, lun);
     entry = &ftl->blocks[index];
-    return entry->bad == 0U &&
-        ((entry->state == COSMOS_FTL_BLOCK_FREE && page == 0U &&
-          ftl->open_block[lane] == COSMOS_FTL_BLOCK_NONE) ||
-         (entry->state == COSMOS_FTL_BLOCK_OPEN &&
-          ftl->open_block[lane] == block && page == entry->next_page));
+    if (page != entry->next_page && entry->state == COSMOS_FTL_BLOCK_OPEN) {
+        return 0;
+    }
+    return (int)cosmos_ftl_policy_allocation_ppa_valid(
+        ppa_valid, block, page, entry->bad, entry->state,
+        ftl->open_block[lane]);
 }
 
 static void allocation_apply(struct cosmos_ftl *ftl, unsigned int ppa) {
@@ -462,6 +402,7 @@ static void allocation_apply(struct cosmos_ftl *ftl, unsigned int ppa) {
     unsigned int block;
     unsigned int page;
     struct cosmos_ftl_block *entry;
+    unsigned long long receipt;
 
     if (cosmos_ftl_ppa_decode(
             ppa, &die, &lun, &block, &page) != COSMOS_OK) {
@@ -470,44 +411,39 @@ static void allocation_apply(struct cosmos_ftl *ftl, unsigned int ppa) {
     index = block_index_from_parts(die, lun, block);
     lane = lane_index_from_parts(die, lun);
     entry = &ftl->blocks[index];
-    if (entry->state == COSMOS_FTL_BLOCK_FREE) {
-        entry->state = COSMOS_FTL_BLOCK_OPEN;
-        ftl->open_block[lane] = (unsigned short)block;
-    }
-    entry->next_page = (unsigned char)(page + 1U);
-    if (entry->next_page == COSMOS_FTL_PAGES_PER_BLOCK) {
-        entry->state = COSMOS_FTL_BLOCK_CLOSED;
-        ftl->open_block[lane] = COSMOS_FTL_BLOCK_NONE;
-    }
-    ftl->allocation_lane = (lane + 1U) % COSMOS_FTL_LANE_COUNT;
+    receipt = cosmos_ftl_policy_allocation_apply_receipt(
+        entry->state, page, block, lane);
+    entry->state = (unsigned char)receipt;
+    entry->next_page = (unsigned char)(receipt >> 8U);
+    ftl->open_block[lane] = (unsigned short)(receipt >> 16U);
+    ftl->allocation_lane = (unsigned int)(receipt >> 32U);
 }
 
 static void apply_record(struct cosmos_ftl *ftl,
                          const struct cosmos_ftl_journal_record *record) {
-    if (record->type == COSMOS_FTL_RECORD_ALLOCATE) {
+    unsigned int action = cosmos_ftl_policy_apply_record_action(
+        record->type, record->lpn, ftl->l2p_count,
+        record->block_index, ftl->block_count);
+
+    if (action == COSMOS_FTL_RECORD_ALLOCATE) {
         allocation_apply(ftl, record->new_ppa);
-    } else if (record->type == COSMOS_FTL_RECORD_MAP &&
-               record->lpn < ftl->l2p_count) {
+    } else if (action == COSMOS_FTL_RECORD_MAP) {
         map_apply(ftl, record->lpn, record->new_ppa, record->old_ppa);
         if (record->generation > ftl->generation) {
             ftl->generation = record->generation;
         }
-    } else if (record->type == COSMOS_FTL_RECORD_RETIRE &&
-               record->block_index < ftl->block_count) {
+    } else if (action == COSMOS_FTL_RECORD_RETIRE) {
         ftl->blocks[record->block_index].bad = 1U;
         ftl->blocks[record->block_index].state = COSMOS_FTL_BLOCK_RETIRED;
-    } else if (record->type == COSMOS_FTL_RECORD_ERASE_BEGIN &&
-               record->block_index < ftl->block_count) {
+    } else if (action == COSMOS_FTL_RECORD_ERASE_BEGIN) {
         ftl->blocks[record->block_index].state = COSMOS_FTL_BLOCK_ERASING;
-    } else if (record->type == COSMOS_FTL_RECORD_ERASE_DONE &&
-               record->block_index < ftl->block_count) {
+    } else if (action == COSMOS_FTL_RECORD_ERASE_DONE) {
         ftl->blocks[record->block_index].state = COSMOS_FTL_BLOCK_FREE;
         ftl->blocks[record->block_index].next_page = 0U;
         if (ftl->blocks[record->block_index].erase_count != 0xFFFFU) {
             ++ftl->blocks[record->block_index].erase_count;
         }
-    } else if (record->type == COSMOS_FTL_RECORD_QUARANTINE &&
-               record->block_index < ftl->block_count) {
+    } else if (action == COSMOS_FTL_RECORD_QUARANTINE) {
         unsigned int die;
         unsigned int lane;
         unsigned int lun;
@@ -520,8 +456,7 @@ static void apply_record(struct cosmos_ftl *ftl,
             ftl->open_block[lane] = COSMOS_FTL_BLOCK_NONE;
         }
         ftl->blocks[record->block_index].state = COSMOS_FTL_BLOCK_EVACUATE;
-    } else if (record->type == COSMOS_FTL_RECORD_DISCARD &&
-               record->lpn < ftl->l2p_count) {
+    } else if (action == COSMOS_FTL_RECORD_DISCARD) {
         unsigned int old_block;
 
         if (block_index_from_ppa(record->old_ppa, &old_block) == COSMOS_OK &&
@@ -534,18 +469,23 @@ static void apply_record(struct cosmos_ftl *ftl,
 }
 
 static int data_ppa_valid(const struct cosmos_ftl *ftl, unsigned int ppa) {
-    unsigned int die;
-    unsigned int lun;
-    unsigned int block;
-    unsigned int page;
-    unsigned int index;
+    unsigned int die = 0U;
+    unsigned int lun = 0U;
+    unsigned int block = 0U;
+    unsigned int page = 0U;
+    unsigned int index = 0U;
 
-    return cosmos_ftl_ppa_decode(
-               ppa, &die, &lun, &block, &page) == COSMOS_OK &&
-        block >= COSMOS_FTL_METADATA_BLOCKS_PER_LUN &&
-        block < COSMOS_FTL_MAIN_BLOCKS_PER_LUN &&
-        block_index_from_ppa(ppa, &index) == COSMOS_OK &&
-        ftl->blocks[index].bad == 0U;
+    unsigned int ppa_valid = cosmos_ftl_ppa_decode(
+        ppa, &die, &lun, &block, &page) == COSMOS_OK;
+    unsigned int index_valid = ppa_valid != 0U &&
+        block_index_from_ppa(ppa, &index) == COSMOS_OK;
+
+    (void)die;
+    (void)lun;
+    (void)page;
+    return (int)cosmos_ftl_policy_data_ppa_valid(
+        ppa_valid, block, index_valid,
+        index_valid != 0U ? ftl->blocks[index].bad : 0U);
 }
 
 static int append_record(struct cosmos_ftl *ftl, unsigned int type,
@@ -555,12 +495,9 @@ static int append_record(struct cosmos_ftl *ftl, unsigned int type,
 
 static int journal_has_space(
     const struct cosmos_ftl *ftl, unsigned long long records) {
-    return records != 0ULL &&
-        records <= ftl->backend.journal_capacity &&
-        ftl->journal_index >= ftl->journal_first_index &&
-        ftl->journal_index <= ~0ULL - records &&
-        ftl->journal_index - ftl->journal_first_index <=
-            ftl->backend.journal_capacity - records;
+    return (int)cosmos_ftl_policy_journal_has_space(
+        ftl->journal_index, ftl->journal_first_index,
+        ftl->backend.journal_capacity, records);
 }
 
 int cosmos_ftl_recover(struct cosmos_ftl *ftl) {
@@ -593,12 +530,10 @@ int cosmos_ftl_recover(struct cosmos_ftl *ftl) {
             checkpoint_error = 1U;
         }
     }
-    first = valid[1] != 0U &&
-        (valid[0] == 0U ||
-         checkpoint[1].generation > checkpoint[0].generation ||
-         (checkpoint[1].generation == checkpoint[0].generation &&
-          checkpoint[1].journal_index >
-              checkpoint[0].journal_index)) ? 1U : 0U;
+    first = cosmos_ftl_policy_recover_checkpoint_first(
+        valid[0], valid[1], checkpoint[0].generation,
+        checkpoint[1].generation, checkpoint[0].journal_index,
+        checkpoint[1].journal_index);
     second = first ^ 1U;
     if (valid[first] != 0U &&
         load_checkpoint(ftl, first, &checkpoint[first]) != COSMOS_OK) {
@@ -809,21 +744,26 @@ int cosmos_ftl_recover(struct cosmos_ftl *ftl) {
 
 int cosmos_ftl_lookup(const struct cosmos_ftl *ftl, unsigned int lpn,
                       unsigned int *ppa) {
-    unsigned int block_index;
+    unsigned int block_index = 0U;
+    unsigned int mapped = COSMOS_FTL_PPA_NONE;
+    unsigned int index_valid = 0U;
+    unsigned int bad = 0U;
+    unsigned int status;
 
-    if (ftl == 0 || ppa == 0 || ftl->mounted == 0U ||
-        lpn >= ftl->l2p_count) {
-        return COSMOS_INVALID;
+    if (ftl != 0 && lpn < ftl->l2p_count) {
+        mapped = ftl->l2p[lpn];
+        index_valid = block_index_from_ppa(mapped, &block_index) == COSMOS_OK;
+        if (index_valid != 0U) {
+            bad = ftl->blocks[block_index].bad;
+        }
     }
-    *ppa = ftl->l2p[lpn];
-    if (*ppa == COSMOS_FTL_PPA_NONE) {
-        return COSMOS_UNAVAILABLE;
+    status = cosmos_ftl_policy_lookup_status(
+        ftl != 0, ppa != 0, ftl != 0 ? ftl->mounted : 0U,
+        lpn, ftl != 0 ? ftl->l2p_count : 0U, mapped, index_valid, bad);
+    if (status == COSMOS_OK || status == COSMOS_UNAVAILABLE) {
+        *ppa = mapped;
     }
-    if (block_index_from_ppa(*ppa, &block_index) != COSMOS_OK ||
-        ftl->blocks[block_index].bad != 0U) {
-        return COSMOS_HW_ERROR;
-    }
-    return COSMOS_OK;
+    return (int)status;
 }
 
 static int append_record(struct cosmos_ftl *ftl, unsigned int type,
@@ -833,10 +773,12 @@ static int append_record(struct cosmos_ftl *ftl, unsigned int type,
     struct cosmos_ftl_journal_record record;
     enum cosmos_ftl_append_result result;
 
-    if (ftl->journal_index == ~0ULL ||
-        ftl->journal_index - ftl->journal_first_index >=
-            ftl->backend.journal_capacity) {
-        return COSMOS_UNAVAILABLE;
+    unsigned int action = cosmos_ftl_policy_append_record_result(
+        ftl->journal_index, ftl->journal_first_index,
+        ftl->backend.journal_capacity, COSMOS_FTL_APPEND_COMMITTED);
+
+    if ((action & 0xFFU) != COSMOS_OK) {
+        return (int)(action & 0xFFU);
     }
     record.magic = COSMOS_FTL_MAGIC;
     record.type = type;
@@ -850,17 +792,18 @@ static int append_record(struct cosmos_ftl *ftl, unsigned int type,
     record.crc = cosmos_ftl_journal_record_crc(&record);
     result = ftl->backend.append_journal(
         ftl->backend.context, ftl->journal_index, &record);
-    if (result == COSMOS_FTL_APPEND_COMMITTED) {
+    action = cosmos_ftl_policy_append_record_result(
+        ftl->journal_index, ftl->journal_first_index,
+        ftl->backend.journal_capacity, result);
+    if ((action & 0x200U) != 0U) {
         ftl->journal_crc = record.crc;
         ++ftl->journal_index;
         return COSMOS_OK;
     }
-    if (result == COSMOS_FTL_APPEND_NOT_COMMITTED) {
-        return COSMOS_RETRY;
+    if ((action & 0x100U) != 0U) {
+        ftl->fail_sticky = 1U;
     }
-    ftl->fail_sticky = 1U;
-    return result == COSMOS_FTL_APPEND_AMBIGUOUS
-        ? COSMOS_COMPLETION_UNCERTAIN : COSMOS_HW_ERROR;
+    return (int)(action & 0xFFU);
 }
 
 static int allocate_page(struct cosmos_ftl *ftl, unsigned int gc,
@@ -881,10 +824,11 @@ static int allocate_page(struct cosmos_ftl *ftl, unsigned int gc,
         if (block != COSMOS_FTL_BLOCK_NONE) {
             unsigned int index = block_index_from_parts(die, lun, block);
             struct cosmos_ftl_block *entry = &ftl->blocks[index];
+            unsigned int action = cosmos_ftl_policy_allocate_page_action(
+                index, excluded_block_index, entry->state,
+                entry->next_page, entry->bad, 1U, 0U, gc, 0U);
 
-            if (index != excluded_block_index &&
-                entry->state == COSMOS_FTL_BLOCK_OPEN &&
-                entry->next_page < COSMOS_FTL_PAGES_PER_BLOCK) {
+            if (action == 18U) {
                 return cosmos_ftl_ppa_encode(
                     die, lun, block, entry->next_page, ppa);
             }
@@ -892,10 +836,12 @@ static int allocate_page(struct cosmos_ftl *ftl, unsigned int gc,
         for (block = COSMOS_FTL_METADATA_BLOCKS_PER_LUN;
              block < COSMOS_FTL_MAIN_BLOCKS_PER_LUN; ++block) {
             unsigned int index = block_index_from_parts(die, lun, block);
+            unsigned int action = cosmos_ftl_policy_allocate_page_action(
+                index, excluded_block_index, ftl->blocks[index].state,
+                ftl->blocks[index].next_page, ftl->blocks[index].bad,
+                0U, free_count, gc, 0U);
 
-            if (index != excluded_block_index &&
-                ftl->blocks[index].state == COSMOS_FTL_BLOCK_FREE &&
-                ftl->blocks[index].bad == 0U) {
+            if (action == 19U || action == 20U) {
                 if (free_block == COSMOS_FTL_BLOCK_NONE) {
                     free_block = block;
                 }
@@ -903,8 +849,9 @@ static int allocate_page(struct cosmos_ftl *ftl, unsigned int gc,
             }
         }
         if (free_block != COSMOS_FTL_BLOCK_NONE &&
-            ((gc != 0U && free_count != 0U) ||
-             free_count > COSMOS_FTL_GC_RESERVE_BLOCKS_PER_LANE)) {
+            cosmos_ftl_policy_allocate_page_action(
+                0U, ~0U, COSMOS_FTL_BLOCK_FREE, 0U, 0U, 0U,
+                free_count, gc, 1U) == 20U) {
             return cosmos_ftl_ppa_encode(
                 die, lun, free_block, 0U, ppa);
         }
@@ -918,21 +865,24 @@ static int commit_page_internal(struct cosmos_ftl *ftl, unsigned int lpn,
     unsigned int allocated;
     unsigned int old_ppa;
     unsigned long long generation;
-    unsigned int allocated_block;
     unsigned int excluded_block = ~0U;
+    unsigned int source_index_valid = 1U;
+    unsigned int admit;
     int status;
 
-    if (ftl == 0 || ppa == 0 || ftl->mounted == 0U ||
-        ftl->fail_sticky != 0U || lpn >= ftl->l2p_count ||
-        ftl->generation == ~0ULL) {
-        return COSMOS_INVALID;
+    if (source_ppa != COSMOS_FTL_PPA_NONE) {
+        source_index_valid = ftl != 0 &&
+            block_index_from_ppa(source_ppa, &excluded_block) == COSMOS_OK;
     }
-    if (!journal_has_space(ftl, 3ULL)) {
-        return COSMOS_UNAVAILABLE;
-    }
-    if (source_ppa != COSMOS_FTL_PPA_NONE &&
-        block_index_from_ppa(source_ppa, &excluded_block) != COSMOS_OK) {
-        return COSMOS_INVALID;
+    admit = cosmos_ftl_policy_commit_page_admit(
+        ftl != 0, ppa != 0, ftl != 0 ? ftl->mounted : 0U,
+        ftl != 0 ? ftl->fail_sticky : 0U, lpn,
+        ftl != 0 ? ftl->l2p_count : 0U,
+        ftl != 0 ? ftl->generation : 0ULL,
+        ftl != 0 ? (unsigned int)journal_has_space(ftl, 3ULL) : 0U,
+        source_ppa, source_index_valid);
+    if (admit != COSMOS_OK) {
+        return (int)admit;
     }
     status = allocate_page(ftl, gc, excluded_block, &allocated);
     if (status != COSMOS_OK) {
@@ -946,7 +896,7 @@ static int commit_page_internal(struct cosmos_ftl *ftl, unsigned int lpn,
         return status;
     }
     allocation_apply(ftl, allocated);
-    status = source_ppa == COSMOS_FTL_PPA_NONE
+    status = cosmos_ftl_policy_commit_page_mode(source_ppa) == 0U
         ? ftl->backend.program_data(
               ftl->backend.context, allocated, lpn, generation)
         : ftl->backend.copy_data(
@@ -958,24 +908,6 @@ static int commit_page_internal(struct cosmos_ftl *ftl, unsigned int lpn,
         if (abandon != COSMOS_OK) {
             ftl->fail_sticky = 1U;
             return abandon;
-        }
-        if (block_index_from_ppa(allocated, &allocated_block) == COSMOS_OK &&
-            ftl->blocks[allocated_block].state !=
-                COSMOS_FTL_BLOCK_EVACUATE) {
-            int quarantine = append_record(
-                ftl, COSMOS_FTL_RECORD_QUARANTINE, ftl->generation,
-                0U, COSMOS_FTL_PPA_NONE, COSMOS_FTL_PPA_NONE,
-                allocated_block);
-
-            if (quarantine != COSMOS_OK) {
-                ftl->fail_sticky = 1U;
-                return quarantine;
-            }
-            apply_record(ftl, &(struct cosmos_ftl_journal_record){
-                COSMOS_FTL_MAGIC, COSMOS_FTL_RECORD_QUARANTINE, 0U,
-                ftl->generation, 0U, COSMOS_FTL_PPA_NONE,
-                COSMOS_FTL_PPA_NONE, allocated_block, 0U, 0U
-            });
         }
         return status;
     }
@@ -1003,6 +935,7 @@ static int commit_page_internal(struct cosmos_ftl *ftl, unsigned int lpn,
 
 int cosmos_ftl_commit_page(struct cosmos_ftl *ftl, unsigned int lpn,
                            unsigned int *ppa) {
+    (void)cosmos_ftl_policy_commit_page_mode(COSMOS_FTL_PPA_NONE);
     return commit_page_internal(
         ftl, lpn, COSMOS_FTL_PPA_NONE, 0U, ppa);
 }
@@ -1012,8 +945,10 @@ int cosmos_ftl_refresh_page(struct cosmos_ftl *ftl, unsigned int lpn,
     unsigned int mapped;
     int status = cosmos_ftl_lookup(ftl, lpn, &mapped);
 
-    if (status != COSMOS_OK || mapped != source_ppa) {
-        return status == COSMOS_OK ? COSMOS_INVALID : status;
+    status = (int)cosmos_ftl_policy_refresh_page_status(
+        (unsigned int)status, mapped, source_ppa);
+    if (status != COSMOS_OK) {
+        return status;
     }
     return commit_page_internal(ftl, lpn, source_ppa, 1U, ppa);
 }
@@ -1022,18 +957,19 @@ int cosmos_ftl_discard_page(struct cosmos_ftl *ftl, unsigned int lpn) {
     struct cosmos_ftl_journal_record record;
     unsigned long long generation;
     unsigned int old_ppa;
+    unsigned int action;
     int status;
 
-    if (ftl == 0 || ftl->mounted == 0U || ftl->fail_sticky != 0U ||
-        lpn >= ftl->l2p_count || ftl->generation == ~0ULL) {
-        return COSMOS_INVALID;
-    }
-    old_ppa = ftl->l2p[lpn];
-    if (old_ppa == COSMOS_FTL_PPA_NONE) {
-        return COSMOS_OK;
-    }
-    if (!journal_has_space(ftl, 1ULL)) {
-        return COSMOS_UNAVAILABLE;
+    old_ppa = ftl != 0 && lpn < ftl->l2p_count
+        ? ftl->l2p[lpn] : COSMOS_FTL_PPA_NONE;
+    action = cosmos_ftl_policy_discard_page_action(
+        ftl != 0, ftl != 0 ? ftl->mounted : 0U,
+        ftl != 0 ? ftl->fail_sticky : 0U, lpn,
+        ftl != 0 ? ftl->l2p_count : 0U,
+        ftl != 0 ? ftl->generation : 0ULL, old_ppa,
+        ftl != 0 ? (unsigned int)journal_has_space(ftl, 1ULL) : 0U);
+    if ((action & 0x100U) == 0U) {
+        return (int)(action & 0xFFU);
     }
     generation = ftl->generation + 1ULL;
     status = append_record(
@@ -1057,23 +993,22 @@ int cosmos_ftl_discard_page(struct cosmos_ftl *ftl, unsigned int lpn) {
 }
 
 int cosmos_ftl_retire_block(struct cosmos_ftl *ftl, unsigned int ppa) {
-    unsigned int index;
+    unsigned int index = 0U;
+    unsigned int index_valid = ftl != 0 &&
+        block_index_from_ppa(ppa, &index) == COSMOS_OK;
+    unsigned int action = cosmos_ftl_policy_retire_block_action(
+        ftl != 0, ftl != 0 ? ftl->mounted : 0U, index_valid,
+        index_valid != 0U ? ftl->blocks[index].state : 0U,
+        index_valid != 0U ? ftl->blocks[index].valid_pages : 0U,
+        ftl != 0 ? (unsigned int)journal_has_space(ftl, 1ULL) : 0U);
     int status;
 
-    if (ftl == 0 || ftl->mounted == 0U ||
-        block_index_from_ppa(ppa, &index) != COSMOS_OK) {
-        return COSMOS_INVALID;
+    if (action <= COSMOS_COMPLETION_UNCERTAIN) {
+        return (int)action;
     }
-    if (ftl->blocks[index].state == COSMOS_FTL_BLOCK_RESERVED ||
-        ftl->blocks[index].state == COSMOS_FTL_BLOCK_RETIRED ||
-        ftl->blocks[index].state == COSMOS_FTL_BLOCK_ERASING) {
-        return COSMOS_INVALID;
-    }
-    if (!journal_has_space(ftl, 1ULL)) {
-        return COSMOS_UNAVAILABLE;
-    }
-    if (ftl->blocks[index].valid_pages != 0U) {
-        if (ftl->blocks[index].state != COSMOS_FTL_BLOCK_EVACUATE) {
+    if (action == 21U) {
+        if (ftl->blocks[index].valid_pages != 0U ||
+            ftl->blocks[index].state != COSMOS_FTL_BLOCK_EVACUATE) {
             status = append_record(
                 ftl, COSMOS_FTL_RECORD_QUARANTINE, ftl->generation,
                 0U, COSMOS_FTL_PPA_NONE, COSMOS_FTL_PPA_NONE, index);
@@ -1087,22 +1022,9 @@ int cosmos_ftl_retire_block(struct cosmos_ftl *ftl, unsigned int ppa) {
                 COSMOS_FTL_PPA_NONE, index, 0U, 0U
             });
         }
-        return COSMOS_RETRY;
-    }
-    if (ftl->blocks[index].state == COSMOS_FTL_BLOCK_OPEN ||
-        ftl->blocks[index].state == COSMOS_FTL_BLOCK_CLOSED) {
-        status = append_record(
-            ftl, COSMOS_FTL_RECORD_QUARANTINE, ftl->generation,
-            0U, COSMOS_FTL_PPA_NONE, COSMOS_FTL_PPA_NONE, index);
-        if (status != COSMOS_OK) {
-            ftl->fail_sticky = 1U;
-            return status;
+        if (ftl->blocks[index].valid_pages != 0U) {
+            return COSMOS_RETRY;
         }
-        apply_record(ftl, &(struct cosmos_ftl_journal_record){
-            COSMOS_FTL_MAGIC, COSMOS_FTL_RECORD_QUARANTINE, 0U,
-            ftl->generation, 0U, COSMOS_FTL_PPA_NONE,
-            COSMOS_FTL_PPA_NONE, index, 0U, 0U
-        });
     }
     status = append_record(
         ftl, COSMOS_FTL_RECORD_RETIRE, ftl->generation,
@@ -1123,16 +1045,16 @@ static int gc_victim(const struct cosmos_ftl *ftl, unsigned int *victim) {
 
     for (index = 0U; index < ftl->block_count; ++index) {
         const struct cosmos_ftl_block *entry = &ftl->blocks[index];
+        unsigned int choice = cosmos_ftl_policy_gc_victim_better(
+            entry->state, entry->valid_pages, entry->erase_count,
+            best != ~0U, best_valid,
+            best != ~0U ? ftl->blocks[best].erase_count : 0U);
 
-        if (entry->state == COSMOS_FTL_BLOCK_EVACUATE) {
+        if (choice == 2U) {
             *victim = index;
             return COSMOS_OK;
         }
-        if (entry->state == COSMOS_FTL_BLOCK_CLOSED &&
-            entry->valid_pages < COSMOS_FTL_PAGES_PER_BLOCK &&
-            (best == ~0U || entry->valid_pages < best_valid ||
-             (entry->valid_pages == best_valid &&
-              entry->erase_count < ftl->blocks[best].erase_count))) {
+        if (choice == 1U) {
             best = index;
             best_valid = entry->valid_pages;
         }
@@ -1145,14 +1067,17 @@ static int gc_victim(const struct cosmos_ftl *ftl, unsigned int *victim) {
 }
 
 static int gc_finish_block(struct cosmos_ftl *ftl, unsigned int victim) {
+    unsigned int action = cosmos_ftl_policy_gc_finish_action(
+        ftl->blocks[victim].state,
+        (unsigned int)journal_has_space(
+            ftl, ftl->blocks[victim].state ==
+                COSMOS_FTL_BLOCK_EVACUATE ? 1ULL : 3ULL));
     int status;
 
-    if (!journal_has_space(
-            ftl, ftl->blocks[victim].state ==
-                COSMOS_FTL_BLOCK_EVACUATE ? 1ULL : 3ULL)) {
-        return COSMOS_UNAVAILABLE;
+    if (action == COSMOS_UNAVAILABLE) {
+        return (int)action;
     }
-    if (ftl->blocks[victim].state == COSMOS_FTL_BLOCK_EVACUATE) {
+    if (action == 22U) {
         status = append_record(
             ftl, COSMOS_FTL_RECORD_RETIRE, ftl->generation,
             0U, COSMOS_FTL_PPA_NONE, COSMOS_FTL_PPA_NONE, victim);
@@ -1210,10 +1135,12 @@ static int gc_finish_block(struct cosmos_ftl *ftl, unsigned int victim) {
 
 int cosmos_ftl_gc_step(struct cosmos_ftl *ftl, unsigned int max_moves) {
     unsigned int moves = 0U;
+    unsigned int admit = cosmos_ftl_policy_gc_step_status(
+        ftl != 0, ftl != 0 ? ftl->mounted : 0U,
+        ftl != 0 ? ftl->fail_sticky : 0U, max_moves, 0U, COSMOS_OK);
 
-    if (ftl == 0 || ftl->mounted == 0U || ftl->fail_sticky != 0U ||
-        max_moves == 0U) {
-        return COSMOS_INVALID;
+    if (admit != COSMOS_OK) {
+        return (int)admit;
     }
     while (moves < max_moves) {
         unsigned int die;
@@ -1224,7 +1151,9 @@ int cosmos_ftl_gc_step(struct cosmos_ftl *ftl, unsigned int max_moves) {
         int status = gc_victim(ftl, &victim);
 
         if (status != COSMOS_OK) {
-            return moves != 0U ? COSMOS_OK : status;
+            return (int)cosmos_ftl_policy_gc_step_status(
+                1U, ftl->mounted, ftl->fail_sticky,
+                max_moves, moves, (unsigned int)status);
         }
         block_parts_from_index(victim, &die, &lun, &block);
         for (page = 0U; page < ftl->blocks[victim].next_page; ++page) {
@@ -1279,10 +1208,14 @@ int cosmos_ftl_gc_step(struct cosmos_ftl *ftl, unsigned int max_moves) {
 int cosmos_ftl_flush(struct cosmos_ftl *ftl) {
     struct cosmos_ftl_checkpoint checkpoint;
     unsigned int slot;
+    unsigned int action = cosmos_ftl_policy_flush_action(
+        ftl != 0, ftl != 0 ? ftl->mounted : 0U,
+        ftl != 0 ? ftl->fail_sticky : 0U,
+        ftl != 0 ? ftl->checkpoint_valid_mask : 0U);
     int status;
 
-    if (ftl == 0 || ftl->mounted == 0U || ftl->fail_sticky != 0U) {
-        return COSMOS_INVALID;
+    if ((action & 0xFFU) != COSMOS_OK) {
+        return (int)(action & 0xFFU);
     }
     checkpoint.magic = COSMOS_FTL_MAGIC;
     checkpoint.version = COSMOS_FTL_VERSION;
@@ -1303,7 +1236,10 @@ int cosmos_ftl_flush(struct cosmos_ftl *ftl) {
         ftl->active_checkpoint = slot;
         ftl->checkpoint_journal_index[slot] = ftl->journal_index;
         ftl->checkpoint_valid_mask |= 1U << slot;
-        if (ftl->checkpoint_valid_mask == 3U) {
+        action = cosmos_ftl_policy_flush_action(
+            1U, ftl->mounted, ftl->fail_sticky,
+            ftl->checkpoint_valid_mask);
+        if ((action & 0x200U) != 0U) {
             unsigned long long first =
                 ftl->checkpoint_journal_index[0] <
                     ftl->checkpoint_journal_index[1]

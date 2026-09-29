@@ -1,0 +1,488 @@
+# Transport-neutral TLS 1.3 application-record session.
+#
+# Framing and bounded accumulation belong to the shared V1 record stream.
+# This adapter owns only established traffic keys, sequence commitment, and
+# authenticated plaintext frames returned to a transport adapter. It does not
+# own sockets, listeners, credentials, application protocols, or service state.
+
+use std.common.net.tls_application_record_stream_v1.{
+    TlsApplicationRecordStreamV1,
+    TLS_APPLICATION_DATA_TYPE_V1,
+    TLS_MAX_FRAGMENT_LENGTH_V1,
+    TLS_MAX_SEQUENCE_V1,
+    tls_application_record_sequence_can_advance_v1,
+    tls_application_record_stream_new_v1
+}
+use os.tls13.handshake13.{
+    CIPHER_AES_128_GCM_SHA256,
+    CIPHER_CHACHA20_POLY1305_SHA256
+}
+use os.tls13.record13.{
+    RecordKey, RecordResult,
+    record13_decrypt_for_suite, record13_encrypt_for_suite
+}
+use os.tls13.server_types.{Tls13ServerContext}
+use std.common.crypto.secure_memory.{secure_zero_u8_slots}
+
+pub val TLS13_APPLICATION_MAX_WRITE_RECORDS_V1: i64 = 2
+pub val TLS13_APPLICATION_MAX_WRITE_PLAINTEXT_V1: i64 = (
+    TLS_MAX_FRAGMENT_LENGTH_V1 * TLS13_APPLICATION_MAX_WRITE_RECORDS_V1)
+
+fn _tls13_copy_secret_bytes_v1(source: [u8]) -> [u8]:
+    var copied: [u8] = []
+    for byte in source:
+        copied.push(byte)
+    copied
+
+fn _tls13_wipe_frames_v1(frames: [[u8]]) -> i64:
+    var wiped: i64 = 0
+    for frame in frames:
+        val report = secure_zero_u8_slots(frame)
+        wiped = wiped + report.overwritten_slots.to_i64()
+    wiped
+
+fn _tls13_nonzero_frame_bytes_v1(frames: [[u8]]) -> i64:
+    var retained: i64 = 0
+    for frame in frames:
+        for byte in frame:
+            if byte != 0u8: retained = retained + 1
+    retained
+
+pub enum Tls13ApplicationSessionStatusV1:
+    Established
+    PeerCloseReceived
+    CloseNotifyPendingPeerOpen
+    CloseNotifyPendingPeerClosed
+    LocalCloseSent
+    Failed
+    Closed
+
+pub enum Tls13ApplicationIngressStatusV1:
+    NeedMore
+    Authenticated
+    Malformed
+    Overflow
+    AuthenticationFailed
+    SequenceExhausted
+    UnexpectedContentType
+    CloseNotify
+    SessionClosed
+
+pub class Tls13ApplicationRecordSessionV1:
+    """Established TLS traffic owner; retained bytes are ciphertext only."""
+    stream: TlsApplicationRecordStreamV1
+    cipher_suite: u16
+    client_key: RecordKey
+    server_key: RecordKey
+    server_sequence: i64
+    status: Tls13ApplicationSessionStatusV1
+    zeroization_started: bool
+    last_rejected_plaintext_nonzero_byte_count: i64
+    last_secret_zeroization_attempted_slots: i64
+    last_secret_zeroization_overwritten_slots: i64
+    last_secret_zeroization_residual_slots: i64
+    last_secret_zeroization_verified: bool
+
+    pub static fn from_context(ctx: Tls13ServerContext) -> Result<Tls13ApplicationRecordSessionV1, text>:
+        """Copy established traffic secrets out of the handshake context.
+
+        The caller retains and remains responsible for its context buffers;
+        this owner never aliases them. On exit it securely overwrites every
+        owned key/IV and publishes the aggregate verification receipt; a false
+        receipt leaves the owner terminal and must be treated as quarantine.
+        """
+        val key_length = if ctx.cipher_suite == CIPHER_AES_128_GCM_SHA256:
+            16
+        elif ctx.cipher_suite == CIPHER_CHACHA20_POLY1305_SHA256:
+            32
+        else:
+            return Err("tls-application-cipher-suite-unsupported")
+        if (ctx.client_app_key.len().to_i64() != key_length or
+            ctx.server_app_key.len().to_i64() != key_length or
+            ctx.client_app_iv.len().to_i64() != 12 or
+            ctx.server_app_iv.len().to_i64() != 12):
+            return Err("tls-application-traffic-key-shape-invalid")
+        if (ctx.client_seq > TLS_MAX_SEQUENCE_V1.to_u64() or
+            ctx.server_seq > TLS_MAX_SEQUENCE_V1.to_u64()):
+            return Err("tls-application-sequence-invalid")
+        Ok(Tls13ApplicationRecordSessionV1(
+            stream: tls_application_record_stream_new_v1(ctx.client_seq.to_i64()),
+            cipher_suite: ctx.cipher_suite,
+            client_key: RecordKey(
+                key: _tls13_copy_secret_bytes_v1(ctx.client_app_key),
+                iv: _tls13_copy_secret_bytes_v1(ctx.client_app_iv)),
+            server_key: RecordKey(
+                key: _tls13_copy_secret_bytes_v1(ctx.server_app_key),
+                iv: _tls13_copy_secret_bytes_v1(ctx.server_app_iv)),
+            server_sequence: ctx.server_seq.to_i64(),
+            status: Tls13ApplicationSessionStatusV1.Established,
+            zeroization_started: false,
+            last_rejected_plaintext_nonzero_byte_count: 0,
+            last_secret_zeroization_attempted_slots: 0,
+            last_secret_zeroization_overwritten_slots: 0,
+            last_secret_zeroization_residual_slots: 0,
+            last_secret_zeroization_verified: false
+        ))
+
+    me record_zeroization(attempted: i64, overwritten: i64, residual: i64, verified: bool):
+        self.last_secret_zeroization_attempted_slots = (
+            self.last_secret_zeroization_attempted_slots + attempted)
+        self.last_secret_zeroization_overwritten_slots = (
+            self.last_secret_zeroization_overwritten_slots + overwritten)
+        self.last_secret_zeroization_residual_slots = (
+            self.last_secret_zeroization_residual_slots + residual)
+        if self.zeroization_started:
+            self.last_secret_zeroization_verified = (
+                self.last_secret_zeroization_verified and verified)
+        else:
+            self.last_secret_zeroization_verified = verified
+            self.zeroization_started = true
+
+    me wipe_read_secret():
+        val _client_key_wipe = secure_zero_u8_slots(self.client_key.key)
+        val _client_iv_wipe = secure_zero_u8_slots(self.client_key.iv)
+        self.record_zeroization(
+            (_client_key_wipe.slot_count + _client_iv_wipe.slot_count).to_i64(),
+            (_client_key_wipe.overwritten_slots + _client_iv_wipe.overwritten_slots).to_i64(),
+            (_client_key_wipe.residual_nonzero_slots + _client_iv_wipe.residual_nonzero_slots).to_i64(),
+            _client_key_wipe.verified() and _client_iv_wipe.verified())
+        # Do not replace the fixed-capacity record stream here: constructing a
+        # fresh stream allocates and zero-fills its ~32.8 KiB ring on every
+        # directional close. A valid close is committed only with no framing
+        # remainder. Abortive failures may retain ciphertext in the terminal
+        # owner, but no traffic key remains with which to decrypt it.
+        self.client_key = RecordKey(key: [], iv: [])
+
+    me wipe_write_secret():
+        val _server_key_wipe = secure_zero_u8_slots(self.server_key.key)
+        val _server_iv_wipe = secure_zero_u8_slots(self.server_key.iv)
+        self.record_zeroization(
+            (_server_key_wipe.slot_count + _server_iv_wipe.slot_count).to_i64(),
+            (_server_key_wipe.overwritten_slots + _server_iv_wipe.overwritten_slots).to_i64(),
+            (_server_key_wipe.residual_nonzero_slots + _server_iv_wipe.residual_nonzero_slots).to_i64(),
+            _server_key_wipe.verified() and _server_iv_wipe.verified())
+        self.server_key = RecordKey(key: [], iv: [])
+
+    me fail():
+        if (self.status == Tls13ApplicationSessionStatusV1.Failed or
+            self.status == Tls13ApplicationSessionStatusV1.Closed):
+            return
+        if self.client_key.key.len() > 0 or self.client_key.iv.len() > 0:
+            self.wipe_read_secret()
+        if self.server_key.key.len() > 0 or self.server_key.iv.len() > 0:
+            self.wipe_write_secret()
+        self.cipher_suite = 0u16
+        self.status = Tls13ApplicationSessionStatusV1.Failed
+
+    pub me seal_application(plaintext: [u8]) -> [u8]:
+        """Encrypt one response and commit its sequence only on success."""
+        if ((self.status != Tls13ApplicationSessionStatusV1.Established and
+             self.status != Tls13ApplicationSessionStatusV1.PeerCloseReceived) or
+            plaintext.len() == 0 or
+            plaintext.len().to_i64() > TLS_MAX_FRAGMENT_LENGTH_V1):
+            return []
+        if not tls_application_record_sequence_can_advance_v1(self.server_sequence):
+            self.fail()
+            return []
+        val record = record13_encrypt_for_suite(
+            self.cipher_suite,
+            self.server_key,
+            self.server_sequence.to_u64(),
+            TLS_APPLICATION_DATA_TYPE_V1.to_u8(),
+            plaintext
+        )
+        if record.len() == 0:
+            self.fail()
+            return []
+        self.server_sequence = self.server_sequence + 1
+        record
+
+    pub me fn seal_application_records(plaintext: [u8]) -> [[u8]]:
+        """Fragment application bytes into ordered TLS records."""
+        if ((self.status != Tls13ApplicationSessionStatusV1.Established and
+             self.status != Tls13ApplicationSessionStatusV1.PeerCloseReceived) or
+            plaintext.len() == 0 or
+            plaintext.len().to_i64() > TLS13_APPLICATION_MAX_WRITE_PLAINTEXT_V1):
+            return []
+        var records: [[u8]] = []
+        var offset: u64 = 0
+        while offset < plaintext.len():
+            val remaining = plaintext.len() - offset
+            val fragment_length = if remaining.to_i64() > TLS_MAX_FRAGMENT_LENGTH_V1:
+                TLS_MAX_FRAGMENT_LENGTH_V1.to_u64()
+            else:
+                remaining
+            val record = self.seal_application(
+                plaintext.slice(offset, offset + fragment_length))
+            if record.len() == 0:
+                val _ = _tls13_wipe_frames_v1(records)
+                return []
+            records.push(record)
+            offset = offset + fragment_length
+        records
+
+    pub me fn seal_close_notify() -> [u8]:
+        if (self.status != Tls13ApplicationSessionStatusV1.Established and
+            self.status != Tls13ApplicationSessionStatusV1.PeerCloseReceived):
+            return []
+        if not tls_application_record_sequence_can_advance_v1(self.server_sequence):
+            self.fail()
+            return []
+        val record = record13_encrypt_for_suite(
+            self.cipher_suite, self.server_key,
+            self.server_sequence.to_u64(), 21u8, [1u8, 0u8])
+        if record.len() == 0:
+            self.fail()
+            return []
+        self.server_sequence = self.server_sequence + 1
+        if self.status == Tls13ApplicationSessionStatusV1.PeerCloseReceived:
+            self.status = Tls13ApplicationSessionStatusV1.CloseNotifyPendingPeerClosed
+        else:
+            self.status = Tls13ApplicationSessionStatusV1.CloseNotifyPendingPeerOpen
+        record
+
+    pub me fn commit_close_notify_sent() -> bool:
+        """Commit exactly one previously sealed close after transport send."""
+        if (self.status != Tls13ApplicationSessionStatusV1.CloseNotifyPendingPeerOpen and
+            self.status != Tls13ApplicationSessionStatusV1.CloseNotifyPendingPeerClosed):
+            return false
+        self.wipe_write_secret()
+        if self.status == Tls13ApplicationSessionStatusV1.CloseNotifyPendingPeerClosed:
+            self.cipher_suite = 0u16
+            self.status = Tls13ApplicationSessionStatusV1.Closed
+        else:
+            self.status = Tls13ApplicationSessionStatusV1.LocalCloseSent
+        true
+
+    pub me fn abort_close_notify_send() -> bool:
+        """Fail closed when transport cannot commit the sealed close record."""
+        if (self.status != Tls13ApplicationSessionStatusV1.CloseNotifyPendingPeerOpen and
+            self.status != Tls13ApplicationSessionStatusV1.CloseNotifyPendingPeerClosed):
+            return false
+        self.fail()
+        true
+
+    pub me close():
+        if (self.status == Tls13ApplicationSessionStatusV1.Failed or
+            self.status == Tls13ApplicationSessionStatusV1.Closed):
+            return
+        self.fail()
+        self.status = Tls13ApplicationSessionStatusV1.Closed
+
+pub struct Tls13ApplicationIngressV1:
+    """Authenticated plaintext frames plus ciphertext framing remainder."""
+    plaintext_frames: [[u8]]
+    remainder_length: i64
+    status: Tls13ApplicationIngressStatusV1
+    authenticated_record_count: i64
+
+impl Tls13ApplicationIngressV1:
+    pub me fn zeroize_plaintext_frame(frame_index: u64) -> i64:
+        if frame_index >= self.plaintext_frames.len():
+            return 0
+        var wiped: i64 = 0
+        var byte_index: u64 = 0
+        while byte_index < self.plaintext_frames[frame_index].len():
+            self.plaintext_frames[frame_index][byte_index] = 0u8
+            wiped = wiped + 1
+            byte_index = byte_index + 1u64
+        wiped
+
+    pub me fn zeroize_plaintext_frames() -> i64:
+        var wiped: i64 = 0
+        var frame_index: u64 = 0
+        while frame_index < self.plaintext_frames.len():
+            wiped = wiped + self.zeroize_plaintext_frame(frame_index)
+            frame_index = frame_index + 1u64
+        wiped
+
+    pub fn retained_plaintext_nonzero_byte_count() -> i64:
+        var retained: i64 = 0
+        for frame in self.plaintext_frames:
+            for byte in frame:
+                if byte != 0u8:
+                    retained = retained + 1
+        retained
+
+fn _tls13_application_ingress_v1(
+    status: Tls13ApplicationIngressStatusV1,
+    remainder_length: i64,
+    frames: [[u8]],
+    count: i64
+) -> Tls13ApplicationIngressV1:
+    Tls13ApplicationIngressV1(
+        plaintext_frames: frames,
+        remainder_length: remainder_length,
+        status: status,
+        authenticated_record_count: count
+    )
+
+fn _tls13_application_empty_ingress_v1(
+    status: Tls13ApplicationIngressStatusV1
+) -> Tls13ApplicationIngressV1:
+    _tls13_application_ingress_v1(status, 0, [], 0)
+
+impl Tls13ApplicationRecordSessionV1:
+  pub me fn ingest(bytes: [u8]) -> Tls13ApplicationIngressV1:
+    """Frame and authenticate inbound records, committing each sequence only
+    after its AEAD verification succeeds. No plaintext is retained in the
+    returned session.
+    """
+    if (self.status != Tls13ApplicationSessionStatusV1.Established and
+        self.status != Tls13ApplicationSessionStatusV1.CloseNotifyPendingPeerOpen and
+        self.status != Tls13ApplicationSessionStatusV1.LocalCloseSent):
+        return _tls13_application_empty_ingress_v1(
+            Tls13ApplicationIngressStatusV1.SessionClosed)
+
+    val proposed = self.stream.ingest(bytes)
+    if proposed.is_malformed():
+        self.fail()
+        return _tls13_application_empty_ingress_v1(Tls13ApplicationIngressStatusV1.Malformed)
+    if proposed.is_overflow():
+        self.fail()
+        return _tls13_application_empty_ingress_v1(Tls13ApplicationIngressStatusV1.Overflow)
+    if proposed.is_sequence_exhausted():
+        self.fail()
+        return _tls13_application_empty_ingress_v1(
+            Tls13ApplicationIngressStatusV1.SequenceExhausted)
+    if proposed.is_proposal_pending():
+        self.fail()
+        return _tls13_application_empty_ingress_v1(Tls13ApplicationIngressStatusV1.Malformed)
+
+    var frames: [[u8]] = []
+    var authenticated: i64 = 0
+    var index: u64 = 0
+    val proposed_records = proposed.framed_records()
+    while index < proposed_records.len():
+        val record_sequence = self.stream.sequence() + index.to_i64()
+        if not tls_application_record_sequence_can_advance_v1(
+            record_sequence):
+            var wipe_frame_index: u64 = 0
+            while wipe_frame_index < frames.len():
+                var prior = frames[wipe_frame_index]
+                var wipe_byte_index: u64 = 0
+                while wipe_byte_index < prior.len():
+                    prior[wipe_byte_index] = 0u8
+                    wipe_byte_index = wipe_byte_index + 1u64
+                frames[wipe_frame_index] = prior
+                wipe_frame_index = wipe_frame_index + 1u64
+            val _ = self.stream.reject_authentication(
+                proposed.proposal_token())
+            self.fail()
+            return _tls13_application_empty_ingress_v1(
+                Tls13ApplicationIngressStatusV1.SequenceExhausted)
+        val decrypted = record13_decrypt_for_suite(
+            self.cipher_suite,
+            self.client_key,
+            record_sequence.to_u64(),
+            proposed_records[index]
+        )
+        match decrypted:
+            case RecordResult.Err(_):
+                var wipe_frame_index: u64 = 0
+                while wipe_frame_index < frames.len():
+                    var prior = frames[wipe_frame_index]
+                    var wipe_byte_index: u64 = 0
+                    while wipe_byte_index < prior.len():
+                        prior[wipe_byte_index] = 0u8
+                        wipe_byte_index = wipe_byte_index + 1u64
+                    frames[wipe_frame_index] = prior
+                    wipe_frame_index = wipe_frame_index + 1u64
+                self.last_rejected_plaintext_nonzero_byte_count = _tls13_nonzero_frame_bytes_v1(frames)
+                val _ = self.stream.reject_authentication(
+                    proposed.proposal_token())
+                self.fail()
+                return _tls13_application_empty_ingress_v1(
+                    Tls13ApplicationIngressStatusV1.AuthenticationFailed)
+            case RecordResult.Ok(content_type, plaintext_value):
+                var plaintext = plaintext_value
+                if (content_type == 21u8 and plaintext.len() == 2u64 and
+                    (plaintext[0] == 1u8 or plaintext[0] == 2u8) and
+                    plaintext[1] == 0u8):
+                    var close_wipe_index: u64 = 0
+                    while close_wipe_index < plaintext.len():
+                        plaintext[close_wipe_index] = 0u8
+                        close_wipe_index = close_wipe_index + 1u64
+                    val close_count = index.to_i64() + 1
+                    if (proposed_records.len() != index + 1u64 or
+                        proposed.remaining_byte_count() != 0):
+                        val _ = _tls13_wipe_frames_v1(frames)
+                        self.last_rejected_plaintext_nonzero_byte_count = _tls13_nonzero_frame_bytes_v1(frames)
+                        val _ = self.stream.reject_authentication(
+                            proposed.proposal_token())
+                        self.fail()
+                        return _tls13_application_empty_ingress_v1(
+                            Tls13ApplicationIngressStatusV1.Malformed)
+                    if not self.stream.commit_authenticated(
+                        proposed.proposal_token(), close_count):
+                        val _ = _tls13_wipe_frames_v1(frames)
+                        self.fail()
+                        return _tls13_application_empty_ingress_v1(
+                            Tls13ApplicationIngressStatusV1.Malformed)
+                    self.wipe_read_secret()
+                    if self.status == Tls13ApplicationSessionStatusV1.LocalCloseSent:
+                        self.cipher_suite = 0u16
+                        self.status = Tls13ApplicationSessionStatusV1.Closed
+                    elif self.status == Tls13ApplicationSessionStatusV1.CloseNotifyPendingPeerOpen:
+                        self.status = Tls13ApplicationSessionStatusV1.CloseNotifyPendingPeerClosed
+                    else:
+                        self.status = Tls13ApplicationSessionStatusV1.PeerCloseReceived
+                    return _tls13_application_ingress_v1(
+                        Tls13ApplicationIngressStatusV1.CloseNotify,
+                        proposed.remaining_byte_count(), frames, close_count)
+                if content_type != TLS_APPLICATION_DATA_TYPE_V1:
+                    var wipe_plaintext_index: u64 = 0
+                    while wipe_plaintext_index < plaintext.len():
+                        plaintext[wipe_plaintext_index] = 0u8
+                        wipe_plaintext_index = wipe_plaintext_index + 1u64
+                    var wipe_frame_index: u64 = 0
+                    while wipe_frame_index < frames.len():
+                        var prior = frames[wipe_frame_index]
+                        var wipe_byte_index: u64 = 0
+                        while wipe_byte_index < prior.len():
+                            prior[wipe_byte_index] = 0u8
+                            wipe_byte_index = wipe_byte_index + 1u64
+                        frames[wipe_frame_index] = prior
+                        wipe_frame_index = wipe_frame_index + 1u64
+                    self.last_rejected_plaintext_nonzero_byte_count = _tls13_nonzero_frame_bytes_v1(frames)
+                    val _ = self.stream.reject_authentication(
+                        proposed.proposal_token())
+                    self.fail()
+                    return _tls13_application_empty_ingress_v1(
+                        Tls13ApplicationIngressStatusV1.UnexpectedContentType)
+                frames.push(plaintext)
+                var wipe_plaintext_index: u64 = 0
+                while wipe_plaintext_index < plaintext.len():
+                    plaintext[wipe_plaintext_index] = 0u8
+                    wipe_plaintext_index = wipe_plaintext_index + 1u64
+                authenticated = authenticated + 1
+        index = index + 1u64
+
+    if proposed_records.len() > 0:
+        if not proposed.requires_commit() or
+            not self.stream.commit_authenticated(
+                proposed.proposal_token(), proposed_records.len().to_i64()):
+            var wipe_frame_index: u64 = 0
+            while wipe_frame_index < frames.len():
+                var prior = frames[wipe_frame_index]
+                var wipe_byte_index: u64 = 0
+                while wipe_byte_index < prior.len():
+                    prior[wipe_byte_index] = 0u8
+                    wipe_byte_index = wipe_byte_index + 1u64
+                frames[wipe_frame_index] = prior
+                wipe_frame_index = wipe_frame_index + 1u64
+            self.fail()
+            return _tls13_application_empty_ingress_v1(
+                Tls13ApplicationIngressStatusV1.Malformed)
+    val status = if authenticated > 0:
+        Tls13ApplicationIngressStatusV1.Authenticated
+    else:
+        Tls13ApplicationIngressStatusV1.NeedMore
+    _tls13_application_ingress_v1(
+        status, proposed.remaining_byte_count(), frames, authenticated)
+
+export Tls13ApplicationRecordSessionV1
+export Tls13ApplicationSessionStatusV1, Tls13ApplicationIngressStatusV1
+export Tls13ApplicationIngressV1
+export TLS13_APPLICATION_MAX_WRITE_RECORDS_V1
+export TLS13_APPLICATION_MAX_WRITE_PLAINTEXT_V1

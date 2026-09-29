@@ -1,0 +1,172 @@
+# Focused regression for fail-closed parameter-header reservation.
+
+use std.spec.*
+use compiler.hir.hir_types.{HirModule, HirType, HirTypeKind, SymbolId,
+    SymbolKind, SymbolTable, ScopeKind}
+use compiler.hir.hir_definitions.{HirFunction, HirParam, HirBlock, HirStmt,
+    HirStmtKind, HirExpr, HirExprKind, HirCallArg}
+use compiler.common.attributes.{FunctionAttr}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.portable_body_profile_types.{PortableBodyLimitsV1,
+    PortableBodyErrorV1}
+use compiler.hir.portable_body_budget.{PortableBodyLedgerV1}
+use compiler.hir.portable_body_semantics.{portable_embedded_body_profile_digest_v1,
+    portable_hir_semantic_facts_from_typed_v1}
+
+fn span() -> Span: Span.empty()
+fn i64_type() -> HirType:
+    HirType(kind: HirTypeKind.Int(64, true), span: span())
+
+fn bool_type() -> HirType:
+    HirType(kind: HirTypeKind.Bool, span: span())
+
+fn function(id: SymbolId, name: text, params: [HirParam], body: HirBlock,
+            public_: bool) -> HirFunction:
+    HirFunction(symbol: id, name: name, type_params: [], params: params,
+        return_type: i64_type(), body: body, effects: [],
+        visibility: if public_: Visibility.Public else: Visibility.Private,
+        is_async: false, is_static: false, is_public: public_, is_method: false,
+        is_mutable: false, is_const: false, is_extern: false,
+        func_attr: FunctionAttr.default(), has_export_attr: false,
+        export_attr: nil, has_driver_manifest_attr: false,
+        driver_manifest_attr: nil, has_suspension: false,
+        has_vhdl_metadata: false, vhdl_metadata: nil, has_doc_comment: false,
+        doc_comment: "", span: span(), is_gpu_kernel: false, gpu_target: "",
+        gpu_backend_order: "", verification_contract: nil,
+        is_generic_template: false)
+
+fn oversized_mismatched_signature_module() -> HirModule:
+    var symbols = SymbolTable.new()
+    val signature = HirType(kind: HirTypeKind.Function([bool_type()],
+        i64_type(), []), span: span())
+    val identity_id = symbols.define("identity", SymbolKind.Function,
+        Some(signature), span(), Visibility.Private, false, Some("tiny"))
+    _ = symbols.push_scope(ScopeKind.Function)
+    val parameter_id = symbols.define("value", SymbolKind.Parameter,
+        Some(i64_type()), span(), Visibility.Private, false, Some("tiny"))
+    val local_id = symbols.define("saved", SymbolKind.Variable,
+        Some(i64_type()), span(), Visibility.Private, false, Some("tiny"))
+    symbols.pop_scope()
+    val parameter = HirParam(symbol: parameter_id, name: "value",
+        type_: i64_type(), has_default: false, default: nil, span: span(),
+        is_mutable: false)
+    val parameter_value = HirExpr(kind: HirExprKind.Var(parameter_id), has_type_: true,
+        type_: i64_type(), span: span())
+    val let_stmt = HirStmt(kind: HirStmtKind.Let(local_id, i64_type(),
+        parameter_value), span: span())
+    val identity_value = HirExpr(kind: HirExprKind.Var(local_id), has_type_: true,
+        type_: i64_type(), span: span())
+    val identity_body = HirBlock(stmts: [let_stmt], has: true,
+        value: identity_value, span: span())
+    val identity = function(identity_id, "identity", [parameter], identity_body, false)
+
+    val entry_signature = HirType(kind: HirTypeKind.Function([], i64_type(), []),
+        span: span())
+    val entry_id = symbols.define("entry", SymbolKind.Function,
+        Some(entry_signature), span(), Visibility.Public, false, Some("tiny"))
+    # SymbolTable's root index is an explicit persistent mirror. Populate it in
+    # this hand-built fixture so shape validation reaches the budget contract.
+    symbols.root_scope_symbols["identity"] = identity_id.id
+    symbols.root_scope_symbols["entry"] = entry_id.id
+    val callee = HirExpr(kind: HirExprKind.NamedVar(identity_id, "identity"),
+        has_type_: true, type_: signature, span: span())
+    val argument = HirExpr(kind: HirExprKind.IntLit(7, nil), has_type_: true,
+        type_: i64_type(), span: span())
+    val call = HirExpr(kind: HirExprKind.Call(callee,
+        [HirCallArg(has_name: false, name: "", value: argument, span: span())], []),
+        has_type_: true, type_: i64_type(), span: span())
+    val entry_body = HirBlock(stmts: [], has: true, value: call, span: span())
+    val entry = function(entry_id, "entry", [], entry_body, true)
+    var functions: Dict<SymbolId, HirFunction> = {}
+    functions[identity_id] = identity
+    functions[entry_id] = entry
+    HirModule(name: "tiny", path: "tiny.spl", imports: [], exports: ["entry"],
+        domain_blocks: [], symbols: symbols, functions: functions,
+        gpu_function_targets: {}, gpu_function_backend_orders: {}, classes: {},
+        structs: {}, enums: {}, bitfields: {}, traits: {}, impls: [], constants: {},
+        static_asserts: [], aop_advices: [], di_bindings: [], arch_rules: [],
+        mock_decls: [], types: [], extend_enums: [])
+
+fn caller_first_oversized_call_signature_module() -> HirModule:
+    var symbols = SymbolTable.new()
+    val entry_signature = HirType(kind: HirTypeKind.Function([], i64_type(), []),
+        span: span())
+    val entry_id = symbols.define("entry", SymbolKind.Function,
+        Some(entry_signature), span(), Visibility.Public, false, Some("tiny_call"))
+    val callee_signature = HirType(kind: HirTypeKind.Function([bool_type()],
+        i64_type(), []), span: span())
+    val identity_id = symbols.define("identity", SymbolKind.Function,
+        Some(callee_signature), span(), Visibility.Private, false, Some("tiny_call"))
+    _ = symbols.push_scope(ScopeKind.Function)
+    val parameter_id = symbols.define("value", SymbolKind.Parameter,
+        Some(i64_type()), span(), Visibility.Private, false, Some("tiny_call"))
+    symbols.pop_scope()
+    symbols.root_scope_symbols = symbols.scopes[0].symbols
+
+    val parameter = HirParam(symbol: parameter_id, name: "value",
+        type_: i64_type(), has_default: false, default: nil, span: span(),
+        is_mutable: false)
+    val identity_value = HirExpr(kind: HirExprKind.Var(parameter_id),
+        has_type_: true, type_: i64_type(), span: span())
+    val identity_body = HirBlock(stmts: [], has: true, value: identity_value,
+        span: span())
+    val identity = function(identity_id, "identity", [parameter], identity_body, false)
+
+    val callee = HirExpr(kind: HirExprKind.NamedVar(identity_id, "identity"),
+        has_type_: true, type_: callee_signature, span: span())
+    val argument = HirExpr(kind: HirExprKind.IntLit(7, nil), has_type_: true,
+        type_: i64_type(), span: span())
+    val call = HirExpr(kind: HirExprKind.Call(callee,
+        [HirCallArg(has_name: false, name: "", value: argument, span: span())], []),
+        has_type_: true, type_: i64_type(), span: span())
+    val entry = function(entry_id, "entry", [],
+        HirBlock(stmts: [], has: true, value: call, span: span()), true)
+    var functions: Dict<SymbolId, HirFunction> = {}
+    functions[entry_id] = entry
+    functions[identity_id] = identity
+    HirModule(name: "tiny_call", path: "tiny_call.spl", imports: [],
+        exports: ["entry"], domain_blocks: [], symbols: symbols,
+        functions: functions, gpu_function_targets: {},
+        gpu_function_backend_orders: {}, classes: {}, structs: {}, enums: {},
+        bitfields: {}, traits: {}, impls: [], constants: {}, static_asserts: [],
+        aop_advices: [], di_bindings: [], arch_rules: [], mock_decls: [],
+        types: [], extend_enums: [])
+
+fn zero_parameter_ledger() -> PortableBodyLedgerV1:
+    PortableBodyLedgerV1.create(PortableBodyLimitsV1(max_body_objects: 1,
+        max_functions: 2, max_symbols: 4, max_scopes: 3, max_exports: 1,
+        max_parameters: 0, max_nodes: 8, max_graph_nodes: 1,
+        max_dependency_edges: 1, max_call_occurrences: 1,
+        max_call_chain_depth: 2, max_semantic_depth: 4,
+        max_text_bytes: 4096, max_encoded_bytes: 4096,
+        max_retained_bytes: 4096, max_work_units: 128)).unwrap()
+
+describe "portable body parameter-header budget":
+    it "refuses oversized function and signature headers before type matching":
+        step("submit mismatched one-parameter headers to a zero-parameter ledger")
+        val module = oversized_mismatched_signature_module()
+        expect(module.symbols.root_scope_symbols.len()).to_equal(2)
+        match portable_hir_semantic_facts_from_typed_v1(
+                module,
+                portable_embedded_body_profile_digest_v1(), zero_parameter_ledger()):
+            case Err(PortableBodyErrorV1.BoundsExceeded(detail)):
+                expect(detail).to_contain("parameter budget")
+            case Err(PortableBodyErrorV1.UnsupportedSemantics(detail)):
+                fail("unbounded semantic refusal: " + detail)
+            case _:
+                fail("parameter headers were matched before their budget reservation")
+
+    it "reserves a later callee header before caller-first call matching":
+        step("verify a caller ordered before its mismatched one-parameter callee")
+        val module = caller_first_oversized_call_signature_module()
+        expect(module.functions[SymbolId(id: 0)].name).to_equal("entry")
+        match portable_hir_semantic_facts_from_typed_v1(
+                module,
+                portable_embedded_body_profile_digest_v1(), zero_parameter_ledger()):
+            case Err(PortableBodyErrorV1.BoundsExceeded(detail)):
+                expect(detail).to_contain("parameter budget")
+            case Err(PortableBodyErrorV1.UnsupportedSemantics(detail)):
+                fail("caller reached unreserved call matching: " + detail)
+            case _:
+                fail("callee parameter header was not reserved before caller traversal")

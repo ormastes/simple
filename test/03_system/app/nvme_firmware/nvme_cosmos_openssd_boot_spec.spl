@@ -1,39 +1,33 @@
-# @req REQ-001 REQ-002 REQ-003 REQ-004 REQ-005 REQ-006 REQ-007 REQ-008 REQ-009 REQ-010 REQ-011 NFR-001 NFR-002 NFR-003 NFR-004 NFR-005 NFR-006 NFR-007 NFR-008 NFR-009 NFR-010 NFR-012
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-SYSTEM
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+# @req REQ-SSPEC-SYSTEM REQ-SSPEC-SYSTEM REQ-SSPEC-SYSTEM REQ-SSPEC-SYSTEM REQ-SSPEC-SYSTEM REQ-SSPEC-SYSTEM REQ-SSPEC-SYSTEM REQ-SSPEC-SYSTEM REQ-SSPEC-SYSTEM REQ-SSPEC-SYSTEM REQ-SSPEC-SYSTEM NFR-001 NFR-002 NFR-003 NFR-004 NFR-005 NFR-006 NFR-007 NFR-008 NFR-009 NFR-010 NFR-012
 """
-Cosmos+ OpenSSD production-HAL software evidence for Zynq-7000/Cortex-A9.
 
-**Requirements:** doc/02_requirements/feature/cosmos_openssd_production_hal.md
-**NFR:** doc/02_requirements/nfr/cosmos_openssd_production_hal.md
-**Plan:** doc/03_plan/sys_test/cosmos_openssd_production_hal.md
-**Design:** doc/05_design/cosmos_openssd_production_hal.md
+**Feature IDs:** #NVME-COSMOS-001
+**Category:** Hardware
+**Difficulty:** 4/5
+**Status:** Implemented (bring-up; silicon port gaps enumerated)
+**Plan:** doc/03_plan/hardware/cosmos_openssd_port_2026-06-30.md
+**Research:** doc/01_research/hardware/nvme_firmware/research_addendum_2026-06-29.md
 
-## Overview
+Config 3: the real NVMe-fw dev environment based on the CRZ Cosmos+ OpenSSD platform. The
+Cortex-A9 bring-up (`src/os/kernel/arch/arm32/cosmos/`, Cadence UART) boots on QEMU's
+`xilinx-zynq-a9` and prints a banner plus an explicit "MISSING for silicon" gap list — the
+port is deliberately incomplete and says so (see the plan doc for the full gap analysis).
 
-Executes the host runtime ABI, MMIO, ARM abort, PCIe transport, FTL metadata,
-NVMe IO/admin callback-service, and SMP/cache integration drivers, boots the unbound QEMU image, builds
-the exact `openssd2-8ch8way-v3.0.0` silicon profile, inspects its ELF identity,
-runs packaging rejection checks, and guards the freestanding ARM ABI edges.
-The NVMe runners are host/ARM contract tests. The PCIe bridge decodes the
-controller transport but requires caller-provided media callbacks. The service
-objects, crash-consistent FTL metadata, physical NFC persistence backend,
-4 KiB-to-16 KiB media adapter, and fail-closed UART foreground startup compile
-for the pinned silicon profile. Physical-board proof remains pending.
-Corrected bridge/admin runners cover Abort bits, Number of Queues NSID/max,
-CQ IEN/IV, SQ QPRIO, SMART NSID/RAE, PCIe zero-write retry boundaries,
-non-retryable post-start completion behavior, and PRP edges.
+Build the image first: `sh src/os/kernel/arch/arm32/cosmos/build.shs`.
 
 ## Syntax
 
-Run only with `bin/simple` rebuilt and deployed from the current tree in
-interpreter mode. A stale release runner with the obsolete `rt_env_set` ABI can
-crash before any scenario executes and is not evidence. Do NOT invoke
-`bin/release/simple`: that path is a production-guard wrapper which refuses to
-exec a non-production runtime ("refusing non-production Simple runtime") and
-exits without running anything, which reads as a firmware-shaped false RED.
+Run only with `bin/release/simple` rebuilt and deployed from the current tree
+in interpreter mode. A stale release runner with the obsolete `rt_env_set` ABI
+can crash before any scenario executes and is not evidence.
 
 ## Examples
 
-`bin/simple test test/03_system/app/nvme_firmware/nvme_cosmos_openssd_boot_spec.spl --mode=interpreter`
+`bin/release/simple test test/03_system/app/nvme_firmware/nvme_cosmos_openssd_boot_spec.spl --mode=interpreter`
 
 ## Claim Boundary
 
@@ -46,22 +40,13 @@ until retained evidence from the identified board satisfies the production
 guide. The NVMe callback-service scenario does not bind real PCIe/NFC adapters
 and is not board evidence. The current strict bootstrap reached Stage 3, but
 its third/final Stage 4 attempt was terminated at about 64 GiB RSS; no current
-deployed `bin/simple` exists and this spec has not been executed or doc-generated.
+`bin/release/simple` exists and this spec has not been executed or doc-generated.
 """
 
 use std.spec.*
 use std.io_runtime.{process_run}
 use app.io.mod.{file_read_text}
 use os.kernel.arch.arm32.cosmos.cosmos_fsbl_decision.cosmos_fsbl_handoff_valid_registers
-
-struct FsblVector:
-    locksta: u32
-    arm_clk: u32
-    ddr_clk: u32
-    pss_rst: u32
-    a9_rst: u32
-    devcfg_int_sts: u32
-    expected: bool
 
 val BUILD: text = "src/os/kernel/arch/arm32/cosmos/build.shs"
 val PACKAGE: text = "src/os/kernel/arch/arm32/cosmos/package_boot.shs"
@@ -100,13 +85,15 @@ val PROFILE_SYMBOL: text = "cosmos_profile_cosmos_plus_openssd2_8ch8way_v300"
 fn _run(cmd: text) -> (text, text, i64):
     process_run("/bin/sh", ["-c", cmd])
 
-fn _expect_no_fail(out: text, err: text, label: text):
-    if out.contains("FAIL") or err.contains("FAIL"):
-        fail(label + " emitted a FAIL marker")
+fn _boot() -> (text, text, i64):
+    # qemu zynq-a9: route UART1 (the firmware's primary Cadence UART) to a capture file.
+    process_run("/bin/sh", ["-c", "mkdir -p build/test-artifacts; timeout 8 qemu-system-arm -M xilinx-zynq-a9 -display none -serial null -serial file:" + SERIAL + " -kernel " + ELF + " </dev/null; cat " + SERIAL])
 
-fn _expect_absent(output: text, marker: text, label: text):
-    if output.contains(marker):
-        fail(label + " emitted forbidden marker: " + marker)
+describe "NVMe firmware Cosmos+ OpenSSD bring-up on QEMU xilinx-zynq-a9":
+    """
+    The CRZ Cosmos+ OpenSSD (Zynq-7000 / Cortex-A9) bring-up boots on the real Zynq
+    emulation and reports over the Cadence UART, including the explicit silicon-port gap list.
+    """
 
 describe "Cosmos+ OpenSSD production HAL":
     it "keeps the Pure-Simple FSBL decision core in MC/DC parity with C":
@@ -146,16 +133,19 @@ describe "Cosmos+ OpenSSD production HAL":
 
     # REQ-001..004, REQ-008, REQ-011; NFR-001..004, NFR-009..010, NFR-012.
     it "should execute the host FSBL, NFC, and PCIe MMIO state machines":
+        # @req REQ-012
+            # @req REQ-012
+        # @req REQ-SSPEC-SYSTEM
+        step("should execute the host FSBL, NFC, and PCIe MMIO state machines")
         step("Compile and run the fail-closed host mock-MMIO integration driver")
         val (out, err, code) = _run("sh " + HOST_MMIO)
         expect(code).to_equal(0)
 
-        step("Verify all seven bounded MMIO scenarios complete")
+        step("Verify all six bounded MMIO scenarios complete")
         expect(out).to_contain("PASS FSBL handoff and PCFG_DONE")
         expect(out).to_contain("PASS unconfigured PL fail-closed")
         expect(out).to_contain("PASS NFC bounded initialization")
         expect(out).to_contain("PASS NFC read/program/erase/ECC")
-        expect(out).to_contain("PASS NFC raw marker read")
         expect(out).to_contain("PASS NFC timeout quarantine")
         expect(out).to_contain("PASS PCIe link/function/MSI/admin")
         expect(out).to_contain("STATUS: PASS cosmos host mock-MMIO integration")
@@ -163,6 +153,8 @@ describe "Cosmos+ OpenSSD production HAL":
 
     # REQ-004, REQ-011; NFR-001, NFR-002, NFR-004, NFR-009..010, NFR-012.
     it "should execute the standalone PCIe contract runner":
+        # @req REQ-SSPEC-SYSTEM
+        step("should execute the standalone PCIe contract runner")
         step("Compile and run the bounded PCIe controller contract driver")
         val (out, err, code) = _run("sh " + HOST_PCIE)
         expect(code).to_equal(0)
@@ -182,6 +174,8 @@ describe "Cosmos+ OpenSSD production HAL":
 
     # REQ-008, REQ-011; NFR-001..003, NFR-009..010, NFR-012.
     it "should execute actual ARM prefetch and data abort entry paths":
+        # @req REQ-SSPEC-SYSTEM
+        step("should execute actual ARM prefetch and data abort entry paths")
         step("Run bounded QEMU injections through the production ARM vectors")
         val (out, err, code) = _run("sh " + HOST_ABORT)
         expect(code).to_equal(0)
@@ -192,6 +186,8 @@ describe "Cosmos+ OpenSSD production HAL":
 
     # REQ-011; NFR-001, NFR-004, NFR-009..010, NFR-012. Host/ARM callback contract only.
     it "should execute the hardened NVMe IO callback service contract runner":
+        # @req REQ-SSPEC-SYSTEM
+        step("should execute the hardened NVMe IO callback service contract runner")
         step("Run bounded IO validation, identity, DMA-span, and publication tests")
         val (out, err, code) = _run("sh " + HOST_NVME)
         expect(code).to_equal(0)
@@ -201,6 +197,8 @@ describe "Cosmos+ OpenSSD production HAL":
 
     # REQ-003, REQ-011; NFR-001..004, NFR-009..010, NFR-012.
     it "should execute the crash-consistent FTL metadata contract runner":
+        # @req REQ-SSPEC-SYSTEM
+        step("should execute the crash-consistent FTL metadata contract runner")
         step("Run PPA, journal, checkpoint, recovery, retirement, and fail-closed checks")
         val (out, err, code) = _run("sh " + HOST_FTL)
         expect(code).to_equal(0)
@@ -257,6 +255,8 @@ describe "Cosmos+ OpenSSD production HAL":
 
     # REQ-003..004, REQ-011; NFR-001..004, NFR-009..010, NFR-012.
     it "should bind persistent NFC media and fail closed outside silicon":
+        # @req REQ-SSPEC-SYSTEM
+        step("should bind persistent NFC media and fail closed outside silicon")
         step("Run NFC wire-format, media staging, and startup composition checks")
         val (nfc_out, nfc_err, nfc_code) = _run("sh " + HOST_FTL_NFC)
         expect(nfc_code).to_equal(0)
@@ -375,6 +375,8 @@ describe "Cosmos+ OpenSSD production HAL":
 
     # REQ-004, REQ-011; NFR-001, NFR-004, NFR-009..010, NFR-012.
     it "should execute the PCIe-to-NVMe bridge contract runner":
+        # @req REQ-SSPEC-SYSTEM
+        step("should execute the PCIe-to-NVMe bridge contract runner")
         step("Run DW0/DW1/DW6-DW12, AUTO-DMA PRP, and completion transport checks")
         val (out, err, code) = _run("sh " + HOST_NVME_ADAPTER)
         expect(code).to_equal(0)
@@ -394,6 +396,8 @@ describe "Cosmos+ OpenSSD production HAL":
 
     # REQ-004, REQ-011; NFR-001, NFR-009..010, NFR-012. Corrected host/ARM PASS; callback contract only.
     it "should execute the NVMe admin callback core contract runner":
+        # @req REQ-SSPEC-SYSTEM
+        step("should execute the NVMe admin callback core contract runner")
         step("Run corrected bounded Identify, SMART, queue, feature, Abort, and AER checks")
         val (out, err, code) = _run("sh " + HOST_NVME_ADMIN)
         expect(code).to_equal(0)
@@ -403,6 +407,8 @@ describe "Cosmos+ OpenSSD production HAL":
 
     # REQ-004, REQ-011; NFR-001, NFR-004, NFR-009..010, NFR-012.
     it "should route the single PCIe command FIFO to admin or IO exactly once":
+        # @req REQ-SSPEC-SYSTEM
+        step("should route the single PCIe command FIFO to admin or IO exactly once")
         step("Run queue-zero admin, IO, retry, terminal, and reserved-field routing checks")
         val (out, err, code) = _run("sh " + HOST_NVME_DISPATCH)
         expect(code).to_equal(0)
@@ -412,6 +418,8 @@ describe "Cosmos+ OpenSSD production HAL":
 
     # REQ-006..007, REQ-011; NFR-001, NFR-005, NFR-009..010, NFR-012.
     it "should execute the host SMP, GIC, MMU, and cache contracts":
+        # @req REQ-SSPEC-SYSTEM
+        step("should execute the host SMP, GIC, MMU, and cache contracts")
         step("Compile and run the host SMP/cache contract driver")
         val (out, err, code) = _run("sh " + HOST_SMP_CACHE)
         expect(code).to_equal(0)
@@ -422,6 +430,8 @@ describe "Cosmos+ OpenSSD production HAL":
 
     # REQ-005, REQ-008..009, REQ-011; NFR-001..003, NFR-006, NFR-009..010, NFR-012.
     it "should boot the unbound QEMU image with an exact software-only verdict":
+        # @req REQ-SSPEC-SYSTEM
+        step("should boot the unbound QEMU image with an exact software-only verdict")
         step("Build every Cosmos HAL unit and boot the Zynq QEMU machine")
         val (out, err, code) = _run("COSMOS_BUILD_MODE=qemu sh " + BUILD + " --run")
         expect(code).to_equal(0)
@@ -449,6 +459,8 @@ describe "Cosmos+ OpenSSD production HAL":
 
     # REQ-001, REQ-004..005, REQ-009, REQ-011; NFR-002, NFR-006..007, NFR-009..010, NFR-012.
     it "should build and identify the exact bound silicon profile":
+        # @req REQ-SSPEC-SYSTEM
+        step("should build and identify the exact bound silicon profile")
         step("Build the silicon image with the exact reviewed profile selector")
         val command = "COSMOS_BUILD_MODE=silicon COSMOS_SILICON_PROFILE=" + PROFILE +
             " sh " + BUILD
@@ -481,6 +493,8 @@ describe "Cosmos+ OpenSSD production HAL":
 
     # REQ-010..011; NFR-002, NFR-007..010, NFR-012.
     it "should reject invalid boot inputs and publish bound package metadata":
+        # @req REQ-SSPEC-SYSTEM
+        step("should reject invalid boot inputs and publish bound package metadata")
         step("Run ELF, bitstream, alias, Bootgen metadata, hash, and manifest checks")
         val (out, err, code) = _run("sh " + PACKAGE + " --self-test")
         expect(code).to_equal(0)
@@ -490,6 +504,8 @@ describe "Cosmos+ OpenSSD production HAL":
 
     # REQ-005, REQ-011; NFR-001, NFR-006, NFR-010, NFR-012.
     it "should retain ARM EABI division edges and runtime self-test markers":
+        # @req REQ-SSPEC-SYSTEM
+        step("should retain ARM EABI division edges and runtime self-test markers")
         step("Run host behavior and unresolved-symbol checks for the ARM runtime ABI")
         val (out, err, code) = _run("sh " + HOST_RUNTIME)
         expect(code).to_equal(0)

@@ -22,6 +22,7 @@ fn src(rel: text) -> text:
     rt_file_read_text(INTERP + rel) ?? ""
 
 describe "pure-Simple core interpreter mutates collections through the owner":
+    # @manual scenario evidence
     it "upsert appends to both parallel arrays and set_field_idx writes in place":
         val_reset()
         val d = val_make_struct("__dict", [], [])
@@ -55,10 +56,16 @@ describe "pure-Simple core interpreter mutates collections through the owner":
         val access = src("eval_access.spl")
         val assign = src("_EvalOps/access_literal_assign_eval.spl")
         val call = src("_EvalOps/call_method_eval.spl")
+        val v = src("value.spl")
         expect(access.contains("val_arrays[base_val][idx] = new_val")).to_equal(true)
         expect(access.contains("val_arrays[base_val] = elements")).to_equal(false)
-        expect(assign.contains("val_arrays[base_val][idx] = new_val")).to_equal(true)
-        expect(assign.contains("val_arrays[ix_base][ix_i] = ix_new")).to_equal(true)
+        # 07206ba1e37 routed the _EvalOps writes through value.spl's owner-scoped
+        # helpers (the arena stays private when evaluator ops compile as separate
+        # native modules). The in-place mechanism now lives in the helper bodies.
+        expect(v.contains("val_arrays[vid][index] = value")).to_equal(true)
+        expect(v.contains("val_arrays[vid].push(value)")).to_equal(true)
+        expect(assign.contains("val_array_set(base_val, idx, new_val)")).to_equal(true)
+        expect(assign.contains("val_array_set(ix_base, ix_i, ix_new)")).to_equal(true)
         expect(assign.contains("val_arrays[ix_base] = ix_elems")).to_equal(false)
-        expect(call.contains("val_arrays[receiver].push(new_elem)")).to_equal(true)
+        expect(call.contains("val_array_push(receiver, new_elem)")).to_equal(true)
         expect(call.contains("val_arrays[receiver] = new_elems")).to_equal(false)

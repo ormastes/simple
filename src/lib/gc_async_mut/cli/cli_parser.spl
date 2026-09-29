@@ -46,6 +46,9 @@ struct ParsedArgs:
     option_values: Dict<text, text>
     positional_values: [text]
     remaining: [text]
+    # Usage errors in argument order (unknown option, missing value, value on
+    # a flag, value outside choices). Reported by validate_args.
+    errors: [text]
 
 # =========================================================================
 # Builder API
@@ -154,6 +157,20 @@ fn cli_spec_positional(spec: CliSpec, name: text, desc: text, required: bool) ->
 fn parse_cli_args(spec: CliSpec, args: [text]) -> ParsedArgs:
     """Parse command-line arguments according to specification.
 
+    Follows the GNU getopt_long convention:
+      - value option: `--opt=value`, `--opt value`, `-o value`, `-ovalue`
+      - a value option with no value (last argument, or the next token is
+        itself an option) is an error; the next option is never consumed
+      - a flag takes no value: `--flag=x` is an error
+      - an unknown option is an error (and is kept in `remaining`)
+      - a value outside declared `choices` is an error (default is kept)
+      - `--` ends option parsing; later tokens are positionals
+      - `--help` / `-h` set the `help` flag unless the spec declares them
+      - repeated options: last value wins
+    Errors are collected in `errors`; `validate_args` reports the first.
+    Cost: one pass over args; each option token scans the flag/option
+    tables once by name (no per-entry allocation).
+
     Args:
         spec: CLI specification
         args: Command-line arguments
@@ -164,6 +181,7 @@ fn parse_cli_args(spec: CliSpec, args: [text]) -> ParsedArgs:
     var option_values = {}
     var positional_values: [text] = []
     var remaining: [text] = []
+    var errors: [text] = []
 
     # Initialize flag defaults (false)
     for flag in spec.flags:
@@ -174,74 +192,140 @@ fn parse_cli_args(spec: CliSpec, args: [text]) -> ParsedArgs:
         option_values[option.long] = option.default
 
     var i = 0
-    var skip_next = false
+    var options_ended = false
     while i < args.len():
-        if skip_next:
-            skip_next = false
-            i = i + 1
-            continue
-
         val arg = args[i]
-
-        # Check for flags
-        var matched = false
-        for flag in spec.flags:
-            val long_form = "--{flag.long}"
-            val short_form = "-{flag.short}"
-            if arg == long_form or (flag.short != "" and arg == short_form):
-                flag_values[flag.long] = true
-                matched = true
-                break
-
-        if matched:
-            i = i + 1
-            continue
-
-        # Check for options (--key=value format)
-        for option in spec.options:
-            val prefix = "--{option.long}="
-            if arg.starts_with(prefix):
-                val value = arg[prefix.len():]
-                if is_valid_choice(option.choices, value):
-                    option_values[option.long] = value
-                matched = true
-                break
-
-        if matched:
-            i = i + 1
-            continue
-
-        # Check for options (--key value format)
-        for option in spec.options:
-            val long_form = "--{option.long}"
-            val short_form = "-{option.short}"
-            if arg == long_form or (option.short != "" and arg == short_form):
-                if i + 1 < args.len():
-                    val value = args[i + 1]
-                    if is_valid_choice(option.choices, value):
-                        option_values[option.long] = value
-                    skip_next = true
-                matched = true
-                break
-
-        if matched:
-            i = i + 1
-            continue
-
-        # Positional or remaining
-        if arg.starts_with("-"):
-            remaining.push(arg)
-        else:
-            positional_values.push(arg)
-
         i = i + 1
+
+        if options_ended or arg == "-" or not arg.starts_with("-"):
+            positional_values.push(arg)
+            continue
+
+        if arg == "--":
+            options_ended = true
+            continue
+
+        if arg.starts_with("--"):
+            var name = arg[2:]
+            var inline_value = ""
+            var has_inline = false
+            if name.contains("="):
+                val eq_pos = name.index_of("=")
+                inline_value = name[eq_pos + 1:]
+                name = name[0:eq_pos]
+                has_inline = true
+
+            val fi = cli_find_flag(spec, long: name, short: "")
+            if fi >= 0:
+                if has_inline:
+                    errors.push("option --{name} does not take a value")
+                    remaining.push(arg)
+                else:
+                    flag_values[name] = true
+                continue
+
+            val oi = cli_find_option(spec, long: name, short: "")
+            if oi >= 0:
+                var value = inline_value
+                var have_value = has_inline
+                if not has_inline and i < args.len() and not cli_token_is_option(args[i]):
+                    value = args[i]
+                    have_value = true
+                    i = i + 1
+                if not have_value:
+                    errors.push("option --{name} requires a value")
+                elif is_valid_choice(spec.options[oi].choices, value):
+                    option_values[name] = value
+                else:
+                    errors.push(cli_choice_error(spec.options[oi], shown: "--{name}", value: value))
+                continue
+
+            if name == "help" and not has_inline:
+                flag_values["help"] = true
+                continue
+
+            errors.push("unknown option: --{name}")
+            remaining.push(arg)
+            continue
+
+        # Short form: -f, -o value, -ovalue
+        val short = arg[1:2]
+        val sfi = cli_find_flag(spec, long: "", short: short)
+        if sfi >= 0 and arg.len() == 2:
+            flag_values[spec.flags[sfi].long] = true
+            continue
+
+        val soi = cli_find_option(spec, long: "", short: short)
+        if soi >= 0:
+            val option = spec.options[soi]
+            var value = ""
+            var have_value = false
+            if arg.len() > 2:
+                value = arg[2:]
+                have_value = true
+            elif i < args.len() and not cli_token_is_option(args[i]):
+                value = args[i]
+                have_value = true
+                i = i + 1
+            if not have_value:
+                errors.push("option -{short} requires a value")
+            elif is_valid_choice(option.choices, value):
+                option_values[option.long] = value
+            else:
+                errors.push(cli_choice_error(option, shown: "-{short}", value: value))
+            continue
+
+        if arg == "-h" and sfi < 0:
+            flag_values["help"] = true
+            continue
+
+        errors.push("unknown option: {arg}")
+        remaining.push(arg)
 
     ParsedArgs(
         flag_values: flag_values,
         option_values: option_values,
         positional_values: positional_values,
-        remaining: remaining
+        remaining: remaining,
+        errors: errors
     )
+
+fn cli_token_is_option(token: text) -> bool:
+    """True when `token` must not be consumed as an option value.
+
+    `-` (stdin) and negative numbers such as `-5` are values; any other
+    token starting with `-` is an option.
+    """
+    if token.len() < 2 or not token.starts_with("-"):
+        return false
+    not "0123456789".contains(token[1:2])
+
+fn cli_find_flag(spec: CliSpec, long: text, short: text) -> i64:
+    """Index of the flag matching `long` (or non-empty `short`), else -1."""
+    var idx = 0
+    for flag in spec.flags:
+        if long != "" and flag.long == long:
+            return idx
+        if short != "" and flag.short == short:
+            return idx
+        idx = idx + 1
+    -1
+
+fn cli_find_option(spec: CliSpec, long: text, short: text) -> i64:
+    """Index of the option matching `long` (or non-empty `short`), else -1."""
+    var idx = 0
+    for option in spec.options:
+        if long != "" and option.long == long:
+            return idx
+        if short != "" and option.short == short:
+            return idx
+        idx = idx + 1
+    -1
+
+fn cli_choice_error(option: CliOption, shown: text, value: text) -> text:
+    """Usage error for a value outside `option.choices`."""
+    val choices_str = option.choices.join("|")
+    "invalid value '{value}' for {shown} (choices: {choices_str})"
 
 fn is_valid_choice(choices: [text], value: text) -> bool:
     """Check if value is in allowed choices.
@@ -409,6 +493,10 @@ fn validate_args(spec: CliSpec, parsed: ParsedArgs) -> (bool, text):
 
     Returns: (is_valid, error_message)
     """
+    # Usage errors found while parsing (unknown option, missing value, ...)
+    if parsed.errors.len() > 0:
+        return (false, parsed.errors[0])
+
     # Check required positionals
     for pos in spec.positionals:
         if pos.required:

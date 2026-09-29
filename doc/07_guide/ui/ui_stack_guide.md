@@ -264,11 +264,6 @@ display), it's a `CompositorBackend` + `InputBackend` pair, not a
 - **Don't** cache backend-specific state on `UISession`. Use
   `SurfaceManager` for per-surface state and `WidgetStore` for
   widget-local state.
-- **Don't** call `FontRenderer`, Engine2D font backend adapters, or Engine3D
-  HUD/world methods from GUI/web app code. Emit semantic Draw IR text/style and
-  let the existing Engine2D executor select bitmap text or lower an enabled
-  vector face to transient font batches.
-  Direct Engine2D demos remain low-level examples, not GUI/web architecture.
 
 ## 9. Running an on-screen GUI window on macOS
 
@@ -326,15 +321,6 @@ CPU SIMD, software, and CPU. Use this helper for vector and bitmap glyph
 offload selection instead of per-frame or per-glyph ad hoc probing. Treat an
 accelerated font path as valid only when readback/checksum evidence matches the
 CPU reference for the covered fixture.
-
-This offload planner prepares generated vector/bitmap glyphs; it is not the
-opt-in TTF loader. `Engine2D.load_font(path)` uses the CPU `spl_fonts` owner for
-layout/rasterization, keeps a per-engine bounded glyph cache, and sends one
-tight alpha payload to the selected drawing backend. Without `load_font`,
-Engine2D continues to use the backend bitmap font. Trusted local paths may use
-non-ASCII names. The current native face/layout owner is a serialized
-process-global singleton; concurrent distinct faces require the documented
-future owned-handle upgrade.
 
 | Lane | App | Renders |
 |------|-----|---------|

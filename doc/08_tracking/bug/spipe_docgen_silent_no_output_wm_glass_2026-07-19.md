@@ -1,4 +1,8 @@
 # Bug: SPipe Docgen Exits Successfully Without Producing Manual
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Observed
 
@@ -32,3 +36,4 @@ first add an output-existence postcondition to the docgen CLI.
 Blocks generation of the WM glass theme system manual until fixed or until a
 different canonical docgen invocation is identified. It does not justify a
 hand-written manual being represented as generated evidence.
+

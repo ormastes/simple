@@ -35,6 +35,7 @@ use compiler.frontend.desugar.placeholder_lambda.{
 }
 
 use std.nogc_sync_mut.io_runtime.{env_get, time_now_unix_micros}
+use std.string_core.{char_from_code}
 
 # Level-gated operation counters (DEFAULT OFF; SIMPLE_PARSE_PHASE_PROFILE=1).
 # These count OPERATIONS, not milliseconds: how many string literals each pass
@@ -158,16 +159,47 @@ fn decode_interpolation_brace_escapes(value: text) -> text:
     chunks.push(value.substring(copied_until, value.len()))
     chunks.join("")
 
+pub fn interpolation_literalize_region(region: text) -> text:
+    """Double every brace of a `{...}` region (outer braces included) so the
+    depth-0 `{{` / `}}` escape rule of every segment splitter reads it back as
+    exactly the original literal text."""
+    # Spelled via char codes: inside an ordinary string literal `{{` is itself
+    # the escape for ONE brace, so a literal "{{" would read back as "{".
+    val open_brace = char_from_code(123)
+    val close_brace = char_from_code(125)
+    region.replace(open_brace, open_brace + open_brace).replace(close_brace, close_brace + close_brace)
+
 fn parse_string_interpolation_parts(value: text) -> [i64]:
+    # Parts only; see parse_string_interpolation_regions for the literalized
+    # text that must accompany them when promoting a literal.
+    val (_rewritten, parts) = parse_string_interpolation_regions(value)
+    parts
+
+fn parse_string_interpolation_regions(value: text) -> (text, [i64]):
+    """Region-only interpolation (seed parity: parser/src/expressions/primary/
+    literals.rs, Rust test a_valid_hole_next_to_css_text_still_interpolates).
+
+    Returns `(rewritten, parts)`. A region that is not a clean single
+    expression (CSS/regex text such as `{ color: red; }`) is literalized ALONE:
+    its braces are doubled in `rewritten` so the evaluator's segment splitter
+    keeps it verbatim, while valid neighbouring regions still interpolate.
+    Until 2026-09-27 one bad region literalized the WHOLE string, diverging from
+    the seed (owner ruling 2026-09-27). An unbalanced string stays wholly
+    literal: `(value, [])`.
+    """
     # Fast path (perf, exact): every branch of the scanner below is gated on
     # seeing a `{` or a `}`. A literal with neither cannot produce a part and
-    # cannot leave `depth != 0`, so it always returns `[]` -- reached here
+    # cannot leave `depth != 0`, so it always returns no parts -- reached here
     # without the per-character `value[i:i+1]` substring allocations.
     if not (value.contains("{") or value.contains("}")):
-        return []
+        return (value, [])
     var parts: [i64] = []
+    var chunks: [text] = []
+    var copied_until = 0
     var depth = 0
     var inner_start = -1
+    var quote = ""
+    var escaped = false
     var i = 0
     while i < value.len():
         val ch = value[i:i + 1]
@@ -179,6 +211,17 @@ fn parse_string_interpolation_parts(value: text) -> [i64]:
         elif depth == 0 and ch == "{":
             depth = 1
             inner_start = i + 1
+            quote = ""
+            escaped = false
+        elif depth > 0 and quote != "":
+            if escaped:
+                escaped = false
+            elif ch == "\\":
+                escaped = true
+            elif ch == quote:
+                quote = ""
+        elif depth > 0 and (ch == "\"" or ch == "'"):
+            quote = ch
         elif depth > 0 and ch == "{":
             depth = depth + 1
         elif depth > 0 and ch == "}":
@@ -192,12 +235,19 @@ fn parse_string_interpolation_parts(value: text) -> [i64]:
                 val inner = value.substring(inner_start, i)
                 val part = parse_interpolation_fragment(inner)
                 if part < 0:
-                    return []
-                parts.push(part)
+                    chunks.push(value.substring(copied_until, inner_start - 1))
+                    chunks.push(interpolation_literalize_region(
+                        value.substring(inner_start - 1, i + 1)))
+                    copied_until = i + 1
+                else:
+                    parts.push(part)
         i = i + 1
     if depth != 0:
-        return []
-    parts
+        return (value, [])
+    if copied_until == 0:
+        return (value, parts)
+    chunks.push(value.substring(copied_until, value.len()))
+    (chunks.join(""), parts)
 
 fn expand_interpolated_placeholder_call_args(start_expr: i64):
     """Driver/native-build counterpart of expand_string_interpolations() +
@@ -242,7 +292,7 @@ fn expand_interpolated_placeholder_call_args(start_expr: i64):
                     # loop -- the superlinear term measured 2026-08-21 (a 34x
                     # larger file cost 176x more in this phase). See
                     # doc/08_tracking/bug/frontend_parse_per_file_cost_2026-08-21.md
-                    val parts = parse_string_interpolation_parts(value)
+                    val (rewritten, parts) = parse_string_interpolation_regions(value)
                     if parts.len() > 0:
                         var has_ph = false
                         var p = 0
@@ -251,7 +301,7 @@ fn expand_interpolated_placeholder_call_args(start_expr: i64):
                                 has_ph = true
                             p = p + 1
                         if has_ph:
-                            expr_promote_interpolated_string(a, value, parts)
+                            expr_promote_interpolated_string(a, rewritten, parts)
                             promoted = true
                 i = i + 1
         idx = idx + 1
@@ -269,9 +319,9 @@ fn expand_string_interpolations_with_placeholder_receipt(start_expr: i64) -> boo
         elif tag == EXPR_STRING_LIT and expr_get_int(idx) == 0:
             si_stat_literals_seen = si_stat_literals_seen + 1
             val value = expr_get_str(idx)
-            val parts = parse_string_interpolation_parts(value)
+            val (rewritten, parts) = parse_string_interpolation_regions(value)
             if parts.len() > 0:
-                expr_promote_interpolated_string(idx, value, parts)
+                expr_promote_interpolated_string(idx, rewritten, parts)
             else:
                 expr_mark_string_processed(
                     idx, decode_interpolation_brace_escapes(value)

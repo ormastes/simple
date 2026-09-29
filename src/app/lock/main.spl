@@ -3,7 +3,9 @@
 
 use std.cli.cli_util (get_cli_args, find_manifest_path, parse_deps_section)
 use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
-use app.io.mod (file_exists, file_read, file_write, cwd)
+use app.io.mod (file_exists, file_read, file_atomic_write, cwd)
+use app.pkg.requires_range.{classify_manifest_interface_ranges, resolve_manifest_requires,
+    generate_requires_lock, current_phase8_policy_receipt}
 use std.log.{error}
 
 fn print_help():
@@ -45,34 +47,74 @@ fn handle_generate(force: bool, as_json: bool, progress: text) -> i64:
         return 1
 
     val content = file_read(manifest_path)
-    val deps = parse_deps_section(content, "dependencies") + parse_deps_section(content, "dev_dependencies")
-
-    if deps.len() == 0:
-        if as_json:
-            print "{\"command\":\"generate\",\"status\":\"empty\",\"count\":0}"
+    val classification = classify_manifest_interface_ranges(content, manifest_path)
+    var uses_interface_ranges = false
+    match classification:
+        case Err(errors):
+            print "lock: manifest classification failed"
+            for message in errors:
+                print "  " + message
+            return 1
+        case Ok(value): uses_interface_ranges = value
+    if not uses_interface_ranges:
+        val deps = parse_deps_section(content, "dependencies") + parse_deps_section(content, "dev_dependencies")
+        if deps.len() == 0:
+            if as_json:
+                print "{\"command\":\"generate\",\"status\":\"empty\",\"count\":0}"
+                return 0
+            print "No dependencies found. Lockfile not generated."
             return 0
-        print "No dependencies found. Lockfile not generated."
+        if progress != "summary":
+            val progress_line = render_progress(progress, deps.len(), deps.len(), "lock")
+            if progress_line != "":
+                print progress_line
+        var legacy_lock = "lockfile_version: 1\ngenerated: simple lock generate\npackages:\n"
+        for name in deps:
+            legacy_lock = legacy_lock + "  {name}: *\n"
+        if not file_atomic_write(lockfile_path, legacy_lock):
+            print "lock: failed to write simple.lock"
+            return 1
+        if as_json:
+            print "{\"command\":\"generate\",\"status\":\"ok\",\"count\":{deps.len()}}"
+            return 0
+        print "Generated simple.lock with {deps.len()} packages"
         return 0
 
+    val resolved = resolve_manifest_requires(content, manifest_path, current_dir)
+    val policy_receipt = current_phase8_policy_receipt()
+    var lock_content = ""
+    var resolution_count: i64 = 0
+    match resolved:
+        case Err(errors):
+            print "lock: interface range resolution failed"
+            for message in errors:
+                print "  " + message
+            return 1
+        case Ok((pin, result)):
+            match policy_receipt:
+                case Err(errors):
+                    print "lock: policy receipt validation failed"
+                    for message in errors:
+                        print "  " + message
+                    return 1
+                case Ok(policy):
+                    lock_content = generate_requires_lock(pin, result, policy)
+                    resolution_count = result.resolutions.len()
+
     if progress != "summary":
-        val progress_line = render_progress(progress, deps.len(), deps.len(), "lock")
+        val progress_line = render_progress(progress, resolution_count, resolution_count, "lock")
         if progress_line != "":
             print progress_line
 
-    var lock_content = "lockfile_version: 1\n"
-    lock_content = lock_content + "generated: simple lock generate\n"
-    lock_content = lock_content + "packages:\n"
-    for name in deps:
-        lock_content = lock_content + "  {name}: *\n"
-    if not file_write(lockfile_path, lock_content):
+    if not file_atomic_write(lockfile_path, lock_content):
         print "lock: failed to write simple.lock"
         return 1
 
     if as_json:
-        print "{\"command\":\"generate\",\"status\":\"ok\",\"count\":{deps.len()}}"
+        print "{\"command\":\"generate\",\"status\":\"ok\",\"resolutions\":{resolution_count}}"
         return 0
 
-    print "Generated simple.lock with {deps.len()} packages"
+    print "Generated simple.lock with {resolution_count} interface resolutions"
     0
 
 fn handle_validate(as_json: bool) -> i64:
@@ -92,7 +134,7 @@ fn handle_validate(as_json: bool) -> i64:
     for line in lines:
         if line.starts_with("lockfile_version:"):
             has_version = true
-        if line.starts_with("packages:") or line.starts_with("packages "):
+        if line.starts_with("provides_requires:") or line.starts_with("packages:") or line.starts_with("packages "):
             has_packages = true
 
     if not has_version:
@@ -100,7 +142,7 @@ fn handle_validate(as_json: bool) -> i64:
         return 1
 
     if not has_packages:
-        print "lock: lockfile missing packages table"
+        print "lock: lockfile missing provides/requires table"
         return 1
 
     if as_json:
@@ -124,37 +166,71 @@ fn handle_check(as_json: bool) -> i64:
         return 1
 
     val manifest_content = file_read(manifest_path)
-    val manifest_deps = parse_deps_section(manifest_content, "dependencies") + parse_deps_section(manifest_content, "dev_dependencies")
-
-    val lock_content = file_read(lockfile_path)
-    # Count packages in lockfile
-    var lock_count = 0
-    val lines = lock_content.split("\n")
-    for line in lines:
-        val trimmed = line.trim()
-        if trimmed != "" and not trimmed.starts_with("#") and not trimmed.starts_with("lockfile_version") and not trimmed.starts_with("generated") and not trimmed.starts_with("packages"):
-            lock_count = lock_count + 1
-
-    if manifest_deps.len() == lock_count:
-        if as_json:
-            print "{\"command\":\"check\",\"status\":\"ok\",\"manifest_count\":{manifest_deps.len()},\"lock_count\":{lock_count}}"
+    val classification = classify_manifest_interface_ranges(manifest_content, manifest_path)
+    var uses_interface_ranges = false
+    match classification:
+        case Err(errors):
+            print "lock: manifest classification failed"
+            for message in errors:
+                print "  " + message
+            return 1
+        case Ok(value): uses_interface_ranges = value
+    if not uses_interface_ranges:
+        val manifest_deps = parse_deps_section(manifest_content, "dependencies") + parse_deps_section(manifest_content, "dev_dependencies")
+        var lock_count = 0
+        for line in file_read(lockfile_path).split("\n"):
+            val trimmed = line.trim()
+            if trimmed != "" and not trimmed.starts_with("#") and
+                    not trimmed.starts_with("lockfile_version") and
+                    not trimmed.starts_with("generated") and
+                    not trimmed.starts_with("packages"):
+                lock_count = lock_count + 1
+        if manifest_deps.len() == lock_count:
+            if as_json:
+                print "{\"command\":\"check\",\"status\":\"ok\",\"manifest_count\":{manifest_deps.len()},\"lock_count\":{lock_count}}"
+                return 0
+            print "Lockfile is up to date."
             return 0
-        print "Lockfile is up to date."
-    else:
         if as_json:
             print "{\"command\":\"check\",\"status\":\"out_of_date\",\"manifest_count\":{manifest_deps.len()},\"lock_count\":{lock_count}}"
             return 1
         print "Lockfile is out of date."
-        print "  manifest: {manifest_deps.len()} dependencies"
-        print "  lockfile: {lock_count} packages"
-        print ""
         print "Run 'simple lock generate --force' to update."
         return 1
-    0
 
-fn main() -> i64:
-    val args = get_cli_args()
+    val resolved = resolve_manifest_requires(manifest_content, manifest_path, current_dir)
+    val policy_receipt = current_phase8_policy_receipt()
+    match resolved:
+        case Err(errors):
+            print "lock: interface range resolution failed"
+            for message in errors:
+                print "  " + message
+            return 1
+        case Ok((pin, result)):
+            var expected = ""
+            match policy_receipt:
+                case Err(errors):
+                    print "lock: policy receipt validation failed"
+                    for message in errors:
+                        print "  " + message
+                    return 1
+                case Ok(policy):
+                    expected = generate_requires_lock(pin, result, policy)
+            val actual = file_read(lockfile_path)
+            if actual == expected:
+                if as_json:
+                    print "{\"command\":\"check\",\"status\":\"ok\",\"resolutions\":{result.resolutions.len()}}"
+                    return 0
+                print "Lockfile is up to date."
+                return 0
+            if as_json:
+                print "{\"command\":\"check\",\"status\":\"out_of_date\",\"resolutions\":{result.resolutions.len()}}"
+                return 1
+            print "Lockfile is out of date."
+            print "Run 'simple lock generate --force' to update."
+            return 1
 
+fn run_lock_command(args: [text]) -> i64:
     var force = false
     var subcommand = "generate"
     var as_json = false
@@ -194,3 +270,8 @@ fn main() -> i64:
     print "lock: unknown subcommand '{subcommand}'"
     print_help()
     return 1
+
+fn main() -> i64:
+    run_lock_command(get_cli_args())
+
+export run_lock_command

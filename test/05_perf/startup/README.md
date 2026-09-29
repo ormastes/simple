@@ -1,23 +1,8 @@
 # Startup Perf-Budget Lane
 
-Guards `bin/simple` startup latency across the six Phase-D lanes
-(plan: `doc/03_plan/compiler/startup_performance/startup_perf_plan_2026-08-17.md`),
-each p50 of N=7 samples against committed budgets in `budgets.sdn`:
-
-| lane | command | budget key |
-|---|---|---|
-| version | `bin/simple --version` | `version_ms` |
-| help | `bin/simple build` (prints HELP, exits) | `help_ms` |
-| run-hello-warm | `bin/simple run hello_fixture.spl`, same path each sample | `run_hello_ms` |
-| run-hello-cold | same, fixture copied to a fresh path per sample | `run_hello_cold_ms` |
-| smf-load | `bin/simple hello.smf` (compiled once per run, then timed) | `smf_load_ms` |
-| compile-body | `bin/simple compile` with a different function body per sample | `compile_hello_ms` |
-
-Each real run writes an **immutable per-run manifest** to
-`build/perf/startup/startup_manifest_<utc>_<pid>.sdn` (unique name, chmod a-w):
-binary path/identity/sha256/size+mtime, host, loadavg, sample count, per-lane
-p50 AND p95 (N=7 ⇒ p95 = max sample), run-hello max RSS, and opens/mmap counts
-via strace when available (`unavailable` otherwise — never fabricated).
+Guards `bin/simple` startup latency: p50 of N=7 runs of `bin/simple --version`
+and `bin/simple run test/05_perf/startup/hello_fixture.spl`, compared against
+committed budgets in `budgets.sdn`.
 
 Run:
 
@@ -29,27 +14,76 @@ sh scripts/check/check-startup-perf-budget.shs --selftest # fixtures only
 Verdict (last stdout line, detector standard —
 `doc/07_guide/infra/detector/detector_standard.md`):
 
-- `PASS — 6 lane(s) measured (N=7, binary=<seed|self-hosted> <path>): <per-lane p50/p95>` exit 0
+- `PASS — 2 command(s) measured (N=7, binary=<seed|self-hosted> <path>): ...` exit 0
 - `SKIP — bin/simple missing/unresolvable ...` exit 0 (explicit, never a measurement)
-- `FAIL — ... <lane> p50=<measured>ms > budget <n>ms` exit 1
-- `ERROR — nothing was checked ...` exit 2 (missing budgets file OR missing lane
-  key, failed runs, failed selftest)
+- `FAIL — ... <which> p50=<measured>ms > budget <n>ms` exit 1
+- `ERROR — nothing was checked ...` exit 2 (missing budgets file, failed runs, failed selftest)
 
 The verdict records binary identity (rust-seed vs self-hosted) because the two
 have very different startup profiles — never compare timings across identities.
-
-Specs: `startup_perf_budget_spec.spl` (verdict/fail-closed contract) and
-`startup_perf_lanes_spec.spl` (all-lanes + manifest reproducing spec, plus the
-defect-class positive control via the detector's selftest fixtures). Neither
-re-times anything — the script is the single timing oracle.
 
 ## Updating budgets (the ONLY recorded escape)
 
 Edit `budgets.sdn` and change the value **with a dated comment** explaining the
 new measurement and why. There is deliberately no env var or flag override —
 a silent override is exactly the escape the detector standard forbids. Budgets
-are set well above measured noise (>= p50 x3 and >= p95 x2 on a shared box) so
-box load does not flap the lane; see the dated comments in `budgets.sdn`.
+are set at measured p50 x3 so shared-box noise does not flap the lane
+(2026-08-18 baseline: version 122ms, run-hello 133ms, seed binary).
 
 Status: ADVISORY (FP rate not yet adjudicated on a named sample; see FP-RATE
 line in the script header before any promotion to blocking).
+
+## Interpreter identifier-hash memo
+
+`scripts/check/check-interpreter-hash-memo-perf.shs` measures an explicitly
+owned eight-entry memo against the stateless FNV-1a function. It includes hot,
+4,096-name miss-heavy, product-shaped LOAD_FAST, and module/global slow-env
+fixtures. Evidence is N>=7 and interleaved, with exact binary/source/harness/
+tool/host identities and raw elapsed/RSS/stdout/stderr hashes.
+
+This collector is deliberately fail-closed: a Rust seed, missing/invalid
+adjacent Stage4 provenance, or a raced identity exits 2 and writes no receipt.
+See `doc/10_metrics/startup/interpreter_hash_memo_perf_2026-08-19.md`.
+
+## Class A cross-language matrix
+
+`scripts/check/check-startup-class-a-matrix.shs` measures startup after all
+preparation has completed for Simple native, C, Rust, Go, Python, Bun, and
+Java. Each lane prints the same exact checksum, runs at least one warmup and
+seven timed samples, and records raw samples, p50, p95, maximum RSS, compiler
+and executable hashes, execution mode, and fallback status in an immutable
+retained-schema receipt under `build/perf/startup_class_a_v2/`.
+
+The matrix never substitutes another runtime. A missing compiler/runtime or
+missing pure-Simple self-host is `unavailable`; a present lane with a build,
+checksum, sampling, or receipt failure is `rejected` and makes the matrix
+fail. A global PASS additionally requires the pure-Simple native subject to be
+admitted; competitor rows cannot make a missing Simple row pass. The schema
+selftest has exactly 18 biting controls: fallback, sample floor, budget policy,
+p50 budget, p95 budget, RSS budget, order seed, order position, missing raw
+row, recomputed percentile, maximum RSS, hash, self-host status, startup class,
+ratio, rustup identity, Rust host, and bound-tool version. Stage 4 is currently
+unavailable, so the full matrix has not run and no v2 matrix receipt exists.
+Run the schema contract independently with:
+
+```bash
+sh test/05_perf/startup/class_a/startup_class_a_schema_contract_test.shs
+```
+
+## dynSMF production trust cutover
+
+`dynsmf_trust_cutover_source_closure_spec.spl` is the non-timing closure gate
+for the startup-sensitive trust cutover. It keeps empty/help/version returns
+ahead of OS trust-config admission, rejects process/compiler/directory-scan
+dependencies in the registry owner, and proves ordinary/component registry
+branches consume retained bytes rather than reopening executable paths.
+
+Run it together with the existing argument-parser/mmap startup regression:
+
+```bash
+SIMPLE_LIB=src <diagnostic-simple> test test/05_perf/startup/dynsmf_trust_cutover_source_closure_spec.spl --mode=interpreter --fail-fast
+SIMPLE_LIB=src <diagnostic-simple> test test/02_integration/app/startup_argparse_mmap_perf_spec.spl --mode=interpreter --fail-fast
+```
+
+These commands are focused source/interpreter evidence. They do not establish
+Stage 4, native latency/RSS, bootstrap convergence, or release readiness.

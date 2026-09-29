@@ -1,0 +1,201 @@
+# Purpose: focused L8 evidence for exact verified-CAS kind dispatch.
+# @req REQ-CSM-003 REQ-CSM-006 NFR-CSM-010
+
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use compiler.common.cache_contract.canonical_cache_codec_v1.{
+    canonical_cache_encode_envelope_v1, canonical_cache_kind_source_blob_v1,
+    canonical_cache_kind_compile_snapshot_v1,
+    canonical_cache_kind_public_summary_v1, canonical_cache_kind_file_ast_v1,
+    canonical_cache_kind_semantic_read_set_v1}
+use compiler.common.cache_contract.semantic_query_read_manifest_v1.{
+    SemanticCoverageV1, SemanticQueryKeyV1, SemanticQueryReadManifestV1,
+    semantic_query_read_manifest_encode_v1}
+use compiler.common.cache_contract.portable_object_ref_v1.{PortableObjectRefV1,
+    PortableObjectStageV1, PortablePortabilityV1}
+use compiler.hir.portable_object_profile_v1.{
+    portable_hir_semantic_verifier_digest_v1,
+    portable_hir_semantic_verifier_available_v1,
+    portable_hir_semantic_verifier_blocker_v1}
+use compiler.common.cache_contract.semantic_scope_live_port_contract_v1.{
+    semantic_scope_live_port_contract_blocker_v1}
+use compiler.common.cache_contract.generation_manifest_v1.{GenerationManifestV1,
+    generation_manifest_encode_v1}
+use compiler.common.cache_contract.three_payload_worker_v1.{
+    ThreePayloadInputIdentityV1, ThreePayloadReadReceiptV1,
+    ThreePayloadWorkerResultV1, three_payload_worker_result_encode_v1}
+use compiler.common.cache_contract.reverse_reference_shard_v1.{
+    ReverseReferenceShardV1, reverse_reference_shard_encode_v1}
+use compiler.common.cache_contract.diagnostic_manifest_v1.{
+    DiagnosticSeverityV1, DiagnosticManifestEntryV1, DiagnosticManifestV1,
+    diagnostic_manifest_decode_bounded_v1, diagnostic_manifest_encode_v1}
+use compiler.driver.cache.cas.verified_cas_kind_registry_v1.{
+    verified_cas_kind_known_v1, verified_cas_kind_available_v1,
+    verified_cas_kind_schema_v1, verified_cas_kind_verifier_identity_v1,
+    verified_cas_kind_digest_v1,
+    verified_cas_verifier_registry_canonical_v1,
+    verified_cas_verifier_registry_digest_v1,
+    verified_cas_verify_kind_bytes_v1,
+    verified_cas_verify_portable_hir_bytes_v1}
+use compiler.driver.cache.cas.verified_cas_store.{verified_cas_digest_v1,
+    verified_cas_put_v1, verified_cas_object_path_v1,
+    verified_cas_get_portable_hir_v1, verified_cas_put_portable_hir_v1}
+
+fn d(label: text) -> text: sha256_text(label)
+
+fn with_trailing_byte(bytes: [u8]) -> [u8]:
+    var result = bytes
+    result.push(0 as u8)
+    result
+
+fn query(name: text) -> SemanticQueryKeyV1:
+    SemanticQueryKeyV1(kind: "type", stable_entity_id: name,
+        semantic_profile_digest: d("semantic-profile"),
+        parameter_digest: d("parameters"))
+
+fn forward_manifest_bytes() -> [u8]:
+    semantic_query_read_manifest_encode_v1(SemanticQueryReadManifestV1(
+        schema: 1, consumer: query("consumer"), ordered_reads: []))
+
+fn portable_ref() -> PortableObjectRefV1:
+    PortableObjectRefV1(content_digest: d("portable-hir-bytes"),
+        stage: PortableObjectStageV1.Base,
+        portability: PortablePortabilityV1.Portable, ir_schema: 2,
+        required_semantics_digest: d("portable-semantics"),
+        target_contract_digest: nil,
+        verification_receipt_digest: d("portable-receipt"))
+
+fn worker_result_bytes() -> [u8]:
+    val identity = ThreePayloadInputIdentityV1(source_digest: d("source"),
+        prior_tld_digest: nil, init_tld_digest: d("init-tld"),
+        seal_digest: d("seal"))
+    val receipt = ThreePayloadReadReceiptV1(input_identity: identity,
+        executor_digest: d("executor"), distinct_source: 1,
+        distinct_prior: 0, distinct_init: 1, external_input_count: 0,
+        rr_input_count: 0, open_calls: 2, read_calls: 2, read_bytes: 64,
+        decoded_sections: 1, peak_decode_bytes: 32, denied_io_attempts: 0)
+    val reads = SemanticQueryReadManifestV1(schema: 1,
+        consumer: query("consumer"), ordered_reads: [])
+    three_payload_worker_result_encode_v1(ThreePayloadWorkerResultV1(
+        input_identity: identity, new_summary_digest: d("summary"),
+        query_reads: reads, portable_refs: [],
+        diagnostic_digest: d("diagnostics"), read_receipt: receipt))
+
+fn diagnostic_manifest() -> DiagnosticManifestV1:
+    val first = DiagnosticManifestEntryV1(source_digest: d("source"),
+        start_byte: 2, end_byte: 4, severity: DiagnosticSeverityV1.Warning,
+        code: "W001", message: "first")
+    val second = DiagnosticManifestEntryV1(source_digest: d("source"),
+        start_byte: 8, end_byte: 9, severity: DiagnosticSeverityV1.Error,
+        code: "E002", message: "second")
+    DiagnosticManifestV1(schema: 1, sorted_entries: [first, second])
+
+fn generation_manifest_bytes() -> [u8]:
+    generation_manifest_encode_v1(GenerationManifestV1(schema: 1,
+        snapshot_digest: d("snapshot"), catalog_digest: d("catalog"),
+        summary_refs: [], scope_refs: [], rr_shard_refs: [],
+        forward_manifest_refs: [], portable_refs: [], target_refs: [],
+        diagnostic_refs: []))
+
+fn reverse_reference_shard_bytes() -> [u8]:
+    reverse_reference_shard_encode_v1(ReverseReferenceShardV1(schema: 1,
+        partition_id: "package", coverage: SemanticCoverageV1.Complete,
+        sorted_edges: []))
+
+describe "Verified CAS kind registry V1":
+    it "preserves all five CCH1 tags and exact canonical envelopes":
+        val kinds = ["source_blob", "compile_snapshot", "public_summary",
+            "file_ast", "semantic_read_set"]
+        val tags = [canonical_cache_kind_source_blob_v1(),
+            canonical_cache_kind_compile_snapshot_v1(),
+            canonical_cache_kind_public_summary_v1(),
+            canonical_cache_kind_file_ast_v1(),
+            canonical_cache_kind_semantic_read_set_v1()]
+        var index: i64 = 0
+        while index < kinds.len():
+            val bytes = canonical_cache_encode_envelope_v1(tags[index], 1,
+                [(index + 1) as u8])
+            val verified = verified_cas_verify_kind_bytes_v1(kinds[index], bytes)
+            expect(verified.ok).to_equal(true)
+            expect(verified.schema).to_equal(1)
+            expect(verified.canonical_bytes).to_equal(bytes)
+            expect(verified_cas_kind_digest_v1(kinds[index], bytes)).to_equal(
+                verified_cas_digest_v1(bytes))
+            expect(verified_cas_verify_kind_bytes_v1(kinds[index],
+                with_trailing_byte(bytes)).ok).to_equal(false)
+            index = index + 1
+        val source = canonical_cache_encode_envelope_v1(1, 1, [1 as u8])
+        expect(verified_cas_verify_kind_bytes_v1("compile_snapshot", source).ok).to_equal(false)
+        expect(verified_cas_verify_kind_bytes_v1("source_blob",
+            canonical_cache_encode_envelope_v1(1, 2, [1 as u8])).ok).to_equal(false)
+
+    it "binds the deterministic ordered registry including closed kinds":
+        val canonical = verified_cas_verifier_registry_canonical_v1()
+        val expected_order = ["source_blob", "compile_snapshot", "public_summary",
+            "file_ast", "semantic_read_set", "generation_manifest", "worker_result",
+            "forward_manifest", "diagnostic_manifest", "reverse_reference_shard",
+            "portable_hir_object", "target_artifact"]
+        var prior: i64 = -1
+        for kind in expected_order:
+            val position = canonical.index_of(kind + "\u0000")
+            expect(position).to_be_greater_than(prior)
+            prior = position
+        expect(verified_cas_verifier_registry_digest_v1()).to_equal(sha256_text(canonical))
+        expect(verified_cas_kind_schema_v1("portable_hir_object")).to_equal(2)
+        expect(verified_cas_kind_available_v1("portable_hir_object")).to_equal(false)
+        expect(verified_cas_kind_schema_v1("target_artifact")).to_equal(0)
+        expect(verified_cas_kind_available_v1("target_artifact")).to_equal(false)
+        expect(verified_cas_kind_known_v1("catalog")).to_equal(false)
+        expect(verified_cas_kind_known_v1("unknown")).to_equal(false)
+
+    it "admits exact GEN1 TPW1 SQR1 and RRS1 bytes without wrapping":
+        val kinds = ["generation_manifest", "worker_result", "forward_manifest",
+            "reverse_reference_shard"]
+        val payloads = [generation_manifest_bytes(), worker_result_bytes(),
+            forward_manifest_bytes(), reverse_reference_shard_bytes()]
+        var index: i64 = 0
+        while index < kinds.len():
+            expect(payloads[index].len()).to_be_greater_than(0)
+            val verified = verified_cas_verify_kind_bytes_v1(kinds[index], payloads[index])
+            expect(verified.ok).to_equal(true)
+            expect(verified.canonical_bytes).to_equal(payloads[index])
+            expect(verified_cas_kind_digest_v1(kinds[index],
+                verified.canonical_bytes)).to_equal(
+                sha256_u8_hex(payloads[index]))
+            expect(verified_cas_verify_kind_bytes_v1(kinds[index],
+                with_trailing_byte(payloads[index])).ok).to_equal(false)
+            index = index + 1
+
+    it "round trips bounded DGM1 and rejects noncanonical order and trailing bytes":
+        val value = diagnostic_manifest()
+        val bytes = diagnostic_manifest_encode_v1(value)
+        expect(bytes.len()).to_be_greater_than(0)
+        val decoded = diagnostic_manifest_decode_bounded_v1(bytes, 2)
+        expect(decoded.ok).to_equal(true)
+        expect(verified_cas_verify_kind_bytes_v1("diagnostic_manifest", bytes).ok).to_equal(true)
+        expect(verified_cas_verify_kind_bytes_v1("diagnostic_manifest",
+            with_trailing_byte(bytes)).ok).to_equal(false)
+        expect(diagnostic_manifest_decode_bounded_v1(bytes, 1).ok).to_equal(false)
+        val reversed = DiagnosticManifestV1(schema: 1,
+            sorted_entries: [value.sorted_entries[1], value.sorted_entries[0]])
+        expect(diagnostic_manifest_encode_v1(reversed).len()).to_equal(0)
+
+    it "fails closed for unknown target and generic portable admission":
+        expect(portable_hir_semantic_verifier_available_v1()).to_equal(false)
+        expect(portable_hir_semantic_verifier_blocker_v1()).to_equal(
+            semantic_scope_live_port_contract_blocker_v1())
+        expect(verified_cas_verify_kind_bytes_v1("unknown", [1 as u8]).ok).to_equal(false)
+        expect(verified_cas_verify_kind_bytes_v1("target_artifact", [1 as u8]).ok).to_equal(false)
+        expect(verified_cas_verify_kind_bytes_v1("portable_hir_object",
+            "hir".bytes()).ok).to_equal(false)
+        expect(verified_cas_verify_portable_hir_bytes_v1(portable_ref(),
+            "portable-hir-bytes".bytes(),
+            portable_hir_semantic_verifier_digest_v1(), nil).ok).to_equal(false)
+        expect(verified_cas_put_v1("unused-root", "portable_hir_object",
+            "portable-hir-bytes".bytes()).is_err()).to_equal(true)
+        expect(verified_cas_get_portable_hir_v1("unused-root", portable_ref(),
+            portable_hir_semantic_verifier_digest_v1(), nil, 1024).is_err()).to_equal(true)
+        expect(verified_cas_put_portable_hir_v1("unused-root", portable_ref(),
+            "portable-hir-bytes".bytes(), portable_hir_semantic_verifier_digest_v1(),
+            nil).is_err()).to_equal(true)
+        expect(verified_cas_object_path_v1("unused-root", "catalog", d("x")).is_err()).to_equal(true)

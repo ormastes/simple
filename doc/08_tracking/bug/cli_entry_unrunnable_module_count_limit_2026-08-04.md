@@ -1,4 +1,9 @@
 # The pure-Simple CLI entry cannot be run at all — 800-module import limit
+## Closed 2026-09-16 — Status RESOLVED 2026-08-10; limit raised, re-verified on origin/main
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** RESOLVED (module-count-limit cause) — 2026-08-10
 **Found:** 2026-08-04
@@ -121,3 +126,4 @@ chased further here — out of scope for this bug, and `bin/simple test
 test/02_integration/app/cli_log_modes_spec.spl` was not re-verified to green
 in this session (the daemon-bypass path timed out at 100s during
 verification, a separate harness-speed issue, not re-diagnosed here).
+

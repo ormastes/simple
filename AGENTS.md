@@ -96,15 +96,6 @@ worktree and active session scope. If another session owns a dirty file or a
 different feature lane, do not fold that work into your change unless the user
 explicitly asks for a combined commit.
 
-When reporting recent Codex sessions, order rollouts by their embedded/session
-start timestamp, not filesystem modification time: resume and compaction may
-touch old rollout files in bulk. Report execution state and goal state
-separately. A live process or open rollout file does not prove an active turn;
-the latest lifecycle event must be `task_started` without a matching
-`task_complete`. Likewise, a completed turn does not complete its thread goal:
-only the latest explicit goal status does. Summarize objectives and never echo
-credentials or unrelated prompt content.
-
 When asked to "find similar" or "go the found", inspect active process/session
 IDs and continue only the requested lane. Treat all unrelated dirty files as
 other-agent work: preserve them, avoid reverting them, and mention them
@@ -274,26 +265,41 @@ Must show `STATUS: PASS` before release.
 
 ---
 
-## Step 5: Release
+## Step 5: Land (every change) and Release
 
-Run `/release` — version bump, CHANGELOG, commit, tag, and push only after
-`/verify` shows `STATUS: PASS`.
-
-Release preparation uses an isolated work branch/worktree. It does not move a
-protected branch or create a tag. After exact candidate admission, the release
-authority promotes without rebuilding and pushes exactly one signed tag:
+**A task is finished when its PR is MERGED, not when a PR is open.** `main`
+and `release/*` reject direct pushes (GH013 — `jj bookmark set main` +
+`jj git push --bookmark main` no longer works). Land through a PR and merge it
+yourself; do not stop at a draft or an `awaiting-*` handoff state:
 
 ```bash
-jj git fetch
-jj rebase -d <target>@origin
-env -u GITHUB_TOKEN -u GH_TOKEN jj git push --bookmark <work-branch>
-# Protected integration and exact signed-tag publication occur only through
-# the reviewed integration/release authority.
+git push origin <sha>:refs/heads/work/<topic>          # only your commits
+gh pr create --base main --head work/<topic> ...        # non-draft once complete
+gh pr diff <n>                                          # exact-head review, zero P0/P1
+gh pr review <n> --comment -b "<what you verified>"     # --approve always fails (self-authored)
+gh pr merge <n> --admin --merge                         # owner PR-only bypass
+git push origin --delete work/<topic>
 ```
 
-Ask before pushing. Never push `main`, `release/*`, `candidate/*`, or all tags
-from an authoring session. Treat "pull" as `jj git fetch` plus `jj rebase`; do not use
-merge-style pulls.
+- Use `--draft` only while the work is genuinely unfinished; when it is done,
+  `gh pr ready <n>` and land it in the same session.
+- `SPipe Self Review Admission` is a user/LLM review, not a lock: any push to
+  `main`/`release/**` invalidates it on every open PR and it expires in 10
+  minutes. Do not wait for it to stay green — review, then `--admin` merge.
+- Before `--admin`, read the PR's review comments
+  (`gh pr view <n> --comments`). A finding that your change breaks callers or
+  regresses a spec blocks the merge until you fix it or reply with evidence it
+  is wrong; "someone else reviewed it" is not a reason to merge over it.
+- Never `--admin` over a genuinely FAILING check caused by your change, and
+  never merge another session's active draft. Recipe and rules:
+  `.claude/rules/vcs.md` § "Force-landing a PR".
+- Pushing a `work/*` branch and landing its reviewed PR needs no extra
+  permission. Ask first only for release tags and publication.
+
+Releases: run `/release` only after `/verify` shows `STATUS: PASS`; the release
+commit lands through the same PR flow, then `git push origin refs/tags/vX.Y.Z`
+(tag a commit already on `main`). Treat "pull" as `jj git fetch` plus
+`jj rebase`; do not use merge-style pulls.
 
 When pushing over HTTPS with GitHub CLI credentials, stale `GH_TOKEN` or
 `GITHUB_TOKEN` environment values can override the stored `gh` token. Do not
@@ -314,13 +320,7 @@ MCP server available via npm: `@simple-lang/mcp-server`
 
 ## Critical Rules
 
-- Web producers lower through web semantic/layout; GUI producers lower through
-  their canonical widget/scene semantic owners. Both emit `DrawIrComposition`.
-  Engine2D lowers Draw IR text through `draw_text`; an enabled vector face uses
-  transient `FontRenderer`/`FontRenderBatch` material. Do not put
-  transient atlas/cache material in Draw IR or add private parallel font draw
-  paths. Engine3D HUD/world is a separate lane, never a GUI/web/2D shortcut.
-
+- **Finish = merged PR.** Push a `work/*` branch, open the PR, review it, and land it yourself with `gh pr merge <n> --admin --merge` (Step 5). Never leave a finished change as a draft or `awaiting-*` PR; never push `main`/`release/*` directly.
 - **Default tooling = pure-Simple self-hosted binary, not the Rust seed.** `test`/`lint`/`fmt`/`build`/`run`/MCP/LSP all run on `bin/release/<triple>/simple` (built via bootstrap). The seed (`src/compiler_rust/target/bootstrap/simple`) is bootstrap-only. If the self-hosted binary is slow/unstable, fix it in pure-Simple (`src/compiler`/`src/lib`/`src/app`) and re-deploy or file a bug — don't fall back to the seed. See `.claude/rules/bootstrap.md`
 - **Self-sufficient**: never fail because another LLM didn't do its step — do it yourself
 - When a short, safe grammar or compact expression form fails, compiles too slowly, or forces a workaround, fix it or record a concrete bug/feature request instead of silently normalizing the workaround

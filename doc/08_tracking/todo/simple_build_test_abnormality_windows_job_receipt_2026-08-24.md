@@ -2,6 +2,12 @@
 
 Status: blocked pending a prepared Windows qualification host.
 
+2026-09-16 triage: reviewed on a Windows host; the unblock work below is a
+multi-day runtime-contract change (versioned owned-process ABI extension,
+Job Object limit application before resume, accounting/limit-violation receipt
+fields, and a six-fixture qualification run) owned by the runtime/process
+provider maintainer — out of scope for a single tracking pass. No state change.
+
 Owner: runtime/process provider maintainer.
 
 Current source boundary: `src/runtime/runtime_process_owned.c` returns `ENOTSUP` from the observed owned-process ABI on `_WIN32`; `src/runtime/runtime_process.c` already owns the established Job Object launch/kill lifecycle. `resource_scope.spl` therefore executes through the legacy bounded facade and reports `ResourceEvidenceQuality.Unavailable` rather than fabricating parity.

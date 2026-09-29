@@ -1,0 +1,66 @@
+use std.spec.{describe, it, expect}
+use std.io_runtime.{dir_create_all, file_write, file_delete, file_exists, process_run}
+use std.nogc_sync_mut.io_runtime.{dir_remove}
+use std.scv.compile_source_inventory.{compile_source_inventory_read_current_v1, compile_source_inventory_read_pointer_content_v1}
+use app.compiler_entrypoint.inventory_events.{compiler_inventory_refresh_v1}
+
+extern fn rt_getpid() -> i64
+
+fn membership_digest(pointer: text) -> text:
+    val marker = "untracked_membership_digest="
+    val start = pointer.index_of(marker)
+    if start < 0:
+        return ""
+    pointer.substring(start + marker.len())
+
+describe "compiler inventory untracked membership retention":
+    it "retires the old record after a successful warm pointer update":
+        val root = "build/test-artifacts/scv-membership-gc-{rt_getpid()}"
+        val cache_root = root + "/build/scv"
+        val records = cache_root + "/compile-events/untracked/"
+        dir_remove(root, true)
+        expect(dir_create_all(root + "/src")).to_equal(true)
+        expect(file_write(root + "/src/tracked.spl", "export fn tracked(): 1\n")).to_equal(true)
+        val (_, _, init_code) = process_run("git", ["-C", root, "init", "-q"])
+        expect(init_code).to_equal(0)
+        val (_, _, add_code) = process_run("git", ["-C", root, "add", "src/tracked.spl"])
+        expect(add_code).to_equal(0)
+        val (_, _, commit_code) = process_run("git", ["-C", root,
+            "-c", "user.name=Simple Test", "-c", "user.email=test@example.invalid",
+            "-c", "commit.gpgsign=false", "commit", "-qm", "seed"])
+        expect(commit_code).to_equal(0)
+        expect(file_write(root + "/src/a.spl", "export fn a(): 2\n")).to_equal(true)
+        expect(compiler_inventory_refresh_v1(root, cache_root, ["src"], true).valid).to_equal(true)
+        val first = membership_digest(
+            compile_source_inventory_read_pointer_content_v1(cache_root) ?? "")
+        expect(first.len()).to_equal(64)
+        expect(file_exists(records + first + ".paths")).to_equal(true)
+
+        expect(file_write(root + "/src/b.spl", "export fn b(): 3\n")).to_equal(true)
+        expect(compiler_inventory_refresh_v1(root, cache_root, ["src"], false).valid).to_equal(true)
+        val second = membership_digest(
+            compile_source_inventory_read_pointer_content_v1(cache_root) ?? "")
+        expect(second == first).to_equal(false)
+        expect(file_exists(records + second + ".paths")).to_equal(true)
+        expect(file_exists(records + first + ".paths")).to_equal(false)
+
+        expect(file_delete(root + "/src/b.spl")).to_equal(true)
+        expect(compiler_inventory_refresh_v1(root, cache_root, ["src"], false).valid).to_equal(true)
+        expect(file_exists(records + second + ".paths")).to_equal(false)
+
+        # Git must classify this exact former untracked path as staged. A
+        # glob interpretation of [a] can miss it and publish a false delete.
+        expect(file_write(root + "/src/[a].spl", "export fn bracket(): 4\n")).to_equal(true)
+        expect(compiler_inventory_refresh_v1(root, cache_root, ["src"], false).valid).to_equal(true)
+        val (_, _, stage_code) = process_run("git", ["-C", root, "add", "--", ":(literal)src/[a].spl"])
+        expect(stage_code).to_equal(0)
+        expect(compiler_inventory_refresh_v1(root, cache_root, ["src"], false).valid).to_equal(true)
+        val staged = compile_source_inventory_read_current_v1(cache_root)
+        expect(staged.valid).to_equal(true)
+        if staged.valid:
+            var found = false
+            for entry in staged.inventory!.entries:
+                if entry.source_identity == "src/[a].spl":
+                    found = true
+            expect(found).to_equal(true)
+        dir_remove(root, true)

@@ -52,7 +52,11 @@ thread_local! {
 }
 
 /// True when `s` contains no byte >= 0x80. Memoized per string allocation.
-fn shared_text_is_ascii(s: &Arc<String>) -> bool {
+///
+/// `pub(crate)` (not just module-private) so `interpreter::expr::collections`'s
+/// `indexed_string_char` (the `s[i]` path) can share this memo instead of
+/// re-running its own `s.is_ascii()` scan per call -- see that file.
+pub(crate) fn shared_text_is_ascii(s: &Arc<String>) -> bool {
     ASCII_MEMO.with(|cell| {
         let mut m = cell.borrow_mut();
         let (slots, next) = &mut *m;
@@ -170,8 +174,8 @@ fn try_bare_some_option_method(
 // Re-export the with-self-update functions
 pub(crate) use special::{
     evaluate_call_args, exec_function_with_self_return, find_and_exec_method_with_self,
-    find_and_exec_method_with_self_owned, find_and_exec_method_with_self_owned_values, lookup_class_method_index,
-    lookup_impl_method_index, object_method_exists,
+    find_and_exec_method_with_self_owned, exec_resolved_method_with_self_owned_values, lookup_class_method_index,
+    lookup_impl_method_index, resolve_object_method, ResolvedMethod,
 };
 
 fn use_bare_module_fallback(receiver_in_env: bool, receiver_is_class: bool, receiver_is_enum: bool) -> bool {
@@ -190,6 +194,9 @@ pub(crate) fn evaluate_method_call(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
+    if std::env::var("SIMPLE_DEBUG_WBMA").is_ok() {
+        eprintln!("[eval-method-call] method={} argc={}", method, args.len());
+    }
     // Support module-style dot calls (lib.func()) by resolving directly to imported functions/classes.
     if let Expr::Identifier(module_name) = receiver.as_ref() {
         if method == "empty" {
@@ -275,6 +282,45 @@ pub(crate) fn evaluate_method_call(
             }
             if let Value::Constructor { class_name } = func_val {
                 return instantiate_class(class_name, args, env, functions, classes, enums, impl_methods);
+            }
+        }
+        // Self-named module shadowing: `use a.b.Foo.{Foo}` binds the *module*
+        // namespace dict to `Foo` when the module file and the class share a
+        // name, so `Foo.static_method(..)` reached here as a Dict receiver and
+        // died with "method `static_method` not found on type `dict`". The
+        // module dict still carries both the class constructor (`Foo`) and its
+        // mangled static (`Foo__static_method`), so resolve through them.
+        // Ambiguity (two classes in the module both exposing the static) is
+        // deliberately left to the normal error below.
+        {
+            let mut hit: Option<&Value> = None;
+            let mut ambiguous = false;
+            for entry in module_dict.values() {
+                if let Value::Constructor { class_name } = entry {
+                    if let Some(static_fn) = module_dict.get(&format!("{class_name}__{method}")) {
+                        if matches!(static_fn, Value::Function { .. }) {
+                            if hit.is_some() {
+                                ambiguous = true;
+                            }
+                            hit = Some(static_fn);
+                        }
+                    }
+                }
+            }
+            if !ambiguous {
+                if let Some(Value::Function { def, captured_env, .. }) = hit {
+                    let mut captured_env_clone = Env::clone(captured_env);
+                    return exec_function_with_captured_env(
+                        def,
+                        args,
+                        env,
+                        &mut captured_env_clone,
+                        functions,
+                        classes,
+                        enums,
+                        impl_methods,
+                    );
+                }
             }
         }
         // Handle typed dict objects (from ClassName.new()) - look up methods from impl/class
@@ -1818,6 +1864,9 @@ pub(crate) fn evaluate_method_call_with_self_update(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<(Value, Option<Value>), CompileError> {
+    if std::env::var("SIMPLE_DEBUG_WBMA").is_ok() {
+        eprintln!("[eval-method-call-self-update] method={} argc={}", method, args.len());
+    }
     // Builtin text static methods — intercept before evaluate_expr to avoid
     // "variable `text` not found" when the receiver is the builtin type name.
     if let Expr::Identifier(module_name) = receiver.as_ref() {

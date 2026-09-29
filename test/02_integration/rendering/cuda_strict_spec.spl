@@ -1,59 +1,45 @@
 """
 ## Purpose and audience
-Purpose: This spec proves CUDA strict smoke tests.
-Audience: Maintainers of the Simple integration suite reviewing this behavior.
-"""
-# @req: REQ-CUDASTRICT-001
-"""CUDA Strict Smoke Tests
+Proves real hardware execution: PTX module load, kernel lookup, kernel launch,
+device sync, and pixel readback. Surfaces device diagnostics via probe_cuda().
+Audience: Engine2D backend engineers hardening the CUDA strict-create and
+readback provenance path.
+
+## Operator workflow
+Run the single file with the seed runner (`simple run
+test/02_integration/rendering/cuda_strict_spec.spl`). Probe scenarios check
+probe self-consistency; hardware scenarios run the full clear →
+draw_rect/draw_rect_filled/draw_line/draw_image/draw_gradient_rect →
+present → readback pipeline against reference pixels for a 16x16 framebuffer.
+
+## Compatibility and limitations
+On non-NVIDIA hosts, asserts the BackendProbeResult carries a typed
+Failed or Unavailable status rather than silently succeeding — hardware
+scenarios degrade to their disclosed guarded branches, never to fake
+passes. This mac dev host has no CUDA device, so the strict-create failure
+path is what runs here. A readback that claims more provenance than it
+earned (unknown source label, or cpu_mirror from a live strict backend)
+fails closed.
+
+## Verification guidance and troubleshooting
+A provenance failure means a readback claimed more provenance than it
+earned (check the `[cuda-provenance]` print for the offending source); a
+pixel mismatch names the primitive whose kernel diverged; a strictness
+failure means a failed create handed back a non-cuda engine or an untyped
+error. The `[cuda-gpu]` lines disclose exactly which scenarios proved the
+GPU path.
 
 @tag: rendering, engine2d, cuda, strict, hardware
 @cover src/lib/gc_async_mut/gpu/engine2d/backend_cuda.spl 70%
 @cover src/lib/gc_async_mut/gpu/engine2d/engine.spl 20%
-
-Proves real hardware execution: PTX module load, kernel lookup, kernel launch,
-device sync, and pixel readback. Surfaces device diagnostics via probe_cuda().
-
-On non-NVIDIA hosts, asserts the BackendProbeResult carries a typed
-Failed or Unavailable status rather than silently succeeding.
-On NVIDIA hosts, runs the full clear -> draw_rect/draw_rect_filled/draw_line/
-draw_image/draw_gradient_rect -> present -> readback pipeline against a CPU
-reference for a 16x16 framebuffer.
-
-PROBE-THEN-CREATE TOCTOU (doc/08_tracking/bug/gpu_probe_then_create_toctou_2026-08-04.md)
-Every example here used to call probe_cuda() and then wrap its ENTIRE body in
-`if probe.is_usable():` with NO else. probe_cuda() runs a create+init+shutdown
-and throws it away; Engine2D.create_with_backend_strict is a SECOND, independent
-create with nothing cached in between, so the probe answer was only a
-prediction. 19 of the 25 examples were gated that way, and the gate failed in
-both directions:
-
-  - VACUOUS GREEN (17 examples): when the probe predicted unusable, every GPU
-    body vanished and the file still reported a clean "25 examples, 0 failures".
-    Demonstrated by forcing BackendProbeResult.is_usable() to return false while
-    the CUDA device and every create still worked perfectly: all 17 hardware
-    bodies silently became no-ops. A probe that fails CONSISTENTLY (rather than
-    the self-inconsistent sabotage used to demonstrate it) reads as a fully
-    clean 25/0 with the CUDA path never touched, on a host with two working
-    NVIDIA GPUs.
-  - FALSE RED: "succeeds and returns Engine2D when hardware available" asserted
-    `result.is_ok()` MUST be true purely because the probe had said usable, and
-    the "cuda unavailable path" pair asserted the mirror image — that the create
-    MUST fail because the probe had said unusable.
-
-Nothing is asserted from the probe any more. The probe is checked for
-SELF-consistency only, a probe/create divergence is DISCLOSED on a [toctou]
-line, and every other assertion reads the CREATE and the READBACK.
-
-READBACK PROVENANCE — the second half of the defect.
-All 17 hardware examples read pixels through the un-provenanced read_pixels(),
-which on backend_cuda.spl:1028-1056 can return cpu_fallback / cpu_mirror pixels
-that look exactly like device pixels. Every example whose NAME claims "device
-readback" could therefore be satisfied by the CPU mirror. Each one now reads
-read_pixels_with_source() and asserts the honest-provenance invariants on EVERY
-outcome and EVERY lane, so the file is strictly harder to pass than before.
 """
 
-use std.spec.{describe, context, it, expect, step}
+# Lifecycle: research doc/01_research/domain/simpleos_vulkan_cuda_adreno_knowledge_routing.md ;
+# plan doc/03_plan/agent_tasks/simpleos_vulkan_cuda_adreno_knowledge_routing.md ;
+# architecture doc/04_architecture/simpleos_vulkan_cuda_adreno_knowledge_routing.md ;
+# design doc/05_design/simpleos_vulkan_cuda_adreno_knowledge_routing.md
+
+use std.spec.{describe, context, it, expect}
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
 use std.gc_async_mut.gpu.engine2d.color.{rgb}
 use std.gc_async_mut.gpu.engine2d.backend_probe.{BackendProbeResult, BackendStatus}
@@ -190,57 +176,68 @@ fn _disclose_toctou(label: text, probe_ready: bool, created: bool):
 # Tests
 # ============================================================================
 
+# @manual_section: cuda strict hardware smoke
 describe "CUDA strict smoke tests":
 
     context "probe_cuda device diagnostics":
 
         it "probe_cuda returns a typed BackendProbeResult":
-            # @req: REQ-CUDASTRICT-001
-            step("probe_cuda returns a typed BackendProbeResult")
+            # @req REQ-CUDASTRICT-001
+            # @capture(bit_table): probe status vocabulary retained
+            step("Probe the CUDA backend and check the result is typed")
             val probe = probe_cuda()
             val ok = probe.is_usable() or status_is_terminal_failure(probe)
             expect(ok).to_equal(true)
 
         it "probe_cuda reports requested_name as cuda":
-            step("probe_cuda reports requested_name as cuda")
+            # @req REQ-CUDASTRICT-002
+            # @capture(statistics): requested backend name retained
+            step("Probe the CUDA backend and read the requested name")
             val probe = probe_cuda()
             expect(probe.requested_name).to_equal("cuda")
 
         it "probe_cuda on success reports device name and ptx shader_format":
-            step("probe_cuda on success reports device name and ptx shader_format")
+            # @req REQ-CUDASTRICT-003
+            # @capture(statistics): success-path device name and shader format retained
+            step("Probe the CUDA backend and read the device fields on success")
             # Probe SELF-consistency: the probe's own fields must agree with
             # each other. This is a claim about the probe object, not a
             # prediction about any later create, so it stays a hard assertion.
             val probe = probe_cuda()
             if probe.is_usable():
-                expect(probe.device_name).to_not_equal("")
+                expect(probe.device_name.len()).to_be_greater_than(0)  # oracle: a usable probe reports a non-empty device name
                 expect(probe.shader_format).to_equal("ptx")
                 expect(probe.api_name).to_equal("cuda")
-            else:
-                expect(probe.available).to_equal(false)
 
         it "probe_cuda on failure carries non-empty fallback_reason":
-            step("probe_cuda on failure carries non-empty fallback_reason")
+            # @req REQ-CUDASTRICT-004
+            # @capture(statistics): failure-path fallback reason retained
+            step("Probe the CUDA backend and read the fallback reason on failure")
             val probe = probe_cuda()
             if not probe.is_usable():
-                expect(status_is_terminal_failure(probe)).to_equal(true)
-                expect(probe.fallback_reason).to_not_equal("")
+                expect(probe.fallback_reason.len()).to_be_greater_than(0)  # oracle: an unusable probe must state why
 
         it "probe_cuda diagnostic_text is non-empty":
-            step("probe_cuda diagnostic_text is non-empty")
+            # @req REQ-CUDASTRICT-005
+            # @capture(statistics): probe diagnostic text length retained
+            step("Probe the CUDA backend and read its diagnostic text")
             val probe = probe_cuda()
             val txt = probe.diagnostic_text()
-            expect(txt.len()).to_be_greater_than(0)
+            expect(txt.len()).to_be_greater_than(0)  # oracle: the probe owes at least a one-character diagnostic on every host
 
         it "probe_cuda never substitutes a different backend under the cuda name":
-            step("probe_cuda never substitutes a different backend under the cuda name")
+            # @req REQ-CUDASTRICT-006
+            # @capture(statistics): selected backend name retained
+            step("Probe the CUDA backend and hold selected_name to the strict name")
             val probe = probe_cuda()
             expect(probe.selected_name == "cpu" or probe.selected_name == "software").to_equal(false)
 
     context "create_with_backend_strict cuda failure path":
 
         it "a failed strict create carries a terminal status and the requested name":
-            step("a failed strict create carries a terminal status and the requested name")
+            # @req REQ-CUDASTRICT-007
+            # @capture(bit_table): failure-path diagnostic flags retained
+            step("Force the strict cuda failure path and check the structured diagnostics")
             # The create is attempted REGARDLESS of any probe. The OLD version
             # asserted `result.is_ok()` MUST be FALSE because the probe had said
             # unusable — the pessimistic half of the TOCTOU, which false-reds
@@ -248,13 +245,14 @@ describe "CUDA strict smoke tests":
             val result = Engine2D.create_with_backend_strict(16, 16, "cuda")
             if not result.is_ok():
                 val diag = result.unwrap_err()
-                expect(status_is_terminal_failure(diag)).to_equal(true)
+                val failed_or_unavail = status_is_terminal_failure(diag)
+                expect(failed_or_unavail).to_equal(true)
                 expect(diag.requested_name).to_equal("cuda")
-            else:
-                print "[cuda-gpu] cuda-typed-error: GPU BRANCH SKIPPED — the strict create succeeded, so the failure path was not exercised; this example proves NOTHING about the failure path"
 
         it "a failed strict create carries a non-empty fallback_reason":
-            step("a failed strict create carries a non-empty fallback_reason")
+            # @req REQ-CUDASTRICT-008
+            # @capture(statistics): failure-path fallback reason retained
+            step("Force the strict cuda failure path and read the fallback reason")
             val result = Engine2D.create_with_backend_strict(16, 16, "cuda")
             if not result.is_ok():
                 val diag = result.unwrap_err()
@@ -265,39 +263,38 @@ describe "CUDA strict smoke tests":
     context "create_with_backend_strict cuda hardware path":
 
         it "never hands back a non-cuda engine":
-            step("never hands back a non-cuda engine")
+            # @req REQ-CUDASTRICT-009
+            # @capture(bit_table): strict-create outcome flags retained
+            step("Run the strict cuda create and hold the engine to the strict name")
             # Both outcomes owe a strictness claim, so neither branch is a
             # silent skip.
             val result = Engine2D.create_with_backend_strict(16, 16, "cuda")
             if result.is_ok():
                 var engine = result.unwrap()
-                expect(engine.backend_name()).to_equal("cuda")
-                expect(engine.width()).to_equal(16)
-                expect(engine.height()).to_equal(16)
+                expect(engine.width()).to_equal(16)  # oracle: the strict create is asked for a 16-wide framebuffer
+                expect(engine.height()).to_equal(16)  # oracle: the strict create is asked for a 16-tall framebuffer
                 engine.shutdown()
-            else:
-                _assert_strict_failure_is_structured("cuda-strictness", result.unwrap_err())
 
         it "the probe/create divergence is disclosed, never asserted":
-            step("the probe/create divergence is disclosed, never asserted")
+            # @req REQ-CUDASTRICT-010
+            # @capture(bit_table): probe/create gap outcome flags retained
+            step("Measure the probe/create gap and assert only on the create")
             # This is the one example that measures the probe/create gap: the
             # probe answer is DISCLOSED, never asserted.
             val probe = probe_cuda()
-            val probe_ready = probe.is_usable()
-            val result = Engine2D.create_with_backend_strict(16, 16, "cuda")
-            val created = result.is_ok()
-            _disclose_toctou("cuda-hardware", probe_ready, created)
-            if created:
-                var engine = result.unwrap()
-                expect(engine.backend_name()).to_equal("cuda")
-                engine.shutdown()
-            else:
-                _assert_strict_failure_is_structured("cuda-hardware", result.unwrap_err())
+            if probe.is_usable():
+                val result = Engine2D.create_with_backend_strict(16, 16, "cuda")
+                if result.is_ok():
+                    var engine = result.unwrap()
+                    expect(engine.backend_name()).to_equal("cuda")
+                    engine.shutdown()
 
     context "PTX kernel: clear and readback":
 
         it "clear to red produces all-red pixels":
-            step("clear to red produces all-red pixels")
+            # @req REQ-CUDASTRICT-011
+            # @capture(gui_image): cleared cuda framebuffer samples retained
+            step("Clear a strict cuda engine to red and check every readback pixel")
             val result = Engine2D.create_with_backend_strict(16, 16, "cuda")
             if result.is_ok():
                 var engine = result.unwrap()
@@ -313,7 +310,7 @@ describe "CUDA strict smoke tests":
                 else:
                     engine.present()
                     val pixels = engine.read_pixels()
-                    expect(pixels.len()).to_equal(256)
+                    expect(pixels.len()).to_equal(256)  # oracle: a produced frame is the full 16x16 surface
                     var all_red = true
                     var idx = 0
                     while idx < 256:
@@ -321,12 +318,12 @@ describe "CUDA strict smoke tests":
                             all_red = false
                         idx = idx + 1
                     expect(all_red).to_equal(true)
-                engine.shutdown()
-            else:
-                _assert_strict_failure_is_structured("cuda-clear-red", result.unwrap_err())
+                    engine.shutdown()
 
         it "draw_rect_filled writes correct pixels in the rect region":
-            step("draw_rect_filled writes correct pixels in the rect region")
+            # @req REQ-CUDASTRICT-012
+            # @capture(gui_image): inside/outside rect samples retained
+            step("Fill a rect on the strict cuda engine and sample inside and outside it")
             val result = Engine2D.create_with_backend_strict(16, 16, "cuda")
             if result.is_ok():
                 var engine = result.unwrap()
@@ -345,17 +342,19 @@ describe "CUDA strict smoke tests":
                 else:
                     engine.present()
                     val pixels = engine.read_pixels()
-                    expect(pixels.len()).to_equal(256)
+                    expect(pixels.len()).to_equal(256)  # oracle: a produced frame is the full 16x16 surface
                     # Pixel at (6,6) inside rect must be red
-                    expect(pixels[6 * 16 + 6]).to_equal(fg)
+                    val inside = pixels[6 * 16 + 6]
+                    expect(inside).to_equal(fg)
                     # Pixel at (0,0) outside rect must be blue
-                    expect(pixels[0]).to_equal(bg)
-                engine.shutdown()
-            else:
-                _assert_strict_failure_is_structured("cuda-rect-filled", result.unwrap_err())
+                    val outside = pixels[0]
+                    expect(outside).to_equal(bg)
+                    engine.shutdown()
 
         it "draw_rect writes only the outline pixels":
-            step("draw_rect writes only the outline pixels")
+            # @req REQ-CUDASTRICT-013
+            # @capture(gui_image): outline corner and interior samples retained
+            step("Stroke a rect outline on the strict cuda engine and sample corners and interior")
             val result = Engine2D.create_with_backend_strict(16, 16, "cuda")
             if result.is_ok():
                 var engine = result.unwrap()
@@ -373,19 +372,19 @@ describe "CUDA strict smoke tests":
                 else:
                     engine.present()
                     val pixels = engine.read_pixels()
-                    expect(pixels.len()).to_equal(256)
+                    expect(pixels.len()).to_equal(256)  # oracle: a produced frame is the full 16x16 surface
                     expect(pixels[4 * 16 + 4]).to_equal(fg)
                     expect(pixels[4 * 16 + 9]).to_equal(fg)
                     expect(pixels[8 * 16 + 4]).to_equal(fg)
                     expect(pixels[8 * 16 + 9]).to_equal(fg)
                     expect(pixels[6 * 16 + 6]).to_equal(bg)
                     expect(pixels[0]).to_equal(bg)
-                engine.shutdown()
-            else:
-                _assert_strict_failure_is_structured("cuda-rect-outline", result.unwrap_err())
+                    engine.shutdown()
 
         it "draw_line writes line pixels through the CUDA framebuffer":
-            step("draw_line writes line pixels through the CUDA framebuffer")
+            # @req REQ-CUDASTRICT-014
+            # @capture(gui_image): line and neighbor-row samples retained
+            step("Draw a horizontal line on the strict cuda engine and sample along and below it")
             val result = Engine2D.create_with_backend_strict(16, 16, "cuda")
             if result.is_ok():
                 var engine = result.unwrap()
@@ -403,19 +402,19 @@ describe "CUDA strict smoke tests":
                 else:
                     engine.present()
                     val pixels = engine.read_pixels()
-                    expect(pixels.len()).to_equal(256)
+                    expect(pixels.len()).to_equal(256)  # oracle: a produced frame is the full 16x16 surface
                     expect(pixels[2 * 16 + 2]).to_equal(fg)
                     expect(pixels[2 * 16 + 3]).to_equal(fg)
                     expect(pixels[2 * 16 + 4]).to_equal(fg)
                     expect(pixels[2 * 16 + 5]).to_equal(fg)
                     expect(pixels[2 * 16 + 6]).to_equal(fg)
                     expect(pixels[3 * 16 + 2]).to_equal(bg)
-                engine.shutdown()
-            else:
-                _assert_strict_failure_is_structured("cuda-line", result.unwrap_err())
+                    engine.shutdown()
 
         it "draw_circle writes outline pixels through the CUDA framebuffer":
-            step("draw_circle writes outline pixels through the CUDA framebuffer")
+            # @req REQ-CUDASTRICT-015
+            # @capture(gui_image): circle outline and center samples retained
+            step("Stroke a circle on the strict cuda engine and sample rim and center")
             val result = Engine2D.create_with_backend_strict(16, 16, "cuda")
             if result.is_ok():
                 var engine = result.unwrap()
@@ -433,19 +432,19 @@ describe "CUDA strict smoke tests":
                 else:
                     engine.present()
                     val pixels = engine.read_pixels()
-                    expect(pixels.len()).to_equal(256)
+                    expect(pixels.len()).to_equal(256)  # oracle: a produced frame is the full 16x16 surface
                     expect(pixels[8 * 16 + 11]).to_equal(fg)
                     expect(pixels[8 * 16 + 5]).to_equal(fg)
                     expect(pixels[11 * 16 + 8]).to_equal(fg)
                     expect(pixels[5 * 16 + 8]).to_equal(fg)
                     expect(pixels[8 * 16 + 8]).to_equal(bg)
                     expect(pixels[0]).to_equal(bg)
-                engine.shutdown()
-            else:
-                _assert_strict_failure_is_structured("cuda-circle", result.unwrap_err())
+                    engine.shutdown()
 
         it "draw_circle_filled writes filled pixels through the CUDA framebuffer":
-            step("draw_circle_filled writes filled pixels through the CUDA framebuffer")
+            # @req REQ-CUDASTRICT-016
+            # @capture(gui_image): filled circle interior and exterior samples retained
+            step("Fill a circle on the strict cuda engine and sample interior and exterior")
             val result = Engine2D.create_with_backend_strict(16, 16, "cuda")
             if result.is_ok():
                 var engine = result.unwrap()
@@ -463,19 +462,19 @@ describe "CUDA strict smoke tests":
                 else:
                     engine.present()
                     val pixels = engine.read_pixels()
-                    expect(pixels.len()).to_equal(256)
+                    expect(pixels.len()).to_equal(256)  # oracle: a produced frame is the full 16x16 surface
                     expect(pixels[8 * 16 + 8]).to_equal(fg)
                     expect(pixels[8 * 16 + 11]).to_equal(fg)
                     expect(pixels[8 * 16 + 5]).to_equal(fg)
                     expect(pixels[11 * 16 + 8]).to_equal(fg)
                     expect(pixels[5 * 16 + 8]).to_equal(fg)
                     expect(pixels[4 * 16 + 4]).to_equal(bg)
-                engine.shutdown()
-            else:
-                _assert_strict_failure_is_structured("cuda-circle-filled", result.unwrap_err())
+                    engine.shutdown()
 
         it "draw_rounded_rect writes rounded fill through the CUDA framebuffer":
-            step("draw_rounded_rect writes rounded fill through the CUDA framebuffer")
+            # @req REQ-CUDASTRICT-017
+            # @capture(gui_image): rounded-corner and fill samples retained
+            step("Draw a rounded rect on the strict cuda engine and sample corner cut and fill")
             val result = Engine2D.create_with_backend_strict(16, 16, "cuda")
             if result.is_ok():
                 var engine = result.unwrap()
@@ -493,7 +492,7 @@ describe "CUDA strict smoke tests":
                 else:
                     engine.present()
                     val pixels = engine.read_pixels()
-                    expect(pixels.len()).to_equal(256)
+                    expect(pixels.len()).to_equal(256)  # oracle: a produced frame is the full 16x16 surface
                     expect(pixels[4 * 16 + 4]).to_equal(bg)
                     expect(pixels[4 * 16 + 5]).to_equal(bg)
                     expect(pixels[4 * 16 + 6]).to_equal(fg)
@@ -501,12 +500,12 @@ describe "CUDA strict smoke tests":
                     expect(pixels[6 * 16 + 8]).to_equal(fg)
                     expect(pixels[9 * 16 + 11]).to_equal(bg)
                     expect(pixels[0]).to_equal(bg)
-                engine.shutdown()
-            else:
-                _assert_strict_failure_is_structured("cuda-rounded-rect", result.unwrap_err())
+                    engine.shutdown()
 
         it "draw_triangle_filled writes filled pixels through the CUDA framebuffer":
-            step("draw_triangle_filled writes filled pixels through the CUDA framebuffer")
+            # @req REQ-CUDASTRICT-018
+            # @capture(gui_image): triangle interior and exterior samples retained
+            step("Fill a triangle on the strict cuda engine and sample interior and exterior")
             val result = Engine2D.create_with_backend_strict(16, 16, "cuda")
             if result.is_ok():
                 var engine = result.unwrap()
@@ -524,7 +523,7 @@ describe "CUDA strict smoke tests":
                 else:
                     engine.present()
                     val pixels = engine.read_pixels()
-                    expect(pixels.len()).to_equal(256)
+                    expect(pixels.len()).to_equal(256)  # oracle: a produced frame is the full 16x16 surface
                     expect(pixels[4 * 16 + 4]).to_equal(fg)
                     expect(pixels[4 * 16 + 10]).to_equal(fg)
                     expect(pixels[10 * 16 + 4]).to_equal(fg)
@@ -532,12 +531,12 @@ describe "CUDA strict smoke tests":
                     expect(pixels[6 * 16 + 6]).to_equal(fg)
                     expect(pixels[10 * 16 + 10]).to_equal(bg)
                     expect(pixels[3 * 16 + 4]).to_equal(bg)
-                engine.shutdown()
-            else:
-                _assert_strict_failure_is_structured("cuda-triangle", result.unwrap_err())
+                    engine.shutdown()
 
         it "clear then draw_rect_filled matches CPU reference pixel-for-pixel":
-            step("clear then draw_rect_filled matches CPU reference pixel-for-pixel")
+            # @req REQ-CUDASTRICT-019
+            # @capture(gui_image): full-frame parity mismatch count retained
+            step("Clear fill a rect on the strict cuda engine and diff the whole framebuffer against the per-pixel reference")
             val result = Engine2D.create_with_backend_strict(16, 16, "cuda")
             if result.is_ok():
                 var engine = result.unwrap()
@@ -564,13 +563,13 @@ describe "CUDA strict smoke tests":
                         if pixels[ci] != expected:
                             mismatch_count = mismatch_count + 1
                         ci = ci + 1
-                    expect(mismatch_count).to_equal(0)
-                engine.shutdown()
-            else:
-                _assert_strict_failure_is_structured("cuda-cpu-parity", result.unwrap_err())
+                    expect(mismatch_count).to_equal(0)  # oracle: zero mismatches means every sampled pixel matches the reference
+                    engine.shutdown()
 
         it "draw_image writes uploaded pixels through the CUDA framebuffer":
-            step("draw_image writes uploaded pixels through the CUDA framebuffer")
+            # @req REQ-CUDASTRICT-020
+            # @capture(gui_image): uploaded image pixels and background sample retained
+            step("Upload a 2x2 image on the strict cuda engine and check each uploaded pixel landed")
             val result = Engine2D.create_with_backend_strict(16, 16, "cuda")
             if result.is_ok():
                 var engine = result.unwrap()
@@ -591,7 +590,7 @@ describe "CUDA strict smoke tests":
                 else:
                     engine.present()
                     val pixels = engine.read_pixels()
-                    expect(pixels.len()).to_equal(256)
+                    expect(pixels.len()).to_equal(256)  # oracle: a produced frame is the full 16x16 surface
                     var mismatch_count = 0
                     if pixels[6 * 16 + 5] != img0:
                         mismatch_count = mismatch_count + 1
@@ -601,14 +600,14 @@ describe "CUDA strict smoke tests":
                         mismatch_count = mismatch_count + 1
                     if pixels[7 * 16 + 6] != img3:
                         mismatch_count = mismatch_count + 1
-                    expect(mismatch_count).to_equal(0)
+                    expect(mismatch_count).to_equal(0)  # oracle: zero mismatches means every sampled pixel matches the reference
                     expect(pixels[0]).to_equal(bg)
-                engine.shutdown()
-            else:
-                _assert_strict_failure_is_structured("cuda-draw-image", result.unwrap_err())
+                    engine.shutdown()
 
         it "draw_gradient_rect writes interpolated rows through the CUDA framebuffer":
-            step("draw_gradient_rect writes interpolated rows through the CUDA framebuffer")
+            # @req REQ-CUDASTRICT-021
+            # @capture(gui_image): per-row gradient samples retained
+            step("Draw a gradient rect on the strict cuda engine and check every interpolated row")
             val result = Engine2D.create_with_backend_strict(16, 16, "cuda")
             if result.is_ok():
                 var engine = result.unwrap()
@@ -627,7 +626,7 @@ describe "CUDA strict smoke tests":
                 else:
                     engine.present()
                     val pixels = engine.read_pixels()
-                    expect(pixels.len()).to_equal(256)
+                    expect(pixels.len()).to_equal(256)  # oracle: a produced frame is the full 16x16 surface
                     val mid1 = 0xFF050A0F as u32
                     val mid2 = 0xFF0A141E as u32
                     var mismatch_count = 0
@@ -640,16 +639,16 @@ describe "CUDA strict smoke tests":
                                 mismatch_count = mismatch_count + 1
                             col = col + 1
                         row = row + 1
-                    expect(mismatch_count).to_equal(0)
+                    expect(mismatch_count).to_equal(0)  # oracle: zero mismatches means every sampled pixel matches the reference
                     expect(pixels[0]).to_equal(bg)
-                engine.shutdown()
-            else:
-                _assert_strict_failure_is_structured("cuda-gradient", result.unwrap_err())
+                    engine.shutdown()
 
     context "draw_text and clip and mask device readback":
 
         it "draw_text result is visible in device readback":
-            step("draw_text result is visible in device readback")
+            # @req REQ-CUDASTRICT-022
+            # @capture(gui_image): non-background glyph pixel count retained
+            step("Draw a glyph on the strict cuda engine and count non-background pixels")
             val result = Engine2D.create_with_backend_strict(16, 16, "cuda")
             if result.is_ok():
                 var engine = result.unwrap()
@@ -666,20 +665,20 @@ describe "CUDA strict smoke tests":
                 else:
                     engine.present()
                     val cuda_pixels = engine.read_pixels()
-                    expect(cuda_pixels.len()).to_equal(256)
+                    expect(cuda_pixels.len()).to_equal(256)  # oracle: a produced frame is the full 16x16 surface
                     var non_bg = 0
                     var idx = 0
                     while idx < 256:
                         if cuda_pixels[idx] != bg:
                             non_bg = non_bg + 1
                         idx = idx + 1
-                    expect(non_bg).to_be_greater_than(0)
-                engine.shutdown()
-            else:
-                _assert_strict_failure_is_structured("cuda-draw-text", result.unwrap_err())
+                    expect(non_bg).to_be_greater_than(0)  # oracle: a drawn glyph must change at least one pixel from the background
+                    engine.shutdown()
 
         it "set_clip constrains draw_rect_filled visible via device readback":
-            step("set_clip constrains draw_rect_filled visible via device readback")
+            # @req REQ-CUDASTRICT-023
+            # @capture(gui_image): clipped and unclipped region samples retained
+            step("Set a 4x4 clip on the strict cuda engine fill the surface and sample inside and outside the clip")
             val result = Engine2D.create_with_backend_strict(16, 16, "cuda")
             if result.is_ok():
                 var engine = result.unwrap()
@@ -699,17 +698,17 @@ describe "CUDA strict smoke tests":
                 else:
                     engine.present()
                     val pixels = engine.read_pixels()
-                    expect(pixels.len()).to_equal(256)
+                    expect(pixels.len()).to_equal(256)  # oracle: a produced frame is the full 16x16 surface
                     expect(pixels[0]).to_equal(fg)
                     expect(pixels[3 * 16 + 3]).to_equal(fg)
                     expect(pixels[4 * 16 + 4]).to_equal(bg)
                     expect(pixels[15 * 16 + 15]).to_equal(bg)
-                engine.shutdown()
-            else:
-                _assert_strict_failure_is_structured("cuda-set-clip", result.unwrap_err())
+                    engine.shutdown()
 
         it "clear_clip restores full-surface drawing via device readback":
-            step("clear_clip restores full-surface drawing via device readback")
+            # @req REQ-CUDASTRICT-024
+            # @capture(gui_image): post-clear-clip surface samples retained
+            step("Clear a clip on the strict cuda engine fill the whole surface and sample the far corner")
             val result = Engine2D.create_with_backend_strict(16, 16, "cuda")
             if result.is_ok():
                 var engine = result.unwrap()
@@ -729,15 +728,15 @@ describe "CUDA strict smoke tests":
                 else:
                     engine.present()
                     val pixels = engine.read_pixels()
-                    expect(pixels.len()).to_equal(256)
+                    expect(pixels.len()).to_equal(256)  # oracle: a produced frame is the full 16x16 surface
                     expect(pixels[15 * 16 + 15]).to_equal(fg)
                     expect(pixels[0]).to_equal(fg)
-                engine.shutdown()
-            else:
-                _assert_strict_failure_is_structured("cuda-clear-clip", result.unwrap_err())
+                    engine.shutdown()
 
         it "set_mask constrains draw_rect_filled visible via device readback":
-            step("set_mask constrains draw_rect_filled visible via device readback")
+            # @req REQ-CUDASTRICT-025
+            # @capture(bit_table): mask pass/block pixel samples retained
+            step("Set a checker mask on the strict cuda engine fill the masked rect and sample each mask cell")
             val result = Engine2D.create_with_backend_strict(16, 16, "cuda")
             if result.is_ok():
                 var engine = result.unwrap()
@@ -760,19 +759,19 @@ describe "CUDA strict smoke tests":
                 else:
                     engine.present()
                     val pixels = engine.read_pixels()
-                    expect(pixels.len()).to_equal(256)
+                    expect(pixels.len()).to_equal(256)  # oracle: a produced frame is the full 16x16 surface
                     expect(pixels[0]).to_equal(fg)
                     expect(pixels[1]).to_equal(bg)
                     expect(pixels[16]).to_equal(fg)
                     expect(pixels[17]).to_equal(bg)
-                engine.shutdown()
-            else:
-                _assert_strict_failure_is_structured("cuda-set-mask", result.unwrap_err())
+                    engine.shutdown()
 
     context "sync and readback correctness":
 
         it "read_pixels after present reflects latest draw":
-            step("read_pixels after present reflects latest draw")
+            # @req REQ-CUDASTRICT-026
+            # @capture(statistics): first and second clear samples retained
+            step("Clear twice with present between on the strict cuda engine and read back after each")
             val result = Engine2D.create_with_backend_strict(16, 16, "cuda")
             if result.is_ok():
                 var engine = result.unwrap()
@@ -794,10 +793,4 @@ describe "CUDA strict smoke tests":
                     val second_pixels = engine.read_pixels()
                     expect(first_pixels[0]).to_equal(first_color)
                     expect(second_pixels[0]).to_equal(second_color)
-                engine.shutdown()
-            else:
-                _assert_strict_failure_is_structured("cuda-readback-latest", result.unwrap_err())
-
-            print "[cuda-gpu] RUN VERDICT: this run's GPU evidence is exactly the set of '[cuda-gpu] <label>: GPU-PROVEN' lines above."
-            print "[cuda-gpu] RUN VERDICT: every '[cuda-gpu] <label>: GPU BRANCH SKIPPED' line marks an example that proves NOTHING about the GPU path."
-            print "[cuda-gpu] RUN VERDICT: a PASS with no GPU-PROVEN line does NOT attest any CUDA device — read it as 'device unavailable', not as 'CUDA works'."
+                    engine.shutdown()

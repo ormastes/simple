@@ -1,9 +1,16 @@
 # Bug: `{{` / `}}` collapse to a single brace in ALL string literals (not just interpolated)
 
+## Triage 2026-09-13 — STILL OPEN, reproduced; fix is in string-literal lexing and blocked here
+- **measured** — `print("{{a}}")` prints `{a}` and `print("plain {{ and }}")` prints
+  `plain { and }` under `bin/simple run` (Rust seed v1.0.0-rc.1, Windows) — the brace
+  escape is applied to plain, non-interpolated literals exactly as filed.
+- **inferred** — the fix is in string-literal lexing under `src/compiler/**` /
+  `src/compiler_rust/**`, off-limits to this pass (concurrent bootstrap). Left OPEN.
+
 - **ID:** string_literal_double_brace_collapse_2026-06-16
 - **Severity:** P2 (silently corrupts any literal building JSON/braces; root cause of broken LSP code-action edits)
 - **Area:** language / interpreter (string-literal lexing)
-- **Status:** RECLASSIFIED 2026-08-25 — works as documented (see "Reclassification" below); no lexer change
+- **Status:** open — minimal repro confirmed
 - **Found while:** isolating the "substring off-by-one" suspected during reliable-mode P1/R3 (turns out NOT substring — see below)
 
 ## Summary

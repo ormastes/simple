@@ -1,0 +1,42 @@
+use app.io.mod.{current_time_ms, process_run}
+use std.io_runtime.{file_delete, file_exists, getpid}
+
+val CONTEXT_IMPORT_RUNNER = "test/integration/app/context_pure_database_import_runner.spl"
+
+fn process_import_path(kind: text) -> text:
+    "/tmp/context_import_{getpid()}_{current_time_ms()}_{kind}.db"
+
+fn process_remove_if_present(path: text):
+    if file_exists(path):
+        file_delete(path)
+
+describe "context PureDatabase importer across independent processes":
+    it "prepares imports and reopens exact ordered rows without switching the source backend":
+        val source_path = process_import_path("source")
+        val snapshot_path = process_import_path("snapshot")
+        val stage_path = process_import_path("stage")
+        val destination_path = process_import_path("destination")
+        process_remove_if_present(source_path)
+        process_remove_if_present(snapshot_path)
+        process_remove_if_present(stage_path)
+        process_remove_if_present(destination_path)
+        val (prepare_out, _prepare_err, prepare_code) = process_run(
+            "bin/simple", ["run", CONTEXT_IMPORT_RUNNER, "prepare", source_path, snapshot_path])
+        expect(prepare_code).to_equal(0)
+        expect(prepare_out).to_contain("CONTEXT_IMPORT_SOURCE_READY")
+
+        val (import_out, _import_err, import_code) = process_run(
+            "bin/simple", ["run", CONTEXT_IMPORT_RUNNER, "import", source_path, stage_path, destination_path])
+        expect(import_code).to_equal(0)
+        expect(import_out).to_contain("CONTEXT_IMPORT_PUBLISHED rows=2")
+
+        val (verify_out, _verify_err, verify_code) = process_run(
+            "bin/simple", ["run", CONTEXT_IMPORT_RUNNER, "verify", source_path,
+                            snapshot_path, stage_path, destination_path])
+        expect(verify_code).to_equal(0)
+        expect(verify_out).to_contain("CONTEXT_IMPORT_REOPEN_VERIFIED rows=2")
+
+        process_remove_if_present(source_path)
+        process_remove_if_present(snapshot_path)
+        process_remove_if_present(stage_path)
+        process_remove_if_present(destination_path)

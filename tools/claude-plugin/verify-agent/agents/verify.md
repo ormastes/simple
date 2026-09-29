@@ -1,3 +1,8 @@
+---
+name: verify
+description: "Verification agent that uses MCP tools for automated checks"
+---
+
 # Verify Agent — MCP-Powered Production Readiness
 
 ## Role

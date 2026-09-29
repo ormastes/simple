@@ -1,6 +1,13 @@
 # IDE Feature Check Interpreter Entrypoint Crash
 
-Status: Resolved in the current worktree after adding focused IDE capability adapters for sheets, DB admin, 
+## Closed 2026-09-13 — Does not reproduce: the IDE feature-check entrypoint completes cleanly
+
+- **measured** `bin/simple-interp src/app/ide/main.spl --feature-check --tui` ran to completion with `EXIT=0` and printed the full capability report (last line `check: saml: std.common.saml functions=2 diagnostics=4 ... checks=5/5`). No core dump.
+- **measured** No `dumped core` or SIGSEGV text anywhere in the captured run log.
+- **inferred** The `--gui` variant was not run here; both modes share the same entrypoint and import closure, so a clean `--tui` run is strong evidence the entrypoint crash is gone.
+
+
+Status: closed (2026-09-13 triage) — see the "Closed 2026-09-13" section below
 
 ## Date
 2026-06-01

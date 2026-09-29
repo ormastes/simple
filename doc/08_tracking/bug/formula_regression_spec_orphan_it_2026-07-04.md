@@ -1,9 +1,12 @@
 # formula_regression_spec.spl: TREND/GROWTH/PROB/RANDARRAY sections are orphaned `it`s that never ran
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-04
 **Severity:** medium
-Status: FIXED
-Status re-verified 2026-08-17 by source inspection (triage shard 01).
+**Status:** open
 
 ## Symptom
 
@@ -32,3 +35,4 @@ confirm the pass count rises from 7 to ~27 with no regressions (TREND,
 GROWTH, PROB, and RANDARRAY all have documented hand-computed/probabilistic
 expectations already written — this is purely a structural indent fix, not
 new test-writing).
+

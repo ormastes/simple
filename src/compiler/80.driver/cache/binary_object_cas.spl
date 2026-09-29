@@ -1,0 +1,115 @@
+# Binary object CAS — verified, bounded, shadow-only content storage.
+#
+# This module deliberately has no action-key lookup or native-build wiring.
+# A binary blob is reusable only after the producer action key covers the
+# complete compiler/backend/runtime/target inputs and the fixed-point gates
+# admit that identity. Until then this store is an independently testable
+# publication primitive, not a cache-hit authority.
+
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.encoding.sha256_contract.{sha256_lower_hex_valid}
+use std.nogc_sync_mut.io.file_ops.{file_write_bytes,
+    file_read_regular_no_follow_bounded, file_publish_noreplace_raw,
+    secure_temp_dir_raw}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_remove}
+
+val BINARY_OBJECT_CAS_MAX_BYTES: i64 = 1073741824
+
+fn binary_object_magic_kind(bytes: [u8]) -> text:
+    if bytes.len() < 4:
+        return ""
+    val b0 = bytes[0].to_i64()
+    val b1 = bytes[1].to_i64()
+    val b2 = bytes[2].to_i64()
+    val b3 = bytes[3].to_i64()
+    if b0 == 0x7F and b1 == 0x45 and b2 == 0x4C and b3 == 0x46:
+        return "elf"
+    if ((b0 == 0xCF and b1 == 0xFA and b2 == 0xED and b3 == 0xFE) or
+            (b0 == 0xFE and b1 == 0xED and b2 == 0xFA and b3 == 0xCF) or
+            (b0 == 0xCE and b1 == 0xFA and b2 == 0xED and b3 == 0xFE) or
+            (b0 == 0xFE and b1 == 0xED and b2 == 0xFA and b3 == 0xCE)):
+        return "macho"
+    if ((b0 == 0x64 and b1 == 0x86) or
+            (b0 == 0x4C and b1 == 0x01) or
+            (b0 == 0x64 and b1 == 0xAA) or
+            (b0 == 0xC4 and b1 == 0x01) or
+            (b0 == 0x32 and b1 == 0x50) or
+            (b0 == 0x64 and b1 == 0x50)):
+        return "coff"
+    ""
+
+fn binary_object_magic_valid(bytes: [u8]) -> bool:
+    binary_object_magic_kind(bytes) != ""
+
+fn binary_object_cas_blob_path(root: text, digest: text) -> text:
+    if not sha256_lower_hex_valid(digest):
+        return ""
+    "{root}/objects/sha256/{digest.substring(0, 2)}/{digest.substring(2, 64)}"
+
+fn binary_object_cas_read(root: text, digest: text, max_bytes: i64) -> [u8]?:
+    if max_bytes < 4 or max_bytes > BINARY_OBJECT_CAS_MAX_BYTES:
+        return nil
+    val path = binary_object_cas_blob_path(root, digest)
+    if path == "":
+        return nil
+    match file_read_regular_no_follow_bounded(path, max_bytes):
+        case Err(_): nil
+        case Ok(content):
+            val bytes = content.bytes()
+            if not binary_object_magic_valid(bytes):
+                return nil
+            if sha256_u8_hex(bytes) != digest:
+                return nil
+            bytes
+
+fn binary_object_cas_verify(root: text, digest: text) -> bool:
+    binary_object_cas_read(root, digest, BINARY_OBJECT_CAS_MAX_BYTES).?
+
+fn binary_object_cas_put(root: text, bytes: [u8]) -> text:
+    if (bytes.len() < 4 or bytes.len() > BINARY_OBJECT_CAS_MAX_BYTES or
+            not binary_object_magic_valid(bytes)):
+        return ""
+    val digest = sha256_u8_hex(bytes)
+    val destination = binary_object_cas_blob_path(root, digest)
+    val parent = "{root}/objects/sha256/{digest.substring(0, 2)}"
+    if not dir_create_all(parent):
+        return ""
+
+    # An existing name is accepted only after a bounded, no-follow read proves
+    # both object magic and the requested digest. Never trust path presence.
+    if binary_object_cas_verify(root, digest):
+        return digest
+
+    val stage_dir = secure_temp_dir_raw(parent, "simple-object-cas")
+    if stage_dir == "":
+        return ""
+    val staged = stage_dir + "/object"
+    if not file_write_bytes(staged, bytes):
+        dir_remove(stage_dir, true)
+        return ""
+
+    # Verify the staged file through the same bounded/no-follow read contract
+    # before it can acquire an authoritative digest name.
+    match file_read_regular_no_follow_bounded(staged, BINARY_OBJECT_CAS_MAX_BYTES):
+        case Err(_):
+            dir_remove(stage_dir, true)
+            return ""
+        case Ok(content):
+            val staged_bytes = content.bytes()
+            if (not binary_object_magic_valid(staged_bytes) or
+                    sha256_u8_hex(staged_bytes) != digest):
+                dir_remove(stage_dir, true)
+                return ""
+
+    val publish_status = file_publish_noreplace_raw(staged, destination)
+    dir_remove(stage_dir, true)
+    if publish_status == 1:
+        return if binary_object_cas_verify(root, digest): digest else: ""
+    if publish_status == 0 and binary_object_cas_verify(root, digest):
+        return digest
+    ""
+
+export BINARY_OBJECT_CAS_MAX_BYTES
+export binary_object_magic_kind, binary_object_magic_valid
+export binary_object_cas_blob_path, binary_object_cas_read
+export binary_object_cas_verify, binary_object_cas_put

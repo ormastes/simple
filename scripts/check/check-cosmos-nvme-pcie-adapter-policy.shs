@@ -1,0 +1,558 @@
+#!/bin/sh
+# Frozen-oracle parity, closed branch coverage, and object/ABI gates for the
+# pure-Simple Cosmos NVMe PCIe adapter scalar-policy migration.
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+SOURCE_DIR="$ROOT/src/os/kernel/arch/arm32/cosmos"
+TEST_DIR="$ROOT/test/02_integration/os/cosmos"
+SIMPLE_SOURCE="$SOURCE_DIR/cosmos_nvme_pcie_adapter_policy.spl"
+POLICY_HEADER="$SOURCE_DIR/cosmos_nvme_pcie_adapter_policy.h"
+C_OWNER="$SOURCE_DIR/cosmos_nvme_pcie_adapter.c"
+ORACLE="$TEST_DIR/cosmos_nvme_pcie_adapter_policy_oracle.c"
+PARITY="$TEST_DIR/cosmos_nvme_pcie_adapter_policy_parity_test.c"
+CONTRACT="$TEST_DIR/cosmos_nvme_pcie_adapter_contract_test.c"
+PROBE="$ROOT/test/fixtures/os/cosmos_nvme_pcie_adapter_policy_probe.spl"
+EVIDENCE_DIR="$ROOT/build/coverage/cosmos-nvme-pcie-adapter-policy"
+RECEIPT="$EVIDENCE_DIR/receipt.sdn"
+RECEIPT_TMP="$EVIDENCE_DIR/.receipt.sdn.tmp.$$"
+SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/cosmos-nvme-pcie-adapter-policy.XXXXXX")
+trap 'case ${SCRATCH:-} in /tmp/cosmos-nvme-pcie-adapter-policy.*|${TMPDIR:-/tmp}/cosmos-nvme-pcie-adapter-policy.*) [ ! -d "$SCRATCH" ] || rm -r -- "$SCRATCH" ;; esac; rm -f "$RECEIPT_TMP"' EXIT HUP INT TERM
+
+fail() {
+    echo "FAIL cosmos-nvme-pcie-adapter-policy: $*" >&2
+    exit 1
+}
+
+not_run() {
+    echo "RUNTIME_EVIDENCE: NOT_RUN compiler=${SIMPLE_STAGE4_BIN:-unset} mode=llvm-object targets=host,arm reason=$*" >&2
+    echo "STATUS: BLOCKED cosmos-nvme-pcie-adapter pure-policy runtime evidence" >&2
+    exit 2
+}
+
+hash_file() {
+    sha256sum "$1" | awk '{print $1}'
+}
+
+verify_hash() {
+    [ "$(hash_file "$1")" = "$2" ] || fail "$3 changed during evidence run"
+}
+
+mkdir -p "$EVIDENCE_DIR"
+rm -f "$RECEIPT" "$RECEIPT_TMP"
+rm -f "$EVIDENCE_DIR/adapter-policy-host.o" \
+    "$EVIDENCE_DIR/adapter-policy-arm.o" \
+    "$EVIDENCE_DIR/adapter-arm.o" \
+    "$EVIDENCE_DIR/adapter-linked.o"
+
+# Do not emit even partial policy evidence until the caller explicitly selects
+# an admitted current-tree Stage-4 compiler with adjacent provenance.
+[ "${SIMPLE_STAGE4_BIN+x}" = x ] && [ -n "$SIMPLE_STAGE4_BIN" ] ||
+    not_run "set SIMPLE_STAGE4_BIN to an admitted Stage-4 compiler"
+[ -x "$SIMPLE_STAGE4_BIN" ] || not_run "Stage-4 compiler is not executable"
+BOOTSTRAP_STAGE3_FACADE_PATH="$ROOT/scripts/check/lib/bootstrap-stage3-provenance.shs"
+STAGE4_PROVENANCE_HELPER_PATH="$ROOT/scripts/check/lib/stage4-candidate-provenance.shs"
+export BOOTSTRAP_STAGE3_FACADE_PATH STAGE4_PROVENANCE_HELPER_PATH
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+. "$STAGE4_PROVENANCE_HELPER_PATH"
+SIMPLE_CANONICAL=$(bootstrap_stage3_canonical_file "$SIMPLE_STAGE4_BIN") ||
+    not_run "compiler cannot be resolved through admitted provenance"
+SIMPLE_PROVENANCE="${SIMPLE_CANONICAL}.provenance.env"
+[ -f "$SIMPLE_PROVENANCE" ] || not_run "adjacent Stage-4 provenance is missing"
+stage4_verify_candidate_provenance \
+    "$SIMPLE_PROVENANCE" "$SIMPLE_CANONICAL" "$ROOT" ||
+    not_run "admitted Stage 4 is absent; seed/Stage 2/Stage 3 fallback is forbidden"
+case "$("$SIMPLE_CANONICAL" --version 2>&1 || true)" in
+    *"Rust-built Simple binary is a bootstrap seed"*|*"bootstrap seed only"*)
+        not_run "Rust seed is diagnostic-only" ;;
+esac
+SIMPLE_SHA256=$(hash_file "$SIMPLE_CANONICAL")
+PROVENANCE_SHA256=$(hash_file "$SIMPLE_PROVENANCE")
+SIMPLE_SOURCE_SHA256=$(hash_file "$SIMPLE_SOURCE")
+POLICY_HEADER_SHA256=$(hash_file "$POLICY_HEADER")
+C_OWNER_SHA256=$(hash_file "$C_OWNER")
+ORACLE_SHA256=$(hash_file "$ORACLE")
+ORACLE_SHA256_PINNED=19f27f25da2ec9346db894823cd885d533eb0950cd748057247da393034a9176
+[ "$ORACLE_SHA256" = "$ORACLE_SHA256_PINNED" ] ||
+    fail "frozen oracle hash is not the reviewed independent oracle"
+PARITY_SHA256=$(hash_file "$PARITY")
+CONTRACT_SHA256=$(hash_file "$CONTRACT")
+PROBE_SHA256=$(hash_file "$PROBE")
+
+expected_exports='cosmos_nvme_pcie_adapter_policy_admin_common_fields_supported
+cosmos_nvme_pcie_adapter_policy_admin_invalid_field
+cosmos_nvme_pcie_adapter_policy_admin_kind
+cosmos_nvme_pcie_adapter_policy_admin_payload_bytes
+cosmos_nvme_pcie_adapter_policy_admin_payload_request_valid
+cosmos_nvme_pcie_adapter_policy_admin_payload_result
+cosmos_nvme_pcie_adapter_policy_admin_transfer_valid
+cosmos_nvme_pcie_adapter_policy_block_bytes_valid
+cosmos_nvme_pcie_adapter_policy_capacity_valid
+cosmos_nvme_pcie_adapter_policy_command_cid
+cosmos_nvme_pcie_adapter_policy_command_opcode
+cosmos_nvme_pcie_adapter_policy_common_fields_supported
+cosmos_nvme_pcie_adapter_policy_coverage_decisions
+cosmos_nvme_pcie_adapter_policy_coverage_mask
+cosmos_nvme_pcie_adapter_policy_coverage_required
+cosmos_nvme_pcie_adapter_policy_coverage_reset
+cosmos_nvme_pcie_adapter_policy_dsm_attributes
+cosmos_nvme_pcie_adapter_policy_dsm_data_bytes
+cosmos_nvme_pcie_adapter_policy_dsm_decode_valid
+cosmos_nvme_pcie_adapter_policy_dsm_fields_supported
+cosmos_nvme_pcie_adapter_policy_dsm_range_count
+cosmos_nvme_pcie_adapter_policy_flush_decode_valid
+cosmos_nvme_pcie_adapter_policy_flush_fields_supported
+cosmos_nvme_pcie_adapter_policy_function_count
+cosmos_nvme_pcie_adapter_policy_init_values_valid
+cosmos_nvme_pcie_adapter_policy_io_invalid_field
+cosmos_nvme_pcie_adapter_policy_io_kind
+cosmos_nvme_pcie_adapter_policy_io_nlb
+cosmos_nvme_pcie_adapter_policy_no_async_result
+cosmos_nvme_pcie_adapter_policy_post_result
+cosmos_nvme_pcie_adapter_policy_prp_first_bytes
+cosmos_nvme_pcie_adapter_policy_prp_span_valid
+cosmos_nvme_pcie_adapter_policy_rw_control
+cosmos_nvme_pcie_adapter_policy_rw_decode_valid
+cosmos_nvme_pcie_adapter_policy_rw_fields_supported
+cosmos_nvme_pcie_adapter_policy_transfer_bytes
+cosmos_nvme_pcie_adapter_policy_write_zeroes_control
+cosmos_nvme_pcie_adapter_policy_write_zeroes_decode_valid
+cosmos_nvme_pcie_adapter_policy_write_zeroes_fields_supported'
+
+expected_imports='cosmos_nvme_pcie_adapter_policy_admin_common_fields_supported
+cosmos_nvme_pcie_adapter_policy_admin_invalid_field
+cosmos_nvme_pcie_adapter_policy_admin_kind
+cosmos_nvme_pcie_adapter_policy_admin_payload_bytes
+cosmos_nvme_pcie_adapter_policy_admin_payload_request_valid
+cosmos_nvme_pcie_adapter_policy_admin_payload_result
+cosmos_nvme_pcie_adapter_policy_admin_transfer_valid
+cosmos_nvme_pcie_adapter_policy_command_cid
+cosmos_nvme_pcie_adapter_policy_command_opcode
+cosmos_nvme_pcie_adapter_policy_common_fields_supported
+cosmos_nvme_pcie_adapter_policy_dsm_attributes
+cosmos_nvme_pcie_adapter_policy_dsm_data_bytes
+cosmos_nvme_pcie_adapter_policy_dsm_decode_valid
+cosmos_nvme_pcie_adapter_policy_dsm_fields_supported
+cosmos_nvme_pcie_adapter_policy_dsm_range_count
+cosmos_nvme_pcie_adapter_policy_flush_decode_valid
+cosmos_nvme_pcie_adapter_policy_flush_fields_supported
+cosmos_nvme_pcie_adapter_policy_init_values_valid
+cosmos_nvme_pcie_adapter_policy_io_invalid_field
+cosmos_nvme_pcie_adapter_policy_io_kind
+cosmos_nvme_pcie_adapter_policy_io_nlb
+cosmos_nvme_pcie_adapter_policy_no_async_result
+cosmos_nvme_pcie_adapter_policy_post_result
+cosmos_nvme_pcie_adapter_policy_prp_first_bytes
+cosmos_nvme_pcie_adapter_policy_prp_span_valid
+cosmos_nvme_pcie_adapter_policy_rw_control
+cosmos_nvme_pcie_adapter_policy_rw_decode_valid
+cosmos_nvme_pcie_adapter_policy_rw_fields_supported
+cosmos_nvme_pcie_adapter_policy_transfer_bytes
+cosmos_nvme_pcie_adapter_policy_write_zeroes_control
+cosmos_nvme_pcie_adapter_policy_write_zeroes_decode_valid
+cosmos_nvme_pcie_adapter_policy_write_zeroes_fields_supported'
+
+expected_c_abi='cosmos_nvme_pcie_admin_service_init
+cosmos_nvme_pcie_configure_io_cq
+cosmos_nvme_pcie_configure_io_sq
+cosmos_nvme_pcie_decode_admin
+cosmos_nvme_pcie_decode_io
+cosmos_nvme_pcie_post_admin_completion
+cosmos_nvme_pcie_service_init'
+
+expected_decisions='0 D_CAPACITY_ZERO
+1 D_BLOCK_ZERO
+2 D_BLOCK_NOT_POWER_TWO
+3 D_BLOCK_UNALIGNED
+4 D_COMMON_UNSUPPORTED
+5 D_RW_UNSUPPORTED
+6 D_FLUSH_NONZERO
+7 D_TRANSFER_BASE_INVALID
+8 D_TRANSFER_OVERFLOW
+9 D_PRP_BASE_INVALID
+10 D_PRP_FITS_FIRST
+11 D_PRP_FIRST_HAS_SECOND
+12 D_PRP_SECOND_MISSING
+13 D_PRP_SINGLE_BOUNDARY
+14 D_PRP_SECOND_UNALIGNED
+15 D_PRP_FIRST_CLAMPED
+16 D_IO_IS_RW
+17 D_IO_IS_FLUSH
+18 D_IO_IS_ZEROES
+19 D_IO_IS_DSM
+20 D_RW_DECODE_INVALID
+21 D_ZEROES_FIELDS_INVALID
+22 D_ZEROES_DECODE_INVALID
+23 D_DSM_FIELDS_INVALID
+24 D_DSM_DECODE_INVALID
+25 D_FLUSH_DECODE_INVALID
+26 D_IO_KNOWN_INVALID
+27 D_ADMIN_COMMON_UNSUPPORTED
+28 D_ADMIN_IS_QUEUE
+29 D_ADMIN_IS_IDENTIFY
+30 D_ADMIN_IS_LOG
+31 D_ADMIN_BYTES_IDENTIFY
+32 D_ADMIN_BYTES_LOG
+33 D_ADMIN_TRANSFER_QUEUE
+34 D_ADMIN_QUEUE_INVALID
+35 D_ADMIN_TRANSFER_PAYLOAD
+36 D_ADMIN_PAYLOAD_INVALID
+37 D_ADMIN_NO_PAYLOAD_PRESENT
+38 D_ADMIN_INVALID_FIELD
+39 D_POST_COMMITTED
+40 D_POST_NOT_COMMITTED
+41 D_POST_AMBIGUOUS
+42 D_PAYLOAD_REQUEST_INVALID
+43 D_PAYLOAD_COMMITTED
+44 D_INIT_INVALID'
+
+CLANG=${CLANG:-clang}
+READELF=${READELF:-readelf}
+if [ -z "${LLVM_COV:-}" ] || [ -z "${LLVM_PROFDATA:-}" ] ||
+        [ -z "${CLANG:-}" ]; then
+    for version in 20 19 18 17 16 15 14; do
+        if command -v "clang-$version" >/dev/null 2>&1 &&
+                command -v "llvm-cov-$version" >/dev/null 2>&1 &&
+                command -v "llvm-profdata-$version" >/dev/null 2>&1; then
+            CLANG=clang-$version
+            LLVM_COV=llvm-cov-$version
+            LLVM_PROFDATA=llvm-profdata-$version
+            break
+        fi
+    done
+fi
+[ -n "${CLANG:-}" ] && [ -n "${LLVM_COV:-}" ] &&
+    [ -n "${LLVM_PROFDATA:-}" ] || fail "matching Clang/LLVM tools required"
+
+source_exports=$(sed -n \
+    's/^[[:space:]]*@export("C", name: "\([^"]*\)").*/\1/p' \
+    "$SIMPLE_SOURCE" | LC_ALL=C sort -u)
+[ "$source_exports" = "$expected_exports" ] ||
+    fail "Simple source export manifest is not the exact 39-symbol ABI"
+production_exports=$(printf '%s\n' "$expected_exports" |
+    grep -Ev '_(coverage_reset|coverage_mask|coverage_required|coverage_decisions|function_count)$')
+printf '%s\n' "$production_exports" >"$SCRATCH/production-exports.txt"
+grep -o 'cosmos_nvme_pcie_adapter_policy_[A-Za-z0-9_]*' "$PARITY" |
+    LC_ALL=C sort -u >"$SCRATCH/parity-policy-names.txt"
+parity_policy_calls=$(grep -Fxf "$SCRATCH/production-exports.txt" \
+    "$SCRATCH/parity-policy-names.txt")
+[ "$parity_policy_calls" = "$production_exports" ] ||
+    fail "parity vectors do not call the exact 34 production policy exports"
+source_decisions=$(sed -n \
+    's/^val \(D_[A-Z0-9_]*\): u32 = \([0-9][0-9]*\)u32$/\2 \1/p' \
+    "$SIMPLE_SOURCE")
+[ "$source_decisions" = "$expected_decisions" ] ||
+    fail "Simple decision manifest is not the exact named 0..44 denominator"
+printf '%s\n' "$expected_decisions" >"$SCRATCH/decision-manifest.txt"
+grep -n -o 'COSMOS-NVME-PCIE-ADAPTER-D[0-9][0-9][0-9]' \
+    "$SIMPLE_SOURCE" >"$SCRATCH/decision-sites.txt"
+[ "$(wc -l <"$SCRATCH/decision-sites.txt" | tr -d ' ')" = 46 ] ||
+    fail "compiler decision-site denominator is not 46"
+awk -F: '{ print $2 }' "$SCRATCH/decision-sites.txt" \
+    >"$SCRATCH/observed-decision-ids.txt"
+awk 'BEGIN { for (i = 1; i <= 46; i++)
+    printf "COSMOS-NVME-PCIE-ADAPTER-D%03d\n", i }' \
+    >"$SCRATCH/required-decision-ids.txt"
+diff -u "$SCRATCH/required-decision-ids.txt" \
+    "$SCRATCH/observed-decision-ids.txt" ||
+    fail "compiler decision-site IDs are not exact and contiguous"
+grep -n -o 'COSMOS-NVME-PCIE-ADAPTER-H[0-9][0-9][0-9]' \
+    "$SIMPLE_SOURCE" >"$SCRATCH/helper-exclusions.txt"
+[ "$(wc -l <"$SCRATCH/helper-exclusions.txt" | tr -d ' ')" = 6 ] ||
+    fail "compiler helper-exclusion denominator is not 6"
+awk -F: '{ print $2 }' "$SCRATCH/helper-exclusions.txt" \
+    >"$SCRATCH/observed-helper-ids.txt"
+awk 'BEGIN { for (i = 1; i <= 6; i++)
+    printf "COSMOS-NVME-PCIE-ADAPTER-H%03d\n", i }' \
+    >"$SCRATCH/required-helper-ids.txt"
+diff -u "$SCRATCH/required-helper-ids.txt" \
+    "$SCRATCH/observed-helper-ids.txt" ||
+    fail "compiler helper exclusions are not exact and contiguous"
+
+grep -Fq '#define COSMOS_NVME_PCIE_ADAPTER_POLICY_ABI_VERSION 1U' \
+    "$POLICY_HEADER" || fail "stable ABI version is not pinned to 1"
+grep -Fq '#define COSMOS_NVME_PCIE_ADAPTER_POLICY_FUNCTIONS 34U' \
+    "$POLICY_HEADER" || fail "policy function denominator is not pinned to 34"
+grep -Fq '#define COSMOS_NVME_PCIE_ADAPTER_POLICY_DECISIONS 45U' \
+    "$POLICY_HEADER" || fail "legacy named-predicate denominator drifted"
+grep -Fq '#define COSMOS_NVME_PCIE_ADAPTER_POLICY_DECISION_SITES 46U' \
+    "$POLICY_HEADER" || fail "compiler decision-site denominator is not 46"
+grep -Fq '#define COSMOS_NVME_PCIE_ADAPTER_POLICY_BRANCH_OUTCOMES 92U' \
+    "$POLICY_HEADER" || fail "compiler branch-outcome denominator is not 92"
+if grep -Eq 'pass_todo|pass_do_nothing|pass_dn|todo\(|TODO|FIXME|unimplemented|stub' \
+        "$SIMPLE_SOURCE"; then
+    fail "pure-Simple policy contains a stub or placeholder"
+fi
+grep -Fq '#include "cosmos_nvme_pcie_adapter_policy.h"' "$C_OWNER" ||
+    fail "C owner does not consume the stable policy ABI"
+if grep -Eq 'static (int|unsigned int) cosmos_nvme_pcie_(capacity_zero|block_bytes_valid|common_fields_supported|rw_fields_supported|flush_fields_supported|transfer_bytes|prp_span_valid|post_result)' \
+        "$C_OWNER"; then
+    fail "pre-migration scalar policy remains in the C owner"
+fi
+
+common_flags='-std=c11 -O2 -Wall -Wextra -Werror -Wpedantic -Wshadow -Wstrict-prototypes -Wformat=2'
+"$CLANG" $common_flags -I"$SOURCE_DIR" -I"$TEST_DIR" \
+    -c "$ORACLE" -o "$SCRATCH/oracle.o"
+oracle_policy_symbols=$(
+    "$READELF" -sW "$SCRATCH/oracle.o" |
+        awk '($4 == "FUNC" || $7 == "UND") &&
+             $8 ~ /^cosmos_nvme_pcie_adapter_policy_/ { print $8 }'
+)
+[ -z "$oracle_policy_symbols" ] ||
+    fail "frozen oracle aliases or imports production policy symbols"
+"$CLANG" $common_flags -I"$SOURCE_DIR" -I"$TEST_DIR" \
+    -c "$PARITY" -o "$SCRATCH/parity-vectors.o"
+
+"$CLANG" $common_flags -DCOSMOS_MMIO_TEST=1 -I"$SOURCE_DIR" \
+    -c "$C_OWNER" -o "$SCRATCH/adapter-host.o"
+"$CLANG" --target=armv7-none-eabi -mcpu=cortex-a9 -marm \
+    -ffreestanding -nostdlib -fno-builtin -O2 -Wall -Wextra -Werror \
+    -Wpedantic -Wshadow -Wstrict-prototypes -Wformat=2 -I"$SOURCE_DIR" \
+    -c "$C_OWNER" -o "$SCRATCH/adapter-arm.o"
+c_imports=$(
+    "$READELF" -sW "$SCRATCH/adapter-arm.o" |
+        awk '$7 == "UND" && $8 ~ /^cosmos_nvme_pcie_adapter_policy_/ { print $8 }' |
+        LC_ALL=C sort -u
+)
+[ "$c_imports" = "$expected_imports" ] ||
+    fail "C boundary does not import the exact 32-symbol scalar-policy closure"
+c_abi=$(
+    "$READELF" -sW "$SCRATCH/adapter-arm.o" |
+        awk '$4 == "FUNC" && $5 == "GLOBAL" && $7 != "UND" &&
+             $8 ~ /^cosmos_nvme_pcie_/ { print $8 }' | LC_ALL=C sort -u
+)
+[ "$c_abi" = "$expected_c_abi" ] ||
+    fail "C adapter public ABI changed"
+
+echo "cosmos_nvme_pcie_adapter_static_abi_exports=39/39"
+echo "cosmos_nvme_pcie_adapter_c_policy_imports=32/32"
+echo "cosmos_nvme_pcie_adapter_c_public_abi=7/7"
+echo "cosmos_nvme_pcie_adapter_frozen_oracle=independent"
+echo "cosmos_nvme_pcie_adapter_compiler_decision_sites=46 outcomes=92 helper_exclusions=6"
+echo "STATIC_STATUS: PASS cosmos-nvme-pcie-adapter pure-policy migration"
+
+SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_LIB="$ROOT/src" \
+    "$SIMPLE_CANONICAL" native-build --backend llvm \
+    --source "$SOURCE_DIR" --entry-closure --entry "$SIMPLE_SOURCE" \
+    --target x86_64-unknown-linux-gnu --emit-object --no-mangle \
+    --cache-dir "$SCRATCH/host-cache" -o "$SCRATCH/adapter-policy-host.o"
+host_symbols=$("$READELF" -sW "$SCRATCH/adapter-policy-host.o")
+host_exports=$(printf '%s\n' "$host_symbols" |
+    awk '$4 == "FUNC" && $5 == "GLOBAL" && $7 != "UND" &&
+         $8 ~ /^cosmos_nvme_pcie_adapter_policy_/ { print $8 }' |
+    LC_ALL=C sort -u)
+[ "$host_exports" = "$expected_exports" ] ||
+    fail "host Simple object does not export the exact stable ABI"
+host_undefined=$(printf '%s\n' "$host_symbols" |
+    awk '$7 == "UND" && $8 != "" { print $8 }' | LC_ALL=C sort -u)
+[ -z "$host_undefined" ] ||
+    fail "host policy object has runtime dependencies: $host_undefined"
+printf '%s\n' "$host_symbols" |
+    awk 'tolower($8) ~ /(malloc|calloc|realloc|alloc_object|gc_alloc)/ {
+        bad = 1
+    } END { exit bad }' || fail "host policy object exposes allocation"
+
+"$CLANG" $common_flags -I"$SOURCE_DIR" -I"$TEST_DIR" \
+    "$ORACLE" "$PARITY" "$SCRATCH/adapter-policy-host.o" \
+    -o "$SCRATCH/parity"
+parity_output=$("$SCRATCH/parity")
+printf '%s\n' "$parity_output" >"$EVIDENCE_DIR/c-oracle-parity-output.txt"
+printf '%s\n' "$parity_output" |
+    grep -Fqx 'COSMOS_NVME_PCIE_ADAPTER_C_ORACLE_PARITY_CASES 314' ||
+    fail "C-vs-Simple parity inventory is not exactly 314 rows"
+
+SIMPLE_COVERAGE=1 SIMPLE_COVERAGE_OUTPUT="$SCRATCH/coverage.sdn" \
+    SIMPLE_LIB="$ROOT/src" "$SIMPLE_CANONICAL" run "$PROBE" \
+    >"$SCRATCH/coverage-probe.out" 2>"$SCRATCH/coverage-probe.log" ||
+    fail "compiler-runtime coverage probe failed"
+[ -s "$SCRATCH/coverage.sdn" ] ||
+    fail "compiler-runtime coverage artifact is missing"
+: >"$SCRATCH/compiler-decision-execution.tsv"
+while IFS=: read -r line decision_id; do
+    awk -F', *' -v owner="/src/os/kernel/arch/arm32/cosmos/cosmos_nvme_pcie_adapter_policy.spl" \
+        -v wanted="$line" -v id="$decision_id" '
+        index($2, owner) == length($2) - length(owner) + 1 &&
+                ($3 + 0) == wanted {
+            print id "\t" ($3 + 0) "\t" ($4 + 0) "\t" \
+                (($5 + 0) > 0 ? 1 : 0) "\t" (($6 + 0) > 0 ? 1 : 0)
+        }
+    ' "$SCRATCH/coverage.sdn" >"$SCRATCH/one-decision.tsv"
+    [ "$(wc -l <"$SCRATCH/one-decision.tsv" | tr -d ' ')" = 1 ] ||
+        fail "compiler decision row missing or duplicated: $decision_id"
+    cat "$SCRATCH/one-decision.tsv" \
+        >>"$SCRATCH/compiler-decision-execution.tsv"
+done <"$SCRATCH/decision-sites.txt"
+simple_outcomes_hit=$(awk -F '\t' '{ hit += $4 + $5 } END { print hit + 0 }' \
+    "$SCRATCH/compiler-decision-execution.tsv")
+[ "$simple_outcomes_hit" = 92 ] ||
+    fail "compiler-emitted Simple outcomes incomplete: $simple_outcomes_hit/92"
+
+"$CLANG" $common_flags -DCOSMOS_MMIO_TEST=1 \
+    -DCOSMOS_NVME_PCIE_ADAPTER_COVERAGE_ONLY=1 -Wno-unused-function \
+    -I"$SOURCE_DIR" \
+    -c "$CONTRACT" -o "$SCRATCH/contract.o"
+"$CLANG" "$SCRATCH/contract.o" "$SCRATCH/adapter-host.o" \
+    "$SCRATCH/adapter-policy-host.o" -o "$SCRATCH/contract"
+"$SCRATCH/contract" | grep -Fqx 'cosmos NVMe PCIe adapter contract: PASS' ||
+    fail "host adapter contract failed with the Simple policy object"
+
+"$CLANG" $common_flags -O0 -fprofile-instr-generate \
+    -fcoverage-mapping -DCOSMOS_MMIO_TEST=1 -I"$SOURCE_DIR" \
+    -c "$C_OWNER" -o "$SCRATCH/adapter-coverage.o"
+"$CLANG" -fprofile-instr-generate "$SCRATCH/contract.o" \
+    "$SCRATCH/adapter-coverage.o" \
+    "$SCRATCH/adapter-policy-host.o" \
+    -o "$SCRATCH/c-coverage-contract"
+LLVM_PROFILE_FILE="$SCRATCH/adapter.profraw" "$SCRATCH/c-coverage-contract" \
+    >/dev/null
+"$LLVM_PROFDATA" merge -sparse "$SCRATCH/adapter.profraw" \
+    -o "$SCRATCH/adapter.profdata"
+"$LLVM_COV" report "$SCRATCH/c-coverage-contract" \
+    -instr-profile="$SCRATCH/adapter.profdata" -show-branch-summary "$C_OWNER" \
+    >"$SCRATCH/c-bridge-llvm-cov.txt"
+set -- $(awk '$1 ~ /cosmos_nvme_pcie_adapter[.]c$/ {
+    print $(NF - 2), $(NF - 1) }' "$SCRATCH/c-bridge-llvm-cov.txt")
+[ "$#" = 2 ] || fail "cannot parse C bridge LLVM branch denominator"
+c_branch_total=$1
+c_branch_missed=$2
+[ "$c_branch_total" = 98 ] ||
+    fail "C bridge LLVM branch denominator changed: $c_branch_total/98"
+[ "$c_branch_missed" = 0 ] ||
+    fail "C bridge LLVM branch coverage incomplete: $((c_branch_total - c_branch_missed))/$c_branch_total"
+cp "$SCRATCH/c-bridge-llvm-cov.txt" \
+    "$EVIDENCE_DIR/c-bridge-llvm-cov.txt"
+cp "$SCRATCH/decision-manifest.txt" \
+    "$EVIDENCE_DIR/decision-manifest.txt"
+cp "$SCRATCH/coverage.sdn" "$EVIDENCE_DIR/compiler-coverage.sdn"
+cp "$SCRATCH/compiler-decision-execution.tsv" \
+    "$EVIDENCE_DIR/compiler-decision-execution.tsv"
+
+# Every compiler-emitted branch row for this owner must be either an admitted
+# production decision site or an explicitly tagged helper exclusion.  This
+# rejects silent denominator shrinkage from untagged source branches.
+{
+    awk -F: '{ print $1 }' "$SCRATCH/decision-sites.txt"
+    awk -F: '{ print $1 }' "$SCRATCH/helper-exclusions.txt"
+} | LC_ALL=C sort -nu >"$SCRATCH/tagged-coverage-lines.txt"
+awk -F', *' \
+    -v owner="/src/os/kernel/arch/arm32/cosmos/cosmos_nvme_pcie_adapter_policy.spl" '
+    NR == FNR { allowed[$1] = 1; next }
+    index($2, owner) == length($2) - length(owner) + 1 &&
+            !allowed[$3 + 0] {
+        print "untagged compiler branch row at line " ($3 + 0) > "/dev/stderr"
+        bad = 1
+    }
+    END { exit bad }
+' "$SCRATCH/tagged-coverage-lines.txt" "$SCRATCH/coverage.sdn" ||
+    fail "compiler coverage contains untagged policy branch rows"
+
+SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_LIB="$ROOT/src" \
+    "$SIMPLE_CANONICAL" native-build --backend llvm \
+    --source "$SOURCE_DIR" --entry-closure --entry "$SIMPLE_SOURCE" \
+    --target armv7-unknown-none-eabi --emit-object --no-mangle \
+    --cache-dir "$SCRATCH/arm-cache" -o "$SCRATCH/adapter-policy-arm.o"
+arm_header=$("$READELF" -hW "$SCRATCH/adapter-policy-arm.o")
+printf '%s\n' "$arm_header" | grep -Eq 'Class:[[:space:]]+ELF32' &&
+    printf '%s\n' "$arm_header" | grep -Eq 'Machine:[[:space:]]+ARM' ||
+    fail "policy object is not ELF32 ARM"
+arm_undefined=$("$READELF" -sW "$SCRATCH/adapter-policy-arm.o" |
+    awk '$7 == "UND" && $8 != "" { print $8 }' | LC_ALL=C sort -u)
+[ -z "$arm_undefined" ] ||
+    fail "ARM policy object has runtime dependencies: $arm_undefined"
+ld.lld -r "$SCRATCH/adapter-arm.o" "$SCRATCH/adapter-policy-arm.o" \
+    -o "$SCRATCH/adapter-linked.o"
+linked_policy_undefined=$("$READELF" -sW "$SCRATCH/adapter-linked.o" |
+    awk '$7 == "UND" && $8 ~ /^cosmos_nvme_pcie_adapter_policy_/ { print $8 }')
+[ -z "$linked_policy_undefined" ] ||
+    fail "C-to-Simple ARM policy link remains unresolved"
+
+HOST_POLICY_OBJECT_SHA256=$(hash_file "$SCRATCH/adapter-policy-host.o")
+ARM_POLICY_OBJECT_SHA256=$(hash_file "$SCRATCH/adapter-policy-arm.o")
+ARM_C_OBJECT_SHA256=$(hash_file "$SCRATCH/adapter-arm.o")
+ARM_LINKED_OBJECT_SHA256=$(hash_file "$SCRATCH/adapter-linked.o")
+cp "$SCRATCH/adapter-policy-host.o" "$EVIDENCE_DIR/adapter-policy-host.o"
+cp "$SCRATCH/adapter-policy-arm.o" "$EVIDENCE_DIR/adapter-policy-arm.o"
+cp "$SCRATCH/adapter-arm.o" "$EVIDENCE_DIR/adapter-arm.o"
+cp "$SCRATCH/adapter-linked.o" "$EVIDENCE_DIR/adapter-linked.o"
+chmod 0444 "$EVIDENCE_DIR/adapter-policy-host.o" \
+    "$EVIDENCE_DIR/adapter-policy-arm.o" \
+    "$EVIDENCE_DIR/adapter-arm.o" \
+    "$EVIDENCE_DIR/adapter-linked.o"
+[ "$(hash_file "$EVIDENCE_DIR/adapter-policy-host.o")" = "$HOST_POLICY_OBJECT_SHA256" ] &&
+    [ "$(hash_file "$EVIDENCE_DIR/adapter-policy-arm.o")" = "$ARM_POLICY_OBJECT_SHA256" ] &&
+    [ "$(hash_file "$EVIDENCE_DIR/adapter-arm.o")" = "$ARM_C_OBJECT_SHA256" ] &&
+    [ "$(hash_file "$EVIDENCE_DIR/adapter-linked.o")" = "$ARM_LINKED_OBJECT_SHA256" ] ||
+    fail "retained object hash changed while sealing evidence"
+
+stage4_verify_candidate_provenance \
+    "$SIMPLE_PROVENANCE" "$SIMPLE_CANONICAL" "$ROOT" ||
+    fail "Stage-4 provenance changed during evidence run"
+verify_hash "$SIMPLE_CANONICAL" "$SIMPLE_SHA256" compiler
+verify_hash "$SIMPLE_PROVENANCE" "$PROVENANCE_SHA256" provenance
+verify_hash "$SIMPLE_SOURCE" "$SIMPLE_SOURCE_SHA256" simple-source
+verify_hash "$POLICY_HEADER" "$POLICY_HEADER_SHA256" policy-header
+verify_hash "$C_OWNER" "$C_OWNER_SHA256" c-owner
+verify_hash "$ORACLE" "$ORACLE_SHA256" c-oracle
+verify_hash "$PARITY" "$PARITY_SHA256" parity-vectors
+verify_hash "$CONTRACT" "$CONTRACT_SHA256" c-contract
+verify_hash "$PROBE" "$PROBE_SHA256" compiler-coverage-probe
+
+umask 077
+{
+    echo "schema=cosmos-nvme-pcie-adapter-policy-evidence-v1"
+    echo "claim_scope=nvme-pcie-adapter-scalar-policy-oracle-and-c-abi-only"
+    echo "board_evidence=separate-not-included"
+    echo "whole_nvme_claim=false"
+    echo "stage4_compiler_path=$SIMPLE_CANONICAL"
+    echo "stage4_compiler_sha256=$SIMPLE_SHA256"
+    echo "stage4_provenance_path=$SIMPLE_PROVENANCE"
+    echo "stage4_provenance_sha256=$PROVENANCE_SHA256"
+    echo "simple_source_sha256=$SIMPLE_SOURCE_SHA256"
+    echo "policy_header_sha256=$POLICY_HEADER_SHA256"
+    echo "c_owner_sha256=$C_OWNER_SHA256"
+    echo "c_oracle_sha256=$ORACLE_SHA256"
+    echo "parity_vectors_sha256=$PARITY_SHA256"
+    echo "c_contract_sha256=$CONTRACT_SHA256"
+    echo "simple_probe_sha256=$PROBE_SHA256"
+    echo "decision_manifest_sha256=$(hash_file "$EVIDENCE_DIR/decision-manifest.txt")"
+    echo "c_llvm_coverage_sha256=$(hash_file "$EVIDENCE_DIR/c-bridge-llvm-cov.txt")"
+    echo "compiler_coverage_sha256=$(hash_file "$EVIDENCE_DIR/compiler-coverage.sdn")"
+    echo "compiler_decision_execution_sha256=$(hash_file "$EVIDENCE_DIR/compiler-decision-execution.tsv")"
+    echo "parity_output_sha256=$(hash_file "$EVIDENCE_DIR/c-oracle-parity-output.txt")"
+    echo "parity_rows_hit=314"
+    echo "parity_rows_total=314"
+    echo "policy_exports_hit=39"
+    echo "policy_exports_total=39"
+    echo "c_policy_imports_hit=32"
+    echo "c_policy_imports_total=32"
+    echo "c_public_abi_hit=7"
+    echo "c_public_abi_total=7"
+    echo "legacy_named_predicates=45"
+    echo "legacy_owner_mask=diagnostic-not-acceptance"
+    echo "compiler_decision_sites_hit=46"
+    echo "compiler_decision_sites_total=46"
+    echo "compiler_helper_sites_excluded=6"
+    echo "branch_outcomes_hit=$simple_outcomes_hit"
+    echo "branch_outcomes_total=92"
+    echo "c_bridge_llvm_branches_total=$c_branch_total"
+    echo "c_bridge_llvm_branches_missed=$c_branch_missed"
+    echo "host_object=ELF64-allocation-free"
+    echo "arm_object=ELF32-ARM-allocation-free"
+    echo "native_link=pass"
+    echo "host_policy_object_sha256=$HOST_POLICY_OBJECT_SHA256"
+    echo "arm_policy_object_sha256=$ARM_POLICY_OBJECT_SHA256"
+    echo "arm_c_object_sha256=$ARM_C_OBJECT_SHA256"
+    echo "arm_linked_object_sha256=$ARM_LINKED_OBJECT_SHA256"
+} >"$RECEIPT_TMP"
+mv -f -- "$RECEIPT_TMP" "$RECEIPT"
+
+echo "cosmos_nvme_pcie_adapter_c_oracle_parity=pass"
+echo "cosmos_nvme_pcie_adapter_compiler_coverage=46/46 outcomes=$simple_outcomes_hit/92 helper_exclusions=6"
+echo "cosmos_nvme_pcie_adapter_c_llvm_branch_coverage=$c_branch_total/$c_branch_total"
+echo "cosmos_nvme_pcie_adapter_host_object=ELF64 allocation_free"
+echo "cosmos_nvme_pcie_adapter_arm_object=ELF32_ARM allocation_free"
+echo "cosmos_nvme_pcie_adapter_native_link=pass"
+echo "RUNTIME_EVIDENCE: PASS compiler=$SIMPLE_CANONICAL mode=llvm-object targets=host,arm"
+echo "cosmos_nvme_pcie_adapter_receipt=$RECEIPT"
+echo "cosmos_nvme_pcie_adapter_receipt_sha256=$(hash_file "$RECEIPT")"
+echo "STATUS: PASS cosmos-nvme-pcie-adapter pure-policy migration"

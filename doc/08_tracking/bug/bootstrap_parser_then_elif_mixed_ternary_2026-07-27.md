@@ -1,7 +1,9 @@
 # Bootstrap Parser Rejects Mixed Then/Elif Ternary
+## Closed 2026-09-16 — FIXED AND CLEARED IN FULL BOOTSTRAP; focused nested-AST regression passes
 
-Status: CLOSED (not reproducible)
-Status re-verified 2026-08-17 by source inspection (triage shard 00).
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
 
@@ -55,3 +57,4 @@ else branch is a nested `EXPR_IF`.
 The strict retry at source commit `1f27b9be2cb7` cleared this source and later
 stopped at the unrelated `match[0]` keyword-identifier defect tracked in
 `bootstrap_parser_match_keyword_identifier_2026-07-27.md`.
+

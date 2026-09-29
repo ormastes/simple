@@ -14,7 +14,8 @@ mkdir -p "$output" "$tmp/unwritable-default-tmp"
 chmod 500 "$tmp/unwritable-default-tmp"
 
 bootstrap_stage3_seed_inputs_fingerprint() {
-  printf '%s\n' "${TMPDIR}" >>"$trace"
+  printf '%s|%s\n' "${TMPDIR}" \
+    "${BOOTSTRAP_STAGE3_FINGERPRINT_TRACE:-missing}" >>"$trace"
   if [ -e "$output/fail-helper" ]; then
     echo 'mktemp: No space left on device' >&2
     return 73
@@ -31,7 +32,7 @@ for phase in pre post commit; do
 done
 [ "$(wc -l <"$trace" | tr -d ' ')" -eq 3 ]
 while IFS= read -r observed; do
-  [ "$observed" = "$scratch" ] || exit 1
+  [ "$observed" = "$scratch|1" ] || exit 1
 done <"$trace"
 [ ! -e "$manifest" ] && [ ! -e "$error_log" ]
 
@@ -47,6 +48,16 @@ fi
 grep -Fqx 'phase=post' "$manifest"
 grep -Fqx 'status=73' "$manifest"
 grep -Fqx "tmpdir=$scratch" "$manifest"
+grep -Fqx 'argument_count=5' "$manifest"
+for argn in 1 2 3 4 5; do
+  grep -Eq "^arg${argn}_sha256=[0-9a-f]{64}$" "$manifest"
+done
+if grep -Fq '/bin' "$manifest" || grep -Fq 'cranelift' "$manifest" ||
+   grep -Eq '^arg[0-9]+=' "$manifest"; then
+  echo 'FAIL: fingerprint failure manifest retained raw argv/PATH' >&2
+  exit 1
+fi
+[ "$(wc -c <"$manifest" | tr -d ' ')" -lt 4096 ]
 grep -Fqx 'phase=post' "$error_log"
 grep -Fqx 'mktemp: No space left on device' "$error_log"
 

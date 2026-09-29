@@ -2,7 +2,7 @@
 
 [![Production Ready](https://img.shields.io/badge/status-production%20ready-brightgreen)](doc/archive/release/PRODUCTION_READY_SUMMARY.md)
 [![Tests](https://img.shields.io/badge/tests-4067%2F4067%20passing-brightgreen)](doc/09_report/session/full_test_suite_results_2026-02-14.md)
-[![Multiplatform Bootstrap](https://github.com/ormastes/simple/actions/workflows/rust-bootstrap-multiplatform.yml/badge.svg)](.github/workflows/rust-bootstrap-multiplatform.yml)
+[![LLVM Cross](https://github.com/ormastes/simple/actions/workflows/simple-llvm-cross.yml/badge.svg)](.github/workflows/simple-llvm-cross.yml)
 [![License](https://img.shields.io/badge/license-Apache_2.0-blue.svg)](LICENSE)
 
 Simple is a self-hosted language and toolchain that combines a readable Python-like surface with compiler-integrated testing, documentation, architecture rules, and baremetal-oriented execution paths.
@@ -137,15 +137,10 @@ bin/simple build bootstrap
 Direct commands behind the wrapper:
 
 ```bash
-scripts/bootstrap/bootstrap-from-scratch.sh --mode=dynload
-scripts/bootstrap/bootstrap-from-scratch.sh --mode=one-binary
-scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap
+src/compiler_rust/target/bootstrap/simple --version
+bin/simple build bootstrap
 sha256sum bootstrap/simple_stage2 bootstrap/simple_stage3
 ```
-
-`src/compiler_rust/target/bootstrap/simple` is a bootstrap seed only and prints
-a `WARNING` when run directly. Use the pure-Simple `bin/simple` for normal
-build/test/tooling work.
 
 See [doc/02_requirements/app/build/bootstrap.md](doc/02_requirements/app/build/bootstrap.md) and [doc/03_plan/compiler/bootstrap/pure_simple_bootstrap_stage2_remaining_2026-05-04.md](doc/03_plan/compiler/bootstrap/pure_simple_bootstrap_stage2_remaining_2026-05-04.md) for the current bootstrap flow and remaining pure-Simple self-hosting notes.
 
@@ -612,12 +607,14 @@ print s.items.len()  # 2
 Run SDoctest examples:
 ```bash
 simple test --sdoctest README.md      # Run verified examples in Markdown/docs
-simple test --sdoctest src/math.spl   # Run file-local doctest examples
+simple test --spl-doctest src/math.spl # Run file-local source-comment doctests
 simple test --sdoctest --tag slow     # Filter by tag
-simple test test --whole              # Release gate: specs, long tests, source + Markdown doctests
 ```
 
 `--doctest` is still accepted as a compatibility alias, but `--sdoctest` is the clearer name for the implemented path.
+In the canonical release command, the positional `test` selects the spec tree
+only. `--whole` still discovers Markdown from `config/sdoctest.sdn` and comment
+sdoctests from the production `src/lib`, `src/compiler`, and `src/app` roots.
 
 ### Functional Update Operator (`->`)
 
@@ -747,7 +744,7 @@ fn matrix_multiply(A: []f32, B: []f32, C: []f32, N: u32):
 - [Macro System](doc/06_spec/macro.md) - Executable macro spec and status
 - [AOP Support Matrix](doc/05_design/aop_support_matrix.md) - Supported selectors, advice kinds, backends, and error codes
 - [SDN Format](doc/04_architecture/format/note_sdn_index.md) - Note/SDN storage and indexing format
-- [SDoctest](doc/06_spec/app/compiler/modules/testing/sdoctest.md) - Documentation testing and verified examples
+- [SDoctest](doc/06_spec/03_system/feature/features/sdoctest/sdoctest_spec.md) - Documentation testing and verified examples
 - [Feature Documentation](doc/06_spec/feature.md) - Generated feature-doc artifact format
 
 ---
@@ -810,35 +807,81 @@ scenarios. SPipe is the related runner/docgen process; SSpec is the authoring
 style: write readable `step("...")` actions, keep executable assertions in the
 same scenario, and let docgen render compact manual steps with folded source.
 
+### Example 1: TUI Selection
+
+This follows the real Code Actions picker flow exercised by
+`test/03_system/gui/editor_controller_spec.spl`: populate a selectable panel,
+choose a row, and apply it with Enter. Keep the interaction and its visible
+selection contract together.
+
 ```simple
-use std.spec.*
+use std.spec.{describe, expect, it, step}
 
-describe "Dashboard actions":
-    # @inline
-    it "operator has an authenticated session":
-        step("Open the sign-in page")
-        step("Submit valid credentials")
-
-    it "operator reviews dashboard actions":
-        # @include("operator has an authenticated session")
-        step("Open the actions panel")
-        expect("actions").to_equal("actions")
+describe "Code action picker":
+  it "selects and applies the requested repair":
+    # @req REQ-EDITOR-CODE-ACTION-001
+    val actions = [
+      ["First fix", "Rename first now"],
+      ["Second fix", "Rename second now"]
+    ]
+    step("Open the Code Actions menu")
+    step("Select \"Second fix\"")
+    val selected_index = 1
+    step("Press Enter to apply the selected action")
+    expect(actions[selected_index][0]).to_equal("Second fix")
+    expect(actions[selected_index][1]).to_equal("Rename second now")
 ```
 
-Generated manual:
+Generated operator manual:
 
-```md
-1. Open the sign-in page
-2. Submit valid credentials
-3. Open the actions panel
-   - Expected: "actions" equals `actions`
+```text
+1. Open the Code Actions menu
+2. Select "Second fix"
+3. Press Enter to apply the selected action
+```
+
+### Example 2: Tabular Output
+
+This is shortened from the dashboard HTML rendering system spec at
+`test/03_system/feature/app/web_dashboard/dashboard_render_spec.spl`. It is the
+same table-shaped contract useful for compression, storage/NVMe, security, and
+HTML test reports: stable columns, representative rows, and assertions over
+the generated surface.
+
+```simple
+use std.spec.{describe, expect, it, step}
+use app.dashboard.render.table.{render_html_table}
+
+describe "Artifact verification table":
+  it "renders each artifact result as a table row":
+    val headers = ["Artifact", "Integrity", "Status"]
+    val rows = [
+      ["firmware.bin", "sha256", "passed"],
+      ["policy.sdn", "signature", "blocked"]
+    ]
+    step("Render the artifact verification table")
+    val html = render_html_table(headers, rows)
+    step("Verify the blocked policy result remains visible")
+    expect(html).to_contain("policy.sdn")
+    expect(html).to_contain("blocked")
+```
+
+Generated QA evidence can retain the compact tabular result:
+
+```text
+Artifact     | Integrity | Status
+firmware.bin | sha256    | passed
+policy.sdn   | signature | blocked
 ```
 
 `Given_*`, `When_*`, and `Then_*` helper naming is legacy style. Use
 `step("...")` for new SSpec manuals. See the
 [SSpec Scenario Manual Guide](doc/07_guide/infra/sspec_scenario_manual.md).
 
-Generated docs land in the numbered documentation tree, primarily under `doc/06_spec/`, so the checked examples stay close to the current spec artifacts.
+Generated docs land in the numbered documentation tree under `doc/06_spec/`.
+Docgen mirrors a test path without its leading `test/` component; for example,
+`test/03_system/plan_acceptance/evidence_showcase_spec.spl` generates
+`doc/06_spec/03_system/plan_acceptance/evidence_showcase_spec.md`.
 
 ---
 
@@ -921,47 +964,58 @@ See [doc/README.md](doc/README.md), [doc/06_spec/README.md](doc/06_spec/README.m
 
 ```
 simple/
-├── bin/                      # CLI entry points
-│   ├── simple               # Main CLI (shell wrapper)
-│   └── release/             # Pre-built release binaries
-│       └── simple           # Pre-built runtime (33 MB)
+├── bin/                      # CLI wrappers and admitted binaries
+│   ├── simple                # Main CLI
+│   └── release/              # Release binaries by target
 │
-├── src/                      # Simple source code (100% Simple)
-│   ├── app/                  # Applications
-│   │   ├── cli/             # Main CLI dispatcher
-│   │   ├── build/           # Self-hosting build system
-│   │   ├── mcp/             # MCP server (Model Context Protocol)
-│   │   ├── lsp/             # Language server protocol
-│   │   ├── io/              # SFFI wrappers (file, process, etc.)
-│   │   └── ...              # 50+ tool modules
-│   ├── lib/                  # Libraries
-│   │   ├── database/        # Unified database (BugDB, TestDB, etc.)
-│   │   └── pure/            # Pure Simple DL (tensor, autograd, nn)
-│   ├── std/                  # Standard library
-│   │   ├── src/             # Library source
-│   │   └── test/            # Library tests
-│   └── compiler/             # Compiler infrastructure
-│       ├── backend/         # Code generation
-│       ├── inference/       # Type inference
-│       └── parser/          # Parser and treesitter
+├── src/                      # Product source
+│   ├── app/                  # CLI, build, MCP, LSP, test runner, tools
+│   ├── compiler/             # Numbered compiler layers
+│   │   ├── 00.common/        # Shared compiler contracts and cache keys
+│   │   ├── 10.frontend/      # Lexer, parser, AST, desugaring
+│   │   ├── 50.mir/           # Lowered intermediate representation
+│   │   ├── 70.backend/       # Native, LLVM, C, WASM, and linker backends
+│   │   ├── 80.driver/        # Build driver and incremental cache
+│   │   │   └── cache/reference/ # Reverse-reference scheduling and receipts
+│   │   ├── 95.interp/        # Interpreter execution layer
+│   │   └── 99.loader/        # Module resolution, loading, and JIT instantiation
+│   ├── compiler_rust/        # Rust seed bootstrap compiler
+│   ├── lib/                  # Standard library, imported as use std.X
+│   ├── runtime/              # Native runtime and support libraries
+│   └── verification/         # Formal verification
 │
-├── examples/                 # Example programs
-│   ├── pure_nn/             # Deep learning examples
-│   └── gpu/vulkan/          # GPU computing examples
+├── test/                     # Executable specifications
+│   ├── 01_unit/              # Unit tests
+│   ├── 02_integration/       # Integration tests
+│   ├── 03_system/            # System and feature tests
+│   ├── 04_smoke/             # Fast product smoke tests
+│   └── 05_perf/              # Performance tests
 │
-├── test/                     # Test suites
-│   ├── integration/         # Integration tests
-│   ├── system/              # System tests
-│   └── intensive/           # Intensive feature tests
+├── doc/                      # Numbered lifecycle documentation
+│   ├── 01_research/          # Research
+│   ├── 02_requirements/      # Requirements
+│   ├── 03_plan/              # Plans
+│   ├── 04_architecture/      # Architecture
+│   ├── 05_design/            # Detail design
+│   ├── 06_spec/              # Generated/manual SSpec documents
+│   └── 07_guide/             # User and contributor guides
 │
-├── doc/                      # Documentation
-│   ├── spec/                # Language specifications
-│   ├── guide/               # User guides
-│   ├── design/              # Design documents
-│   └── report/              # Session reports
-│
-└── src/verification/             # Lean 4 formal verification
+├── .scv/quarantine/          # Ignored local SCV/JIT/root artifacts
+└── build/                    # Ignored output, bootstrap artifacts, and scratchpad probes
 ```
+
+### Incremental Compile and Interpreter Boundaries
+
+The reverse-reference records under `src/compiler/80.driver/cache/reference/`
+map changed declarations and artifacts to their known consumers. The build
+driver uses them to select invalidation and reuse candidates; the loader uses
+the same dependency facts for scheduling. They make incremental compilation
+more selective when receipts and cache keys match, but do not alter language
+semantics or turn an interpreter run into a native compilation. Interpreter
+execution remains owned by `src/compiler/95.interp/`.
+
+The admission model and current evidence limits are documented in the
+[reverse-reference harmonization plan](doc/03_plan/compiler/macos_bootstrap_reverse_reference_harmonization_plan_2026-08-30.md).
 
 ---
 
@@ -1026,18 +1080,16 @@ See [doc/09_report/session/full_test_suite_results_2026-02-14.md](doc/09_report/
 ### Code Quality
 
 ```bash
-# Rust workspace quality aggregate (clippy + rustfmt + Rust tests)
+# Check before commit (fmt + lint + test)
 simple build check
 
-# Pure-Simple source quality gates
-simple lint <changed .spl files>
-simple duplicate-check <owned-dir> --mode token --min-lines 5
-simple test <scope>
+# Full check (includes coverage + duplication)
+simple build check --full
 
-# Format Rust workspace code
+# Format code
 simple build fmt
 
-# Run Rust clippy
+# Lint
 simple build lint
 ```
 

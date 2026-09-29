@@ -70,7 +70,8 @@
 #
 # An explicit operator choice is honoured via $SIMPLE_BUILD_COMPILER, but it is
 # still capability-probed -- an explicit choice has to be able to do the job.
-# A deliberate seed selection warns rather than aborting (D1 route-around).
+# An explicit seed selection is rejected: operator intent cannot turn bootstrap
+# lineage into admitted self-hosted evidence.
 #
 # USAGE (as a command)
 # --------------------
@@ -96,10 +97,14 @@ simple_compiler_default_candidates() {
     # only one of them (as the reference implementation did) silently misses
     # half the staged compilers. Both are listed.
     printf '%s\n' \
+        "${SIMPLE_WORKTREE_STORAGE_ROOT:-$_scs_root/.simple/storage}"/build/bootstrap/stage3/*/simple \
+        "${SIMPLE_WORKTREE_STORAGE_ROOT:-$_scs_root/.simple/storage}"/build/bootstrap/stage3/simple \
         "$_scs_root"/build/bootstrap/stage3/*/simple \
         "$_scs_root"/build/bootstrap/stage3/simple \
         "$_scs_root"/bootstrap/stage3/*/simple \
         "$_scs_root"/bootstrap/stage3/simple \
+        "${SIMPLE_WORKTREE_STORAGE_ROOT:-$_scs_root/.simple/storage}"/build/bootstrap/stage2/*/simple \
+        "${SIMPLE_WORKTREE_STORAGE_ROOT:-$_scs_root/.simple/storage}"/build/bootstrap/stage2/simple \
         "$_scs_root"/build/bootstrap/stage2/*/simple \
         "$_scs_root"/build/bootstrap/stage2/simple \
         "$_scs_root"/bootstrap/stage2/*/simple \
@@ -164,12 +169,16 @@ simple_compiler_is_seed() {
 # If every rung is inconclusive we reject -- fail-CLOSED, because we then have no
 # evidence the candidate can do anything at all.
 #
-# A non-signal, non-unknown-command exit (e.g. a type error about the fixture)
-# IS a pass: that is a source-level verdict from a pipeline that plainly ran.
+# The fixture is valid, so merely reaching a source-level error is not evidence
+# of a usable compiler.  Admission requires either a successful `check`, or a
+# successful native build whose executable produces the expected output.
 simple_compiler_env_write_ok() {
     _scs_bin="$1"
     case "$_scs_bin" in /*) ;; *) _scs_bin="$PWD/$_scs_bin" ;; esac
-    _scs_dir="$(mktemp -d "${TMPDIR:-/tmp}/simple-compiler-probe.XXXXXX")" || return 1
+    [ -n "${SIMPLE_WORKTREE_STORAGE_ROOT:-}" ] || return 1
+    _scs_probe_root="${SIMPLE_WORKTREE_STORAGE_ROOT}/tmp/compiler-select"
+    mkdir -p "$_scs_probe_root" || return 1
+    _scs_dir="$(mktemp -d "$_scs_probe_root/simple-compiler-probe.XXXXXX")" || return 1
     printf 'fn main():\n    print("ok")\n' > "$_scs_dir/p.spl" 2>/dev/null || {
         rm -rf "$_scs_dir"; return 1; }
 
@@ -213,7 +222,33 @@ simple_compiler_env_write_ok() {
             _scs_verdict=1; _scs_conclusive=1
             break
         fi
-        _scs_conclusive=1   # it ran; whatever it said is about the fixture
+        case "$_scs_rung" in
+            check\ *)
+                if [ "$_scs_rc" -eq 0 ]; then
+                    _scs_conclusive=1
+                    break
+                fi
+                # A candidate may lack or have a broken check frontend while
+                # still supporting the native-build contract. Try that rung.
+                continue
+                ;;
+            native-build\ *)
+                _scs_conclusive=1
+                if [ "$_scs_rc" -ne 0 ] || [ ! -x "$_scs_dir/probe_bin" ]; then
+                    _scs_verdict=1
+                    break
+                fi
+                _scs_probe_out="$(timeout "$SIMPLE_COMPILER_PROBE_TIMEOUT" \
+                    "$_scs_dir/probe_bin" 2>/dev/null)" || {
+                    _scs_verdict=1
+                    break
+                }
+                if [ "$_scs_probe_out" != ok ]; then
+                    _scs_verdict=1
+                fi
+                break
+                ;;
+        esac
     done
 
     rm -rf "$_scs_dir"
@@ -240,6 +275,24 @@ simple_compiler_usable() {
     [ -n "${1:-}" ] || return 1
     [ -f "$1" ] && [ -x "$1" ] || return 1
     simple_compiler_is_seed "$1" && return 1
+    case "$1" in
+        */bin/release/*/simple)
+            _scs_root=${SIMPLE_COMPILER_ROOT:-$(CDPATH= cd -- "$(dirname -- "$1")/../../.." 2>/dev/null && pwd -P)}
+            if ! command -v simple_runtime_provenance_admits >/dev/null 2>&1; then
+                [ -f "$_scs_root/scripts/lib/simple-runtime-provenance.shs" ] || return 1
+                . "$_scs_root/scripts/lib/simple-runtime-provenance.shs"
+            fi
+            simple_runtime_provenance_admits "$1" "$_scs_root" || return 1
+            ;;
+        */release/*/simple)
+            _scs_root=${SIMPLE_COMPILER_ROOT:-$(CDPATH= cd -- "$(dirname -- "$1")/../.." 2>/dev/null && pwd -P)}
+            if ! command -v simple_runtime_provenance_admits >/dev/null 2>&1; then
+                [ -f "$_scs_root/scripts/lib/simple-runtime-provenance.shs" ] || return 1
+                . "$_scs_root/scripts/lib/simple-runtime-provenance.shs"
+            fi
+            simple_runtime_provenance_admits "$1" "$_scs_root" || return 1
+            ;;
+    esac
     simple_compiler_env_write_ok "$1" || return 1
     if [ -n "${2:-}" ]; then
         simple_compiler_can_build_target "$1" "$2" || return 1
@@ -264,6 +317,15 @@ simple_compiler_select() {
         esac
         shift
     done
+    SIMPLE_COMPILER_ROOT=$_scs_sel_root
+    export SIMPLE_COMPILER_ROOT
+    if ! command -v simple_runtime_provenance_admits >/dev/null 2>&1; then
+        [ -f "$_scs_sel_root/scripts/lib/simple-runtime-provenance.shs" ] || {
+            echo "error: runtime provenance library is missing" >&2
+            return 1
+        }
+        . "$_scs_sel_root/scripts/lib/simple-runtime-provenance.shs"
+    fi
 
     # Explicit operator choice: honoured, but still probed.
     if [ -n "${SIMPLE_BUILD_COMPILER:-}" ]; then
@@ -272,11 +334,17 @@ simple_compiler_select() {
             return 1
         fi
         if simple_compiler_is_seed "$SIMPLE_BUILD_COMPILER"; then
-            echo "warning: explicitly selected the Rust bootstrap seed: $SIMPLE_BUILD_COMPILER" >&2
-            echo "warning: artifacts built with it will FAIL the provenance guards" >&2
-            printf '%s\n' "$SIMPLE_BUILD_COMPILER"
-            return 0
+            echo "error: SIMPLE_BUILD_COMPILER is the Rust bootstrap seed, not an admitted self-hosted compiler: $SIMPLE_BUILD_COMPILER" >&2
+            return 1
         fi
+        case "$SIMPLE_BUILD_COMPILER" in
+            */bin/release/*/simple|*/release/*/simple)
+                simple_runtime_provenance_admits "$SIMPLE_BUILD_COMPILER" "$_scs_sel_root" || {
+                    echo "error: SIMPLE_BUILD_COMPILER provenance is missing or mismatched: $SIMPLE_BUILD_COMPILER" >&2
+                    return 1
+                }
+                ;;
+        esac
         if ! simple_compiler_env_write_ok "$SIMPLE_BUILD_COMPILER"; then
             echo "error: SIMPLE_BUILD_COMPILER failed the environment-write probe: $SIMPLE_BUILD_COMPILER" >&2
             return 1
@@ -303,6 +371,14 @@ simple_compiler_select() {
             [ "$_scs_quiet" -eq 1 ] || echo "  skip (Rust bootstrap seed): $_scs_cand" >&2
             continue
         fi
+        case "$_scs_cand" in
+            */bin/release/*/simple|*/release/*/simple)
+                if ! simple_runtime_provenance_admits "$_scs_cand" "$_scs_sel_root"; then
+                    [ "$_scs_quiet" -eq 1 ] || echo "  skip (missing or mismatched runtime provenance): $_scs_cand" >&2
+                    continue
+                fi
+                ;;
+        esac
         if ! simple_compiler_env_write_ok "$_scs_cand"; then
             [ "$_scs_quiet" -eq 1 ] || echo "  skip (failed environment-write probe): $_scs_cand" >&2
             continue
@@ -346,6 +422,60 @@ simple_compiler_select_self_test() {
         fi
     }
 
+    # Deterministic regression control for bootstrap_main's historical
+    # fail-open shape: no check command, then an explicit refusal to fabricate
+    # a native wrapper. Reaching that diagnostic must never count as success.
+    _scs_fake_dir="$(mktemp -d "${TMPDIR:-/tmp}/simple-compiler-self-test.XXXXXX")" || return 1
+    _scs_fake="$_scs_fake_dir/simple-bootstrap"
+    cat >"$_scs_fake" <<'EOF'
+#!/bin/sh
+case "${1:-}" in
+    check)
+        echo "error: unknown command 'check'" >&2
+        exit 1
+        ;;
+    native-build)
+        echo "error: bootstrap_main cannot emit a seed-wrapper fallback" >&2
+        exit 1
+        ;;
+esac
+exit 1
+EOF
+    chmod +x "$_scs_fake"
+    _scs_st_ran=$((_scs_st_ran + 1))
+    if simple_compiler_env_write_ok "$_scs_fake"; then
+        echo "  FAIL  bootstrap fallback refusal was admitted" >&2
+        _scs_st_fail=$((_scs_st_fail + 1))
+    else
+        echo "  PASS  bootstrap fallback refusal is rejected"
+    fi
+
+    _scs_good="$_scs_fake_dir/simple-native"
+    cat >"$_scs_good" <<'EOF'
+#!/bin/sh
+case "${1:-}" in
+    check)
+        echo "error: unknown command 'check'" >&2
+        exit 1
+        ;;
+    native-build)
+        printf '#!/bin/sh\nprintf "ok\\n"\n' >probe_bin
+        chmod +x probe_bin
+        exit 0
+        ;;
+esac
+exit 1
+EOF
+    chmod +x "$_scs_good"
+    _scs_st_ran=$((_scs_st_ran + 1))
+    if simple_compiler_env_write_ok "$_scs_good"; then
+        echo "  PASS  successful native artifact is admitted"
+    else
+        echo "  FAIL  successful native artifact was rejected" >&2
+        _scs_st_fail=$((_scs_st_fail + 1))
+    fi
+    rm -rf "$_scs_fake_dir"
+
     # Expectations below are MEASURED on this tree (2026-08-06), not assumed.
     # The self-test's job is to pin WHY each candidate is accepted or rejected,
     # so a future regression -- either direction -- is caught: a fail-OPEN
@@ -367,8 +497,12 @@ simple_compiler_select_self_test() {
         "SimpleOS PAYLOAD: cross-target ELF, must never build itself (D-B)"
     _scs_expect reject bootstrap/stage3/x86_64-unknown-linux-gnu/simple \
         "top-level stage3: rc=139 on native-build (real work, not --help)"
-    _scs_expect reject bootstrap/stage2/simple \
-        "top-level stage2: rc=139 on native-build (real work, not --help)"
+    # Retargeted 2026-09-12: the bare `bootstrap/stage2/simple` path was retired
+    # (deploy-clobber residue -- see darwin_stage_binaries_clobber_bare_paths).
+    # Left pointing at the bare path this row would SKIP on every host forever,
+    # which is how a selftest row silently stops testing.
+    _scs_expect reject bootstrap/stage2/aarch64-apple-darwin-macho/simple \
+        "top-level stage2: refuses native-build without the full Simple driver"
     echo "known-good -- MUST be accepted (regression guard for the false-negative fix):"
     _scs_expect usable build/bootstrap/stage2/x86_64-unknown-linux-gnu/simple \
         "build/ stage2: no 'check' subcommand (inconclusive), but native-build compiles+links a real binary"

@@ -1,0 +1,146 @@
+"""Acceptance coverage for durable ContextStoreV1 recovery.
+
+This is intentionally process-backed: the writer and reader are independent
+ContextStoreV1 owners, so in-memory rows cannot satisfy the reopen assertions.
+"""
+
+use std.io_runtime.{file_delete, file_exists, file_read, file_write}
+use std.nogc_sync_mut.io.file_ops.{file_lock, file_unlock}
+
+extern fn rt_getpid() -> i64
+extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+val RUNNER = "test/integration/app/context_store_v1_recovery_runner.spl"
+
+fn path(suffix: text) -> text:
+    "/tmp/context_store_v1_{rt_getpid()}_{rt_time_now_unix_micros()}_{suffix}.db"
+
+fn remove(path: text):
+    if file_exists(path):
+        file_delete(path)
+    if file_exists(path + ".context.lock"):
+        file_delete(path + ".context.lock")
+
+fn run(mode: text, db_path: text) -> (text, text, i64):
+    rt_process_run("bin/simple", ["run", RUNNER, mode, db_path])
+
+fn run_malformed(db_path: text, kind: text) -> (text, text, i64):
+    rt_process_run("bin/simple", ["run", RUNNER, "malformed", db_path, kind])
+
+fn run_corrupt(db_path: text, kind: text) -> (text, text, i64):
+    rt_process_run("bin/simple", ["run", RUNNER, "corrupt", db_path, kind])
+
+describe "ContextStoreV1 durable recovery" :
+    it "persists rows and reopens them through independent ContextStore owners":
+        step("Reopen the committed context image in another process")
+        val db_path = path("reopen")
+        remove(db_path)
+        val (write_out, _write_err, write_code) = run("write", db_path)
+        expect(write_code).to_equal(0)
+        expect(write_out).to_contain("CONTEXT_STORE_WRITER_COMMITTED rows=3")
+        val (read_out, _read_err, read_code) = run("read", db_path)
+        expect(read_code).to_equal(0)
+        expect(read_out).to_contain("CONTEXT_STORE_READER_REOPENED rows=3 ids=2,7,8")
+        remove(db_path)
+        remove(db_path + ".max")
+
+    it "refuses identity conflicts and generation overflow without changing committed rows":
+        step("Reject persistent identity conflicts at the generation boundary")
+        val db_path = path("conflict")
+        remove(db_path)
+        val (write_out, _write_err, write_code) = run("write", db_path)
+        expect(write_code).to_equal(0)
+        expect(write_out).to_contain("CONTEXT_STORE_WRITER_COMMITTED")
+        val (conflict_out, _conflict_err, conflict_code) = run("conflict", db_path)
+        expect(conflict_code).to_equal(0)
+        expect(conflict_out).to_contain("CONTEXT_STORE_CONFLICT_REFUSED generation=9223372036854775807")
+        remove(db_path)
+        remove(db_path + ".max")
+
+    it "refuses empty, foreign, corrupt, and truncated images without rewriting them":
+        step("Refuse corrupt and truncated context images without rewrite")
+        val empty_path = path("empty")
+        val foreign_path = path("foreign")
+        val corrupt_path = path("corrupt")
+        val truncated_path = path("truncated")
+        remove(empty_path)
+        remove(foreign_path)
+        remove(corrupt_path)
+        remove(truncated_path)
+        expect(file_write(empty_path, "")).to_equal(true)
+        expect(file_write(foreign_path, "SQLite format 3\000\000")).to_equal(true)
+        val (empty_out, _empty_err, empty_code) = rt_process_run(
+            "bin/simple", ["run", RUNNER, "reject", empty_path, "empty"])
+        expect(empty_code).to_equal(0)
+        expect(empty_out).to_contain("CONTEXT_STORE_IMAGE_REJECTED kind=empty")
+        val (foreign_out, _foreign_err, foreign_code) = rt_process_run(
+            "bin/simple", ["run", RUNNER, "reject", foreign_path, "foreign"])
+        expect(foreign_code).to_equal(0)
+        expect(foreign_out).to_contain("CONTEXT_STORE_IMAGE_REJECTED kind=foreign")
+        val (corrupt_out, _corrupt_err, corrupt_code) = run_corrupt(corrupt_path, "checksum")
+        expect(corrupt_code).to_equal(0)
+        expect(corrupt_out).to_contain("CONTEXT_STORE_IMAGE_REJECTED kind=checksum")
+        val (truncated_out, _truncated_err, truncated_code) = run_corrupt(truncated_path, "truncated")
+        expect(truncated_code).to_equal(0)
+        expect(truncated_out).to_contain("CONTEXT_STORE_IMAGE_REJECTED kind=truncated")
+        expect(file_read(empty_path)).to_equal("")
+        expect(file_read(foreign_path)).to_equal("SQLite format 3\000\000")
+        expect(file_read(corrupt_path)).to_start_with("simple-pure-db-v3\n")
+        expect(file_read(truncated_path)).to_start_with("simple-pure-db-v3\n")
+        remove(empty_path)
+        remove(foreign_path)
+        remove(corrupt_path)
+        remove(truncated_path)
+
+    it "rejects malformed context schemas, typed rows, and duplicate row identities without rewrite":
+        step("Validate exact context schema columns types and row identities before persistent admission")
+        val reordered_path = path("reordered-columns")
+        val wrong_type_path = path("wrong-row-type")
+        val duplicate_id_path = path("duplicate-id")
+        val extra_table_path = path("extra-table")
+        val wrong_declared_type_path = path("wrong-declared-type")
+        val wrong_primary_key_path = path("wrong-primary-key")
+        remove(reordered_path)
+        remove(wrong_type_path)
+        remove(duplicate_id_path)
+        remove(extra_table_path)
+        remove(wrong_declared_type_path)
+        remove(wrong_primary_key_path)
+        val (reordered_out, _reordered_err, reordered_code) = run_malformed(reordered_path, "reordered-columns")
+        expect(reordered_code).to_equal(0)
+        expect(reordered_out).to_contain("CONTEXT_STORE_IMAGE_REJECTED kind=reordered-columns")
+        val (wrong_type_out, _wrong_type_err, wrong_type_code) = run_malformed(wrong_type_path, "wrong-row-type")
+        expect(wrong_type_code).to_equal(0)
+        expect(wrong_type_out).to_contain("CONTEXT_STORE_IMAGE_REJECTED kind=wrong-row-type")
+        val (duplicate_out, _duplicate_err, duplicate_code) = run_malformed(duplicate_id_path, "duplicate-id")
+        expect(duplicate_code).to_equal(0)
+        expect(duplicate_out).to_contain("CONTEXT_STORE_IMAGE_REJECTED kind=duplicate-id")
+        val (extra_out, _extra_err, extra_code) = run_malformed(extra_table_path, "extra-table")
+        expect(extra_code).to_equal(0)
+        expect(extra_out).to_contain("CONTEXT_STORE_IMAGE_REJECTED kind=extra-table")
+        val (declared_type_out, _declared_type_err, declared_type_code) = run_malformed(wrong_declared_type_path, "wrong-declared-type")
+        expect(declared_type_code).to_equal(0)
+        expect(declared_type_out).to_contain("CONTEXT_STORE_IMAGE_REJECTED kind=wrong-declared-type")
+        val (primary_key_out, _primary_key_err, primary_key_code) = run_malformed(wrong_primary_key_path, "wrong-primary-key")
+        expect(primary_key_code).to_equal(0)
+        expect(primary_key_out).to_contain("CONTEXT_STORE_IMAGE_REJECTED kind=wrong-primary-key")
+        remove(reordered_path)
+        remove(wrong_type_path)
+        remove(duplicate_id_path)
+        remove(extra_table_path)
+        remove(wrong_declared_type_path)
+        remove(wrong_primary_key_path)
+
+    it "refuses a concurrent ContextStore open before inspecting or creating the path":
+        step("Acquire the ContextStore owner lease before persistent path inspection")
+        val db_path = path("concurrent-open")
+        remove(db_path)
+        val lock_handle = file_lock(db_path + ".context.lock", 0)
+        expect(lock_handle >= 0).to_equal(true)
+        val (busy_out, _busy_err, busy_code) = run("busy", db_path)
+        expect(file_unlock(lock_handle)).to_equal(true)
+        expect(busy_code).to_equal(0)
+        expect(busy_out).to_contain("CONTEXT_STORE_OWNER_BUSY")
+        expect(file_exists(db_path)).to_equal(false)
+        remove(db_path)

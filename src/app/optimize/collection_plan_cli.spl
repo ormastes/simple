@@ -1,0 +1,221 @@
+# Explain the initial runtime choice made by an attributed adaptive container.
+# The parser-generated call is the authority for site and source attribute;
+# an admitted .sprof index supplies only the matching site/target prior load.
+
+use std.io.{file_read, file_exists}
+use compiler.core.parser.{parse_module_silent_checked}
+use compiler.core.ast.{module_get_decls, EXPR_IDENT, EXPR_METHOD_CALL, EXPR_STRING_LIT, expr_get_tag, expr_get_str, expr_get_left, expr_get_args}
+use compiler.core.ast_traversal.{
+    flat_decl_child_decls, flat_decl_child_stmts, flat_decl_child_exprs,
+    flat_stmt_child_stmts, flat_stmt_child_exprs, flat_stmt_child_arms,
+    flat_expr_child_exprs, flat_expr_child_stmts, flat_expr_child_arms,
+    flat_arm_child_exprs, flat_arm_child_stmts
+}
+use app.optimize.sprof_collection_profile.{
+    SprofCollectionSetIndex, sprof_source_module_identity_from_text,
+    sprof_load_collection_profile_file, sprof_build_collection_set_index,
+    sprof_prepared_collection_profile_for_site
+}
+use std.nogc_sync_mut.src.collections.adaptive_text_set.{adaptive_set_default_profile}
+
+struct CollectionPlanAstItem:
+    kind: i64  # 0 declaration, 1 statement, 2 expression, 3 arm
+    id: i64
+
+struct CollectionPlanSourceSite:
+    site_id: text
+    collection_type: text
+    attribute: text
+    direct_new: bool
+
+fn _collection_plan_source_site(expr: i64) -> CollectionPlanSourceSite?:
+    if expr_get_tag(expr) != EXPR_METHOD_CALL:
+        return nil
+    val method = expr_get_str(expr)
+    if method != "attributed_at_site" and method != "attributed_with_prior_at_site":
+        return nil
+    val receiver = expr_get_left(expr)
+    if expr_get_tag(receiver) != EXPR_IDENT:
+        return nil
+    val family = expr_get_str(receiver)
+    if family != "AdaptiveTextSet" and family != "AdaptiveTextMap" and
+            family != "AdaptiveSet" and family != "AdaptiveMap":
+        return nil
+    val args = expr_get_args(expr)
+    if args.len() < 3 or expr_get_tag(args[1]) != EXPR_STRING_LIT or
+            expr_get_tag(args[2]) != EXPR_STRING_LIT:
+        return nil
+    val source = args[0]
+    val direct_new = expr_get_tag(source) == EXPR_METHOD_CALL and expr_get_str(source) == "new"
+    Some(CollectionPlanSourceSite(
+        site_id: expr_get_str(args[2]), collection_type: family,
+        attribute: expr_get_str(args[1]), direct_new: direct_new
+    ))
+
+fn collection_plan_source_sites(source: text, path: text) -> [CollectionPlanSourceSite]?:
+    """Parse once and inspect exactly the attributed calls emitted by the parser."""
+    if parse_module_silent_checked(source, path):
+        return nil
+    var pending: [CollectionPlanAstItem] = []
+    for decl in module_get_decls():
+        pending.push(CollectionPlanAstItem(kind: 0, id: decl))
+    var sites: [CollectionPlanSourceSite] = []
+    var visited: i64 = 0
+    while pending.len() > 0:
+        visited = visited + 1
+        if visited > 1000000:
+            return nil
+        val item = pending[pending.len() - 1]
+        pending.pop()
+        if item.kind == 0:
+            for child in flat_decl_child_decls(item.id): pending.push(CollectionPlanAstItem(kind: 0, id: child))
+            for child in flat_decl_child_stmts(item.id): pending.push(CollectionPlanAstItem(kind: 1, id: child))
+            for child in flat_decl_child_exprs(item.id): pending.push(CollectionPlanAstItem(kind: 2, id: child))
+        elif item.kind == 1:
+            for child in flat_stmt_child_stmts(item.id): pending.push(CollectionPlanAstItem(kind: 1, id: child))
+            for child in flat_stmt_child_exprs(item.id): pending.push(CollectionPlanAstItem(kind: 2, id: child))
+            for child in flat_stmt_child_arms(item.id): pending.push(CollectionPlanAstItem(kind: 3, id: child))
+        elif item.kind == 2:
+            if val site = _collection_plan_source_site(item.id):
+                sites.push(site)
+            for child in flat_expr_child_exprs(item.id): pending.push(CollectionPlanAstItem(kind: 2, id: child))
+            for child in flat_expr_child_stmts(item.id): pending.push(CollectionPlanAstItem(kind: 1, id: child))
+            for child in flat_expr_child_arms(item.id): pending.push(CollectionPlanAstItem(kind: 3, id: child))
+        else:
+            for child in flat_arm_child_exprs(item.id): pending.push(CollectionPlanAstItem(kind: 2, id: child))
+            for child in flat_arm_child_stmts(item.id): pending.push(CollectionPlanAstItem(kind: 1, id: child))
+    Some(sites)
+
+fn _collection_plan_initial_explain(
+    site: CollectionPlanSourceSite, target: text,
+    index: SprofCollectionSetIndex?
+) -> text:
+    val runtime_profile = adaptive_set_default_profile()
+    var profile_found = false
+    var profile_size: i64 = -1
+    var profile_lookups: i64 = -1
+    var profile_hash_probes: i64 = -1
+    var profile_hash_collisions: i64 = -1
+    if val prepared = index:
+        val selected = sprof_prepared_collection_profile_for_site(
+            prepared, site.site_id, target
+        )
+        if selected.found:
+            profile_found = true
+            profile_size = selected.profile.size_p95
+            profile_lookups = selected.profile.lookup_count_p95
+            profile_hash_probes = selected.profile.hash_probe_count_p95
+            profile_hash_collisions = selected.profile.hash_collision_count_p95
+    val profile_pressure = profile_found and
+        (profile_size > runtime_profile.linear_size_limit or
+            profile_lookups >= runtime_profile.lookup_promotion_count)
+    val collision_pressure = profile_found and
+        profile_hash_probes >= runtime_profile.lookup_promotion_count and
+        profile_hash_collisions > profile_hash_probes / 4
+    val selected = if site.attribute == "hash": "hash"
+        else if site.attribute == "ordered": "ordered"
+        else if site.attribute == "linear": "linear"
+        else if not site.direct_new: "unknown"
+        else if collision_pressure: "ordered"
+        else if profile_pressure: "hash"
+        else: "linear"
+    val evidence = if site.attribute != "auto": "source-attribute"
+        else if not site.direct_new: "custom-initializer-unproved"
+        else if profile_found: "admitted-exact-site-profile"
+        else: "default-auto-thresholds"
+    val rejected_linear = if site.attribute == "linear": "none"
+        else if site.attribute != "auto": "source-attribute"
+        else if profile_pressure: "profile-pressure"
+        else: "none"
+    val rejected_hash = if site.attribute == "hash": "none"
+        else if site.attribute != "auto": "source-attribute"
+        else if collision_pressure: "profile-hash-collisions"
+        else if profile_pressure: "none"
+        else: "no-prior-pressure"
+    val rejected_ordered = if site.attribute == "ordered" or
+            (site.attribute == "auto" and collision_pressure):
+        "none"
+    else:
+        "source-attribute-or-auto-policy"
+    # Even linear instances allocate auxiliary empty backings today. No
+    # measured byte model exists for a trustworthy per-instance delta.
+    val memory = "unknown"
+    val generic_keys = site.collection_type == "AdaptiveSet" or
+        site.collection_type == "AdaptiveMap"
+    val key_order_guard = if generic_keys:
+        "native-order-checked-on-keyed-use;forced-ordered-key-error"
+    else:
+        "text-total-order"
+    val fallback = if site.attribute == "auto" and generic_keys:
+        "live-workload-promotion-and-demotion;unsupported-key-demotion"
+    elif site.attribute == "auto":
+        "live-workload-promotion-and-demotion"
+    else:
+        "none"
+    val profile_status = if profile_found: "admitted-exact-site" else: "absent"
+    val profile_size_text = if profile_found: "{profile_size}" else: "unknown"
+    val profile_lookups_text = if profile_found: "{profile_lookups}" else: "unknown"
+    val profile_hash_probes_text = if profile_hash_probes >= 0: "{profile_hash_probes}" else: "unknown"
+    val profile_hash_collisions_text = if profile_hash_collisions >= 0: "{profile_hash_collisions}" else: "unknown"
+    val initializer_guard = if site.direct_new: "direct-new" else: "unproved-custom-initializer"
+    var live_collision_guard = "window={runtime_profile.lookup_promotion_count},high=collisions>probes/4,promote=high>window/4"
+    if site.attribute != "auto":
+        live_collision_guard = "disabled-by-attribute"
+    elif not site.direct_new:
+        live_collision_guard = "custom-profile-threshold-unknown"
+    [
+        "collection-runtime-initial-plan-v1",
+        "site={site.site_id}", "target={target}", "kind={site.collection_type}",
+        "selected={selected}", "evidence={evidence}", "attribute={site.attribute}",
+        "static.size=unknown", "static.lookups=unknown",
+        "profile.status={profile_status}", "profile.size_p95={profile_size_text}",
+        "profile.lookups_p95={profile_lookups_text}",
+        "profile.hash_probes_p95={profile_hash_probes_text}",
+        "profile.hash_collisions_p95={profile_hash_collisions_text}",
+        "guard.initializer={initializer_guard}", "guard.typed_mir=unconnected",
+        "guard.key_order={key_order_guard}",
+        "guard.live_hash_collision={live_collision_guard}",
+        "rejected.linear={rejected_linear}", "rejected.hash={rejected_hash}",
+        "rejected.ordered={rejected_ordered}",
+        "extra_memory_bytes={memory}", "memory_budget=not-modeled",
+        "fallback={fallback}"
+    ].join("\n") + "\n"
+
+fn collection_plan_explain_file(
+    path: text, profile_path: text, workload: text, target: text, site_filter: text
+) -> text:
+    """Explain actual initial adaptive storage; unknowns stay explicit."""
+    if not file_exists(path):
+        return "error: source file not found"
+    val source = file_read(path)
+    var index: SprofCollectionSetIndex? = nil
+    if profile_path != "":
+        if workload == "" or target == "":
+            return "error: profile explanation requires --collection-workload and --collection-target"
+        if not file_exists(profile_path):
+            return "error: collection profile file not found"
+        val identity = sprof_source_module_identity_from_text(path, source)
+        val loaded = sprof_load_collection_profile_file(profile_path, identity, workload)
+        if loaded.status != "loaded":
+            return "error: collection profile was not admitted: {loaded.status}"
+        val prepared = sprof_build_collection_set_index(loaded)
+        var target_found = false
+        for profile in prepared.profiles:
+            if profile.target_profile_id == target:
+                target_found = true
+        if not target_found:
+            return "error: collection profile has no samples for target"
+        index = Some(prepared)
+    val parsed = collection_plan_source_sites(source, path)
+    if parsed == nil:
+        return "error: source parse or collection-site inspection failed"
+    var reports: [text] = []
+    for site in parsed.unwrap():
+        if site_filter == "" or site.site_id == site_filter:
+            reports.push(_collection_plan_initial_explain(site, target, index))
+    if reports.len() == 0:
+        return "error: no matching attributed collection site"
+    reports.join("\n")
+
+export CollectionPlanSourceSite, collection_plan_source_sites
+export collection_plan_explain_file

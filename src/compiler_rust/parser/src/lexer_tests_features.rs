@@ -393,6 +393,31 @@ fn test_region_domain_unclosed_block_reports_kind() {
 }
 
 #[test]
+fn test_path_suffix_requires_adjacency_and_rejects_unsupported_string_forms() {
+    assert_eq!(
+        tokenize(r#""config/app.toml"_path"#),
+        vec![
+            TokenKind::TypedString("config/app.toml".to_string(), "path".to_string()),
+            TokenKind::Eof,
+        ]
+    );
+
+    let spaced = tokenize(r#""config/app.toml" _path"#);
+    assert!(!matches!(spaced.first(), Some(TokenKind::TypedString(_, suffix)) if suffix == "path"));
+
+    assert!(matches!(
+        tokenize(r#""config/{name}"_path"#).first(),
+        Some(TokenKind::Error(message))
+            if message == "_path does not support interpolated strings"
+    ));
+    assert!(matches!(
+        tokenize(r#""""config/app.toml"""_path"#).first(),
+        Some(TokenKind::Error(message))
+            if message == "_path does not support triple-quoted strings"
+    ));
+}
+
+#[test]
 fn test_region_domain_unclosed_block_reports_opening_span() {
     let mut lexer = crate::lexer::Lexer::new("schema{Building: id Uuid");
     let token = lexer.next_token();

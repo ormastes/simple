@@ -1,0 +1,58 @@
+use app.test_daemon.environment_identity.{TestDaemonEnvironmentIdentityV1, test_daemon_environment_snapshot_identity_v1, test_daemon_environment_can_reuse_v1}
+
+describe "test daemon environment identity":
+    it "is independent of environment enumeration order":
+        val a = test_daemon_environment_snapshot_identity_v1(
+            [("ALPHA", "1"), ("BETA", "2")])
+        val b = test_daemon_environment_snapshot_identity_v1(
+            [("BETA", "2"), ("ALPHA", "1")])
+        expect(a.valid).to_equal(true)
+        expect(a.digest).to_equal(b.digest)
+
+    it "changes when a caller value changes":
+        val a = test_daemon_environment_snapshot_identity_v1([("SWITCH", "0")])
+        val b = test_daemon_environment_snapshot_identity_v1([("SWITCH", "1")])
+        expect(a.digest == b.digest).to_equal(false)
+
+    it "changes when a caller variable becomes absent":
+        val present = test_daemon_environment_snapshot_identity_v1([("SWITCH", "1")])
+        val absent = test_daemon_environment_snapshot_identity_v1([])
+        expect(present.digest == absent.digest).to_equal(false)
+
+    it "length framing distinguishes delimiter-shaped values":
+        val a = test_daemon_environment_snapshot_identity_v1(
+            [("A", "B|1:C"), ("D", "E")])
+        val b = test_daemon_environment_snapshot_identity_v1(
+            [("A", "B"), ("C|1", "D|1:E")])
+        expect(a.digest == b.digest).to_equal(false)
+        val newline_value = test_daemon_environment_snapshot_identity_v1(
+            [("A", "line-one\nline-two")])
+        val split_rows = test_daemon_environment_snapshot_identity_v1(
+            [("A", "line-one"), ("line-two", "")])
+        expect(newline_value.digest == split_rows.digest).to_equal(false)
+
+    it "rejects duplicate names":
+        val result = test_daemon_environment_snapshot_identity_v1(
+            [("A", "1"), ("A", "2")])
+        expect(result.valid).to_equal(false)
+        expect(result.reason).to_equal("environment-field-duplicate:A")
+
+    it "normalizes shell bookkeeping and the forced daemon execution mode":
+        val client = test_daemon_environment_snapshot_identity_v1(
+            [("_", "client"), ("SHLVL", "1"), ("SIMPLE_EXECUTION_MODE", "jit")])
+        val daemon = test_daemon_environment_snapshot_identity_v1(
+            [("_", "daemon"), ("SHLVL", "2"), ("SIMPLE_EXECUTION_MODE", "interpret")])
+        expect(client.digest).to_equal(daemon.digest)
+        val absent = test_daemon_environment_snapshot_identity_v1([])
+        val forced = test_daemon_environment_snapshot_identity_v1(
+            [("SIMPLE_EXECUTION_MODE", "interpret")])
+        expect(absent.digest).to_equal(forced.digest)
+
+    it "fails closed for missing mismatched or invalid published identity":
+        val caller = test_daemon_environment_snapshot_identity_v1([("A", "1")])
+        val changed = test_daemon_environment_snapshot_identity_v1([("A", "2")])
+        expect(test_daemon_environment_can_reuse_v1(caller, "")).to_equal(false)
+        expect(test_daemon_environment_can_reuse_v1(caller, changed.digest)).to_equal(false)
+        expect(test_daemon_environment_can_reuse_v1(caller, caller.digest)).to_equal(true)
+        val invalid = TestDaemonEnvironmentIdentityV1(false, caller.digest, "failed")
+        expect(test_daemon_environment_can_reuse_v1(invalid, caller.digest)).to_equal(false)

@@ -1,8 +1,10 @@
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
+
 
 ## Root #5 status update — module_global_init PARTIAL coverage (blocker)
-
-Status: FIXED
-Status re-verified 2026-08-17 by source inspection (triage shard 02).
 Codex landed module_global_init.rs fix (Optional globals → nil sentinel + eager
 init preserved), but a fresh full-seed rebuild (all 3 fixes) STILL faults at boot
 `Mutex.lock` null via `_browser_default_font_lock_acquire` ←

@@ -1,0 +1,44 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+owner="$root/src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl"
+provider_dir=${1:-}
+
+fail() { echo "FAIL: $*" >&2; exit 1; }
+[ -n "$provider_dir" ] || fail "usage: $0 <admitted-provider-directory>"
+[ -d "$provider_dir" ] || fail "provider directory is missing: $provider_dir"
+command -v nm >/dev/null 2>&1 || fail "nm is unavailable"
+
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/typed-text-provider.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+
+# This compiler owner is the complete host-extern surface touched by typed-text
+# canonicalization. Check every declaration in it, not a hand-picked symbol,
+# so a later helper addition cannot silently outrun the admitted provider.
+sed -n 's/^[[:space:]]*extern fn \([A-Za-z_][A-Za-z0-9_]*\).*/\1/p' "$owner" |
+    LC_ALL=C sort -u > "$tmp/required"
+: > "$tmp/defined.unsorted"
+find "$provider_dir" -maxdepth 2 -type f \( -name '*.a' -o -name '*.rlib' \) -print |
+while IFS= read -r archive; do
+    nm -g --defined-only "$archive" 2>/dev/null |
+        awk 'NF { print $NF }' | sed 's/^_//' >> "$tmp/defined.unsorted"
+done
+LC_ALL=C sort -u "$tmp/defined.unsorted" > "$tmp/defined"
+LC_ALL=C comm -23 "$tmp/required" "$tmp/defined" > "$tmp/missing"
+[ ! -s "$tmp/missing" ] || {
+    sed 's/^/missing: /' "$tmp/missing" >&2
+    fail "typed-text compiler externs exceed admitted provider ABI"
+}
+
+! grep -Fq 'extern fn rt_text_eq_any' "$owner" ||
+    fail "unadmitted rt_text_eq_any dependency returned"
+! grep -Fq 'extern fn rt_text_cmp_any' "$owner" ||
+    fail "LLVM-registering comparator dependency returned"
+grep -Fq 'builtin_method_tag == BUILTIN_METHOD_STR_STRIP' "$owner" ||
+    fail "scalar strip tag lowering is absent"
+grep -Fq 'builtin_method_tag == BUILTIN_METHOD_STR_LINES' "$owner" ||
+    fail "scalar lines tag lowering is absent"
+
+count=$(wc -l < "$tmp/required" | tr -d ' ')
+echo "PASS: admitted provider owns all $count typed-text compiler externs"

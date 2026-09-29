@@ -1,89 +1,162 @@
 # CSS Logical Sizing And Writing Mode
 
-> Mirrored manual for
-> `test/03_system/feature/web_platform/css/logical_sizing_writing_mode_spec.spl`.
+> This bounded integer-pixel scenario proves that logical size declarations map
 
 | Tests | Active | Skipped | Pending |
-|-------|-------:|--------:|--------:|
+|-------|--------|---------|--------:|
 | 2 | 2 | 0 | 0 |
 
-| Manual status | Value |
+<details>
+<summary>Full Scenario Manual</summary>
+
+# CSS Logical Sizing And Writing Mode
+
+This bounded integer-pixel scenario proves that logical size declarations map
+
+## At a Glance
+
+| Field | Value |
 |-------|-------|
-| Source SHA-256 | `12c85ef23f151d899505e92622dc37cb21bdb41f82018c2847f9f80dd2d0330a` |
-| Docgen | Pending — no admitted pure-Simple runner provenance is available |
-| Runtime result | Not executed |
+| Category | Other |
+| Status | Active |
+| Source | `test/03_system/feature/web_platform/css/logical_sizing_writing_mode_spec.spl` |
+| Updated | 2026-08-26 |
+| Generator | `simple spipe-docgen` (Simple) |
 
-## Scope
+This bounded integer-pixel scenario proves that logical size declarations map
+to the physical axis selected by writing-mode before canonical Web layout,
+Draw IR, and Engine2D execution.
 
-This bounded scenario covers nonnegative integer-pixel `inline-size`,
-`block-size`, their min/max longhands, and authored-order conflicts with
-physical width/height for horizontal, vertical, and sideways writing modes.
-It also covers inherited, stylesheet-normal, inline-normal,
-stylesheet-important, and inline-important writing-mode winners.
-It does not claim vertical text shaping or full CSS Writing Modes conformance.
+## Scenarios
 
-## Requirement traceability
+### REQ-WEB-BROWSER-003/004/021: CSS logical sizing
 
-- `REQ-WEB-BROWSER-003`: resolves logical dimensions on the writing-mode axis.
-- `REQ-WEB-BROWSER-004`: carries exact geometry through canonical Draw IR and
-  renders discriminating pixels through the shared Engine2D compositor.
-- `REQ-WEB-BROWSER-021`: supplies a modern executable SSpec and this mirror.
+#### should map logical sizes through writing mode into exact pixels
 
-## Scenario
+**Scenario capture:** artifact after_step
 
-### should map logical sizes through writing mode into exact pixels
 
-1. **Keep horizontal logical dimensions on width and height**
-   - `inline-size:12px; block-size:20px` produces a 12 by 20 content rect.
-   - Draw IR source kind remains `html_ast`.
-2. **Swap vertical inline and block dimensions before layout**
-   - The same sizes under `vertical-rl` produce a 20 by 12 content rect.
-3. **Map vertical and sideways logical min and max constraints**
-   - Sideways min/max fields map to physical width `[18,22]` and height
-     `[10,14]`; minimum geometry is 18 by 10.
-   - A later `min-inline-size:10px` clears the earlier `min-height:100vh`
-     viewport flag on their shared vertical physical axis.
-   - Vertical max constraints reduce 30 by 24 to 22 by 14.
-4. **Preserve authored order between logical and physical axes**
-   - A later vertical `block-size` beats width, while a later height beats
-     `inline-size`, producing 20 by 9.
-5. **Use the final inherited inline and important writing mode**
-   - An inherited vertical mode overridden by inline normal resolves to
-     horizontal 12 by 20.
-   - Stylesheet-important vertical beats inline-normal horizontal and resolves
-     to 20 by 12.
-   - Inline-important horizontal beats stylesheet-normal vertical and resolves
-     to 12 by 20.
-6. **Render discriminating horizontal and vertical Engine2D pixels**
-   - Neither composition skips a command.
-   - Pixel `(19,11)` is white horizontally and blue vertically.
-   - Pixel `(11,19)` is blue horizontally and white vertically.
+<details>
+<summary>Executable SSpec</summary>
 
-### should preserve empty cell winners while pre-resolving writing mode
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
 
-1. **Let stylesheet-important hide beat inline-normal show**
-   - The empty cell is transparent and pixel `(5,4)` retains the blue table
-     background.
-2. **Let inline-important show beat stylesheet-important hide**
-   - The same pixel is the cell's red background.
+```simple
+# @req REQ-WEB-BROWSER-003/004/021
+```
 
-## Canonical route
+</details>
 
-The HTML producer resolves declarations in the existing Web style owner,
-layout produces the shared `DrawIrComposition`, and the existing software
-Engine2D compositor consumes that composition. No private WebIR, layout,
-paint, cache, or font path is introduced.
+#### should preserve empty cell winners while pre-resolving writing mode
 
-## Evidence boundary
+- should preserve empty cell winners while pre-resolving writing mode
+- Let stylesheet-important hide beat inline-normal show
+- Let inline-important show beat stylesheet-important hide
+   - Expected: inline_important_pixels[4 * 48 + 5] equals `0xFFEF4444u32`
 
-This is a complete handwritten scenario mirror pending qualified
-`simple spipe-docgen`. Source inspection proves the prior implementation
-always mapped inline size to width and block size to height. A provenance-bound
-pure-Simple execution is still required before recording runtime PASS.
 
-## Complete executable scenario reproduction
+<details>
+<summary>Executable SSpec</summary>
 
-The complete runnable modern SSpec, including every setup helper, visible
-`step("...")`, exact Draw IR assertion, and Engine2D pixel assertion, is:
+Runnable source: 29 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
 
-`test/03_system/feature/web_platform/css/logical_sizing_writing_mode_spec.spl`
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("should preserve empty cell winners while pre-resolving writing mode")
+step("Let stylesheet-important hide beat inline-normal show")
+val stylesheet_important = _logical_document(
+    "table{width:40px;background:#dbeafe}" +
+    "td{display:block;width:20px;height:8px;background:#ef4444;" +
+    "empty-cells:hide!important}",
+    "<table><tr><td id='box' style='empty-cells:show'></td></tr></table>"
+)
+val stylesheet_important_pixels = _logical_pixels(
+    stylesheet_important
+)
+expect(stylesheet_important.composition.batches[0].source.source_kind).to_equal(
+    "html_ast"
+)
+expect(stylesheet_important_pixels[4 * 48 + 5]).to_equal(
+    0xFFDBEAFEu32
+)
+
+step("Let inline-important show beat stylesheet-important hide")
+val inline_important = _logical_document(
+    "table{width:40px;background:#dbeafe}" +
+    "td{display:block;width:20px;height:8px;background:#ef4444;" +
+    "empty-cells:hide!important}",
+    "<table><tr><td id='box' " +
+    "style='empty-cells:show!important'></td></tr></table>"
+)
+val inline_important_pixels = _logical_pixels(inline_important)
+expect(inline_important_pixels[4 * 48 + 5]).to_equal(0xFFEF4444u32)
+```
+
+</details>
+
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 2 |
+| Active scenarios | 2 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
+
+
+</details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+- `REQ-WEB-BROWSER-003/004/021`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `823494a7685de0875668d14d367b99ed070c06e593ee79b73bb21ec961207859`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `823494a7685de0875668d14d367b99ed070c06e593ee79b73bb21ec961207859`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `823494a7685de0875668d14d367b99ed070c06e593ee79b73bb21ec961207859`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/03_system/feature/web_platform/css/logical_sizing_writing_mode_spec.spl
+mirror: doc/06_spec/03_system/feature/web_platform/css/logical_sizing_writing_mode_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=80 oracle=100
+  traceability=100 evidence=90 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/feature/web_platform/css/logical_sizing_writing_mode_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/web_platform/css/logical_sizing_writing_mode_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/web_platform/css/logical_sizing_writing_mode_spec.spl:71:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'should map logical sizes through writing mode into exact pixels' has no visible step flow
+  why: Ordered visible actions make the manual operable.
+  improve: Add ordered step("...") calls for meaningful actions.
+test/03_system/feature/web_platform/css/logical_sizing_writing_mode_spec.spl:71:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should map logical sizes through writing mode into exact pixels' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/feature/web_platform/css/logical_sizing_writing_mode_spec.spl:190:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should preserve empty cell winners while pre-resolving writing mode' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/feature/web_platform/css/logical_sizing_writing_mode_spec.spl:190:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should preserve empty cell winners while pre-resolving writing mode' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

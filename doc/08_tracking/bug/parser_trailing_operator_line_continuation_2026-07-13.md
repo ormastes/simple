@@ -1,4 +1,9 @@
 # Bug: trailing binary-operator line continuation causes "expected expression, found Dedent"
+## Closed 2026-09-16 — RESOLVED 2026-08-21: seed parser fix, 11/11 matrix green, suite 299 green
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **ID:** parser_trailing_operator_line_continuation_2026-07-13
 **Filed:** 2026-07-13
@@ -6,8 +11,9 @@
 single-line-body form now parses in the Rust seed; the earlier narrowing
 (multi-line body already fine) is retained below for history.
 **Severity:** P2 — silently-confusing parse failure on a plausible/idiomatic form
-**Component:** compiler frontend / parser (both the deployed self-hosted `bin/simple`
-and the fresh Rust seed reject the same input)
+**Component:** Rust bootstrap frontend / parser inline-`if` boundary. The
+current pure-Simple lexer suppresses continuation indentation without creating
+this pseudo-indent debt and is not affected.
 
 ## Symptom
 
@@ -177,3 +183,4 @@ single-line body). Whole crate: **299 + 1 lib/integration suites all green,
 The live instances at
 `src/compiler/00.common/assurance/formal_delivery_gates.spl:147-149,205-207` are
 no longer a parse failure for the seed.
+

@@ -1,0 +1,53 @@
+use std.spec.{describe, it, expect}
+use std.fs.{read_file}
+
+describe "PID1 service-manager entry contract":
+    it "uses opaque trusted catalog IDs in VFS-network-HTTP order":
+        val source = read_file("src/os/services/init/service_manager_main.spl")
+        val vfs = source.index_of("ROOT_SERVICE_VFS")
+        val net = source.index_of("ROOT_SERVICE_NET")
+        val http = source.index_of("ROOT_SERVICE_HTTP")
+        expect(source).to_contain("root_service_spawn(catalog_id, priority)")
+        expect(source).to_contain("while true:")
+        expect(vfs < net).to_equal(true)
+        expect(net < http).to_equal(true)
+
+    it "unwinds a failed dependency start through the opaque PID1-only stop ABI":
+        val source = read_file("src/os/services/init/service_manager_main.spl")
+        expect(source).to_contain("fn _stop_started_reverse(pids: [i64])")
+        expect(source).to_contain("root_service_stop(pids[i as u64], -125)")
+
+    it "does not expose a path or grant list to PID1 launch requests":
+        val source = read_file("src/os/userlib/root_service_catalog.spl")
+        expect(source).to_contain("syscall(SYS_ROOT_SERVICE_SPAWN, catalog_id, priority")
+        expect(source).to_not_contain("path:")
+        expect(source).to_not_contain("CapabilitySet")
+
+    it "reaps exact child PIDs and quarantines bounded restart failures":
+        val source = read_file("src/os/services/init/service_manager_main.spl")
+        expect(source).to_contain("root_service_wait_nohang(pids[i])")
+        expect(source).to_contain("MAX_RESTARTS: i64 = 3")
+        expect(source).to_contain("quarantined[i] = true")
+        expect(source).to_contain("Some([vfs, net, http])")
+
+    it "ties PID1 death to recursive job cleanup rather than stale reparenting":
+        val source = read_file("src/os/kernel/ipc/syscall_process.spl")
+        expect(source).to_contain("root_mint_authority")
+        expect(source).to_contain("sched.live_job_member_ids(root_job_id)")
+        expect(source).to_contain("sched.terminate_job(root_job_id, code.to_i32())")
+
+    it "uses bounded staggered exponential backoff before fresh restart grants":
+        val source = read_file("src/os/services/init/service_manager_main.spl")
+        expect(source).to_contain("MAX_RESTART_BACKOFF_YIELDS: u64 = 64u64")
+        expect(source).to_contain("fn _restart_backoff_yields")
+        expect(source).to_contain("val stagger = service_index % 4u64")
+        expect(source).to_contain("restart_backoff[i] = _restart_backoff_yields")
+        expect(source).to_contain("pids[i] = 0")
+
+    it "waits for each exact provider endpoint before starting its dependent":
+        val source = read_file("src/os/services/init/service_manager_main.spl")
+        expect(source).to_contain("ipc_connect_named_port(name)")
+        expect(source).to_contain("_wait_endpoint_ready(\"vfs\")")
+        expect(source).to_contain("_wait_endpoint_ready(\"net\")")
+        expect(source).to_contain("_wait_endpoint_ready(\"http\")")
+        expect(source).to_contain("MAX_READY_YIELDS: u64 = 1024u64")

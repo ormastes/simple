@@ -294,7 +294,7 @@ theorem complete_non_done_eq_done_record (t : GreenTask) (r : Int)
       , assigned_cpu := t.assigned_cpu
       , affinity_mask := t.affinity_mask
       , state := .done
-      , park_reason := t.park_reason
+      , park_reason := ""
       , result_val := r } := by
   simp [GreenTask.complete, h]
 

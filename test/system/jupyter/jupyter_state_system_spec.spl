@@ -1,0 +1,31 @@
+# @cover src/app/jupyter_kernel/session.spl 80%
+# @cover src/app/jupyter_kernel/main.spl 80%
+# Jupyter Kernel State Persistence System Tests
+# Tests: state persists across execute_request messages
+
+# tag: slow, system
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_getpid() -> i64
+extern fn rt_time_now_unix_micros() -> i64
+
+fn send_kernel_messages(msgs: text) -> text:
+    val tmp = "/tmp/jupyter_test_{rt_getpid()}_{rt_time_now_unix_micros()}.txt"
+    rt_file_write_text(tmp, msgs)
+    val cmd = "RUNTIME=src/compiler_rust/target/release/simple; if [ ! -x \"$RUNTIME\" ]; then RUNTIME=src/compiler_rust/target/bootstrap/simple; fi; if [ ! -x \"$RUNTIME\" ]; then RUNTIME=bin/simple; fi; cat {tmp} | timeout 10 \"$RUNTIME\" run src/app/jupyter_kernel/main.spl 2>/dev/null"
+    val (stdout, stderr, code) = rt_process_run("bash", ["-c", cmd])
+    rt_file_delete(tmp)
+    stdout
+
+describe "Jupyter Kernel State":
+    slow_it "should execute code and produce output":
+        val msgs = "{\"channel\":\"shell\",\"msg_type\":\"execute_request\",\"msg_id\":\"e1\",\"session\":\"s1\",\"content\":{\"code\":\"print 42\"}}\n{\"channel\":\"control\",\"msg_type\":\"shutdown_request\",\"msg_id\":\"s1\",\"session\":\"s1\",\"content\":{}}\n"
+        val output = send_kernel_messages(msgs)
+        expect(output).to_contain("execute_reply")
+
+    slow_it "should handle execute errors gracefully":
+        val msgs = "{\"channel\":\"shell\",\"msg_type\":\"execute_request\",\"msg_id\":\"e2\",\"session\":\"s1\",\"content\":{\"code\":\"this is invalid\"}}\n{\"channel\":\"control\",\"msg_type\":\"shutdown_request\",\"msg_id\":\"s2\",\"session\":\"s1\",\"content\":{}}\n"
+        val output = send_kernel_messages(msgs)
+        expect(output).to_contain("execute_reply")

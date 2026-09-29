@@ -1,29 +1,5 @@
 # SimpleOS primary tool manifest
 
-## Authenticated artifact receipts
-
-Every tool is admitted independently through
-`simpleos_primary_tool_receipt_v1`. The signed payload is bounded to 4096 bytes
-and binds the tool name, canonical filesystem path, artifact digest, target,
-filesystem, behavior contract, receipt id, signing key id, validity window, and
-nonce. Verification is Ed25519 against the loader-configured trust root and
-fails closed for missing/malformed signatures, unknown keys, stale/future or
-overlong windows, invalid targets, and malformed identities.
-The verifier owner reconstructs a domain-separated, length-prefixed canonical
-body from every typed receipt field. Both the carried payload and any caller
-expectation must exactly equal those bytes before signature verification, so an
-arbitrary signed payload cannot be attached to substituted metadata. Successful
-admission atomically consumes the bounded `receipt_id:nonce` replay key; reuse,
-store exhaustion, expiry, and future issuance fail closed.
-
-A verified receipt is not executable authority. The loader must separately
-hash the bytes read from the mounted filesystem, compare that digest and all
-receipt bindings, consume a live loader-owned authority token, and only then
-spawn the process. Source modules, package projections, serial markers, fixed
-commands, and host-side execution cannot satisfy this contract. Until those
-target artifacts and live receipts exist, canonical manifest rows remain
-`Blocked`; this lane makes no bootstrap or guest-execution claim.
-
 `simpleos_primary_tool_manifest_v1` is the closed, versioned declaration for
 primary userland categories: administration, archive/compression, networking,
 checksums, text processing, process monitoring, and package management.
@@ -37,16 +13,15 @@ The selected v1 inventory is exact and closed:
 
 | Category | Executable identities | State |
 |---|---|---|
-| administration | no admitted executable | `Blocked` |
-| archive/compression | no admitted executable | `Blocked` |
-| networking | no admitted executable | `Blocked` |
+| administration | no admitted executable | `Unavailable` |
+| archive/compression | no admitted executable | `Unavailable` |
+| networking | no admitted executable | `Unavailable` |
 | checksums | `/usr/bin/sha256sum`, `/usr/bin/md5sum` | `Blocked` |
 | text processing | `/usr/bin/grep` | `Blocked` |
 | process monitoring | `/usr/bin/ps` | `Blocked` |
-| package management | no admitted executable | `Blocked` |
+| package management | no admitted executable | `Unavailable` |
 
-The three executable-bearing blocked categories have real Pure Simple owners
-and bounded behavior:
+The three blocked categories have real pure-Simple owners and bounded behavior:
 checksum and grep read through `VfsManager.read_bytes_bounded` with a 64 MiB
 per-file limit, 64 KiB chunks, and at most 128 files; `ps` consumes the one
 `list_tasks` owner, capped at 256 tasks and 32 command arguments. Their package
@@ -56,10 +31,8 @@ these known files, or 127 for an unknown identity. It never treats that text
 state as an executable-authority token and never falls back to an in-process
 shortcut, PATH lookup, alias expansion, background execution, or pipeline
 execution. The generic `launcher_launch_path_with_args` boundary also rejects
-all four canonical paths before process spawn. It compares lexically normalized
-absolute paths, so equivalent spellings with repeated separators, `.` segments,
-or `..` segments cannot bypass the gate. Async and non-shell launcher callers
-therefore cannot bypass the tool-specific gates.
+all four canonical paths before process spawn, so async and non-shell launcher
+callers cannot bypass the tool-specific gates.
 
 Promotion requires target-native bytes at the exact canonical path, a lower-case
 SHA-256 digest of those bytes, an evidence-service admission receipt, and a live
@@ -118,32 +91,71 @@ filesystem artifact or its alias.
 
 ### SimpleBox filesystem identities (implemented, launch blocked)
 
-The only routed SimpleBox applets are the following eight.  All share the one
-Pure Simple entry owner `os.tools.simplebox.simplebox_main`, canonical binary
-`/bin/simplebox`, and the installer-declared aliases shown below.
+`simplebox_inventory_applet_names_v1` is the authoritative closed inventory of
+41 routed applets. Every row below enters through the Pure Simple source
+`src/os/tools/simplebox/simplebox_main.spl` (`main` -> `simplebox_run`) and maps
+its declared alias to the canonical artifact `/bin/simplebox` through
+`simplebox_resolve_canonical_path_v1`. The production launcher caller
+`launcher_launch_path_with_args` currently stops each identity at
+`primary_tool_path_requires_loader_authority_v1`, before
+`_launcher_spawn_under_recipe`. Thus “declared path” is installer/catalog
+metadata, not proof that the path exists in a booted filesystem.
 
-| Applet | Declared path | Implemented option/operand surface | Bounds |
-|---|---|---|---|
-| `echo` | `/bin/echo` | optional leading `-n`; remaining arguments joined by one space | output at most 65,536 bytes |
-| `true` | `/bin/true` | ignores operands; returns 0 | no filesystem I/O |
-| `false` | `/bin/false` | ignores operands; returns 1 | no filesystem I/O |
-| `pwd` | `/bin/pwd` | no operands; currently emits `/` | rejects operands |
-| `seq` | `/bin/seq` | zero operands emits nothing; otherwise parses the numeric prefix of the first operand and ignores later operands; no general GNU/POSIX range/step/format options | first operand at most 64 bytes, accepted count at most 12,773, output at most 65,536 bytes |
-| `cat` | `/bin/cat` | one or more file operands; no options or stdin mode | at most 128 files, 64 MiB each, 64 KiB reads |
-| `head` | `/bin/head` | optional `-n N`, then one or more files | same file/read bounds as `cat` |
-| `wc` | `/bin/wc` | one or more files; always reports line, word, and byte counts | same file/read bounds as `cat` |
+| Tool | Declared filesystem path | Pure Simple entrypoint | Production caller/evidence | Status |
+|---|---|---|---|---|
+| `echo` | `/bin/echo` | `simplebox_main.main` | generic launcher rejects without loader authority | `filesystem-blocked` |
+| `printf` | `/bin/printf` | `simplebox_main.main` | generic launcher rejects without loader authority | `filesystem-blocked` |
+| `true` | `/bin/true` | `simplebox_main.main` | generic launcher rejects without loader authority | `filesystem-blocked` |
+| `false` | `/bin/false` | `simplebox_main.main` | generic launcher rejects without loader authority | `filesystem-blocked` |
+| `pwd` | `/bin/pwd` | `simplebox_main.main` | generic launcher rejects without loader authority | `filesystem-blocked` |
+| `seq` | `/bin/seq` | `simplebox_main.main` | generic launcher rejects without loader authority | `filesystem-blocked` |
+| `sleep` | `/bin/sleep` | `simplebox_main.main` | generic launcher rejects without loader authority | `filesystem-blocked` |
+| `cat` | `/bin/cat` | `simplebox_main.main` | generic launcher rejects without loader authority | `filesystem-blocked` |
+| `head` | `/bin/head` | `simplebox_main.main` | generic launcher rejects without loader authority | `filesystem-blocked` |
+| `tail` | `/bin/tail` | `simplebox_main.main` | generic launcher rejects without loader authority | `filesystem-blocked` |
+| `wc` | `/bin/wc` | `simplebox_main.main` | generic launcher rejects without loader authority | `filesystem-blocked` |
+| `tee` | `/bin/tee` | `simplebox_main.main` | generic launcher rejects without loader authority | `filesystem-blocked` |
+| `cp` | `/bin/cp` | `simplebox_main.main` | generic launcher rejects without loader authority | `filesystem-blocked` |
+| `mv` | `/bin/mv` | `simplebox_main.main` | generic launcher rejects without loader authority | `filesystem-blocked` |
+| `ls` | `/bin/ls` | `simplebox_main.main` | generic launcher rejects without loader authority | `filesystem-blocked` |
+| `mkdir` | `/bin/mkdir` | `simplebox_main.main` | generic launcher rejects without loader authority | `filesystem-blocked` |
+| `rm` | `/bin/rm` | `simplebox_main.main` | generic launcher rejects without loader authority | `filesystem-blocked` |
+| `rmdir` | `/bin/rmdir` | `simplebox_main.main` | generic launcher rejects without loader authority | `filesystem-blocked` |
+| `chmod` | `/bin/chmod` | `simplebox_main.main` | generic launcher rejects without loader authority | `filesystem-blocked` |
+| `touch` | `/bin/touch` | `simplebox_main.main` | generic launcher rejects without loader authority | `filesystem-blocked` |
+| `ln` | `/bin/ln` | `simplebox_main.main` | generic launcher rejects without loader authority | `filesystem-blocked` |
+| `basename` | `/bin/basename` | `simplebox_main.main` | generic launcher rejects without loader authority | `filesystem-blocked` |
+| `dirname` | `/bin/dirname` | `simplebox_main.main` | generic launcher rejects without loader authority | `filesystem-blocked` |
+| `readlink` | `/bin/readlink` | `simplebox_main.main` | generic launcher rejects without loader authority | `filesystem-blocked` |
+| `which` | `/bin/which` | `simplebox_main.main` | generic launcher rejects without loader authority | `filesystem-blocked` |
+| `stat` | `/bin/stat` | `simplebox_main.main` | generic launcher rejects without loader authority | `filesystem-blocked` |
+| `find` | `/bin/find` | `simplebox_main.main` | generic launcher rejects without loader authority | `filesystem-blocked` |
+| `grep` | `/bin/grep` | `simplebox_main.main` | generic launcher rejects without loader authority | `filesystem-blocked` |
+| `sort` | `/bin/sort` | `simplebox_main.main` | generic launcher rejects without loader authority | `filesystem-blocked` |
+| `sed` | `/bin/sed` | `simplebox_main.main` | generic launcher rejects without loader authority | `filesystem-blocked` |
+| `uniq` | `/bin/uniq` | `simplebox_main.main` | generic launcher rejects without loader authority | `filesystem-blocked` |
+| `cut` | `/bin/cut` | `simplebox_main.main` | generic launcher rejects without loader authority | `filesystem-blocked` |
+| `tr` | `/bin/tr` | `simplebox_main.main` | generic launcher rejects without loader authority | `filesystem-blocked` |
+| `cmp` | `/bin/cmp` | `simplebox_main.main` | generic launcher rejects without loader authority | `filesystem-blocked` |
+| `od` | `/bin/od` | `simplebox_main.main` | generic launcher rejects without loader authority | `filesystem-blocked` |
+| `strings` | `/bin/strings` | `simplebox_main.main` | generic launcher rejects without loader authority | `filesystem-blocked` |
+| `file` | `/bin/file` | `simplebox_main.main` | generic launcher rejects without loader authority | `filesystem-blocked` |
+| `comm` | `/bin/comm` | `simplebox_main.main` | generic launcher rejects without loader authority | `filesystem-blocked` |
+| `paste` | `/bin/paste` | `simplebox_main.main` | generic launcher rejects without loader authority | `filesystem-blocked` |
+| `nl` | `/bin/nl` | `simplebox_main.main` | generic launcher rejects without loader authority | `filesystem-blocked` |
+| `join` | `/bin/join` | `simplebox_main.main` | generic launcher rejects without loader authority | `filesystem-blocked` |
 
-`/bin/busybox APPLET` is accepted by the multicall argument router, but the
-installer does not declare `/bin/busybox` as a deployed alias.  It is therefore
-not an installed filesystem identity.  `--list` is a SimpleBox router action,
-not a ninth applet.
+The same catalog contract declares `/bin/busybox` as a multicall alias for
+`/bin/simplebox`; it is not a separate tool or payload. `--list` is a router
+action, not a 42nd applet.
 
-The image builder conditionally writes `/bin/simplebox` and declares the eight
-aliases in its deployment manifest only when supplied nonempty target-native
-bytes plus a matching bounded build receipt.  The current source does not
-materialize those alias filesystem entries.  An empty configuration records
-blocked inventory and installs no payload.  Even a staged payload remains
-`filesystem-blocked`: the tracked blocker
+The image builder conditionally writes `/bin/simplebox` and declares all 42
+aliases (`/bin/busybox` plus the 41 applet paths) only when supplied nonempty
+target-native bytes plus its validated build receipt. The alias records are
+manifest declarations; `_stage_simplebox_payload` does not create alias files.
+An empty configuration records blocked inventory and installs no payload, and
+signed catalog admission remains a separate launch requirement. Even a staged
+payload remains `filesystem-blocked`: the tracked blocker
 `doc/08_tracking/bug/simpleos_primary_tool_guest_admission_identity_2026-08-22.md`
 records that the booted guest cannot yet authenticate the installer admission
 and mint the guest-local one-shot launch authority.  Generic and alias paths
@@ -161,14 +173,32 @@ produce an installer-compatible artifact; accepting a caller's freestanding
 triple would not prove that an artifact exists in any case.
 There is no retained FAT32, DBFS, or NVFS guest launch receipt for any target.
 
+### Combined Clang + primary catalog boot (2026-08-25, unverified)
+
+The current implementation under review no longer asks the primary-tool lane
+to seal its five rows independently. It authenticates the nine-record
+Clang/sysroot release and five-record primary release under one shared release
+identity, gives the primary plan sole ownership of `/bin/simplebox`, and then
+requests one fourteen-record catalog population. The x86_64, ARM64, and RV64
+adapters delegate to that shared owner.
+
+This is not launch evidence. `ImageBuilder._materialize_primary_artifact`
+still creates a real disk only for the non-installer x86_64 FAT32 route;
+descriptor fallback and DBFS/NVFS selection metadata do not prove that signed
+payloads exist in a boot-mounted filesystem. Promotion still requires fresh
+per-ISA/per-filesystem receipts described in
+`doc/03_plan/agent_tasks/simpleos_combined_signed_catalog_boot.md`. The i686,
+ARMv7, and RV32 rows remain blocked on complete target sysroots and native
+payloads; a 64-bit catalog receipt cannot promote them.
+
 ### Dedicated primary executables (implemented, launch blocked)
 
-| Command | Canonical path | Pure Simple owner | Implemented surface | Current authority/runtime state |
+| Command | Canonical path | Pure Simple entrypoint | Production caller/evidence | Status |
 |---|---|---|---|---|
-| `sha256sum` | `/usr/bin/sha256sum` | `os.tools.shell.checksum.checksum_tool` | bounded file SHA-256 plus help/version/error behavior | no target bytes, digest, admitted receipt, or live loader token |
-| `md5sum` | `/usr/bin/md5sum` | `os.tools.shell.checksum.checksum_tool` | bounded file MD5 plus help/version/error behavior | no target bytes, digest, admitted receipt, or live loader token |
-| `grep` | `/usr/bin/grep` | `os.tools.shell.grep.grep_tool` | bounded line search plus help/version/error behavior | no target bytes, digest, admitted receipt, or live loader token |
-| `ps` | `/usr/bin/ps` | `os.tools.proc.ps_tool` | bounded kernel task listing plus help/version/error behavior | no target bytes, digest, admitted receipt, or live loader token |
+| `sha256sum` | `/usr/bin/sha256sum` | `src/os/apps/coreutils/entries/sha256sum_main.spl` (`main`) | shell `launcher_dispatch_checksum_tool_v1`; generic launcher also rejects before spawn; no admitted target receipt/token | `filesystem-blocked` |
+| `md5sum` | `/usr/bin/md5sum` | `src/os/apps/coreutils/entries/md5sum_main.spl` (`main`) | shell `launcher_dispatch_checksum_tool_v1`; generic launcher also rejects before spawn; no admitted target receipt/token | `filesystem-blocked` |
+| `grep` | `/usr/bin/grep` | `src/os/apps/coreutils/entries/grep_main.spl` (`main`) | shell `launcher_dispatch_text_tool_v1`; generic launcher also rejects before spawn; no admitted target receipt/token | `filesystem-blocked` |
+| `ps` | `/usr/bin/ps` | `src/os/apps/coreutils/entries/ps_main.spl` (`main`) | shell `launcher_dispatch_process_tool_v1`; generic launcher also rejects before spawn; no admitted target receipt/token | `filesystem-blocked` |
 
 All four are `Blocked` for the six declared userland triples and all three
 declared filesystems.  Those target/filesystem lists are required acceptance

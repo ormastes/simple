@@ -1,0 +1,140 @@
+"""
+## Purpose and audience
+Purpose: Pin how slang recognises the model formats that actually exist on
+disk, and pin that a model it cannot run is REFUSED WITH A REASON rather than
+silently omitted. Audience: engineers pointing slang at a real model root
+(HuggingFace checkouts, GGUF exports) rather than at a hand-built slang pack.
+
+## Operator workflow
+I point slang at the directory where my models live. Before this behaviour
+existed, a root holding three real multi-gigabyte models reported nothing at
+all, because only a `manifest.sdn` pack counted as a model - I could not tell
+"empty directory" from "three models slang does not understand". Now every
+directory comes back classified, sized, and carrying the reason it is or is not
+runnable, and a load that would not fit in memory is refused before it is
+attempted rather than after it has taken the host down.
+
+## Compatibility and limitations
+Detection reads MAGIC, not filenames: a file named `.gguf` without the GGUF
+magic is not a GGUF model. Reads are ranged - four bytes for the GGUF magic,
+one for the safetensors header - because real shards are gigabytes and must
+never be read whole. The memory-fit check reads MemAvailable from
+/proc/meminfo and is therefore Linux-specific; it refuses rather than guesses
+when that file cannot be read.
+"""
+
+use std.spec.step
+use std.spec.{describe, it, expect}
+
+use std.gc_async_mut.slang.model_executor.model_loader.native_formats.{detect_format, model_format_text, describe_model, scan_model_root, has_gguf_magic, has_safetensors_header, gguf_entry_shard, dir_byte_size}
+use std.gc_async_mut.slang.model_executor.model_loader.memory_budget.{check_fit, mem_available_bytes, default_headroom_bytes}
+use std.io_runtime.{dir_create_all, file_write, dir_remove_all}
+
+fn valid_manifest(model_id: text) -> text:
+    "{\"schema_version\":0,\"model_id\":\"" + model_id + "\",\"revision\":\"v0\",\"preferred_chunk_bytes\":2097152,\"digest_algo\":\"sha256\",\"chunks\":[],\"tensors\":[]}"
+
+# A model root holding one of each thing slang can meet: a native pack, a real
+# GGUF (magic present), a file that only CLAIMS to be GGUF, a real safetensors
+# header, and a directory that is none of these.
+fn mixed_root() -> text:
+    val root = "build/test/slang_native_formats/mixed"
+    dir_remove_all(root)
+    dir_create_all(root + "/native-pack")
+    dir_create_all(root + "/real-gguf")
+    dir_create_all(root + "/liar-gguf")
+    dir_create_all(root + "/real-safetensors")
+    dir_create_all(root + "/junk")
+    file_write(root + "/native-pack/manifest.sdn", valid_manifest("slang-native"))
+    file_write(root + "/real-gguf/model-00001-of-00002.gguf", "GGUFthisisnotarealmodelbutthemagicisright")
+    file_write(root + "/real-gguf/model-00002-of-00002.gguf", "GGUFsecondshard")
+    file_write(root + "/liar-gguf/model.gguf", "NOPE this file is named gguf and is not one")
+    file_write(root + "/real-safetensors/model.safetensors", "12345678{\"a\":1}")
+    file_write(root + "/junk/readme.txt", "nothing to see")
+    root
+
+describe "format detection reads evidence, not filenames":
+    it "recognises a GGUF file by its magic":
+        step("Verify: the four-byte magic is what makes a file GGUF")
+        val root = mixed_root()
+        expect(has_gguf_magic(root + "/real-gguf/model-00001-of-00002.gguf")).to_equal(true)
+
+    it "refuses a file that is named .gguf but carries no magic":
+        step("Verify: a filename claim is not evidence - this is the whole point of the probe")
+        val root = mixed_root()
+        expect(has_gguf_magic(root + "/liar-gguf/model.gguf")).to_equal(false)
+        expect(model_format_text(detect_format(root + "/liar-gguf"))).to_equal("unknown")
+
+    it "recognises a safetensors file by the JSON header at byte 8":
+        step("Verify: byte 8 is the JSON opener for every valid safetensors file")
+        val root = mixed_root()
+        expect(has_safetensors_header(root + "/real-safetensors/model.safetensors")).to_equal(true)
+        expect(model_format_text(detect_format(root + "/real-safetensors"))).to_equal("safetensors")
+
+    it "still recognises a native slang pack through the A1 manifest parser":
+        step("Verify: the pre-existing pack format keeps priority over the native formats")
+        val root = mixed_root()
+        expect(model_format_text(detect_format(root + "/native-pack"))).to_equal("slang-pack")
+
+    it "picks the lowest-numbered shard as the GGUF entry point":
+        step("Verify: a split GGUF is entered at shard 00001, which finds its own siblings")
+        val root = mixed_root()
+        expect(gguf_entry_shard(root + "/real-gguf").ends_with("model-00001-of-00002.gguf")).to_equal(true)
+
+describe "nothing on disk is silently dropped":
+    it "returns one entry per directory, including the ones it cannot run":
+        step("Verify: the empty-list-for-real-models bug cannot come back")
+        val root = mixed_root()
+        expect(scan_model_root(root, true).len()).to_equal(5)
+
+    it "gives every non-runnable model a non-empty reason":
+        step("Verify: a refusal a caller can read, not a silent omission")
+        val root = mixed_root()
+        var refused = 0
+        for m in scan_model_root(root, true):
+            if not m.runnable:
+                expect(m.reason == "").to_equal(false)
+                refused = refused + 1
+        expect(refused).to_equal(4)
+
+    it "marks a GGUF runnable only when a backend is available":
+        step("Verify: runnability tracks the backend, and says so when it is absent")
+        val root = mixed_root()
+        expect(describe_model(root + "/real-gguf", true).runnable).to_equal(true)
+        val without = describe_model(root + "/real-gguf", false)
+        expect(without.runnable).to_equal(false)
+        expect(without.reason.find("ggml") >= 0).to_equal(true)
+
+    it "reports safetensors as recognised but not runnable by this backend":
+        step("Verify: recognised and runnable are separate claims and stay separate")
+        val root = mixed_root()
+        val m = describe_model(root + "/real-safetensors", true)
+        expect(m.format).to_equal("safetensors")
+        expect(m.runnable).to_equal(false)
+
+    it "sizes a model from the bytes actually on disk":
+        step("Verify: the fit check is fed measured bytes, not a manifest's claim")
+        val root = mixed_root()
+        expect(dir_byte_size(root + "/real-gguf") > 0).to_equal(true)
+
+describe "a load that will not fit is refused before it is attempted":
+    it "reads MemAvailable from the host":
+        step("Verify: the budget has a real number to work from")
+        expect(mem_available_bytes() > 0).to_equal(true)
+
+    it "refuses a model larger than available memory, naming the arithmetic":
+        step("Verify: an impossible load is refused, and the refusal explains itself")
+        val huge = 900 * 1024 * 1024 * 1024
+        val verdict = check_fit(huge, 0, default_headroom_bytes())
+        expect(verdict.fits).to_equal(false)
+        expect(verdict.reason.find("available") >= 0).to_equal(true)
+
+    it "admits a model that comfortably fits":
+        step("Verify: the gate is not simply always-refuse, which would prove nothing")
+        expect(check_fit(1024, 0, 0).fits).to_equal(true)
+
+    it "counts headroom against the budget rather than ignoring it":
+        step("Verify: headroom is load-bearing - the same model flips verdict on it alone")
+        val available = mem_available_bytes()
+        val snug = available - (1024 * 1024)
+        expect(check_fit(snug, 0, 0).fits).to_equal(true)
+        expect(check_fit(snug, 0, default_headroom_bytes()).fits).to_equal(false)

@@ -1,4 +1,8 @@
 # S61: Interpreter Stack Overflow on app.io.mod Imports
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** Open  
 **Defect Type:** Interpreter module loader / missing cycle detection  
@@ -160,13 +164,3 @@ doc's theory (in-flight cycle tracking, lane S64) is held un-landed: plausible
 defense-in-depth, but its motivating bug is unconfirmed and it is unverifiable
 until redeploy.
 
-## PARTIAL — re-verified 2026-08-17 (P2 triage, compiler lane)
-
-No `is_currently_loading` / in-progress set exists at HEAD — grepping
-`module_loader_core.spl`, `module_loader_lazy.spl` and `module_loader_resolve.spl`
-for loading/in_progress/cycle/visiting returns prose comments only. The sole
-mitigation is a depth counter: `module_loader_core.spl:206`
-`val _MODULE_LOAD_MAX_DEPTH = 16`, checked at `:398`, which returns 0 — a silent
-failure, not a cycle diagnostic. `module_mark_loaded` runs AFTER the recursive
-parse/registration (`:434`), so a genuine cycle still re-enters and is stopped
-only by that depth guard. NOT FIXED by this lane (P1-owned path).

@@ -1,4 +1,9 @@
 # Implicit-self field ASSIGNMENT in `me` methods silently no-ops — while the linter recommends it
+## Closed 2026-09-16 — Status FIXED IN SOURCE 2026-08-08: check moved to HIR lowering, guard PASS on 2 engine settings
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-07-17
 **Status:** FIXED IN SOURCE 2026-08-08 — both lanes now hard-error. The JIT half
@@ -223,3 +228,4 @@ it — the suite cannot reach that engine. Same structural gap as
 **Not yet closed:** `bin/release/<triple>/simple` still predates this fix, so
 the guard is red until the next seed redeploy. The fix is in source and proven
 on a built binary; redeploying the shared binary was out of scope for this lane.
+

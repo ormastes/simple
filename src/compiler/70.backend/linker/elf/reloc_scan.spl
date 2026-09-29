@@ -1,0 +1,353 @@
+# Relocation scan — lane A7 slice 2 (design §5, mold phase "scan relocations").
+#
+# One pass over every relocation that lands in an allocatable output section,
+# BEFORE layout, deciding what synthetic state each one needs:
+#   - a .got slot (GOT-indirect relocs that are not relaxed),
+#   - a .plt entry (branches to a shared-library function; aarch64 and x86_64),
+#   - a dynamic relocation (R_*_RELATIVE for absolute words in a PIE,
+#     R_*_GLOB_DAT for GOT slots of imports, symbolic ABS64 for data words
+#     that point into a shared library),
+# or a named error when the output cannot represent it (COPY outside ET_EXEC,
+# text relocations, TLS, absolute narrow relocs in a PIE,
+# RELATIVE relocs in a static PIE that has no self-relocating startup).
+#
+# The driver (elf_static_link) resolves each relocation's symbol into an
+# ElfScanRef first; this file only classifies and allocates.
+
+use compiler.backend.linker.reloc_engine.{
+    RelocArch, R_X86_64_GOT32, R_X86_64_GOT64, R_X86_64_GOTPLT64,
+    R_X86_64_GOTPCREL64,
+    R_X86_64_CODE_4_GOTPCRELX, R_X86_64_CODE_4_GOTTPOFF,
+    R_X86_64_CODE_6_GOTTPOFF,
+    R_X86_64_PLTOFF64, R_X86_64_SIZE32, R_X86_64_SIZE64}
+use compiler.backend.linker.elf.synthetic_sections.{elf_gnu_hash_sort}
+
+# ============================================================================
+# Link modes
+# ============================================================================
+
+val ELF_LINK_STATIC_EXEC: i64 = 0    # ET_EXEC, no .dynamic (slice 1)
+val ELF_LINK_STATIC_PIE: i64 = 1     # ET_DYN, no PT_INTERP, no dynamic relocations allowed
+val ELF_LINK_DYNAMIC_EXEC: i64 = 2   # ET_EXEC + PT_INTERP + DT_NEEDED
+val ELF_LINK_DYNAMIC_PIE: i64 = 3    # ET_DYN + PT_INTERP + DT_NEEDED
+
+fn elf_mode_pie(mode: i64) -> bool:
+    mode == ELF_LINK_STATIC_PIE or mode == ELF_LINK_DYNAMIC_PIE
+
+fn elf_mode_dynamic(mode: i64) -> bool:
+    mode == ELF_LINK_DYNAMIC_EXEC or mode == ELF_LINK_DYNAMIC_PIE
+
+# ============================================================================
+# Symbol reference kinds
+# ============================================================================
+
+val SYMREF_DEFINED: i64 = 0    # defined by an input object; address known after layout
+val SYMREF_IMPORT: i64 = 1     # defined by a shared library; bound by ld.so
+val SYMREF_WEAK_ZERO: i64 = 2  # undefined weak with no definition anywhere: value 0
+val SYMREF_ABS: i64 = 3        # SHN_ABS or no symbol: a position-independent constant
+
+# ============================================================================
+# Relocation classes
+# ============================================================================
+
+val RC_NONE: i64 = 0
+val RC_ABS64: i64 = 1        # 64-bit absolute word
+val RC_ABS_NARROW: i64 = 2   # absolute value truncated to < 64 bits (not PIC)
+val RC_PCREL: i64 = 3        # PC-/page-relative (incl. the :lo12: half of ADRP pairs)
+val RC_BRANCH: i64 = 4       # call/jump that may go through a PLT
+val RC_GOT: i64 = 5          # GOT-indirect, not relaxable
+val RC_GOT_RELAX: i64 = 6    # x86_64 GOTPCRELX / REX_GOTPCRELX
+val RC_TLS_LE: i64 = 7       # local-exec offset from the thread pointer
+val RC_TLS_IE: i64 = 8       # initial-exec GOT slot containing a TPOFF
+val RC_SIZE: i64 = 9         # link-time symbol extent plus addend
+val RC_TLS_LD: i64 = 10      # local-dynamic offset from the PT_TLS block start
+val RC_TLS_MOD: i64 = 11     # statically known TLS module identifier
+val RC_PLTOFF: i64 = 12      # function/PLT address relative to the GOT base
+
+fn elf_reloc_class(target: RelocArch, rtype: i64) -> i64:
+    match target:
+        case X86_64:
+            if rtype == 0:
+                return RC_NONE
+            if rtype == 1:
+                return RC_ABS64
+            if rtype == 10 or rtype == 11 or rtype == 12 or rtype == 14:
+                return RC_ABS_NARROW
+            if rtype == 4:
+                return RC_BRANCH
+            if rtype == 9:
+                return RC_GOT
+            if rtype == R_X86_64_GOT32 or rtype == R_X86_64_GOT64 or
+                    rtype == R_X86_64_GOTPLT64:
+                return RC_GOT
+            if rtype == R_X86_64_GOTPCREL64:
+                return RC_GOT
+            if rtype == R_X86_64_CODE_4_GOTPCRELX:
+                return RC_GOT
+            if rtype == R_X86_64_PLTOFF64:
+                return RC_PLTOFF
+            if rtype == 16:
+                return RC_TLS_MOD
+            if rtype == 17:
+                return RC_TLS_LD
+            if rtype == 18 or rtype == 23:
+                return RC_TLS_LE
+            if rtype == R_X86_64_SIZE32 or rtype == R_X86_64_SIZE64:
+                return RC_SIZE
+            if rtype == 22 or rtype == R_X86_64_CODE_4_GOTTPOFF or
+                    rtype == R_X86_64_CODE_6_GOTTPOFF:
+                return RC_TLS_IE
+            if rtype == 41 or rtype == 42:
+                return RC_GOT_RELAX
+            RC_PCREL
+        case _:
+            if rtype == 0:
+                return RC_NONE
+            if rtype == 257:
+                return RC_ABS64
+            if rtype == 258 or rtype == 259 or (rtype >= 263 and rtype <= 272):
+                return RC_ABS_NARROW
+            if rtype == 279 or rtype == 280 or rtype == 282 or rtype == 283 or rtype == 314:
+                return RC_BRANCH
+            if rtype >= 300 and rtype <= 306:
+                return RC_GOT
+            if rtype >= 309 and rtype <= 313:
+                return RC_GOT
+            if rtype == 315:
+                return RC_GOT
+            if rtype >= 539 and rtype <= 543:
+                return RC_TLS_IE
+            if (rtype >= 523 and rtype <= 538) or rtype == 572 or rtype == 573:
+                return RC_TLS_LD
+            if (rtype >= 544 and rtype <= 559) or rtype == 570 or rtype == 571:
+                return RC_TLS_LE
+            if rtype == 1028:
+                return RC_TLS_MOD
+            if rtype == 1029:
+                return RC_TLS_LD
+            if rtype == 1030:
+                return RC_TLS_LE
+            RC_PCREL
+
+fn elf_x86_can_relax(bytes: [i64], place: i64) -> bool:
+    """`mov foo@GOTPCREL(%rip), %reg` (opcode 0x8b two bytes before the
+    displacement) can become `lea foo(%rip), %reg` — the only GOTPCRELX
+    form relaxed here (ld.lld also rewrites call/jmp/test/binop forms)."""
+    place >= 2 and bytes[place - 2] == 0x8b
+
+# ============================================================================
+# Types
+# ============================================================================
+
+struct ElfScanRef:
+    """One relocation after symbol resolution, before layout."""
+    oi: i64            # input object index
+    sym_idx: i64       # symbol index in that object (0 = none)
+    out_sec: i64       # input-backed output section index
+    out_off: i64       # byte offset of the relocated field in that output section
+    writable: bool     # output section is SHF_WRITE
+    rtype: i64
+    rclass: i64
+    kind: i64          # SYMREF_*
+    key: text          # GOT/PLT identity (global name, or "oi#idx" for locals)
+    name: text
+    stype: i64         # STT_* (imports: from the shared library)
+    size: i64          # imported object extent (0 for other references)
+    alignment: i64     # imported object alignment inferred from its DSO value
+    weak: bool         # the referencing symbol is STB_WEAK
+    addend: i64
+    relax: bool        # x86_64 GOTPCRELX relaxed to lea (no GOT slot)
+
+struct ElfScan:
+    got_keys: [text]
+    got_ref: [i64]         # per slot: index of the first ElfScanRef that uses it
+    got_idx: {text: i64}
+    plt_names: [text]      # PLT entry order (== .rela.plt order)
+    plt_idx: {text: i64}
+    imports: [text]        # .dynsym order (index + 1)
+    import_idx: {text: i64}
+    import_weak: [bool]
+    import_type: [i64]
+    sym_abs: [i64]         # refs needing a symbolic ABS64 dynamic relocation
+    tls_dynamic: [i64]     # raw 64-bit TLS words resolved by ld.so
+    relative: [i64]        # refs needing R_*_RELATIVE (absolute word in a PIE)
+    copy_names: [text]     # imported objects allocated in executable .bss
+    copy_size: [i64]
+    copy_align: [i64]
+    copy_idx: {text: i64}
+
+fn elf_reloc_what(r: ElfScanRef) -> text:
+    "relocation type {r.rtype} against '{r.name}'"
+
+# ============================================================================
+# Scan
+# ============================================================================
+
+fn elf_target_is_a64(target: RelocArch) -> bool:
+    match target:
+        case AArch64:
+            true
+        case _:
+            false
+
+fn elf_raw_dynamic_tls_relocation(target: RelocArch, rtype: i64) -> bool:
+    match target:
+        case X86_64:
+            rtype == 16 or rtype == 17 or rtype == 18
+        case AArch64:
+            rtype == 1028 or rtype == 1029 or rtype == 1030
+        case _:
+            false
+
+fn elf_reloc_scan(refs: [ElfScanRef], target: RelocArch, mode: i64) -> Result<ElfScan, text>:
+    val pie = elf_mode_pie(mode)
+    val a64 = elf_target_is_a64(target)
+    var got_keys: [text] = []
+    var got_ref: [i64] = []
+    var got_idx: {text: i64} = {}
+    var plt_names: [text] = []
+    var plt_idx: {text: i64} = {}
+    var imports: [text] = []
+    var import_idx: {text: i64} = {}
+    var import_weak: [bool] = []
+    var import_type: [i64] = []
+    var sym_abs: [i64] = []
+    var tls_dynamic: [i64] = []
+    var relative: [i64] = []
+    var copy_names: [text] = []
+    var copy_size: [i64] = []
+    var copy_align: [i64] = []
+    var copy_idx: {text: i64} = {}
+    # ET_EXEC may bind direct references to imported objects through a COPY
+    # relocation. Discover the complete set first so GOT and ABS64 references
+    # to the same symbol consistently target the executable's copy.
+    if mode == ELF_LINK_DYNAMIC_EXEC:
+        for r in refs:
+            if r.kind == SYMREF_IMPORT and r.stype == 1 and
+                    r.rclass != RC_NONE and r.rclass != RC_BRANCH and
+                    r.rclass != RC_GOT and r.rclass != RC_GOT_RELAX and
+                    r.rclass != RC_TLS_IE and r.rclass != RC_SIZE:
+                if not copy_idx.has(r.name):
+                    if r.size <= 0:
+                        return Err("copy relocation for '{r.name}' has no positive shared-object symbol size")
+                    copy_idx[r.name] = copy_names.len()
+                    copy_names = copy_names.push(r.name)
+                    copy_size = copy_size.push(r.size)
+                    copy_align = copy_align.push(r.alignment)
+    var j: i64 = 0
+    while j < refs.len():
+        val r = refs[j]
+        val c = r.rclass
+        if c == RC_NONE:
+            j = j + 1
+            continue
+        if r.kind == SYMREF_IMPORT:
+            if not import_idx.has(r.name):
+                imports = imports.push(r.name)
+                import_idx[r.name] = imports.len()
+                import_weak = import_weak.push(r.weak)
+                import_type = import_type.push(r.stype)
+            else if not r.weak:
+                import_weak[import_idx[r.name] - 1] = false
+            if (c == RC_TLS_LE or c == RC_TLS_LD or c == RC_TLS_MOD) and
+                    elf_raw_dynamic_tls_relocation(target, r.rtype) and
+                    elf_mode_dynamic(mode):
+                tls_dynamic = tls_dynamic.push(j)
+                j = j + 1
+                continue
+            if c == RC_TLS_LE or c == RC_TLS_LD or c == RC_TLS_MOD:
+                return Err("UnsupportedFeature: statically resolved TLS relocation against shared-library symbol '{r.name}'")
+            if c == RC_SIZE:
+                j = j + 1
+                continue
+            if c == RC_PLTOFF and r.stype != 2 and r.stype != 10:
+                return Err("R_X86_64_PLTOFF64 requires a function symbol: '{r.name}'")
+            if r.rtype == R_X86_64_GOTPLT64:
+                if r.stype != 2 and r.stype != 10:
+                    return Err("R_X86_64_GOTPLT64 requires a function symbol: '{r.name}'")
+                if not plt_idx.has(r.name):
+                    plt_idx[r.name] = plt_names.len()
+                    plt_names = plt_names.push(r.name)
+            if copy_idx.has(r.name):
+                if c == RC_GOT or c == RC_GOT_RELAX or c == RC_TLS_IE:
+                    if not got_idx.has(r.key):
+                        got_idx[r.key] = got_keys.len()
+                        got_keys = got_keys.push(r.key)
+                        got_ref = got_ref.push(j)
+                j = j + 1
+                continue
+            val canonical_plt = not pie and (r.stype == 2 or r.stype == 10) and
+                c != RC_GOT and c != RC_GOT_RELAX and c != RC_TLS_IE
+            if c == RC_BRANCH or c == RC_PLTOFF or canonical_plt:
+                if not plt_idx.has(r.name):
+                    plt_idx[r.name] = plt_names.len()
+                    plt_names = plt_names.push(r.name)
+            else if c == RC_GOT or c == RC_GOT_RELAX or c == RC_TLS_IE:
+                if not got_idx.has(r.key):
+                    got_idx[r.key] = got_keys.len()
+                    got_keys = got_keys.push(r.key)
+                    got_ref = got_ref.push(j)
+            else if c == RC_ABS64:
+                if not r.writable:
+                    return Err("UnsupportedFeature: text relocation: {elf_reloc_what(r)} in a read-only section")
+                sym_abs = sym_abs.push(j)
+            else:
+                if r.stype == 1:
+                    return Err("UnsupportedFeature: {elf_reloc_what(r)} (a shared-library object) needs a copy relocation; recompile with -fPIC")
+                return Err("UnsupportedFeature: {elf_reloc_what(r)} cannot represent this shared-library symbol in the selected link mode; recompile with -fPIC")
+        else:
+            if c == RC_GOT or c == RC_TLS_IE or (c == RC_GOT_RELAX and not r.relax):
+                if a64 and r.addend != 0 and r.rtype != 315:
+                    return Err("{elf_reloc_what(r)}: GOT relocation with non-zero addend {r.addend} is unsupported")
+                if c != RC_TLS_IE and r.kind == SYMREF_DEFINED and mode == ELF_LINK_STATIC_PIE:
+                    return Err("{elf_reloc_what(r)}: GOT slot needs an R_*_RELATIVE dynamic relocation, which a static PIE without a self-relocating startup cannot apply; compile with -fPIE or link without -pie")
+                if not got_idx.has(r.key):
+                    got_idx[r.key] = got_keys.len()
+                    got_keys = got_keys.push(r.key)
+                    got_ref = got_ref.push(j)
+            else if c == RC_ABS64 and pie and r.kind == SYMREF_DEFINED:
+                if mode == ELF_LINK_STATIC_PIE:
+                    return Err("{elf_reloc_what(r)}: absolute address needs an R_*_RELATIVE dynamic relocation, which a static PIE without a self-relocating startup cannot apply")
+                if not r.writable:
+                    return Err("UnsupportedFeature: text relocation: {elf_reloc_what(r)} in a read-only section")
+                relative = relative.push(j)
+            else if c == RC_ABS_NARROW and pie and r.kind == SYMREF_DEFINED:
+                return Err("{elf_reloc_what(r)} cannot be used in a position-independent output; recompile with -fPIC")
+        j = j + 1
+    # GNU-hashed definitions must be a bucket-sorted tail of .dynsym. Keep
+    # undefined imports in encounter order, then append COPY definitions.
+    var ordered: [text] = []
+    var ordered_weak: [bool] = []
+    var ordered_type: [i64] = []
+    for n in imports:
+        if not copy_idx.has(n):
+            val old = import_idx[n] - 1
+            ordered = ordered.push(n)
+            ordered_weak = ordered_weak.push(import_weak[old])
+            ordered_type = ordered_type.push(import_type[old])
+    for n in elf_gnu_hash_sort(copy_names):
+        val old = import_idx[n] - 1
+        ordered = ordered.push(n)
+        ordered_weak = ordered_weak.push(import_weak[old])
+        ordered_type = ordered_type.push(import_type[old])
+    import_idx = {}
+    var ii: i64 = 0
+    while ii < ordered.len():
+        import_idx[ordered[ii]] = ii + 1
+        ii = ii + 1
+    Ok(ElfScan(got_keys: got_keys, got_ref: got_ref, got_idx: got_idx, plt_names: plt_names, plt_idx: plt_idx,
+        imports: ordered, import_idx: import_idx, import_weak: ordered_weak, import_type: ordered_type,
+        sym_abs: sym_abs, tls_dynamic: tls_dynamic, relative: relative,
+        copy_names: copy_names, copy_size: copy_size,
+        copy_align: copy_align, copy_idx: copy_idx))
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export ElfScanRef, ElfScan
+export elf_reloc_scan, elf_reloc_class, elf_target_is_a64, elf_x86_can_relax
+export elf_raw_dynamic_tls_relocation, elf_mode_pie, elf_mode_dynamic
+export ELF_LINK_STATIC_EXEC, ELF_LINK_STATIC_PIE, ELF_LINK_DYNAMIC_EXEC, ELF_LINK_DYNAMIC_PIE
+export SYMREF_DEFINED, SYMREF_IMPORT, SYMREF_WEAK_ZERO, SYMREF_ABS
+export RC_NONE, RC_ABS64, RC_ABS_NARROW, RC_PCREL, RC_BRANCH, RC_GOT, RC_GOT_RELAX, RC_TLS_LE, RC_TLS_IE, RC_SIZE, RC_TLS_LD, RC_TLS_MOD, RC_PLTOFF

@@ -628,11 +628,17 @@ pub(super) fn eval_op_expr(
                         Ok(result_family) => {
                             // Operation allowed - perform it on inner values
                             let result_val = evaluate_unit_binary_inner(lv, rv, *op)?;
-                            // Return unit with result family (or left family if same-family operation)
-                            let result_suffix = if let Some(ref fam) = result_family {
-                                fam.clone()
-                            } else {
-                                ls.clone()
+                            // Return unit with result family (or left family if same-family operation).
+                            //
+                            // The result SUFFIX is the left operand's suffix whenever the
+                            // operation stays in the same family (`42_ms + 2_ms` is still
+                            // `ms`). Only a derived family — `length / time = velocity`,
+                            // where no operand suffix names the result — falls back to the
+                            // family name. Using the family name unconditionally made
+                            // `(a + b).suffix()` report the family instead of the unit.
+                            let result_suffix = match result_family {
+                                Some(ref fam) if Some(fam.as_str()) != Some(left_family) => fam.clone(),
+                                _ => ls.clone(),
                             };
                             return Ok(Some(Value::Unit {
                                 value: Box::new(result_val),
@@ -944,7 +950,11 @@ pub(super) fn eval_op_expr(
                                 .with_note("check that the divisor is not zero before division");
                             Err(CompileError::semantic_with_context("division by zero".to_string(), ctx))
                         } else {
-                            Ok(Value::Int(left_val.as_int()? / r))
+                            // Unsigned operands divide as u64: `u64::MAX / 2` must not be `-1 / 2 == 0`.
+                            Ok(match uint_wrap_width(&left_val, &right_val) {
+                                Some(width) => wrap_uint((left_val.as_int()? as u64) / (r as u64), width),
+                                None => Value::Int(left_val.as_int()? / r),
+                            })
                         }
                     }
                 }
@@ -993,7 +1003,10 @@ pub(super) fn eval_op_expr(
                                 .with_note("check that the divisor is not zero before modulo operation");
                             Err(CompileError::semantic_with_context("modulo by zero".to_string(), ctx))
                         } else {
-                            Ok(Value::Int(left_val.as_int()? % r))
+                            Ok(match uint_wrap_width(&left_val, &right_val) {
+                                Some(width) => wrap_uint((left_val.as_int()? as u64) % (r as u64), width),
+                                None => Value::Int(left_val.as_int()? % r),
+                            })
                         }
                     }
                 }

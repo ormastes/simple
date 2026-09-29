@@ -1,6 +1,25 @@
 # Native AOT: cross-module generic `Result<[u8], E>` payload type erasure
+## Open 2026-09-16 — needs owner triage
 
-**Status:** IMPLEMENTED 2026-07-15 — strict LLVM/Cranelift execution pending a fresh pure-Simple compiler.
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
+
+## Triage 2026-09-13 — STILL OPEN: native AOT could not be exercised on this host
+- **measured** — a probe was built (module `modB.spl` returning `Result<[u8], Err>`; the
+  importer does `match get_bytes(3): case Ok(d) => print(d.len()); print(d[0])`). It prints
+  `3` then `65` under `bin/simple run` — but the entry says the interpreter is unaffected,
+  so that proves nothing.
+- **measured** — the AOT lane does not work here at all:
+  `bin/simple native-build <probe> -o <exe>` fails with
+  `error: semantic: unknown extern function: rt_env_vars` /
+  `native-build worker exited with code 1`, and a `--compile` invocation produced no
+  artifact next to the source, so its identical `3` / `65` output cannot be attributed to
+  native AOT.
+- **inferred** — this AOT-only bug is neither confirmed nor cleared from this Windows seed
+  host. Left OPEN. (An earlier draft of this triage closed it on the `--compile` output;
+  that was withdrawn once the missing artifact and the native-build failure were seen.)
+
+**Status:** OPEN — see the Triage 2026-09-13 section below
 **Date:** 2026-06-22 (supersedes the 2026-06-21 doc dropped by parallel churn).
 **Mode:** native AOT only (`bin/simple <file> --compile` / `native-build`). Interpreter and `check` are unaffected.
 
@@ -32,20 +51,20 @@ The real chain:
    payload sub-patterns with no type — the variant's payload type is never
    extracted from the instantiated `Result<[u8], E>`.
 3. **MIR index lowering defaults to dynamic.**
-   `src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl:225` reads `expr.type_`,
+   `src/compiler/50.mir/mir_lowering_expr_part1.spl:225` reads `expr.type_`,
    finds nil, defaults the element type → `local_is_array` is false
    (`60.mir_opt/mir_opt/collection_opt_core.spl:368`) → dynamic `rt_index_get`
    path → unlinked convert → fault.
 
-## 2026-06-22 assessment (superseded)
+## Why this is NOT a contained fix
 Recovering `[u8]` at HIR-lowering time needs the match subject's *instantiated*
 generic type (`Result<[u8], E>`). With the no-op checker, that type exists
 nowhere by HIR time. A real fix requires either (a) real generic type
 propagation through the native pipeline, or (b) switching native `--compile` to
 a real type checker **and** fixing variant-payload extraction there
-(`30.types/type_system/_StmtCheck/bindings_check.spl:365` `EnumPattern` also assigns the
+(`30.types/type_system/stmt_check_part1.spl:365` `EnumPattern` also assigns the
 whole subject type, not the payload). Both are major compiler subsystems —
-disproportionate to the payoff (un-gating two slang byte tests).
+disproportionate to the payoff (un-gating two svllm byte tests).
 
 ## 2026-07-15 resolution
 
@@ -65,7 +84,7 @@ explicitly out of scope.
 
 ## Historical mitigation
 
-Production slang previously avoided the erased leaf with typed `[[u8]]`
+Production svllm previously avoided the erased leaf with typed `[[u8]]`
 containers and gated byte-value tests behind `native_u8_fixed`. Those named
 gates are no longer present in the current tree; the focused dual-backend
 checker above is their replacement regression.
@@ -77,3 +96,4 @@ is built by `scripts/bootstrap/bootstrap-from-scratch.sh` (Rust seed → stage2
 `native-build --source src/compiler --source src/app --source src/lib
 --entry-closure`). Stage2 yields a deployable binary; stage3 self-host
 convergence is the historically-fragile part.
+

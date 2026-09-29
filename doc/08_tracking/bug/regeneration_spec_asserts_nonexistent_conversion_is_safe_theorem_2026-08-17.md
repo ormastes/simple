@@ -2,7 +2,6 @@
 
 - **Filed:** 2026-08-17
 - **Status:** **OPEN (P2)** — REOPENED 2026-08-21: the claimed generator change is absent from the tree (`conversion_is_safe` has 0 hits in `src/compiler_rust/lib/std/src/verification/regenerate/memory_capabilities.spl`; none of its `build_theorem` names is it), while `test/00_formal_verification/compiler/regeneration_spec.spl:26` still asserts `theorem conversion_is_safe`. The only occurrence is the hand-written `lib/std/src/memory/proofs/capabilities.lean:195`, which the spec does not read. The "Resolution" section below records a decision that was never landed in the PRODUCT.
-- **Status:** **FIXED 2026-08-17** — the formal-model decision was made and the PRODUCT (the generator) was changed; see "Resolution" at the bottom
 - **Severity:** medium (1 RED example in the formal-verification suite)
 - **Spec:** `test/00_formal_verification/compiler/regeneration_spec.spl:22-26`
 - **Generator:** `src/compiler_rust/lib/std/src/verification/regenerate/memory_capabilities.spl`
@@ -203,11 +202,23 @@ generalising gate was not weakened to accommodate the fix.
 
 Status: FIXED.
 
-## Re-landed 2026-08-18 (lane-test-fix)
+## Re-check 2026-09-13 (BUGFIX-7 lane) — theorem present in tree, spec green, CLOSED
 
-The Resolution above was lost during the REBASE91 salvage — the generator on
-this lane had no `conversion_is_safe` again and the spec was RED
-(`Results: 4 total, 3 passed, 1 failed`). The identical generator + golden
-change was re-applied; the spec is now
-`Results: 4 total, 4 passed, 0 failed` and the class spec
-`Results: 5 total, 5 passed, 0 failed`. Still no spec assertion was edited.
+The top-of-file "REOPENED 2026-08-21" claim (`conversion_is_safe` has 0 hits in
+the generator) does not hold at `a6450c9d6f5`:
+
+```
+$ grep -n conversion_is_safe src/compiler_rust/lib/std/src/verification/regenerate/memory_capabilities.spl
+106:        "conversion_is_safe",
+
+$ bin/simple test test/00_formal_verification/compiler/regeneration_spec.spl --no-session-daemon --sequential
+4 examples, 0 failures
+Results: 4 total, 4 passed, 0 failed
+```
+
+Binary: `bin/release/aarch64-unknown-linux-gnu/simple` (Rust seed, sha256
+prefix `3d120a6f`). The 2026-08-17 fix is in the tree and the spec passes.
+Whatever caused the 2026-08-21 reopening (a stale checkout at the time, or a
+transient revert since re-applied) is not the current state.
+
+- Status: CLOSED (2026-09-13) — verified fixed on `a6450c9d6f5`.

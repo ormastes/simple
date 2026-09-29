@@ -1,0 +1,61 @@
+# Regression spec: `_native_build_entry_closure` must stay FAIL-CLOSED by
+# default when the SCV (semantic-cache-virtualization) freeze has no admitted
+# source inventory to freeze against -- exactly the state of every fresh
+# worktree on this host (no `build/scv/CURRENT` / `.simple/scv/CURRENT`
+# anywhere, confirmed by a repo-wide `find` during triage) -- and must offer
+# an unfrozen direct scan ONLY as an explicit opt-in via
+# `SIMPLE_SCV_FREEZE_FALLBACK=1`. A design that silently fell back by default
+# was proposed and REJECTED in review: the default behaviour must still
+# return `[]`, now paired with a loud, actionable diagnostic (naming the
+# cause and the remedy) instead of the bare `SCV-E-SNAPSHOT: <reason>` code
+# that used to be the only clue before every native-build -- even a 2-line
+# hello-world entry with no imports at all -- died deep inside the
+# compiler's own bootstrap with an opaque, locationless
+# `error: semantic: method \`len\` not found on type \`i64\``. See
+# doc/08_tracking/bug/native_build_entry_closure_scv_freeze_collapses_to_empty_2026-09-13.md.
+#
+# Fixture: test/fixtures/native_build_closure/entry.spl walks several distinct
+# import-resolution styles (std./os. prefixes, a relative `.` import, and a
+# bare unprefixed os path) across separate fixture files, resolved against
+# named `--source` roots exactly as a real native-build invocation passes
+# them (one root per top-level namespace: .../src/lib, .../src/os, ...) --
+# NOT one parent "src" dir, which is a different, unrelated resolution gap
+# (`_nb_source_root_named` matches a root's OWN basename, e.g. "lib", not a
+# "lib" subdirectory inside a broader root).
+#
+# Run order matters: the SCV freeze result is memoized per (entry,
+# source_dirs, revision) key across calls in the same process
+# (`_nb_scv_snapshot_key_v1`), and only a SUCCESSFUL freeze updates that key.
+# The default (fail-closed, no env knob) case must run FIRST so a later,
+# opt-in success cannot be mistaken for the default's own behaviour.
+use std.spec.*
+use std.io_runtime.{env_get, env_set}
+use app.io._CliCompile.native_build_closure.{_native_build_entry_closure}
+
+describe "native-build entry closure with no admitted SCV inventory":
+    it "stays fail-closed by default: returns an empty closure, not the working-tree scan":
+        expect(env_get("SIMPLE_SCV_FREEZE_FALLBACK") ?? "").to_equal("")
+        val closure = _native_build_entry_closure(
+            "test/fixtures/native_build_closure/entry.spl",
+            ["test/fixtures/native_build_closure/src/lib",
+             "test/fixtures/native_build_closure/src/os",
+             "test/fixtures/native_build_closure/src"])
+        expect(closure).to_equal([])
+
+    it "SIMPLE_SCV_FREEZE_FALLBACK=1 opts into the working-tree scan":
+        env_set("SIMPLE_SCV_FREEZE_FALLBACK", "1")
+        val closure = _native_build_entry_closure(
+            "test/fixtures/native_build_closure/entry.spl",
+            ["test/fixtures/native_build_closure/src/lib",
+             "test/fixtures/native_build_closure/src/os",
+             "test/fixtures/native_build_closure/src"])
+        env_set("SIMPLE_SCV_FREEZE_FALLBACK", "")
+        expect(closure.len() > 1).to_equal(true)
+        expect(closure.contains("test/fixtures/native_build_closure/entry.spl")).to_equal(true)
+        expect(closure.contains("test/fixtures/native_build_closure/relative_fixture.spl")).to_equal(true)
+        expect(closure.contains("test/fixtures/native_build_closure/src/lib/nogc_sync_mut/memory_leveling.spl")).to_equal(true)
+        expect(closure.contains("test/fixtures/native_build_closure/src/lib/nogc_sync_mut/explicit_fixture.spl")).to_equal(true)
+        expect(closure.contains("test/fixtures/native_build_closure/src/os/kernel/memory/manager.spl")).to_equal(true)
+        expect(closure.contains("test/fixtures/native_build_closure/src/os/kernel/memory/adapters.spl")).to_equal(true)
+        expect(closure.contains("test/fixtures/native_build_closure/src/os/kernel/memory/capabilities.spl")).to_equal(true)
+        expect(closure.contains("test/fixtures/native_build_closure/src/os/kernel/memory/swap.spl")).to_equal(true)

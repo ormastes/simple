@@ -60,7 +60,7 @@ Reader algorithm validates the header and directory completely before decoding a
 
 ## Provider descriptors
 
-`SimpleProviderRequestV1` fields: struct size, interface ID, minimum major/minor, host ABI digest, target identity, requested capability bitset/view. `SimpleProviderResultV1` fields: status, provided major/minor, descriptor size/address, opaque context, provider identity, implementation digest, ABI digest.
+`SimpleProviderRequestV1` fields: struct size, interface ID, minimum major/minor, host ABI digest, target identity, requested capability bitset/view. `SimpleProviderResultV1` fields: status, provided major/minor, descriptor size/address, opaque context, provider identity, implementation digest, and eight ordered big-endian `u32` words representing the complete 32-byte ABI SHA-256. The packed result is 84 bytes: the pre-existing 48-byte scalar prefix, the digest at bytes 48..79, and four reserved zero bytes. Decode requires the exact size. Before invocation the host poison-fills all 84 bytes; a legacy partial write therefore retains poison in the extended suffix and fails reserved-byte validation. Session query rejects malformed SCI text or a digest mismatch before incrementing `next_pin_id` or appending `live_pins`.
 
 `SimpleCliCommandV1` uses coarse calls for description, argument validation, execution, and completion. SCI duplicates only stable summary/option-schema identity needed for root help. `SimpleAppLaunchV1` accepts an immutable launch request with app/artifact/action IDs and bounded arguments, and returns a stable status plus opaque process/activation identity.
 

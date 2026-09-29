@@ -1,4 +1,8 @@
 # Bug: pure-Simple detect_os() reads OSTYPE — false negative in non-shell child processes
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Date:** 2026-07-02
 - **Severity:** medium (silently disables Metal/GPU paths)
@@ -27,3 +31,4 @@ mechanism (compile-time target triple constant threaded by the compiler, or
 
 ## Workaround (current)
 Gates inject `OSTYPE=darwin` into the launched app environment.
+

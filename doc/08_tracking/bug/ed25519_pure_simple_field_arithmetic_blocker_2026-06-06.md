@@ -1,6 +1,13 @@
 # Ed25519 Pure Simple Field Arithmetic Blocker (2026-06-06)
 
-Status: Resolved for the pure Simple Ed25519 path. Rust/SFFI seed/runtime signing can be checked after this 
+## Closed 2026-09-13 — Resolved for the pure-Simple Ed25519 path per the entry's status
+
+- **inferred** The Status line records the blocker resolved for the pure Simple Ed25519 path, with Rust/SFFI seed signing left as a separate follow-up.
+- **measured** The referenced Ed25519/curve25519 sources still exist (path scan: 4 referenced, 1 "missing" hit is the prose name `curve25519_smalllimb.spl`, not a live path), so the implementation stands.
+- **inferred** Crypto spec execution is unavailable here (`bin/simple test` is killed at its outer bound on this Windows host); the seed/SFFI signing follow-up is tracked by the separate TLS-signature entry.
+
+
+Status: closed (2026-09-13 triage) — see the "Closed 2026-09-13" section below
 
 ## Status
 

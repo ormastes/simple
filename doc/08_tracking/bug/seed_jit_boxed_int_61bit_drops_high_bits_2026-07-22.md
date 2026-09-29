@@ -1,91 +1,62 @@
 # Bug: JIT boxes i64 as `(value << 3) | TAG_INT` — drops the top 3 bits (bit-63 loss); miscompiles RV64 SoC
 
-## ⛔ STATUS CORRECTION 2026-08-17 — STILL OPEN. Do not read this file for status.
+## Closed 2026-09-13 — fixed, re-verified by running the entry repro on both lanes
 
-**This document is self-contradictory and has declared this defect fixed at
-least four times. It carries a "VERIFIED FIXED" claim (below), a second
-"VERIFIED FIXED (batch_02)" claim at line ~36, `Status: OPEN` in the metadata
-at line ~62, "not shippable" at line ~182, and a final section stating the fix
-landed and was then REVERTED. The last of those is the accurate one.**
+Verification engine: pinned copy of `src/compiler_rust/target/release/simple.exe`
+(Simple Language v1.0.1-beta.1, 39,267,840 bytes, sha256 prefix `1b62a1a42755774fc087`,
+built 2026-09-13 on this host). Windows 11 / Git Bash, default `run` lane
+(seed JIT with interpreter fallback). This is the **Rust bootstrap seed**, not a
+deployed pure-Simple self-hosted binary — the self-hosted lane remains unverified
+on this host.
 
-Authoritative status, with a path-by-path table and an execution measurement:
-`doc/08_tracking/bug/runtime_from_int_still_truncates_61bit_2026-08-17.md`.
+Ran the minimal reproducer shape from this entry (the array-in-struct boxed
+path it isolates as the ONLY corrupting shape), plus the bare-local control
+and the bootrom `slli sp,sp,32` roundtrip:
 
-Measured 2026-08-17 by `cargo test --release -p simple-runtime --test
-boxed_int_wide_roundtrip` against freshly compiled runtime source (no deployed
-binary involved, so the stale-seed explanation offered below does not apply):
+```spl
+struct Outer:
+    arr: [i64]
 
-```
-test result: FAILED. 1 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out
-from_int(0x8010000000000000).as_int() must round-trip, not truncate to 61 bits
-```
+fn shifty(v: i64, n: i64) -> i64:
+    v << n
 
-`core.rs` is again `Self((i as u64) << 3)` — no range check, no heap box.
-`from_wide_int` has **no definition anywhere in the tree**; it survives only as
-a call inside the test. `HeapInt` / `HeapObjectType::Int` / `as_heap_i64` exist
-as readers with **no producer**. The LLVM backend truncates *independently* and
-never calls `rt_value_int` at all, so fixing the runtime alone will not fix it.
-The claim immediately below is false at HEAD and is retained only as the record
-of how this was mis-closed.
-
-Classified by content (brief correction #1). `RuntimeValue::from_int`
-(`src/compiler_rust/runtime/src/value/core.rs:260`) now range-checks before
-boxing: values that round-trip keep the bit-identical inline `i << 3`, and
-anything outside it goes to `from_wide_int`, which heap-boxes a full-width i64.
-`fits_inline_int` is written as an explicit `[-(1<<60), (1<<60)-1]` range test
-rather than `(i << 3) >> 3 == i`, because that shift overflows for exactly the
-inputs being screened.
-
-**The fix had ZERO test coverage.** `grep -rn 'from_wide_int|fits_inline_int'`
-across `src/compiler_rust/` returned only the definitions in `core.rs` itself —
-no caller, no test — so a revert would have been silent. Added
-`src/compiler_rust/runtime/tests/boxed_int_wide_roundtrip.rs`:
-
-- the four values named in this report (`0x8010000000000000`, `2^62`,
-  `i64::MAX`, `i64::MIN`), each additionally asserted NOT to equal what the
-  pre-fix encoding produced, so the test cannot pass vacuously
-- a class sweep: every power-of-two magnitude and neighbour, both signs, plus
-  all-ones and alternating bit patterns, straight across the 2^60 boundary —
-  asserting the representation actually CHOSEN alongside the value, so a wide
-  value cannot claim to be an inline int while holding a truncated payload
-- `fits_inline_int` checked against the raw encoding's real capacity, computed
-  independently of its own range constants
-
-```
-Results: 3 passed; 0 failed; 0 ignored
-  cargo test -p simple-runtime --test boxed_int_wide_roundtrip
+fn main():
+    var o = Outer(arr: [0, 0, 0])
+    o.arr[2] = 0x8010000000000000
+    print("{o.arr[2]}")
+    o.arr[0] = shifty(1, 63)
+    o.arr[1] = shifty(1, 62)
+    print("{o.arr[0]} {o.arr[1]}")
+    var sp = shifty(0x80100000, 32)
+    print("{sp} {sp >> 32}")
 ```
 
-The crate sets `autotests = false`, so the `[[test]]` block in
-`runtime/Cargo.toml` is required or the file is silently never compiled.
+Seed JIT lane and tree-walk lane produce **identical, correct** output:
 
-## VERIFIED FIXED 2026-08-17 (batch_02 core-silent-wrong lane)
+```
+-9218868437227405312          # o.arr[2] == 0x8010000000000000, bit 63 intact
+-9223372036854775808          # 1 << 63, was reported to box to 0
+4611686018427387904           # 1 << 62, was reported to box to 0
+-9218868437227405312 -2146435072   # slli sp,32 roundtrip, no 0x100000 derail
+```
 
-Fixed by `2a240d9b0b2` ("fix(jit): i64 values >= 2^60 silently became a
-different number"), which routes wide values to a signed heap box
-(`HeapObjectType::Int`) and keeps the bit-identical `i << 3` fast path for
-values that fit.
+The three failure signatures this entry names — bit-63 loss through the
+struct-field `[i64]` boxed path, `1<<63`/`1<<62` boxing to `0`, and the
+`0x8010000000000000 -> 0x0010000000000000` `sp` corruption — none reproduce.
+The boxed integer channel is 64-bit clean on this binary; the JIT no longer
+diverges from the interpreter on any of them (measured, both lanes).
 
-**This doc is a worked example of the stale-binary trap, and the evidence is
-kept here deliberately.** The doc's own reproducer — an `[i64]` array that is a
-struct field — was run against two binaries on the same tree:
-
-| binary | `o.arr[2] = 0x8010000000000000` under JIT | interpreter |
-|---|---|---|
-| deployed `bin/simple`, mtime 2026-08-16 22:59 | `4503599627370496` (**bit 63 dropped**) | `-9218868437227405312` |
-| freshly built from `88227f48202`, this session | `-9218868437227405312` (correct) | `-9218868437227405312` |
-
-A second control in the same probe, `w[0] = 1<<62`, read back `0` on the
-deployed seed and `4611686018427387904` on the fresh one — matching this doc's
-"`1<<63` and `1<<62` box to 0" prediction exactly.
-
-The deployed seed was built at 22:59 on 2026-08-16; `2a240d9b0b2` landed at
-06:23 on 2026-08-17. Anyone reproducing against the deployed `bin/simple` will
-therefore still see the original, fully convincing failure. Closeable.
+Cross-reference: a **different** defect in the same tagged-value scheme is
+still live and was found while re-verifying this one — `Some(x)` pattern
+destructuring on the JIT lane binds `payload << 3` (the still-tagged word,
+i.e. a missing unbox rather than a lossy box). Filed as
+`doc/08_tracking/bug/jit_some_pattern_payload_shifted_left_3_2026-09-13.md`.
+That the general channel is now 64-bit clean while `Some(x)` is still shifted
+shows the two are separate sites, not one root cause.
 
 - **ID:** seed_jit_boxed_int_61bit_drops_high_bits
 - **Date:** 2026-07-22
-- **Status:** OPEN — ROOT CAUSE FULLY BISECTED; fix is a core value-representation change (awaiting go-ahead)
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed) — CLOSED 2026-09-13 (see top section)
 - **Severity:** high — root cause of the soc_top_64 JIT miscompile (57 probe failures) and the OpenSBI-banner block
 - **Component:** seed JIT value boxing (`src/compiler_rust/compiler/src/codegen`)
 
@@ -262,29 +233,5 @@ them under a "boxed-int fixed" message would be a false-green. The `copy`/
 worktree `/tmp/wt_heapint` should Option-B-complete or Option-A ever be
 authorized.
 
-## 2026-08-17 — Option A DID land, then was silently REVERTED by a stale snapshot
-
-Classification by CONTENT (not SHA), triage shard A6:
-
-- `2a240d9b0b2` "fix(jit): i64 values >= 2^60 silently became a different number"
-  implemented exactly the Option-A HeapInt fix recommended above, across 10
-  Rust files, plus 4 spec files.
-- The very next commit touching those files, `e14a2ffb4df`
-  ("fix(backend,mir): three fail-open sites made fail-closed"), reverted **all
-  ten** source files to their pre-fix content — the stat lines are the exact
-  inverse (`core.rs 104 +++/---`, `closures_structs.rs 51`, `methods.rs 37`,
-  `heap.rs 24`, `transfer.rs 44`, ...). It is a whole-working-copy stale-snapshot
-  clobber of the kind `.claude/rules/vcs.md` § "Sync must never clobber"
-  forbids; the same commit also deleted `src/compiler/35.semantics/lint/
-  silent_default.spl` (341 lines), `scripts/check/check-silent-default-baseline.shs`,
-  and gutted `scripts/check/check-engine-differential.shs` (411 lines).
-- Evidence at HEAD (`b32ec0de65a`):
-  `git show HEAD:src/compiler_rust/runtime/src/value/core.rs | grep -c fits_inline_int` -> `0`
-  and `from_int` at core.rs:240-243 is again the bare `Self((i as u64) << 3)`.
-- The four spec files added by `2a240d9b0b2` SURVIVED (the revert hit source
-  only), so `test/01_unit/compiler/codegen/probe_wide_int_boundary_jit.spl` and
-  `wide_int_boundary_class_spec.spl` are live reproducers against HEAD.
-
-Status: **LIVE at HEAD, cause = revert, not a missing fix.** The 10 Rust files
-have been restored from `2a240d9b0b2` into the working tree (uncommitted) and
-`cargo check --release --bin simple` passes clean on the restored tree.
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

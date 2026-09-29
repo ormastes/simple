@@ -1,0 +1,122 @@
+# Purpose: exercise the production reader-pin owner while proving that the
+# incomplete GC host primitive cannot be promoted into deletion authority.
+# @req REQ-CSM-008 REQ-CSM-012 REQ-CSM-024
+# @cover src/compiler/80.driver/cache/gc/reader_pin_gc_guard.spl 80%
+
+use std.spec.{describe, it, expect}
+use std.spec.step
+use std.common.crypto.sha256.{sha256_text}
+use std.io_runtime.{dir_create_all, dir_remove_all}
+use compiler.driver.cache.gc.reader_pin_gc_guard.*
+use compiler.common.cache_contract.direct_read_pin_v1.{DirectReadPinV1}
+use common.cache_host_authority_v1.{
+    cache_host_begin_reader_pin_v1, cache_host_release_reader_pin_v1,
+    cache_host_open_root_v1, cache_host_close_root_v1,
+}
+
+extern fn rt_getpid() -> i64
+
+fn digest(label: text) -> text: sha256_text(label)
+
+fn acquire_pin(root_path: text, epoch: i64, generation: i64,
+        manifest: text, now: i64) -> DirectReadPinV1:
+    val root = cache_host_open_root_v1(root_path)
+    val process = "reader-{rt_getpid()}-{now}"
+    val boot = digest("boot")
+    val namespace = digest("namespace-{process}")
+    val authority = cache_host_begin_reader_pin_v1(root, epoch, generation,
+        manifest, process, boot, namespace, now, 10000)
+    _ = cache_host_close_root_v1(root)
+    DirectReadPinV1(pin_id: authority.opaque_handle.to_string(),
+        process_instance_nonce: process, boot_identity_digest: boot,
+        reader_admission_epoch: epoch,
+        journal_superblock_generation: generation,
+        pinned_manifest_digest: manifest, created_monotonic: now,
+        expires_monotonic: now + 10000,
+        namespace_entry_digest: namespace)
+
+fn release_pin(pin: DirectReadPinV1) -> i64:
+    cache_host_release_reader_pin_v1(reader_pin_authority(pin),
+        pin.reader_admission_epoch, pin.journal_superblock_generation,
+        pin.pinned_manifest_digest, pin.process_instance_nonce,
+        pin.boot_identity_digest, pin.namespace_entry_digest)
+
+describe "reader pin GC guard":
+    it "validates a real pin but refuses the non-generation-bound GC barrier":
+        step("Create a real host pin and revalidate every bound identity field")
+        val root_path = "/tmp/simple-reader-pin-gc-guard-{rt_getpid()}"
+        dir_remove_all(root_path)
+        expect(dir_create_all(root_path)).to_equal(true)
+        val manifest = digest("manifest")
+        val pin = acquire_pin(root_path, 8, 6, manifest, 100)
+        expect(reader_pin_authority(pin).opaque_handle > 0).to_equal(true)
+        var guard = reader_pin_gc_guard_open(root_path, 8, 6).unwrap()
+        expect(guard.reader_epoch()).to_equal(8)
+        expect(guard.generation()).to_equal(6)
+        expect(guard.validate_live_pin_identity(pin, 101).is_ok()).to_equal(true)
+        var tampered = pin
+        tampered.boot_identity_digest = digest("other-boot")
+        expect(guard.validate_live_pin_identity(tampered, 101)).to_equal(
+            Err(ReaderPinGcGuardError.PinGenerationMismatch))
+        expect(guard.validate_live_pin_identity(pin, 10100)).to_equal(
+            Err(ReaderPinGcGuardError.PinGenerationMismatch))
+        expect(guard.begin_authoritative_final_scan(10, 6)).to_equal(
+            Err(ReaderPinGcGuardError.PinGenerationMismatch))
+
+        step("Refuse before epoch mutation because begin cannot atomically bind generation")
+        val refused = guard.begin_authoritative_final_scan(8, 6)
+        expect(refused).to_equal(
+            Err(ReaderPinGcGuardError.HostGenerationBindingUnavailable))
+
+        step("Prove refusal left even-epoch reader admission usable")
+        val second = acquire_pin(root_path, 8, 6, manifest, 102)
+        expect(reader_pin_authority(second).opaque_handle > 0).to_equal(true)
+        expect(guard.validate_live_pin_identity(second, 103).is_ok()).to_equal(true)
+        expect(release_pin(second)).to_equal(0)
+        expect(guard.validate_live_pin_identity(second, 104)).to_equal(
+            Err(ReaderPinGcGuardError.PinGenerationMismatch))
+        expect(release_pin(pin)).to_equal(0)
+        expect(guard.close()).to_equal(true)
+        expect(guard.validate_live_pin_identity(pin, 105)).to_equal(
+            Err(ReaderPinGcGuardError.Released))
+        expect(guard.begin_authoritative_final_scan(8, 6)).to_equal(
+            Err(ReaderPinGcGuardError.Released))
+        expect(guard.close()).to_equal(false)
+        dir_remove_all(root_path)
+
+    it "does not mistake caller generation or stale pin fields for host authority":
+        val root_path = "/tmp/simple-reader-pin-gc-mismatch-{rt_getpid()}"
+        dir_remove_all(root_path)
+        expect(dir_create_all(root_path)).to_equal(true)
+        val pin = acquire_pin(root_path, 12, 9, digest("current"), 200)
+        var stale_guard = reader_pin_gc_guard_open(root_path, 12, 8).unwrap()
+        expect(stale_guard.validate_live_pin_identity(pin, 201)).to_equal(
+            Err(ReaderPinGcGuardError.PinGenerationMismatch))
+        expect(stale_guard.begin_authoritative_final_scan(12, 8)).to_equal(
+            Err(ReaderPinGcGuardError.HostGenerationBindingUnavailable))
+        expect(stale_guard.close()).to_equal(true)
+        expect(release_pin(pin)).to_equal(0)
+        dir_remove_all(root_path)
+
+    it "keeps old packs and mature orphans ineligible without complete root authority":
+        step("Check two-generation and grace arithmetic as advisory facts only")
+        expect(reader_pin_gc_orphan_age_ready(4, 5, 1000, 5000, 1000)).to_equal(false)
+        expect(reader_pin_gc_orphan_age_ready(4, 6, 1000, 1999, 1000)).to_equal(false)
+        expect(reader_pin_gc_orphan_age_ready(4, 6, 1000, 2000, 1000)).to_equal(true)
+        expect(reader_pin_gc_orphan_age_ready(
+            0x7ffffffffffffffd, 0x7fffffffffffffff,
+            0x7ffffffffffffffd, 0x7fffffffffffffff, 2)).to_equal(true)
+
+        step("Refuse deletion because complete host roots pins and unlink are unavailable")
+        expect(reader_pin_gc_authoritative_delete_available()).to_equal(false)
+        expect(reader_pin_gc_delete_blocker()).to_equal(
+            "complete_host_root_pin_snapshot_and_descriptor_unlink_unavailable")
+        expect(reader_pin_gc_retired_generation_must_retain()).to_equal(true)
+
+    it "rejects invalid epochs and absent roots before creating a guard":
+        val absent = "/tmp/simple-reader-pin-gc-absent-{rt_getpid()}"
+        dir_remove_all(absent)
+        expect(reader_pin_gc_guard_open(absent, 8, 1)).to_equal(
+            Err(ReaderPinGcGuardError.RootUnavailable))
+        expect(reader_pin_gc_guard_open(absent, 9, 1)).to_equal(
+            Err(ReaderPinGcGuardError.InvalidInput))

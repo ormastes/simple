@@ -1,0 +1,195 @@
+# Purpose: bounded offset-only shared-memory worker transport acceptance.
+# @req REQ-KPF-SHARED-MEMORY-WORKER
+# @cover src/os/smf/kernel_plugin/shared_memory_*.spl 85%
+
+use std.spec
+use std.spec.step
+use std.nogc_async_mut.kernel_plugin.runtime.KpfRequestHandleV1
+use os.smf.kernel_plugin.shared_memory_ring.KpfSharedMemoryRingV1
+use os.smf.kernel_plugin.shared_memory_transport.KpfSharedMemoryWorkerTransportV1
+use os.smf.kernel_plugin.shared_memory_wire.*
+use os.smf.kernel_plugin.worker_protocol.*
+
+fn descriptors(capacity: i64) -> [KpfSharedMemoryDescriptorV1]:
+    var result: [KpfSharedMemoryDescriptorV1] = []
+    var index = 0
+    while index < capacity:
+        result.push(kpf_shared_memory_empty_descriptor_v1())
+        index = index + 1
+    result
+
+fn occupancy(capacity: i64) -> [bool]:
+    var result: [bool] = []
+    var index = 0
+    while index < capacity:
+        result.push(false)
+        index = index + 1
+    result
+
+fn integers(capacity: i64) -> [i64]:
+    var result: [i64] = []
+    var index = 0
+    while index < capacity:
+        result.push(-1)
+        index = index + 1
+    result
+
+fn bytes(capacity: i64) -> [u8]:
+    var result: [u8] = []
+    var index = 0
+    while index < capacity:
+        result.push(0u8)
+        index = index + 1
+    result
+
+fn ring(capacity: i64, payload_bytes: i64) -> KpfSharedMemoryRingV1:
+    KpfSharedMemoryRingV1.bind(bytes(capacity * payload_bytes),
+        descriptors(capacity), occupancy(capacity), payload_bytes)
+
+fn frame(kind: KpfWorkerFrameKind, generation: i64, session_epoch: i64,
+        slot: i64, epoch: i64, capabilities: u64,
+        payload: [u8]) -> KpfWorkerFrameV1:
+    KpfWorkerFrameV1(protocol_version: KPF_WORKER_PROTOCOL_V1, kind: kind,
+        generation: generation, session_epoch: session_epoch,
+        request_slot: slot, request_epoch: epoch,
+        capability_bits: capabilities, payload_length: payload.len, payload: payload)
+
+fn request(slot: i64, epoch: i64) -> KpfRequestHandleV1:
+    KpfRequestHandleV1(generation: 7, session_slot: 2,
+        request_slot: slot, request_epoch: epoch)
+
+fn transport(capacity: i64) -> KpfSharedMemoryWorkerTransportV1:
+    KpfSharedMemoryWorkerTransportV1.create(ring(capacity, 8), ring(capacity, 8),
+        bytes(8), integers(capacity), occupancy(capacity),
+        7, 2, 3, 5)
+
+fn complete_handshake(worker: KpfSharedMemoryWorkerTransportV1):
+    val request_frame = worker.submissions.dequeue_into(bytes(8))
+    assert_equal(request_frame.outcome, KpfWorkerOutcome.Accepted)
+    assert_equal(request_frame.frame.kind, KpfWorkerFrameKind.Handshake)
+    assert_equal(worker.completions.enqueue(frame(KpfWorkerFrameKind.HandshakeAccepted,
+        7, 3, -1, 0, 5, [])), KpfWorkerOutcome.Accepted)
+    assert_equal(worker.poll().outcome, KpfWorkerOutcome.Accepted)
+
+describe "bounded shared-memory KPF worker transport":
+    it "binds caller-owned fixed storage and never grows under backpressure":
+        step("fill the only descriptor slot and preserve fixed storage lengths")
+        val worker = transport(1)
+        val storage_bytes = worker.submissions.payload_storage.len
+        val descriptor_slots = worker.submissions.descriptors.len
+        assert_equal(worker.handshake(5), KpfWorkerOutcome.Accepted)
+        assert_equal(worker.handshake(5), KpfWorkerOutcome.WouldBlock)
+        assert_equal(worker.submissions.payload_storage.len, storage_bytes)
+        assert_equal(worker.submissions.descriptors.len, descriptor_slots)
+
+    it "round trips payload through offsets and preserves generation session and request epochs":
+        step("handshake submit and consume one exact completion")
+        val worker = transport(3)
+        assert_equal(worker.handshake(5), KpfWorkerOutcome.Accepted)
+        complete_handshake(worker)
+        val handle = request(4, 9)
+        assert_equal(worker.submit(handle, 1, [11u8, 22u8]), KpfWorkerOutcome.Accepted)
+        val submitted = worker.submissions.dequeue_into(bytes(8))
+        assert_equal(submitted.outcome, KpfWorkerOutcome.Accepted)
+        assert_equal(submitted.frame.payload[0], 11u8)
+        assert_equal(submitted.frame.payload[1], 22u8)
+        assert_equal(submitted.frame.generation, 7)
+        assert_equal(submitted.frame.session_epoch, 3)
+        assert_equal(submitted.frame.request_epoch, 9)
+        assert_equal(worker.completions.enqueue(frame(KpfWorkerFrameKind.Completion,
+            7, 3, 4, 9, 0, [33u8])), KpfWorkerOutcome.Accepted)
+        val completed = worker.poll()
+        assert_equal(completed.outcome, KpfWorkerOutcome.Accepted)
+        assert_equal(completed.request.request_epoch, 9)
+        assert_equal(completed.payload_length, 1)
+        assert_equal(completed.payload[0], 33u8)
+
+    it "rejects malformed offsets before reading shared payload bytes":
+        step("move a descriptor outside its assigned slot")
+        val target = ring(2, 4)
+        assert_equal(target.enqueue(frame(KpfWorkerFrameKind.Completion,
+            7, 3, 1, 1, 0, [1u8, 2u8])), KpfWorkerOutcome.Accepted)
+        assert_true(target.corrupt_next_offset_for_test(7))
+        assert_equal(target.dequeue_into(bytes(4)).outcome,
+            KpfWorkerOutcome.MalformedFrame)
+
+    it "carries cancellation identity and closes only after the exact completion drains":
+        step("submit cancel quiesce drain and close without dropping epochs")
+        val worker = transport(4)
+        assert_equal(worker.handshake(5), KpfWorkerOutcome.Accepted)
+        complete_handshake(worker)
+        val handle = request(5, 11)
+        assert_equal(worker.submit(handle, 1, [4u8]), KpfWorkerOutcome.Accepted)
+        assert_equal(worker.submissions.dequeue_into(bytes(8)).outcome,
+            KpfWorkerOutcome.Accepted)
+        assert_equal(worker.cancel(handle), KpfWorkerOutcome.Accepted)
+        val cancelled = worker.submissions.dequeue_into(bytes(8))
+        assert_equal(cancelled.frame.kind, KpfWorkerFrameKind.Cancel)
+        assert_equal(cancelled.frame.request_slot, 5)
+        assert_equal(cancelled.frame.request_epoch, 11)
+        assert_equal(worker.quiesce(), KpfWorkerOutcome.Accepted)
+        assert_equal(worker.submissions.dequeue_into(bytes(8)).frame.kind,
+            KpfWorkerFrameKind.Quiesce)
+        assert_equal(worker.close(), KpfWorkerOutcome.Quiescing)
+        assert_equal(worker.completions.enqueue(frame(KpfWorkerFrameKind.Completion,
+            7, 3, 5, 11, 0, [])), KpfWorkerOutcome.Accepted)
+        assert_equal(worker.poll().outcome, KpfWorkerOutcome.Accepted)
+        assert_equal(worker.close(), KpfWorkerOutcome.Accepted)
+        assert_equal(worker.submissions.dequeue_into(bytes(8)).frame.kind,
+            KpfWorkerFrameKind.Close)
+
+    it "rejects stale generations and session epochs":
+        step("do not consume inflight state for stale completion identity")
+        val worker = transport(3)
+        assert_equal(worker.handshake(5), KpfWorkerOutcome.Accepted)
+        complete_handshake(worker)
+        assert_equal(worker.submit(request(2, 6), 1, []), KpfWorkerOutcome.Accepted)
+        worker.submissions.dequeue_into(bytes(8))
+        assert_equal(worker.completions.enqueue(frame(KpfWorkerFrameKind.Completion,
+            8, 3, 2, 6, 0, [])), KpfWorkerOutcome.Accepted)
+        assert_equal(worker.poll().outcome, KpfWorkerOutcome.StaleCompletion)
+        assert_equal(worker.inflight, 1)
+
+    it "rejects a fabricated request epoch without consuming the admitted request":
+        step("match completions against the caller-owned bounded request table")
+        val worker = transport(3)
+        assert_equal(worker.handshake(5), KpfWorkerOutcome.Accepted)
+        complete_handshake(worker)
+        assert_equal(worker.submit(request(2, 6), 1, []), KpfWorkerOutcome.Accepted)
+        worker.submissions.dequeue_into(bytes(8))
+        assert_equal(worker.completions.enqueue(frame(KpfWorkerFrameKind.Completion,
+            7, 3, 2, 7, 0, [])), KpfWorkerOutcome.Accepted)
+        assert_equal(worker.poll().outcome, KpfWorkerOutcome.StaleCompletion)
+        assert_equal(worker.inflight, 1)
+        assert_equal(worker.cancel(request(2, 7)), KpfWorkerOutcome.StaleCompletion)
+        assert_equal(worker.cancel(request(2, 6)), KpfWorkerOutcome.Accepted)
+
+    it "uses one direct lookup regardless of request-table capacity":
+        step("compare lookup operation deltas at the first and last bounded slots")
+        val small = transport(2)
+        assert_equal(small.handshake(5), KpfWorkerOutcome.Accepted)
+        complete_handshake(small)
+        val small_before = small.request_lookup_operations
+        assert_equal(small.submit(request(1, 4), 1, []), KpfWorkerOutcome.Accepted)
+        val small_submit_operations = small.request_lookup_operations - small_before
+
+        val large = transport(1024)
+        assert_equal(large.handshake(5), KpfWorkerOutcome.Accepted)
+        complete_handshake(large)
+        val large_before = large.request_lookup_operations
+        assert_equal(large.submit(request(1023, 4), 1, []), KpfWorkerOutcome.Accepted)
+        val large_submit_operations = large.request_lookup_operations - large_before
+        assert_equal(small_submit_operations, 1)
+        assert_equal(large_submit_operations, 1)
+
+    it "rejects negative and past-capacity request slots without indexing storage":
+        step("fail closed before direct request-table access")
+        val worker = transport(2)
+        assert_equal(worker.handshake(5), KpfWorkerOutcome.Accepted)
+        complete_handshake(worker)
+        assert_equal(worker.submit(request(-1, 1), 1, []),
+            KpfWorkerOutcome.StaleCompletion)
+        assert_equal(worker.submit(request(2, 1), 1, []),
+            KpfWorkerOutcome.StaleCompletion)
+        assert_equal(worker.cancel(request(2, 1)),
+            KpfWorkerOutcome.StaleCompletion)

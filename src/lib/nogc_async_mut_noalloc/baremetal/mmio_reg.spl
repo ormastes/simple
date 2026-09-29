@@ -1,0 +1,110 @@
+# Typed bitfield MMIO register views (design A.7 F4)
+#
+# A register view is data, not codegen magic: `MmioField(lo, width)` describes
+# one bit slice of a 32-bit device register at `base + offset`. A field read
+# is a full-width volatile load then mask; a field write is read-modify-write
+# of the containing word. For write-1-to-clear registers use `set_raw`, which
+# is a single plain store (design F4: ".set_raw(mask) is a plain store").
+#
+# The volatile access itself goes through mmio_read_u32/mmio_write_u32
+# (rt_mmio_* volatile providers; on x86_64 native the asm-backed
+# x86_64/volatile_mmio.spl primitives are the drop-in equivalent). On the
+# host, specs install mmio_test_shim to script device values.
+
+use std.nogc_async_mut_noalloc.baremetal.mmio.{mmio_read_u32, mmio_write_u32}
+
+struct MmioField:
+    """One bit slice of a 32-bit register: bits [lo, lo+width)."""
+    lo: u32
+    width: u32
+
+fn mmio_field(lo: u32, width: u32) -> MmioField:
+    if width == 0 or lo + width > 32:
+        panic("E-LAYOUT: MmioField bits [{lo}, {lo}+{width}) exceed the 32-bit register")
+    MmioField(lo: lo, width: width)
+
+fn mmio_field_mask(f: MmioField) -> u32:
+    val ones: u32 = if f.width >= 32: 0xFFFFFFFF else: ((1 as u32) << f.width) - 1
+    ones << f.lo
+
+fn mmio_fields_check_disjoint(fields: [MmioField]) -> bool:
+    """E-LAYOUT check: no two fields of one register view may overlap."""
+    var acc: u32 = 0
+    var i = 0
+    while i < fields.len():
+        val m = mmio_field_mask(fields[i])
+        if (acc & m) != 0:
+            return false
+        acc = acc | m
+        i = i + 1
+    true
+
+# --- host shim -------------------------------------------------------------
+
+var mmio_shim_active: bool = false
+var mmio_shim_addrs: [u64] = []
+var mmio_shim_values: [u32] = []
+
+fn mmio_test_shim(addrs: [u64], values: [u32]):
+    """Script register words for host/interpreter specs."""
+    mmio_shim_addrs = addrs
+    mmio_shim_values = values
+    mmio_shim_active = true
+
+fn mmio_test_shim_clear():
+    mmio_shim_active = false
+    mmio_shim_addrs = []
+    mmio_shim_values = []
+
+fn mmio_shim_index(addr: u64) -> i64:
+    var i = 0
+    while i < mmio_shim_addrs.len():
+        if mmio_shim_addrs[i] == addr:
+            return i
+        i = i + 1
+    -1
+
+# --- register access -------------------------------------------------------
+
+fn reg_read(addr: u64) -> u32:
+    """Full-width volatile read of the register word."""
+    if mmio_shim_active:
+        val i = mmio_shim_index(addr)
+        if i < 0:
+            panic("E-INTRINSIC-HOST: reg_read({addr}) has no scripted value in mmio_test_shim")
+        return mmio_shim_values[i]
+    mmio_read_u32(addr)
+
+fn reg_write(addr: u64, value: u32):
+    """Full-width volatile write ('.set_raw': ONE plain store, no read)."""
+    if mmio_shim_active:
+        val i = mmio_shim_index(addr)
+        if i < 0:
+            mmio_shim_addrs.push(addr)
+            mmio_shim_values.push(value)
+        else:
+            mmio_shim_values[i] = value
+        return
+    mmio_write_u32(addr, value)
+
+fn reg_field_read(addr: u64, f: MmioField) -> u32:
+    """Field read = one full-width volatile load, then shift+mask."""
+    val word = reg_read(addr)
+    val ones: u32 = if f.width >= 32: 0xFFFFFFFF else: ((1 as u32) << f.width) - 1
+    (word >> f.lo) & ones
+
+fn reg_field_write(addr: u64, f: MmioField, value: u32):
+    """Field write = volatile RMW of the containing word (documented; NOT for
+    write-1-to-clear registers — use reg_write / set_raw there)."""
+    val mask = mmio_field_mask(f)
+    val word = reg_read(addr)
+    val shifted = (value << f.lo) & mask
+    val kept = word - (word & mask)
+    reg_write(addr, kept | shifted)
+
+fn reg_field_is_set(addr: u64, f: MmioField) -> bool:
+    reg_field_read(addr, f) != 0
+
+export MmioField, mmio_field, mmio_field_mask, mmio_fields_check_disjoint
+export reg_read, reg_write, reg_field_read, reg_field_write, reg_field_is_set
+export mmio_test_shim, mmio_test_shim_clear

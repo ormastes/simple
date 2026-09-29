@@ -1,4 +1,9 @@
 # Metal GPU lane: device verification pending — no Metal host in this repo
+## Closed 2026-09-16 — explicit Status CLOSED (not reproducible on non-macOS host)
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - Status: CLOSED (not reproducible)
 - Status re-verified 2026-08-17 by source inspection (triage shard 02).
@@ -167,3 +172,4 @@ changing the conformance spec's expected skip reason.
 Until steps 6-9 are also done, the Metal debug/profile wrapper is
 structurally complete and device-unverified, exactly like the executor
 beneath it.
+

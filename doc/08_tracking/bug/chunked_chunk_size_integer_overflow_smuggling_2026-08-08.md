@@ -1,4 +1,9 @@
 # Chunked chunk-size integer overflow accepted as last-chunk (request smuggling)
+## Closed 2026-09-16 — Status FIXED, re-verified 2026-08-17; regression specs added
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - Status: FIXED
 - Status re-verified 2026-08-17 by source inspection (triage shard 00).
@@ -81,3 +86,4 @@ non-overflowing size). Sabotage (widening the guard to 64 digits) takes them
 All verdicts were produced on the interpreter path via `bin/simple test`, and
 `bin/simple` is currently the Rust bootstrap seed. GREEN here does not prove
 self-hosted or native-codegen behavior.
+

@@ -1,0 +1,334 @@
+#!/bin/sh
+# Fail-closed Stage-4 parity, compiler coverage, ABI, object, and receipt gate
+# for the Cosmos FTL pure-policy migration.
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+CC_BIN=${CC:-clang}
+NM_BIN=${NM:-nm}
+READELF_BIN=${READELF:-readelf}
+POLICY_REL=src/os/kernel/arch/arm32/cosmos/cosmos_ftl_policy.spl
+POLICY=$ROOT/$POLICY_REL
+BRIDGE=$ROOT/src/os/kernel/arch/arm32/cosmos/cosmos_ftl.c
+HEADER=$ROOT/src/os/kernel/arch/arm32/cosmos/cosmos_ftl_policy.h
+PROBE=$ROOT/test/fixtures/os/cosmos_ftl_policy_probe.spl
+ORACLE=$ROOT/test/02_integration/os/cosmos/cosmos_ftl_policy_frozen_oracle.c
+ORACLE_DUMP=$ROOT/test/02_integration/os/cosmos/cosmos_ftl_policy_oracle_dump.c
+C_COVERAGE=$ROOT/test/02_integration/os/cosmos/cosmos_ftl_policy_c_coverage_test.c
+CONTRACT=$ROOT/test/02_integration/os/cosmos/cosmos_ftl_contract_test.c
+PIN=$ROOT/test/fixtures/os/cosmos_ftl_policy_coverage_pin.env
+SOURCE_DIR=$ROOT/src/os/kernel/arch/arm32/cosmos
+EVIDENCE_DIR=$ROOT/build/coverage/cosmos-ftl-policy
+RECEIPT=$EVIDENCE_DIR/receipt.sdn
+RECEIPT_TMP=$EVIDENCE_DIR/.receipt.sdn.tmp.$$
+C_COVERAGE_BIN=$EVIDENCE_DIR/frozen-c-coverage-driver
+C_PROFDATA=$EVIDENCE_DIR/frozen-c.profdata
+C_REPORT=$EVIDENCE_DIR/frozen-c-coverage.txt
+C_COVERAGE_BIN_TMP=$EVIDENCE_DIR/.frozen-c-coverage-driver.tmp.$$
+C_PROFDATA_TMP=$EVIDENCE_DIR/.frozen-c.profdata.tmp.$$
+C_REPORT_TMP=$EVIDENCE_DIR/.frozen-c-coverage.txt.tmp.$$
+SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/cosmos-ftl-policy.XXXXXX")
+trap 'case ${SCRATCH:-} in /tmp/cosmos-ftl-policy.*|${TMPDIR:-/tmp}/cosmos-ftl-policy.*) [ ! -d "$SCRATCH" ] || rm -r -- "$SCRATCH" ;; esac; rm -f "$RECEIPT_TMP" "$C_COVERAGE_BIN_TMP" "$C_PROFDATA_TMP" "$C_REPORT_TMP"' EXIT HUP INT TERM
+
+fail() {
+    echo "FAIL cosmos-ftl-policy: $*" >&2
+    exit 1
+}
+
+blocked() {
+    echo "BLOCKED cosmos-ftl-policy: $*" >&2
+    exit 2
+}
+
+hash_file() {
+    sha256sum "$1" | awk '{print $1}'
+}
+
+pin_value() {
+    sed -n "s/^$1=//p" "$PIN"
+}
+
+verify_hash() {
+    [ "$(hash_file "$1")" = "$2" ] || fail "$3 changed during evidence run"
+}
+
+mkdir -p "$EVIDENCE_DIR"
+rm -f "$RECEIPT" "$RECEIPT_TMP" "$C_COVERAGE_BIN" "$C_PROFDATA" "$C_REPORT"
+
+# Evidence is inadmissible unless the compiler is a current-tree Stage-4
+# candidate.  Keep this before the oracle, coverage, object, or ABI work.
+[ "${SIMPLE_STAGE4_BIN+x}" = x ] && [ -n "$SIMPLE_STAGE4_BIN" ] ||
+    blocked "set SIMPLE_STAGE4_BIN to an admitted Stage-4 compiler"
+[ -x "$SIMPLE_STAGE4_BIN" ] || blocked "Stage-4 compiler is not executable"
+BOOTSTRAP_STAGE3_FACADE_PATH=$ROOT/scripts/check/lib/bootstrap-stage3-provenance.shs
+STAGE4_PROVENANCE_HELPER_PATH=$ROOT/scripts/check/lib/stage4-candidate-provenance.shs
+export BOOTSTRAP_STAGE3_FACADE_PATH STAGE4_PROVENANCE_HELPER_PATH
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+. "$STAGE4_PROVENANCE_HELPER_PATH"
+SIMPLE_CANONICAL=$(bootstrap_stage3_canonical_file "$SIMPLE_STAGE4_BIN") ||
+    blocked "cannot resolve pure-Simple compiler canonically"
+SIMPLE_PROVENANCE="${SIMPLE_CANONICAL}.provenance.env"
+[ -f "$SIMPLE_PROVENANCE" ] || blocked "adjacent Stage-4 provenance is missing"
+stage4_verify_candidate_provenance \
+    "$SIMPLE_PROVENANCE" "$SIMPLE_CANONICAL" "$ROOT" ||
+    blocked "admitted current-tree Stage-4 provenance is required"
+case "$("$SIMPLE_CANONICAL" --version 2>&1 || true)" in
+    *"Rust-built Simple binary is a bootstrap seed"*|*"bootstrap seed only"*)
+        blocked "a bootstrap seed cannot prove the FTL migration" ;;
+esac
+SIMPLE_SHA=$(hash_file "$SIMPLE_CANONICAL")
+PROVENANCE_SHA=$(hash_file "$SIMPLE_PROVENANCE")
+
+CLANG_MAJOR=$($CC_BIN -dumpversion | sed 's/\..*//')
+LLVM_PROFDATA_BIN=${LLVM_PROFDATA:-llvm-profdata-$CLANG_MAJOR}
+LLVM_COV_BIN=${LLVM_COV:-llvm-cov-$CLANG_MAJOR}
+for tool in "$CC_BIN" "$NM_BIN" "$READELF_BIN" "$LLVM_PROFDATA_BIN" \
+    "$LLVM_COV_BIN" sha256sum awk sed grep diff ld.lld; do
+    command -v "$tool" >/dev/null 2>&1 || blocked "required tool unavailable: $tool"
+done
+
+[ "$(pin_value schema)" = cosmos-ftl-policy-coverage/v1 ] || fail coverage-pin-schema
+[ "$(pin_value owner_source)" = "$POLICY_REL" ] || fail coverage-pin-owner
+POLICY_SHA=$(hash_file "$POLICY")
+BRIDGE_SHA=$(hash_file "$BRIDGE")
+HEADER_SHA=$(hash_file "$HEADER")
+PROBE_SHA=$(hash_file "$PROBE")
+ORACLE_SHA=$(hash_file "$ORACLE")
+ORACLE_DUMP_SHA=$(hash_file "$ORACLE_DUMP")
+C_COVERAGE_SHA=$(hash_file "$C_COVERAGE")
+CONTRACT_SHA=$(hash_file "$CONTRACT")
+PIN_SHA=$(hash_file "$PIN")
+[ "$(pin_value owner_source_sha256)" = "$POLICY_SHA" ] || fail coverage-pin-source-hash-stale
+grep -n -o 'COSMOS-FTL-D[0-9][0-9][0-9]' "$POLICY" >"$SCRATCH/decision-ids.txt"
+[ "$(wc -l <"$SCRATCH/decision-ids.txt" | tr -d ' ')" = 185 ] || fail decision-site-count
+awk -F: '{ print $2 }' "$SCRATCH/decision-ids.txt" | LC_ALL=C sort \
+    >"$SCRATCH/observed-ids.txt"
+awk 'BEGIN { for (i = 1; i <= 185; i++) printf "COSMOS-FTL-D%03d\n", i }' \
+    >"$SCRATCH/required-ids.txt"
+diff -u "$SCRATCH/required-ids.txt" "$SCRATCH/observed-ids.txt" || fail decision-id-set
+DECISION_IDS_SHA=$(hash_file "$SCRATCH/decision-ids.txt")
+[ "$(pin_value decision_ids_sha256)" = "$DECISION_IDS_SHA" ] || fail decision-id-pin-stale
+[ "$(pin_value compiler_location_lines_sha256)" = "$DECISION_IDS_SHA" ] || fail compiler-location-pin-stale
+[ "$(pin_value decision_sites)" = 185 ] || fail decision-site-pin
+[ "$(pin_value branch_outcomes_total)" = 370 ] || fail branch-outcome-pin
+[ "$(pin_value c_oracle_source_sha256)" = "$ORACLE_SHA" ] || fail c-oracle-pin-stale
+[ "$(pin_value c_coverage_driver_sha256)" = "$C_COVERAGE_SHA" ] || fail c-coverage-driver-pin-stale
+[ "$(pin_value clang_coverage_functions_total)" = 41 ] || fail clang-function-total-pin
+[ "$(pin_value clang_coverage_lines_total)" = 278 ] || fail clang-line-total-pin
+[ "$(pin_value clang_coverage_branch_edges_total)" = 352 ] || fail clang-branch-total-pin
+if grep -Eq 'coverage_(hit|mask|required|reset)|COVERAGE_REQUIRED|decisions_hit' "$POLICY"; then
+    fail owner-authored-coverage-counter
+fi
+[ "$(grep -c '^@export("C")' "$POLICY")" = 41 ] || fail pure-policy-export-count
+
+# Frozen independent C output versus actual production Simple execution.
+"$CC_BIN" -std=c11 -O2 -Wall -Wextra -Werror -Wpedantic -Wshadow \
+    -Wconversion -Wstrict-prototypes -I"$SOURCE_DIR" \
+    "$ORACLE" "$ORACLE_DUMP" -o "$SCRATCH/c-oracle"
+"$SCRATCH/c-oracle" >"$SCRATCH/c.full"
+(cd "$ROOT" && "$SIMPLE_CANONICAL" run "$PROBE") \
+    >"$SCRATCH/simple.full" 2>"$SCRATCH/simple.log" || fail simple-policy-probe-failed
+grep '^FTL|' "$SCRATCH/c.full" >"$SCRATCH/c.out"
+grep '^FTL|' "$SCRATCH/simple.full" >"$SCRATCH/simple.out"
+diff -u "$SCRATCH/c.out" "$SCRATCH/simple.out" || fail frozen-c-oracle-parity-mismatch
+[ "$(wc -l <"$SCRATCH/simple.out" | tr -d ' ')" = 41 ] || fail parity-function-count
+grep '^FTL-ALLOC|' "$SCRATCH/c.full" >"$SCRATCH/c-allocator.out"
+grep '^FTL-ALLOC|' "$SCRATCH/simple.full" >"$SCRATCH/simple-allocator.out"
+diff -u "$SCRATCH/c-allocator.out" "$SCRATCH/simple-allocator.out" ||
+    fail allocator-mode-parity-mismatch
+printf '%s\n' \
+    'FTL-ALLOC|scan-410|19' \
+    'FTL-ALLOC|final-409|19' \
+    'FTL-ALLOC|final-410|20' \
+    'FTL-ALLOC|gc-final-409|20' >"$SCRATCH/allocator-required.out"
+diff -u "$SCRATCH/allocator-required.out" "$SCRATCH/simple-allocator.out" ||
+    fail allocator-mode-expected-results
+
+# clang/llvm-cov, not the oracle or its driver, supplies the independent C
+# branch denominator and hits.  Restrict the report to the frozen oracle.
+"$CC_BIN" -std=c11 -O0 -g -fprofile-instr-generate -fcoverage-mapping \
+    -Wall -Wextra -Werror -Wpedantic -Wshadow -Wconversion \
+    -Wstrict-prototypes -I"$SOURCE_DIR" "$ORACLE" "$C_COVERAGE" \
+    -o "$SCRATCH/c-coverage-driver"
+LLVM_PROFILE_FILE="$SCRATCH/c.profraw" "$SCRATCH/c-coverage-driver" \
+    >"$SCRATCH/c-coverage-driver.out" || fail frozen-c-coverage-driver-failed
+"$LLVM_PROFDATA_BIN" merge -sparse "$SCRATCH/c.profraw" \
+    -o "$SCRATCH/c.profdata"
+"$LLVM_COV_BIN" report "$SCRATCH/c-coverage-driver" \
+    -instr-profile="$SCRATCH/c.profdata" -show-branch-summary "$ORACLE" \
+    >"$SCRATCH/c-coverage.txt"
+set -- $(awk -v oracle="$ORACLE" '$1 == oracle { print $5, $6, $8, $9, $11, $12 }' \
+    "$SCRATCH/c-coverage.txt")
+[ "$#" = 6 ] || fail frozen-c-coverage-summary-shape
+C_FUNCTION_TOTAL=$1
+C_FUNCTION_MISSED=$2
+C_LINE_TOTAL=$3
+C_LINE_MISSED=$4
+C_BRANCH_TOTAL=$5
+C_BRANCH_MISSED=$6
+[ "$C_FUNCTION_TOTAL" = 41 ] && [ "$C_FUNCTION_MISSED" = 0 ] ||
+    fail "frozen-c-functions:$((C_FUNCTION_TOTAL - C_FUNCTION_MISSED))/$C_FUNCTION_TOTAL"
+[ "$C_LINE_TOTAL" = 278 ] && [ "$C_LINE_MISSED" = 0 ] ||
+    fail "frozen-c-lines:$((C_LINE_TOTAL - C_LINE_MISSED))/$C_LINE_TOTAL"
+[ "$C_BRANCH_TOTAL" = 352 ] || fail "frozen-c-branch-denominator:$C_BRANCH_TOTAL/352"
+[ "$C_BRANCH_MISSED" = 0 ] || fail "frozen-c-branches-missed:$C_BRANCH_MISSED/352"
+C_BRANCH_COVERED=$((C_BRANCH_TOTAL - C_BRANCH_MISSED))
+
+# Compiler/runtime branch rows are mapped back to exact stable source IDs.
+SIMPLE_COVERAGE=1 SIMPLE_COVERAGE_OUTPUT="$SCRATCH/coverage.sdn" \
+    "$SIMPLE_CANONICAL" run "$PROBE" \
+    >"$SCRATCH/coverage-probe.out" 2>"$SCRATCH/coverage-probe.log" ||
+    fail compiler-runtime-coverage-run-failed
+[ -s "$SCRATCH/coverage.sdn" ] || fail compiler-runtime-coverage-artifact-missing
+awk -F', *' -v owner="/$POLICY_REL" '
+    index($2, owner) == length($2) - length(owner) + 1 { print ($3 + 0) }
+' "$SCRATCH/coverage.sdn" >"$SCRATCH/compiler-owner-lines.raw"
+[ "$(wc -l <"$SCRATCH/compiler-owner-lines.raw" | tr -d ' ')" = 185 ] ||
+    fail compiler-runtime-owner-row-count
+LC_ALL=C sort -n "$SCRATCH/compiler-owner-lines.raw" >"$SCRATCH/compiler-owner-lines.txt"
+awk -F: '{ print ($1 + 0) }' "$SCRATCH/decision-ids.txt" | LC_ALL=C sort -n \
+    >"$SCRATCH/required-owner-lines.txt"
+diff -u "$SCRATCH/required-owner-lines.txt" "$SCRATCH/compiler-owner-lines.txt" ||
+    fail compiler-runtime-extra-or-missing-location
+: >"$SCRATCH/decision-execution.tsv"
+while IFS=: read -r line decision_id; do
+    awk -F', *' -v owner="/$POLICY_REL" -v wanted="$line" -v id="$decision_id" '
+        index($2, owner) == length($2) - length(owner) + 1 && ($3 + 0) == wanted {
+            print id "\t" ($3 + 0) "\t" ($4 + 0) "\t" (($5 + 0) > 0 ? 1 : 0) "\t" (($6 + 0) > 0 ? 1 : 0)
+        }
+    ' "$SCRATCH/coverage.sdn" >"$SCRATCH/one-decision.tsv"
+    [ "$(wc -l <"$SCRATCH/one-decision.tsv" | tr -d ' ')" = 1 ] ||
+        fail "compiler-runtime-decision-row-missing-or-duplicate:$decision_id"
+    cat "$SCRATCH/one-decision.tsv" >>"$SCRATCH/decision-execution.tsv"
+done <"$SCRATCH/decision-ids.txt"
+BRANCH_COVERED=$(awk -F '\t' '{ covered += $4 + $5 } END { print covered + 0 }' \
+    "$SCRATCH/decision-execution.tsv")
+[ "$BRANCH_COVERED" = 370 ] || fail "compiler-runtime-branch-outcomes-incomplete:$BRANCH_COVERED/370"
+
+# Host object ABI and the production C consumer shape.
+(cd "$ROOT" && "$SIMPLE_CANONICAL" native-build --backend llvm \
+    --source src/os/kernel/arch/arm32/cosmos --entry "$POLICY_REL" --entry-closure \
+    --target x86_64-unknown-linux-gnu --emit-object --no-mangle \
+    --cache-dir "$SCRATCH/cache-host" -o "$SCRATCH/policy-host.o") \
+    >"$SCRATCH/host-object.log" 2>&1 || fail host-policy-object-build-failed
+"$NM_BIN" --defined-only --extern-only --format=posix "$SCRATCH/policy-host.o" |
+    awk '$1 ~ /^cosmos_ftl_policy_/ { print $1 }' | LC_ALL=C sort \
+    >"$SCRATCH/simple-exports.txt"
+[ "$(wc -l <"$SCRATCH/simple-exports.txt" | tr -d ' ')" = 41 ] || fail host-export-count
+HOST_UNDEFINED=$("$NM_BIN" --undefined-only --format=posix "$SCRATCH/policy-host.o" |
+    awk '{ print $1 }' | LC_ALL=C sort)
+[ -z "$HOST_UNDEFINED" ] || fail "unexpected-host-policy-dependency:$HOST_UNDEFINED"
+
+"$CC_BIN" -std=c11 -O2 -Wall -Wextra -Werror -Wpedantic -Wshadow \
+    -Wstrict-prototypes -Wformat=2 -Wno-unused-function -DCOSMOS_MMIO_TEST=1 \
+    -I"$SOURCE_DIR" -c "$BRIDGE" -o "$SCRATCH/bridge-host.o"
+"$NM_BIN" -u "$SCRATCH/bridge-host.o" | awk '{ print $NF }' |
+    grep '^cosmos_ftl_policy_' | LC_ALL=C sort >"$SCRATCH/bridge-imports.txt"
+[ "$(wc -l <"$SCRATCH/bridge-imports.txt" | tr -d ' ')" = 39 ] || fail c-bridge-import-count
+comm -23 "$SCRATCH/simple-exports.txt" "$SCRATCH/bridge-imports.txt" \
+    >"$SCRATCH/internal-exports.txt"
+printf '%s\n' cosmos_ftl_policy_crc32_u32 cosmos_ftl_policy_crc32_u64 |
+    LC_ALL=C sort >"$SCRATCH/internal-exports.required"
+diff -u "$SCRATCH/internal-exports.required" "$SCRATCH/internal-exports.txt" ||
+    fail c-bridge-import-closure
+"$CC_BIN" -std=c11 -O2 -Wall -Wextra -Werror -Wpedantic -Wshadow \
+    -Wstrict-prototypes -Wformat=2 -Wno-unused-function -DCOSMOS_MMIO_TEST=1 \
+    -I"$SOURCE_DIR" "$CONTRACT" "$SCRATCH/bridge-host.o" \
+    "$SCRATCH/policy-host.o" -o "$SCRATCH/c-abi-contract"
+"$SCRATCH/c-abi-contract" >"$SCRATCH/c-abi-contract.out" || fail historical-c-abi-contract-failed
+grep -F 'cosmos FTL contract: PASS' "$SCRATCH/c-abi-contract.out" >/dev/null ||
+    fail historical-c-abi-contract-receipt
+
+# ARM object identity and C-to-Simple closure.
+(cd "$ROOT" && "$SIMPLE_CANONICAL" native-build --backend llvm \
+    --source src/os/kernel/arch/arm32/cosmos --entry "$POLICY_REL" --entry-closure \
+    --target armv7-unknown-none-eabi --emit-object --no-mangle \
+    --cache-dir "$SCRATCH/cache-arm" -o "$SCRATCH/policy-arm.o") \
+    >"$SCRATCH/arm-object.log" 2>&1 || fail arm-policy-object-build-failed
+"$CC_BIN" --target=armv7-none-eabi -mcpu=cortex-a9 -marm -ffreestanding \
+    -nostdlib -fno-builtin -Wall -Wextra -Werror -Wpedantic -Wshadow \
+    -Wstrict-prototypes -I"$SOURCE_DIR" -c "$BRIDGE" -o "$SCRATCH/bridge-arm.o"
+"$READELF_BIN" -hW "$SCRATCH/policy-arm.o" | grep -Eq 'Class:[[:space:]]+ELF32' ||
+    fail arm-policy-not-elf32
+"$READELF_BIN" -hW "$SCRATCH/policy-arm.o" | grep -Eq 'Machine:[[:space:]]+ARM' ||
+    fail arm-policy-not-arm
+ld.lld -r "$SCRATCH/bridge-arm.o" "$SCRATCH/policy-arm.o" \
+    -o "$SCRATCH/ftl-linked.o"
+if "$NM_BIN" -u "$SCRATCH/ftl-linked.o" | awk '{ print $NF }' |
+    grep '^cosmos_ftl_policy_' >/dev/null; then
+    fail production-c-to-simple-link-unresolved
+fi
+
+stage4_verify_candidate_provenance \
+    "$SIMPLE_PROVENANCE" "$SIMPLE_CANONICAL" "$ROOT" ||
+    fail "Stage-4 provenance changed during evidence run"
+verify_hash "$SIMPLE_CANONICAL" "$SIMPLE_SHA" compiler
+verify_hash "$SIMPLE_PROVENANCE" "$PROVENANCE_SHA" provenance
+verify_hash "$POLICY" "$POLICY_SHA" policy-source
+verify_hash "$BRIDGE" "$BRIDGE_SHA" c-bridge
+verify_hash "$HEADER" "$HEADER_SHA" policy-header
+verify_hash "$PROBE" "$PROBE_SHA" parity-probe
+verify_hash "$ORACLE" "$ORACLE_SHA" c-oracle
+verify_hash "$ORACLE_DUMP" "$ORACLE_DUMP_SHA" c-oracle-dump
+verify_hash "$C_COVERAGE" "$C_COVERAGE_SHA" c-coverage-driver
+verify_hash "$CONTRACT" "$CONTRACT_SHA" c-contract
+verify_hash "$PIN" "$PIN_SHA" coverage-pin
+
+umask 077
+cp "$SCRATCH/c-coverage-driver" "$C_COVERAGE_BIN_TMP"
+cp "$SCRATCH/c.profdata" "$C_PROFDATA_TMP"
+cp "$SCRATCH/c-coverage.txt" "$C_REPORT_TMP"
+mv -f -- "$C_COVERAGE_BIN_TMP" "$C_COVERAGE_BIN"
+mv -f -- "$C_PROFDATA_TMP" "$C_PROFDATA"
+mv -f -- "$C_REPORT_TMP" "$C_REPORT"
+{
+    echo "schema=cosmos-ftl-policy-evidence-v1"
+    echo "claim_scope=ftl-scalar-policy-oracle-coverage-and-c-abi-only"
+    echo "board_evidence=separate-not-included"
+    echo "whole_nand_claim=false"
+    echo "stage4_compiler_path=$SIMPLE_CANONICAL"
+    echo "stage4_compiler_sha256=$SIMPLE_SHA"
+    echo "stage4_provenance_path=$SIMPLE_PROVENANCE"
+    echo "stage4_provenance_sha256=$PROVENANCE_SHA"
+    echo "simple_source=$POLICY_REL"
+    echo "simple_source_sha256=$POLICY_SHA"
+    echo "c_bridge_sha256=$BRIDGE_SHA"
+    echo "policy_header_sha256=$HEADER_SHA"
+    echo "simple_probe_sha256=$PROBE_SHA"
+    echo "c_oracle_sha256=$ORACLE_SHA"
+    echo "c_oracle_dump_sha256=$ORACLE_DUMP_SHA"
+    echo "c_coverage_driver_sha256=$C_COVERAGE_SHA"
+    echo "c_contract_sha256=$CONTRACT_SHA"
+    echo "coverage_pin_sha256=$PIN_SHA"
+    echo "c_oracle_output_sha256=$(hash_file "$SCRATCH/c.out")"
+    echo "simple_parity_output_sha256=$(hash_file "$SCRATCH/simple.out")"
+    echo "allocator_parity_output_sha256=$(hash_file "$SCRATCH/simple-allocator.out")"
+    echo "compiler_coverage_sha256=$(hash_file "$SCRATCH/coverage.sdn")"
+    echo "frozen_c_coverage_binary=$C_COVERAGE_BIN"
+    echo "frozen_c_coverage_binary_sha256=$(hash_file "$C_COVERAGE_BIN")"
+    echo "frozen_c_profdata=$C_PROFDATA"
+    echo "frozen_c_profdata_sha256=$(hash_file "$C_PROFDATA")"
+    echo "frozen_c_report=$C_REPORT"
+    echo "frozen_c_report_sha256=$(hash_file "$C_REPORT")"
+    echo "policy_functions_hit=41"
+    echo "policy_functions_total=41"
+    echo "policy_decisions_hit=185"
+    echo "policy_decisions_total=185"
+    echo "branch_outcomes_hit=$BRANCH_COVERED"
+    echo "branch_outcomes_total=370"
+    echo "frozen_c_llvm_functions_hit=$((C_FUNCTION_TOTAL - C_FUNCTION_MISSED))"
+    echo "frozen_c_llvm_functions_total=$C_FUNCTION_TOTAL"
+    echo "frozen_c_llvm_lines_hit=$((C_LINE_TOTAL - C_LINE_MISSED))"
+    echo "frozen_c_llvm_lines_total=$C_LINE_TOTAL"
+    echo "frozen_c_llvm_branch_edges_hit=$C_BRANCH_COVERED"
+    echo "frozen_c_llvm_branch_edges_total=$C_BRANCH_TOTAL"
+    echo "c_imports_hit=39"
+    echo "c_imports_total=39"
+    echo "host_abi=pass"
+    echo "arm_object=pass"
+} >"$RECEIPT_TMP"
+mv -f -- "$RECEIPT_TMP" "$RECEIPT"
+
+echo "cosmos_ftl_policy status=PASS functions=41/41 oracle=exact allocator_modes=4/4 decisions=185 branch_outcomes=370/370 frozen_c_llvm_functions=41/41 frozen_c_llvm_lines=278/278 frozen_c_llvm_edges=$C_BRANCH_COVERED/$C_BRANCH_TOTAL c_imports=39/39 host_abi=pass arm_object=pass stage4=$SIMPLE_PROVENANCE"
+echo "cosmos_ftl_policy_receipt=$RECEIPT"
+echo "cosmos_ftl_policy_receipt_sha256=$(hash_file "$RECEIPT")"

@@ -20,7 +20,7 @@ Calc regression spec for LINEST, TREND, GROWTH, PROB, RANDARRAY.
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/office/sheets/formula_regression_spec.spl` |
-| Updated | 2026-08-18 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 Calc regression spec for LINEST, TREND, GROWTH, PROB, RANDARRAY.
@@ -60,13 +60,22 @@ Ground truths (hand-computed):
 
 #### LINEST: basic slope and intercept
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- LINEST: basic slope and intercept
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("LINEST: basic slope and intercept")
 var sh = _setup_linest_data()
 sh.set_value("D1", "=LINEST(A1:A5, B1:B5)")
 sh = recalculate_formula_cells(sh)
@@ -80,13 +89,18 @@ expect(intercept).to_start_with("0.5")
 
 #### LINEST: omitted known_xs defaults to 1..n
 
+- LINEST: omitted known_xs defaults to 1..n
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("LINEST: omitted known_xs defaults to 1..n")
 var sh = _setup_linest_data()
 sh.set_value("D1", "=LINEST(A1:A5)")
 sh = recalculate_formula_cells(sh)
@@ -100,13 +114,18 @@ expect(intercept).to_start_with("0.5")
 
 #### LINEST: mismatched ranges returns empty
 
+- LINEST: mismatched ranges returns empty
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("LINEST: mismatched ranges returns empty")
 var sh = _setup_linest_data()
 sh.set_value("D1", "=LINEST(A1:A5, B1:B3)")
 sh = recalculate_formula_cells(sh)
@@ -118,13 +137,18 @@ expect(result).to_contain("#ERR")
 
 #### LINEST: n<2 returns empty
 
+- LINEST: n<2 returns empty
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("LINEST: n<2 returns empty")
 var sh = Sheet.new("f")
 sh.set_value("A1", "5")
 sh.set_value("B1", "1")
@@ -138,13 +162,19 @@ expect(result).to_contain("#ERR")
 
 #### LINEST: 2-arg form stays a single row (no stats requested)
 
+- LINEST: 2-arg form stays a single row (no stats requested)
+   - Expected: row2_slope_col equals ``
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("LINEST: 2-arg form stays a single row (no stats requested)")
 var sh = _setup_linest_data()
 sh.set_value("D1", "=LINEST(A1:A5, B1:B5)")
 sh = recalculate_formula_cells(sh)
@@ -156,13 +186,19 @@ expect(row2_slope_col).to_equal("")
 
 #### LINEST: 3-arg form (const) stays a single row
 
+- LINEST: 3-arg form (const) stays a single row
+   - Expected: row2 equals ``
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("LINEST: 3-arg form (const) stays a single row")
 var sh = _setup_linest_data()
 sh.set_value("D1", "=LINEST(A1:A5, B1:B5, TRUE)")
 sh = recalculate_formula_cells(sh)
@@ -178,13 +214,18 @@ expect(row2).to_equal("")
 
 #### LINEST: stats=TRUE spills the 3-row form with hand-verified stats
 
+- LINEST: stats=TRUE spills the 3-row form with hand-verified stats
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("LINEST: stats=TRUE spills the 3-row form with hand-verified stats")
 # x=1..5, y=[3,5,7,10,12]; hand anchors (doc-verified, see
 # writing_calc_functions.md ground-truth discipline):
 #   se_y=0.3162278, se_slope=0.1, se_intercept=0.331662,
@@ -212,13 +253,18 @@ expect(se_y).to_start_with("0.316227")
 
 #### TREND: single new_x prediction
 
+- TREND: single new_x prediction
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("TREND: single new_x prediction")
 var sh = _setup_linest_data()
 sh.set_value("D1", "=TREND(A1:A5, B1:B5, 6)")
 sh = recalculate_formula_cells(sh)
@@ -230,13 +276,18 @@ expect(result).to_start_with("14.3")
 
 #### TREND: range of new_xs
 
+- TREND: range of new_xs
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("TREND: range of new_xs")
 var sh = _setup_linest_data()
 sh.set_value("C1", "6")
 sh.set_value("C2", "7")
@@ -254,13 +305,18 @@ expect(pred7).to_be_less_than(16.7)
 
 #### TREND: omitted new_xs predicts at known_xs
 
+- TREND: omitted new_xs predicts at known_xs
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("TREND: omitted new_xs predicts at known_xs")
 var sh = _setup_linest_data()
 sh.set_value("D1", "=TREND(A1:A5, B1:B5)")
 sh = recalculate_formula_cells(sh)
@@ -272,13 +328,18 @@ expect(pred1).to_start_with("2.8")
 
 #### TREND: bad fit returns empty
 
+- TREND: bad fit returns empty
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("TREND: bad fit returns empty")
 var sh = _setup_linest_data()
 sh.set_value("D1", "=TREND(A1:A3, B1:B1, 10)")
 sh = recalculate_formula_cells(sh)
@@ -292,13 +353,18 @@ expect(result).to_contain("#ERR")
 
 #### GROWTH: exponential prediction at single point
 
+- GROWTH: exponential prediction at single point
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("GROWTH: exponential prediction at single point")
 var sh = _setup_growth_data()
 sh.set_value("D1", "=GROWTH(A1:A4, B1:B4, 5)")
 sh = recalculate_formula_cells(sh)
@@ -311,13 +377,18 @@ expect(result).to_be_less_than(32.5)
 
 #### GROWTH: range of new_xs
 
+- GROWTH: range of new_xs
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("GROWTH: range of new_xs")
 var sh = _setup_growth_data()
 sh.set_value("C1", "5")
 sh.set_value("C2", "6")
@@ -335,13 +406,18 @@ expect(pred6).to_be_less_than(64.5)
 
 #### GROWTH: negative y returns error
 
+- GROWTH: negative y returns error
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("GROWTH: negative y returns error")
 var sh = Sheet.new("f")
 sh.set_value("A1", "-2")
 sh.set_value("A2", "4")
@@ -357,13 +433,18 @@ expect(result).to_contain("#ERR")
 
 #### GROWTH: zero y returns error
 
+- GROWTH: zero y returns error
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("GROWTH: zero y returns error")
 var sh = Sheet.new("f")
 sh.set_value("A1", "0")
 sh.set_value("A2", "4")
@@ -381,13 +462,18 @@ expect(result).to_contain("#ERR")
 
 #### PROB: range [lower, upper]
 
+- PROB: range [lower, upper]
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("PROB: range [lower, upper]")
 var sh = _setup_prob_data()
 sh.set_value("D1", "=PROB(A1:A4, B1:B4, 1, 3)")
 sh = recalculate_formula_cells(sh)
@@ -399,13 +485,18 @@ expect(result).to_start_with("0.8")
 
 #### PROB: single point (upper omitted)
 
+- PROB: single point (upper omitted)
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("PROB: single point (upper omitted)")
 var sh = _setup_prob_data()
 sh.set_value("D1", "=PROB(A1:A4, B1:B4, 2)")
 sh = recalculate_formula_cells(sh)
@@ -417,13 +508,18 @@ expect(result).to_start_with("0.1")
 
 #### PROB: mismatched ranges
 
+- PROB: mismatched ranges
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("PROB: mismatched ranges")
 var sh = _setup_prob_data()
 sh.set_value("D1", "=PROB(A1:A2, B1:B4, 1)")
 sh = recalculate_formula_cells(sh)
@@ -435,13 +531,18 @@ expect(result).to_contain("#ERR")
 
 #### PROB: probabilities don't sum to 1
 
+- PROB: probabilities don't sum to 1
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("PROB: probabilities don't sum to 1")
 var sh = Sheet.new("f")
 sh.set_value("A1", "0")
 sh.set_value("A2", "1")
@@ -457,13 +558,18 @@ expect(result).to_contain("#ERR")
 
 #### PROB: probability out of [0,1]
 
+- PROB: probability out of [0,1]
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("PROB: probability out of [0,1]")
 var sh = Sheet.new("f")
 sh.set_value("A1", "0")
 sh.set_value("A2", "1")
@@ -479,13 +585,18 @@ expect(result).to_contain("#ERR")
 
 #### PROB: requires 3+ arguments
 
+- PROB: requires 3+ arguments
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("PROB: requires 3+ arguments")
 var sh = Sheet.new("f")
 sh.set_value("D1", "=PROB(A1:A2)")
 sh = recalculate_formula_cells(sh)
@@ -499,13 +610,18 @@ expect(result).to_contain("#ERR")
 
 #### RANDARRAY: default 1x1 [0,1)
 
+- RANDARRAY: default 1x1 [0,1)
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("RANDARRAY: default 1x1 [0,1)")
 var sh = Sheet.new("f")
 sh.set_value("D1", "=RANDARRAY()")
 sh = recalculate_formula_cells(sh)
@@ -519,13 +635,18 @@ expect(num).to_be_less_than(1.0)
 
 #### RANDARRAY: custom dimensions
 
+- RANDARRAY: custom dimensions
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("RANDARRAY: custom dimensions")
 var sh = Sheet.new("f")
 sh.set_value("D1", "=RANDARRAY(2, 3)")
 sh = recalculate_formula_cells(sh)
@@ -543,13 +664,18 @@ assert_not_equal(r2c1, "#ERR")
 
 #### RANDARRAY: custom min/max
 
+- RANDARRAY: custom min/max
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("RANDARRAY: custom min/max")
 var sh = Sheet.new("f")
 sh.set_value("D1", "=RANDARRAY(1, 1, 10, 20)")
 sh = recalculate_formula_cells(sh)
@@ -563,13 +689,21 @@ expect(num).to_be_less_than(20.0)
 
 #### RANDARRAY: integer mode
 
+- RANDARRAY: integer mode
+   - Expected: c1 equals `c1.to_i64().to_f64()`
+   - Expected: c2 equals `c2.to_i64().to_f64()`
+   - Expected: c3 equals `c3.to_i64().to_f64()`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("RANDARRAY: integer mode")
 var sh = Sheet.new("f")
 sh.set_value("D1", "=RANDARRAY(1, 3, 1, 10, TRUE)")
 sh = recalculate_formula_cells(sh)
@@ -585,13 +719,18 @@ expect(c3).to_equal(c3.to_i64().to_f64())
 
 #### RANDARRAY: rows < 1 errors
 
+- RANDARRAY: rows < 1 errors
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("RANDARRAY: rows < 1 errors")
 var sh = Sheet.new("f")
 sh.set_value("D1", "=RANDARRAY(0, 1)")
 sh = recalculate_formula_cells(sh)
@@ -603,13 +742,18 @@ expect(result).to_contain("#ERR")
 
 #### RANDARRAY: cols < 1 errors
 
+- RANDARRAY: cols < 1 errors
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("RANDARRAY: cols < 1 errors")
 var sh = Sheet.new("f")
 sh.set_value("D1", "=RANDARRAY(1, 0)")
 sh = recalculate_formula_cells(sh)
@@ -621,13 +765,18 @@ expect(result).to_contain("#ERR")
 
 #### RANDARRAY: min > max errors
 
+- RANDARRAY: min > max errors
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("RANDARRAY: min > max errors")
 var sh = Sheet.new("f")
 sh.set_value("D1", "=RANDARRAY(1, 1, 20, 10)")
 sh = recalculate_formula_cells(sh)
@@ -649,3 +798,51 @@ expect(result).to_contain("#ERR")
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `87941294cd50e18503efe08a0b8ab2cf438b3458882d77e77f7e332ec9bcb759`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `87941294cd50e18503efe08a0b8ab2cf438b3458882d77e77f7e332ec9bcb759`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `87941294cd50e18503efe08a0b8ab2cf438b3458882d77e77f7e332ec9bcb759`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/01_unit/app/office/sheets/formula_regression_spec.spl
+mirror: doc/06_spec/01_unit/app/office/sheets/formula_regression_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/app/office/sheets/formula_regression_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/app/office/sheets/formula_regression_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/app/office/sheets/formula_regression_spec.spl:114:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'LINEST: basic slope and intercept' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/office/sheets/formula_regression_spec.spl:125:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'LINEST: omitted known_xs defaults to 1..n' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/office/sheets/formula_regression_spec.spl:136:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'LINEST: mismatched ranges returns empty' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

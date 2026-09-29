@@ -1,0 +1,149 @@
+"""Receipt-visible compatibility migration for legacy storage locations."""
+
+use std.common.storage_roots.*
+
+pub val STORAGE_OWNERSHIP_MARKER_V1: text = ".simple-storage-owner-v1"
+
+pub enum LegacyStorageKind:
+    RepositoryBuild
+    SimpleCache
+    NativeBuildCache
+
+pub struct LegacyStorageInput:
+    kind: LegacyStorageKind
+    path: CanonicalPath
+    present: bool
+
+pub struct StorageOwnershipMarker:
+    schema_version: u32
+    root_kind: StorageRootKind
+    root_identity: Digest256
+    storage_class: StorageClass
+    cleanup_managed: bool
+    producer: text
+
+pub struct CompatibilityMigrationPlan:
+    source: CanonicalPath
+    destination: CanonicalPath
+    staging: CanonicalPath
+    operation: OperationId
+    expected: ArtifactEvidence
+    marker: StorageOwnershipMarker
+    warning: text
+    observed_receipt: StorageReceipt
+
+pub struct CompatibilityPromotion:
+    staging: CanonicalPath
+    destination: CanonicalPath
+    marker_path: CanonicalPath
+    evidence: ArtifactEvidence
+    receipt: StorageReceipt
+
+pub enum MigrationError:
+    LegacySourceMissing
+    InvalidLegacySource
+    InvalidProducer
+    InvalidOperation
+    InvalidDestination
+    EvidenceMismatch
+    MarkerMismatch
+
+fn _join_migration(base: text, suffix: text) -> text:
+    if base.ends_with("/"): base + suffix else: base + "/" + suffix
+
+fn _parent_migration(path: text) -> text:
+    val offset = path.rfind("/")
+    if offset <= 0: "/" else: path.substring(0, offset)
+
+fn _absolute_migration(path: text) -> bool:
+    path.starts_with("/") or (path.len() >= 3 and path.substring(1, 2) == ":" and (path.substring(2, 3) == "/" or path.substring(2, 3) == "\\"))
+
+fn _safe_segment_migration(value: text) -> bool:
+    value != "" and value != "." and value != ".." and not value.contains("/") and not value.contains("\\")
+
+fn _same_digest_migration(left: Digest256, right: Digest256) -> bool:
+    left.w0 == right.w0 and left.w1 == right.w1 and left.w2 == right.w2 and left.w3 == right.w3
+
+fn _same_evidence_migration(left: ArtifactEvidence, right: ArtifactEvidence) -> bool:
+    _same_digest_migration(left.digest, right.digest) and left.byte_count == right.byte_count and left.item_count == right.item_count
+
+fn _destination_for_legacy(roots: StorageRoots, kind: LegacyStorageKind, producer: text) -> (StorageRootKind, StorageClass, text):
+    if kind == LegacyStorageKind.RepositoryBuild:
+        return (StorageRootKind.Worktree, StorageClass.Build, _join_migration(roots.worktree_root.value, "build"))
+    if kind == LegacyStorageKind.SimpleCache:
+        return (StorageRootKind.User, StorageClass.ReusableCache, _join_migration(roots.user_root.value, "cache/legacy-simple-cache"))
+    (StorageRootKind.User, StorageClass.ReusableCache, _join_migration(roots.user_root.value, "cache/native-build/" + producer))
+
+pub fn plan_compatibility_migration(
+    roots: StorageRoots,
+    legacy: LegacyStorageInput,
+    producer: text,
+    operation: OperationId,
+    expected: ArtifactEvidence,
+) -> Result<CompatibilityMigrationPlan, MigrationError>:
+    if not legacy.present:
+        return Err(MigrationError.LegacySourceMissing)
+    if not _absolute_migration(legacy.path.value) or legacy.path.value == "/":
+        return Err(MigrationError.InvalidLegacySource)
+    if not _safe_segment_migration(producer):
+        return Err(MigrationError.InvalidProducer)
+    if not _safe_segment_migration(operation.value):
+        return Err(MigrationError.InvalidOperation)
+    val selected = _destination_for_legacy(roots, legacy.kind, producer)
+    if legacy.path.value == selected[2]:
+        return Err(MigrationError.InvalidDestination)
+    val staging = _join_migration(_parent_migration(selected[2]), ".simple-stage-" + operation.value)
+    val marker = StorageOwnershipMarker(
+        schema_version: STORAGE_ROOT_POLICY_VERSION_V1,
+        root_kind: selected[0],
+        root_identity: roots.worktree_identity,
+        storage_class: selected[1],
+        cleanup_managed: true,
+        producer: producer,
+    )
+    val detail = "legacy-source=" + legacy.path.value + ";destination=" + selected[2] + ";mode=copy-verify-retain;marker=" + STORAGE_OWNERSHIP_MARKER_V1
+    val observed = StorageReceipt(
+        kind: StorageReceiptKind.Reused,
+        root_kind: selected[0],
+        path: legacy.path,
+        operation: operation,
+        detail: detail,
+    )
+    Ok(CompatibilityMigrationPlan(
+        source: legacy.path,
+        destination: CanonicalPath(value: selected[2]),
+        staging: CanonicalPath(value: staging),
+        operation: operation,
+        expected: expected,
+        marker: marker,
+        warning: "legacy storage retained after verified destination-local promotion",
+        observed_receipt: observed,
+    ))
+
+pub fn verify_compatibility_promotion(
+    plan: CompatibilityMigrationPlan,
+    copied: ArtifactEvidence,
+    marker: StorageOwnershipMarker,
+) -> Result<CompatibilityPromotion, MigrationError>:
+    if not _same_evidence_migration(plan.expected, copied):
+        return Err(MigrationError.EvidenceMismatch)
+    if marker.schema_version != plan.marker.schema_version or marker.root_kind != plan.marker.root_kind or not _same_digest_migration(marker.root_identity, plan.marker.root_identity) or marker.storage_class != plan.marker.storage_class or not marker.cleanup_managed or marker.producer != plan.marker.producer:
+        return Err(MigrationError.MarkerMismatch)
+    val parent = _parent_migration(plan.destination.value)
+    if not plan.staging.value.starts_with(parent + "/.simple-stage-"):
+        return Err(MigrationError.InvalidDestination)
+    val marker_path = _join_migration(plan.destination.value, STORAGE_OWNERSHIP_MARKER_V1)
+    val receipt = StorageReceipt(
+        kind: StorageReceiptKind.Migrated,
+        root_kind: marker.root_kind,
+        path: plan.destination,
+        operation: plan.operation,
+        detail: "source=" + plan.source.value + ";promotion=destination-local;verified=true;legacy-retained=true",
+    )
+    Ok(CompatibilityPromotion(
+        staging: plan.staging,
+        destination: plan.destination,
+        marker_path: CanonicalPath(value: marker_path),
+        evidence: copied,
+        receipt: receipt,
+    ))

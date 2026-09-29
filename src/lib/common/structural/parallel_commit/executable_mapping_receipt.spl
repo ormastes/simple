@@ -1,0 +1,106 @@
+# Pointer-free identity and release accounting shared by executable mappers.
+# A copied receipt identifies a mapping; it never grants authority to unmap it.
+
+pub const EXECUTABLE_MAPPING_RECEIPT_SCHEMA_V1: i64 = 1
+pub const EXECUTABLE_MAPPING_RECEIPT_MAX_INSTANCE_BYTES: i64 = 256
+pub const EXECUTABLE_MAPPING_RECEIPT_MAX_OWNER_BYTES: i64 = 256
+pub const EXECUTABLE_MAPPING_RECEIPT_MAX_KEY_BYTES: i64 = 256
+
+pub enum ExecutableMappingProducerKindV1:
+    SegmentMapper
+    SharedExecMapper
+
+pub enum ExecutableMappingReleaseOutcomeV1:
+    Released
+    AlreadyReleased
+    NotFound
+    OwnerMismatch
+    GenerationMismatch
+    FinalUnpinRequired
+    NativeReleaseFailed
+
+pub struct ExecutableMappingReceiptV1:
+    schema: i64
+    producer_kind: ExecutableMappingProducerKindV1
+    mapper_instance_id: text
+    owner_id: text
+    mapping_key: text
+    mapping_generation: i64
+    mapped_bytes: i64
+    segment_count: i64
+
+pub struct ExecutableMappingReleaseResultV1:
+    receipt: ExecutableMappingReceiptV1
+    outcome: ExecutableMappingReleaseOutcomeV1
+    released_bytes: i64
+    released_segments: i64
+    attempt_id: i64
+
+pub fn executable_mapping_receipt_v1(
+        producer_kind: ExecutableMappingProducerKindV1,
+        mapper_instance_id: text, owner_id: text, mapping_key: text,
+        mapping_generation: i64, mapped_bytes: i64,
+        segment_count: i64) -> ExecutableMappingReceiptV1:
+    ExecutableMappingReceiptV1(
+        schema: EXECUTABLE_MAPPING_RECEIPT_SCHEMA_V1,
+        producer_kind: producer_kind,
+        mapper_instance_id: mapper_instance_id,
+        owner_id: owner_id,
+        mapping_key: mapping_key,
+        mapping_generation: mapping_generation,
+        mapped_bytes: mapped_bytes,
+        segment_count: segment_count)
+
+pub fn executable_mapping_receipt_v1_well_formed(
+        receipt: ExecutableMappingReceiptV1) -> bool:
+    receipt.schema == EXECUTABLE_MAPPING_RECEIPT_SCHEMA_V1 and
+        receipt.mapper_instance_id.bytes().len() > 0 and
+        receipt.mapper_instance_id.bytes().len() <= EXECUTABLE_MAPPING_RECEIPT_MAX_INSTANCE_BYTES and
+        receipt.owner_id.bytes().len() > 0 and
+        receipt.owner_id.bytes().len() <= EXECUTABLE_MAPPING_RECEIPT_MAX_OWNER_BYTES and
+        receipt.mapping_key.bytes().len() > 0 and
+        receipt.mapping_key.bytes().len() <= EXECUTABLE_MAPPING_RECEIPT_MAX_KEY_BYTES and
+        receipt.mapping_generation > 0 and
+        receipt.mapped_bytes > 0 and receipt.segment_count > 0
+
+pub fn executable_mapping_receipt_v1_same_identity(
+        left: ExecutableMappingReceiptV1,
+        right: ExecutableMappingReceiptV1) -> bool:
+    executable_mapping_receipt_v1_well_formed(left) and
+        executable_mapping_receipt_v1_well_formed(right) and
+        left.producer_kind == right.producer_kind and
+        left.mapper_instance_id == right.mapper_instance_id and
+        left.owner_id == right.owner_id and
+        left.mapping_key == right.mapping_key and
+        left.mapping_generation == right.mapping_generation and
+        left.mapped_bytes == right.mapped_bytes and
+        left.segment_count == right.segment_count
+
+pub fn executable_mapping_release_result_v1(
+        receipt: ExecutableMappingReceiptV1,
+        outcome: ExecutableMappingReleaseOutcomeV1,
+        released_bytes: i64, released_segments: i64,
+        attempt_id: i64) -> ExecutableMappingReleaseResultV1:
+    ExecutableMappingReleaseResultV1(
+        receipt: receipt, outcome: outcome,
+        released_bytes: released_bytes,
+        released_segments: released_segments,
+        attempt_id: attempt_id)
+
+pub fn executable_mapping_release_result_v1_well_formed(
+        result: ExecutableMappingReleaseResultV1) -> bool:
+    if not executable_mapping_receipt_v1_well_formed(result.receipt) or
+            result.attempt_id <= 0:
+        return false
+    if result.outcome == ExecutableMappingReleaseOutcomeV1.Released:
+        return result.released_bytes == result.receipt.mapped_bytes and
+            result.released_segments == result.receipt.segment_count
+    result.released_bytes == 0 and result.released_segments == 0
+
+pub fn executable_mapping_release_result_v1_matches(
+        result: ExecutableMappingReleaseResultV1,
+        receipt: ExecutableMappingReceiptV1,
+        attempt_id: i64) -> bool:
+    executable_mapping_release_result_v1_well_formed(result) and
+        executable_mapping_receipt_v1_same_identity(result.receipt, receipt) and
+        result.attempt_id == attempt_id

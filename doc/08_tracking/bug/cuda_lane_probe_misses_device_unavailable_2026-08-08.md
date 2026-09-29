@@ -1,4 +1,9 @@
 # BUG: CUDA lane init fails with `cuda-lane-device-identity-unavailable` on a host with healthy GPUs
+## Closed 2026-09-16 — RESOLVED 2026-08-08 commit 5c49e3538f9c; spec 4/4 sabotage-verified
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** RESOLVED 2026-08-08, commit `5c49e3538f9cfbd05f5bdcb45ad2d386586a0244`
 **File:** `src/lib/gc_async_mut/gpu_lane/cuda_lane_session.spl` (`probe()` / `init()` device-identity path)
@@ -110,3 +115,4 @@ succeed, on a host where `libcuda` and the kernel module match. Concretely:
    green with no assertion changes.
 
 Do NOT close this by weakening any assertion.
+

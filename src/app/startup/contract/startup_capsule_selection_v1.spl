@@ -1,0 +1,153 @@
+# Startup capsule selection is an additive contract layered over the frozen
+# StartupPlanV1 wire format.  It owns closure selection; task implementations
+# never infer eager dependencies for themselves.
+
+use app.startup.contract.startup_plan_v1.{
+    StartupPlanV1,
+    startup_plan_cache_sets_valid,
+    startup_plan_hash
+}
+
+pub struct StartupCapsuleRequestV1:
+    plan: StartupPlanV1
+    aspect_requested: bool
+    dynload_requested: bool
+    native_output_requested: bool
+    selected_backend_capsule: text
+
+pub struct StartupCapsuleSelectionV1:
+    ok: bool
+    error: text
+    eager_capsules: [text]
+    delayed_capsules: [text]
+    forbidden_capsules: [text]
+    native_attachment: bool
+
+fn _selection_error(message: text) -> StartupCapsuleSelectionV1:
+    StartupCapsuleSelectionV1(
+        ok: false,
+        error: message,
+        eager_capsules: [],
+        delayed_capsules: [],
+        forbidden_capsules: [],
+        native_attachment: false)
+
+fn _sort_unique(values: [text]) -> [text]:
+    var sorted = values.copy()
+    var i = 1
+    while i < sorted.len():
+        val held = sorted[i]
+        var j = i
+        while j > 0 and held < sorted[j - 1]:
+            sorted[j] = sorted[j - 1]
+            j = j - 1
+        sorted[j] = held
+        i = i + 1
+    var out: [text] = []
+    for value in sorted:
+        if value != "" and (out.len() == 0 or out[out.len() - 1] != value):
+            out.push(value)
+    out
+
+fn _contains_any(left: [text], right: [text]) -> bool:
+    for value in left:
+        if right.contains(value): return true
+    false
+
+fn _native_command(command_id: text) -> bool:
+    command_id == "build" or command_id == "compile" or
+        command_id == "native-build" or command_id == "link"
+
+pub fn startup_capsule_request_v1(
+    plan: StartupPlanV1,
+    aspect_requested: bool,
+    dynload_requested: bool,
+    native_output_requested: bool,
+    selected_backend_capsule: text
+) -> StartupCapsuleRequestV1:
+    StartupCapsuleRequestV1(
+        plan: plan,
+        aspect_requested: aspect_requested,
+        dynload_requested: dynload_requested,
+        native_output_requested: native_output_requested,
+        selected_backend_capsule: selected_backend_capsule)
+
+# The eager closure is deliberately tiny and stable.  Parser/AOP/backend bodies
+# remain delayed until the sealed route and explicit feature request require
+# them.  A native backend is never admitted merely because one is installed.
+pub fn select_startup_capsules_v1(request: StartupCapsuleRequestV1) -> StartupCapsuleSelectionV1:
+    val plan = request.plan
+    val unsealed = plan.route_kind == "" or plan.plan_hash == "" or plan.plan_hash != startup_plan_hash(plan) or plan.plan_digest != plan.plan_hash or not startup_plan_cache_sets_valid(plan)
+    if unsealed:
+        return _selection_error("startup plan is not sealed")
+    if plan.forbidden_loaded_count != 0:
+        return _selection_error("startup plan already loaded a forbidden capsule")
+
+    var eager: [text] = ["startup.router", "startup.contracts"]
+    var delayed: [text] = []
+    var forbidden: [text] = []
+
+    if plan.route_kind == "root":
+        forbidden = ["compiler.frontend", "compiler.interpreter", "compiler.loader", "compiler.native"]
+    elif plan.route_kind == "artifact":
+        eager.push("compiler.loader.interface")
+        delayed.push("compiler.loader")
+        forbidden.push("compiler.native")
+    elif plan.route_kind == "script":
+        eager.push("compiler.frontend.interface")
+        delayed.push("compiler.frontend")
+        delayed.push("compiler.interpreter")
+        delayed.push("compiler.loader")
+        forbidden.push("compiler.native")
+    elif plan.route_kind == "command":
+        eager.push("compiler.frontend.interface")
+        delayed.push("compiler.frontend")
+        delayed.push("compiler.loader")
+        if not _native_command(plan.command_id):
+            delayed.push("compiler.interpreter")
+            forbidden.push("compiler.native")
+    else:
+        return _selection_error("unsupported startup route")
+
+    if request.aspect_requested:
+        delayed.push("compiler.aspect")
+    else:
+        forbidden.push("compiler.aspect")
+    if request.dynload_requested:
+        delayed.push("compiler.dynload")
+    else:
+        forbidden.push("compiler.dynload")
+
+    val native_route = plan.route_kind == "command" and _native_command(plan.command_id)
+    if request.native_output_requested and not native_route:
+        return _selection_error("native attachment requires a native-producing command")
+    if native_route and not request.native_output_requested:
+        return _selection_error("native-producing command requires explicit native attachment")
+    if request.native_output_requested:
+        if request.selected_backend_capsule == "":
+            return _selection_error("native attachment requires one selected backend")
+        delayed.push("compiler.mono")
+        delayed.push("compiler.mir")
+        delayed.push("compiler.borrow")
+        delayed.push("compiler.optimizer")
+        delayed.push(request.selected_backend_capsule)
+        delayed.push("compiler.linker")
+    else:
+        forbidden.push("compiler.native")
+
+    eager = _sort_unique(eager)
+    delayed = _sort_unique(delayed)
+    forbidden = _sort_unique(forbidden)
+    for capsule in plan.forbidden_capsules:
+        forbidden.push(capsule)
+    forbidden = _sort_unique(forbidden)
+    if _contains_any(eager, forbidden) or _contains_any(delayed, forbidden):
+        return _selection_error("selected capsule conflicts with sealed forbidden closure")
+
+    StartupCapsuleSelectionV1(
+        ok: true,
+        error: "",
+        eager_capsules: eager,
+        delayed_capsules: delayed,
+        forbidden_capsules: forbidden,
+        native_attachment: request.native_output_requested)

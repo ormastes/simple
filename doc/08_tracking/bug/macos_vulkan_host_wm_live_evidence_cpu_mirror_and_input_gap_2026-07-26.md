@@ -1,7 +1,8 @@
 # macOS Vulkan Host-WM Evidence Uses a CPU Presentation Mirror and Synthetic Commands
+## Open 2026-09-16 — needs owner triage
 
-Status: OPEN (P3)
-Status re-verified 2026-08-17 by source inspection (triage shard 02).
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -127,3 +128,4 @@ PASS; it must precede QEMU WM and Metal WM work.
 - `sh -n scripts/check/check-wm-production-fullscreen-evidence.shs`: PASS.
 - Source trace confirmed the producer/consumer paths above.
 - No compiler, native-build, live launch, or screenshot probe was run.
+

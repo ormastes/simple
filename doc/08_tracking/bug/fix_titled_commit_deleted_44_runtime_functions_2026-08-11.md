@@ -1,4 +1,9 @@
 # A "fix"-titled commit deleted 44 runtime functions and broke the build (2026-08-11)
+## Closed 2026-09-16 — Status FIXED, re-verified; superset proof + build/tests PASS
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - Status: FIXED
 - Status re-verified 2026-08-17 by source inspection (triage shard 01).
@@ -116,3 +121,4 @@ each. The 4 net-new names are `rt_value_u64`, `rt_value_as_u64`,
 3. Treat any commit whose diffstat shows a single file at >10x the deletion
    count of every other file in the same commit as a stale-snapshot candidate,
    regardless of title.
+

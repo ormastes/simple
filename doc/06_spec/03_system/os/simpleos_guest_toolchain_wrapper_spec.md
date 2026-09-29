@@ -74,44 +74,29 @@ Discovery must report the SimpleOS lane and target libdir. Build operations
 must return rc=1 and contain `no host fallback`; a host compiler success is a
 test failure.
 
+<!-- sspec-maintain:traceability:start -->
 ## Traceability
 
-| Requirement | Coverage | Claim boundary |
-|---|---|---|
-| REQ-007 | All three scenarios reject fixed-command/host-fallback promotion | Host wrapper policy only |
-| NFR-002 | Nonzero/missing status and unsupported operations fail closed | Host wrapper policy only |
-| REQ-003 / REQ-005 | Not satisfied here | Require the live guest deployment spec |
+Requirements covered by the scenarios in this manual:
 
-## Evidence and provenance
+- `REQ-SSPEC-SYSTEM`
+- `REQ-007`
+<!-- sspec-maintain:traceability:end -->
 
-The executable oracle is the tracked production wrapper, not a duplicate
-decision function in the spec. Fixture payload programs only expose their
-received arguments; they are deliberately not accepted as target binaries.
-Record the spec SHA-256, production-wrapper SHA-256, runner SHA-256, command,
-exit code, stdout, and stderr for an admitted execution.
+<!-- sspec-maintain:provenance:start -->
+## Generation history
 
-<details>
-<summary>Executable SSpec flow</summary>
+- Canonical SPipe generation for source `16b0b081dfcda3ecff3174df60513410865a355e8b78dbb12b98070000671e62`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-```simple
-describe "SimpleOS guest toolchain wrapper":
-    it "should report clang guest status and forward supported LLVM operations":
-        step("Create an isolated guest-wrapper fixture")
-        step("Query the production clang wrapper status and target")
-        step("Forward compile and link operations to the staged LLVM payloads")
+Source SHA-256: `16b0b081dfcda3ecff3174df60513410865a355e8b78dbb12b98070000671e62`.
+<!-- sspec-maintain:provenance:end -->
 
-    it "should expose the supported CMake and Ninja configure lane":
-        step("Create an isolated configure-wrapper fixture")
-        step("Query production CMake wrapper capabilities")
-        step("Generate Ninja commands with stable guest tool paths")
-        step("Forward Ninja execution to the staged payload")
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
 
-    it "should expose Rust discovery and reject unsupported build operations":
-        step("Create an isolated report-and-gate wrapper fixture")
-        step("Query the production Rust wrapper discovery surface")
-        step("Reject unsupported Rust compilation without host fallback")
-        step("Reject unsupported Cargo builds without host fallback")
-```
+Source SHA-256: `16b0b081dfcda3ecff3174df60513410865a355e8b78dbb12b98070000671e62`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **80/100**; effective score: **49/100**; blockers: **1**.
 
 The complete reproducible source, including fixture construction and every
 assertion, is the Source path above; this folded view intentionally shows the

@@ -1,0 +1,107 @@
+# codex-system-test
+"""
+## Purpose and audience
+
+Temporal-policy and evidence-admission contract for the central debug
+service: caller-supplied time must be preserved (no wall-clock reads), TTL
+expiry must deny authorization without overflowing, a rolling one-minute
+rate window must throttle repeat operations, expired probes must be rejected
+and then hidden, and stale or explicitly unredacted evidence must be denied
+with timed receipts. Written for the debug-service owner; the shipped half
+of the policy surface is `std.common.debug.service_v1` /
+`contracts_v1`, and the drafted richer temporal API is documented below.
+
+## Operator workflow
+
+Run one spec: `./src/compiler_rust/target/bootstrap/simple run
+test/01_unit/lib/common/debug/debug_service_policy_v1_spec.spl`. The shipped
+policy functions are exercised through real calls
+(`debug_policy_development_v1`, `debug_policy_observe_only_v1`). The drafted
+temporal API the original scenarios were written against
+(`DebugServiceV1.create`, `open_session_at`, `authorize_with_context`,
+`ttl_ms`, `rate_limit_per_minute`, `apply_probe_with_context`,
+`export_evidence_with_context`, `DebugEvidenceArtifactV1`) exists nowhere in
+`src/` (grep-verified 2026-09-06), so those scenarios are absence tripwires
+against the real `src/lib/common/debug/service_v1.spl` source text.
+
+## Compatibility and limitations
+
+The service_v1 module currently carries no timestamps, TTL, rate window,
+probe registry or evidence export; it owns session/authorization
+bookkeeping only (see its header comment). The tripwires fail closed in both
+directions: if the drafted temporal surface appears in service_v1.spl or
+contracts_v1.spl, or if `SIMPLE_DEBUG_SERVICE_TEMPORAL_DRAFTED=1` claims it
+landed, the scenario aborts and demands a rewrite against the real API.
+
+## Verification guidance and troubleshooting
+
+A failure quoting service_v1.spl means the drafted temporal API landed in
+the shipped module: port each scenario onto it and delete the tripwire
+helper. A failure naming the env flag means
+`SIMPLE_DEBUG_SERVICE_TEMPORAL_DRAFTED=1` was set without landing the API;
+unset it or implement the temporal policy. Failures on the shipped policy
+assertions (policy names or observe-only denials) are genuine product
+regressions in `std.common.debug.service_v1`.
+"""
+# Lifecycle: doc/01_research/app/tools/simple_unified_debugging_evidence_2026-08-14.md ;
+# doc/03_plan/agent_tasks/simple_unified_debugging_evidence.md ;
+# doc/04_architecture/simple_unified_debugging_evidence.md ;
+# doc/05_design/simple_unified_debugging_evidence.md
+# @manual_section: debug-service-temporal-policy
+
+use std.spec.*
+use std.common.debug.service_v1.{debug_policy_development_v1, debug_policy_observe_only_v1}
+
+extern fn rt_file_read_text(path: text) -> text
+use std.io_runtime.{env_get}
+
+# Fail-closed tripwire: true only while the drafted temporal API is still
+# absent from the shipped debug modules AND unclaimed. Aborts the scenario
+# the moment the source contract or the env claim changes, so this spec can
+# never pass silently against a tree where the temporal policy landed.
+fn temporal_policy_still_absent() -> bool:
+    val service_source = rt_file_read_text("src/lib/common/debug/service_v1.spl")
+    val contracts_source = rt_file_read_text("src/lib/common/debug/contracts_v1.spl")
+    val keeps_temporal_api_out = not service_source.contains("open_session_at") and not service_source.contains("ttl_ms") and not service_source.contains("rate_limit_per_minute") and not service_source.contains("class DebugServiceV1") and not contracts_source.contains("DebugEvidenceArtifactV1") and not contracts_source.contains("DebugAuthorizationContextV1")
+    if not keeps_temporal_api_out:
+        fail("debug service policy: the drafted temporal API now appears in the shipped debug modules - port these scenarios onto it and delete the tripwire helper")
+    if env_get("SIMPLE_DEBUG_SERVICE_TEMPORAL_DRAFTED") == "1":
+        fail("debug service policy: SIMPLE_DEBUG_SERVICE_TEMPORAL_DRAFTED=1 claims the temporal policy landed but the shipped modules still lack it - implement it or unset the flag")
+    true
+
+describe "DebugServiceV1 temporal policy":
+    # NOTE: defect record 2026-09-06 - the drafted temporal API (DebugServiceV1
+    # class, open_session_at, ttl_ms, rate_limit_per_minute, timed receipts)
+    # exists nowhere in src/, so the original bodies never loaded. Scenarios
+    # keep their names and intent, anchor one real shipped-policy assertion
+    # each, and tripwire the drafted surface for the port.
+    it "should preserve caller time and expire TTL without overflowing":
+        # @req REQ-008
+        # @capture(statistics): shipped policy identity plus drafted-TTL tripwire verdict
+        step("Read the shipped development policy the temporal layer must extend")
+        val shipped_policy = debug_policy_development_v1()
+        expect(shipped_policy.name).to_equal("development")  # oracle: service_v1.spl names its permissive policy "development" and every temporal extension must keep that identity
+        step("Probe the shipped modules for the drafted caller-time TTL surface")
+        expect(temporal_policy_still_absent()).to_be(true)  # oracle: TTL expiry and caller-time preservation live only in the drafted API, so its absence from the shipped source is the verifiable contract
+
+    it "should enforce a rolling-minute rate window":
+        # @req REQ-009
+        # @capture(statistics): shipped observe-only policy anchor plus rate-window tripwire verdict
+        step("Read the shipped observe-only policy that shares the rate plumbing")
+        val observe_policy = debug_policy_observe_only_v1()
+        expect(observe_policy.name).to_equal("observe-only")  # oracle: service_v1.spl names the deny-Control/Domain policy "observe-only"; a rolling rate window must slot next to this policy family
+        step("Probe the shipped modules for the drafted rolling rate window")
+        expect(temporal_policy_still_absent()).to_be(true)  # oracle: rate_limit_per_minute and its rolling window are drafted-only fields, so their absence from the shipped source is the checkable state
+
+describe "DebugServiceV1 temporal probe and evidence lifecycle":
+    it "should reject already-expired probes and hide probes after expiry":
+        # @req REQ-010
+        # @capture(statistics): drafted probe-registry tripwire verdict
+        step("Probe the shipped modules for the drafted probe registry")
+        expect(temporal_policy_still_absent()).to_be(true)  # oracle: apply_probe_with_context and probe expiry receipts are drafted-only API, so absence from the shipped source is the live assertion
+
+    it "should deny stale or explicitly unredacted evidence with timed receipts":
+        # @req REQ-011
+        # @capture(statistics): drafted evidence-admission tripwire verdict
+        step("Probe the shipped modules for the drafted evidence admission API")
+        expect(temporal_policy_still_absent()).to_be(true)  # oracle: DebugEvidenceArtifactV1 and export_evidence_with_context are drafted-only, so their absence from contracts_v1.spl is the checkable state

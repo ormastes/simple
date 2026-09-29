@@ -1,0 +1,279 @@
+# codex-impl: inactive native-object identity/publication decision projection.
+
+use compiler.driver.cache.native_object_identity_codec_v1.{
+    NativeObjectScopeV1, NativeObjectActionV1, NativeObjectResultV1,
+    native_object_scope_decode_v1, native_object_action_decode_v1,
+    native_object_result_decode_v1, native_object_scope_digest_v1,
+    native_object_action_digest_v1, native_object_result_digest_v1,
+    native_object_result_valid_v1, native_object_format_valid_v1,
+    native_object_semantic_digest_valid_v1, NATIVE_OBJECT_MAX_BYTES_V1}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.encoding.sha256_contract.{sha256_lower_hex_valid}
+
+enum NativeObjectIdentityDecisionKindV1:
+    Shared
+    Private
+    InvalidInput
+
+enum NativeObjectPublishDecisionKindV1:
+    Published
+    IdenticalWinner
+    Conflict
+    Rejected
+
+class NativeObjectIdentityDecisionV1:
+    kind: NativeObjectIdentityDecisionKindV1
+    reason: text
+    scope_digest: text
+    action_digest: text
+    object_format: text
+    output_path: text
+    shared_index_allowed: bool
+
+class NativeObjectPublishDecisionV1:
+    kind: NativeObjectPublishDecisionKindV1
+    reason: text
+    object_digest: text
+    result_digest: text
+
+fn _noi_root_valid_v1(root: text) -> bool:
+    root.len() > 0 and root.len() <= 3072 and root.starts_with("/") and
+        not root.contains("\0") and not root.contains("/../") and
+        not root.ends_with("/..")
+
+fn _noi_owner_component_valid_v1(value: text) -> bool:
+    if value.len() <= 0 or value.len() > 128: return false
+    var index = 0
+    while index < value.len():
+        val code = value.char_code_at(index)
+        val allowed = (code >= 48 and code <= 57) or
+            (code >= 65 and code <= 90) or
+            (code >= 97 and code <= 122) or code == 45 or code == 95
+        if not allowed: return false
+        index = index + 1
+    true
+
+fn native_object_shared_bundle_path_v1(root: text, action_digest: text) -> text:
+    if not _noi_root_valid_v1(root) or not sha256_lower_hex_valid(action_digest):
+        return ""
+    val path = "{root}/nobj/v1/{action_digest.substring(0, 2)}/{action_digest.substring(2, 64)}/"
+    if path.len() > 4096: "" else: path
+
+fn native_object_private_output_path_v1(
+    root: text, owner_build_nonce: text, owner_unit_id: text
+) -> text:
+    """Project existing-owner identifiers; this value is not issuance authority."""
+    if (not _noi_root_valid_v1(root) or
+            not _noi_owner_component_valid_v1(owner_build_nonce) or
+            not _noi_owner_component_valid_v1(owner_unit_id)):
+        return ""
+    val path = "{root}/private/{owner_build_nonce}/objects/{owner_unit_id}/object.o"
+    if path.len() > 4096: "" else: path
+
+fn _noi_private_decision_v1(
+    reason: text, root: text, owner_build_nonce: text, owner_unit_id: text,
+    object_format: text
+) -> NativeObjectIdentityDecisionV1:
+    val path = native_object_private_output_path_v1(
+        root, owner_build_nonce, owner_unit_id)
+    if path == "":
+        return NativeObjectIdentityDecisionV1(
+            kind: NativeObjectIdentityDecisionKindV1.InvalidInput,
+            reason: "invalid owner-issued private locator", scope_digest: "",
+            action_digest: "", object_format: object_format, output_path: "",
+            shared_index_allowed: false)
+    NativeObjectIdentityDecisionV1(
+        kind: NativeObjectIdentityDecisionKindV1.Private, reason: reason,
+        scope_digest: "", action_digest: "", object_format: object_format,
+        output_path: path, shared_index_allowed: false)
+
+fn native_object_identity_decide_v1(
+    root: text, scope_record: [u8]?, action_record: [u8]?,
+    owner_build_nonce: text, owner_unit_id: text
+) -> NativeObjectIdentityDecisionV1:
+    """Classify strict records only; the inactive result confers no admission."""
+    if not _noi_root_valid_v1(root):
+        return NativeObjectIdentityDecisionV1(
+            kind: NativeObjectIdentityDecisionKindV1.InvalidInput,
+            reason: "invalid normalized cache root", scope_digest: "",
+            action_digest: "", object_format: "", output_path: "",
+            shared_index_allowed: false)
+    if not scope_record.?:
+        if action_record.?:
+            match native_object_action_decode_v1(action_record.unwrap()):
+                case Ok(_): ()
+                case Err(_):
+                    return NativeObjectIdentityDecisionV1(
+                        kind: NativeObjectIdentityDecisionKindV1.InvalidInput,
+                        reason: "malformed NOA1 input", scope_digest: "",
+                        action_digest: "", object_format: "", output_path: "",
+                        shared_index_allowed: false)
+        return _noi_private_decision_v1(
+            "producer facts or module witness unavailable", root,
+            owner_build_nonce, owner_unit_id, "")
+    val scope = match native_object_scope_decode_v1(scope_record.unwrap()):
+        case Ok(value): value
+        case Err(_):
+            return NativeObjectIdentityDecisionV1(
+                kind: NativeObjectIdentityDecisionKindV1.InvalidInput,
+                reason: "malformed NOS1 input", scope_digest: "",
+                action_digest: "", object_format: "", output_path: "",
+                shared_index_allowed: false)
+    if not action_record.?:
+        return _noi_private_decision_v1(
+            "producer facts or module witness unavailable", root,
+            owner_build_nonce, owner_unit_id, scope.object_format)
+    val action = match native_object_action_decode_v1(action_record.unwrap()):
+        case Ok(value): value
+        case Err(_):
+            return NativeObjectIdentityDecisionV1(
+                kind: NativeObjectIdentityDecisionKindV1.InvalidInput,
+                reason: "malformed NOA1 input", scope_digest: "",
+                action_digest: "", object_format: scope.object_format,
+                output_path: "", shared_index_allowed: false)
+    val scope_digest = native_object_scope_digest_v1(scope)
+    if action.scope_digest != scope_digest:
+        return NativeObjectIdentityDecisionV1(
+            kind: NativeObjectIdentityDecisionKindV1.InvalidInput,
+            reason: "NOA1 scope binding mismatch", scope_digest: scope_digest,
+            action_digest: "", object_format: scope.object_format,
+            output_path: "", shared_index_allowed: false)
+    val action_digest = native_object_action_digest_v1(action)
+    val path = native_object_shared_bundle_path_v1(root, action_digest)
+    if path == "":
+        return NativeObjectIdentityDecisionV1(
+            kind: NativeObjectIdentityDecisionKindV1.InvalidInput,
+            reason: "shared object path exceeds host bounds",
+            scope_digest: scope_digest, action_digest: action_digest,
+            object_format: scope.object_format, output_path: "",
+            shared_index_allowed: false)
+    NativeObjectIdentityDecisionV1(
+        kind: NativeObjectIdentityDecisionKindV1.Shared, reason: "ok",
+        scope_digest: scope_digest, action_digest: action_digest,
+        object_format: scope.object_format, output_path: path + "object.o",
+        shared_index_allowed: true)
+
+fn _noi_object_format_v1(bytes: [u8]) -> text:
+    if bytes.len() < 4: return ""
+    val b0 = bytes[0].to_i64()
+    val b1 = bytes[1].to_i64()
+    val b2 = bytes[2].to_i64()
+    val b3 = bytes[3].to_i64()
+    if b0 == 0x7F and b1 == 0x45 and b2 == 0x4C and b3 == 0x46:
+        return "elf"
+    if ((b0 == 0xCF and b1 == 0xFA and b2 == 0xED and b3 == 0xFE) or
+            (b0 == 0xFE and b1 == 0xED and b2 == 0xFA and b3 == 0xCF) or
+            (b0 == 0xCE and b1 == 0xFA and b2 == 0xED and b3 == 0xFE) or
+            (b0 == 0xFE and b1 == 0xED and b2 == 0xFA and b3 == 0xCE)):
+        return "macho"
+    if ((b0 == 0x64 and b1 == 0x86) or (b0 == 0x4C and b1 == 0x01) or
+            (b0 == 0x64 and b1 == 0xAA)):
+        return "coff"
+    if b0 == 0 and b1 == 0x61 and b2 == 0x73 and b3 == 0x6D:
+        return "wasm"
+    ""
+
+fn native_object_prepare_result_v1(
+    identity: NativeObjectIdentityDecisionV1, object_bytes: [u8],
+    object_format: text, producer_receipt_digest: text
+) -> Result<NativeObjectResultV1, text>:
+    if identity.kind != NativeObjectIdentityDecisionKindV1.Shared or
+            not identity.shared_index_allowed:
+        return Err("shared identity is unavailable")
+    if (object_bytes.len() <= 0 or object_bytes.len() > NATIVE_OBJECT_MAX_BYTES_V1 or
+            not native_object_format_valid_v1(object_format) or
+            object_format != identity.object_format or
+            _noi_object_format_v1(object_bytes) != identity.object_format):
+        return Err("staged object format or bound is invalid")
+    if not native_object_semantic_digest_valid_v1(producer_receipt_digest):
+        return Err("producer receipt digest is invalid")
+    val result = NativeObjectResultV1(
+        scope_digest: identity.scope_digest, action_digest: identity.action_digest,
+        object_digest: sha256_u8_hex(object_bytes),
+        object_length: object_bytes.len(), object_format: object_format,
+        producer_receipt_digest: producer_receipt_digest)
+    if not native_object_result_valid_v1(result):
+        return Err("prepared NOR1 result is invalid")
+    Ok(result)
+
+fn native_object_cold_publish_decision_v1(
+    result: NativeObjectResultV1
+) -> NativeObjectPublishDecisionV1:
+    if not native_object_result_valid_v1(result):
+        return NativeObjectPublishDecisionV1(
+            kind: NativeObjectPublishDecisionKindV1.Rejected,
+            reason: "invalid cold NOR1 result", object_digest: "",
+            result_digest: "")
+    NativeObjectPublishDecisionV1(
+        kind: NativeObjectPublishDecisionKindV1.Published,
+        reason: "owner publication required", object_digest: result.object_digest,
+        result_digest: native_object_result_digest_v1(result))
+
+fn _noi_exact_bytes_v1(left: [u8], right: [u8]) -> bool:
+    if left.len() != right.len(): return false
+    var index = 0
+    while index < left.len():
+        if left[index] != right[index]: return false
+        index = index + 1
+    true
+
+fn native_object_existing_winner_decision_v1(
+    expected: NativeObjectResultV1, staged_bytes: [u8],
+    winner_result_record: [u8], winner_bytes: [u8],
+    owner_verified_regular_no_follow: bool
+) -> NativeObjectPublishDecisionV1:
+    if not owner_verified_regular_no_follow:
+        return NativeObjectPublishDecisionV1(
+            kind: NativeObjectPublishDecisionKindV1.Rejected,
+            reason: "winner is not an owner-verified regular no-follow object",
+            object_digest: "", result_digest: "")
+    if not native_object_result_valid_v1(expected):
+        return NativeObjectPublishDecisionV1(
+            kind: NativeObjectPublishDecisionKindV1.Rejected,
+            reason: "invalid expected NOR1 result", object_digest: "",
+            result_digest: "")
+    val winner = match native_object_result_decode_v1(winner_result_record):
+        case Ok(value): value
+        case Err(_):
+            return NativeObjectPublishDecisionV1(
+                kind: NativeObjectPublishDecisionKindV1.Rejected,
+                reason: "winner NOR1 is missing or malformed", object_digest: "",
+                result_digest: "")
+    if (winner.scope_digest != expected.scope_digest or
+            winner.action_digest != expected.action_digest or
+            winner.object_format != expected.object_format):
+        return NativeObjectPublishDecisionV1(
+            kind: NativeObjectPublishDecisionKindV1.Rejected,
+            reason: "winner identity does not match the complete action",
+            object_digest: winner.object_digest,
+            result_digest: native_object_result_digest_v1(winner))
+    val winner_format = _noi_object_format_v1(winner_bytes)
+    val staged_format = _noi_object_format_v1(staged_bytes)
+    if (winner_bytes.len() != winner.object_length or
+            sha256_u8_hex(winner_bytes) != winner.object_digest or
+            winner_format != winner.object_format or
+            staged_bytes.len() != expected.object_length or
+            sha256_u8_hex(staged_bytes) != expected.object_digest or
+            staged_format != expected.object_format):
+        return NativeObjectPublishDecisionV1(
+            kind: NativeObjectPublishDecisionKindV1.Rejected,
+            reason: "winner or staged bytes fail NOR1 verification",
+            object_digest: winner.object_digest,
+            result_digest: native_object_result_digest_v1(winner))
+    if _noi_exact_bytes_v1(staged_bytes, winner_bytes):
+        return NativeObjectPublishDecisionV1(
+            kind: NativeObjectPublishDecisionKindV1.IdenticalWinner,
+            reason: "exact bytes verified", object_digest: winner.object_digest,
+            result_digest: native_object_result_digest_v1(winner))
+    NativeObjectPublishDecisionV1(
+        kind: NativeObjectPublishDecisionKindV1.Conflict,
+        reason: "same complete action produced different bytes",
+        object_digest: winner.object_digest,
+        result_digest: native_object_result_digest_v1(winner))
+
+export NativeObjectIdentityDecisionKindV1, NativeObjectPublishDecisionKindV1
+export NativeObjectIdentityDecisionV1, NativeObjectPublishDecisionV1
+export native_object_shared_bundle_path_v1, native_object_private_output_path_v1
+export native_object_identity_decide_v1, native_object_prepare_result_v1
+export native_object_cold_publish_decision_v1
+export native_object_existing_winner_decision_v1

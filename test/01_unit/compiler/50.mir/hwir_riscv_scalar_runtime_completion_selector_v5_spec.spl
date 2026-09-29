@@ -1,0 +1,89 @@
+use std.spec.*
+use compiler.mir.hwir.types.{CoreConfig, HwModuleDef}
+use compiler.mir.hwir.host_evaluator.{HwHostInput, evaluate_strict_comb_hwir}
+use compiler.mir.hwir.riscv_scalar_runtime_completion_selector_v5.{
+    strict_riscv_scalar_runtime_completion_selector_v5}
+
+fn v5_inputs(module: HwModuleDef, class_code: i64, illegal_uop: i64,
+    alu: i64, control: i64, system: i64, illegal: i64, ready: i64,
+    fault_lane: text = "", corrupt: text = "", uop_valid: i64 = 1) -> [HwHostInput]:
+    var result: [HwHostInput] = []
+    for port in module.ports:
+        if port.direction == "in":
+            var value: i64 = 0
+            if port.name == "uop_valid": value = uop_valid
+            elif port.name == "uop_illegal_valid": value = illegal_uop
+            elif port.name == "uop_lineage_valid": value = 1
+            elif port.name == "uop_decoded_execution_class": value = class_code
+            elif port.name == "uop_privilege": value = 3
+            elif port.name == "uop_original_instruction" or port.name == "uop_canonical_instruction": value = 0x1234
+            elif port.name == "uop_instruction_length_bytes": value = 4
+            elif port.name == "uop_pc_before": value = 0x100
+            elif port.name == "uop_fallthrough_pc": value = 0x104
+            elif port.name == "uop_provider_event_id" or port.name == "uop_decode_event_id": value = 7
+            elif port.name == "alu_valid": value = alu
+            elif port.name == "control_valid": value = control
+            elif port.name == "system_valid": value = system
+            elif port.name == "illegal_valid": value = illegal
+            elif port.name == "completion_ready": value = ready
+            elif port.name == fault_lane + "_fault": value = 1
+            elif port.name.ends_with("_privilege"): value = 3
+            elif port.name.ends_with("_original_instruction") or port.name.ends_with("_canonical_instruction"): value = 0x1234
+            elif port.name.ends_with("_instruction_length_bytes"): value = 4
+            elif port.name.ends_with("_pc_before"): value = 0x100
+            elif port.name.ends_with("_pc_after"): value = 0x104
+            elif port.name.ends_with("_provider_event_id") or port.name.ends_with("_decode_event_id"): value = 7
+            elif port.name == "alu_rd_value": value = 0x11
+            elif port.name == "control_rd_value": value = 0x22
+            elif port.name == "system_rd_value": value = 0x55
+            elif port.name == "illegal_execute_trap_valid" or port.name == "illegal_illegal_valid": value = 1
+            if port.name == corrupt: value = if value == 0: 1 else: 0
+            result.push(HwHostInput.bits(port.name, value))
+    result
+
+fn expect_v5_fault(module: HwModuleDef, inputs: [HwHostInput]):
+    val evaluated = evaluate_strict_comb_hwir(module, inputs).unwrap()
+    expect(evaluated.value_of("selector_fault").unwrap()).to_equal(1)
+    expect(evaluated.value_of("selected_valid").unwrap()).to_equal(0)
+    expect(evaluated.value_of("uop_ready").unwrap()).to_equal(0)
+    expect(evaluated.value_of("selected_provider_event_id").unwrap()).to_equal(0)
+
+describe "runtime v5 immediate completion selector":
+    it "selects all four immediate lanes with provider-authored pc-after payload":
+        val module = strict_riscv_scalar_runtime_completion_selector_v5("selector_v5_lanes", CoreConfig.rv64()).unwrap()
+        for row in [(1, 0, 1, 0, 0, 0, 0x11), (2, 0, 0, 1, 0, 0, 0x22),
+                (5, 0, 0, 0, 1, 0, 0x55), (0, 1, 0, 0, 0, 1, 0)]:
+            val held = evaluate_strict_comb_hwir(module, v5_inputs(module, row[0], row[1], row[2], row[3], row[4], row[5], 0)).unwrap()
+            expect(held.value_of("selected_valid").unwrap()).to_equal(1)
+            expect(held.value_of("uop_ready").unwrap()).to_equal(0)
+            expect(held.value_of("selector_fault").unwrap()).to_equal(0)
+            expect(held.value_of("selected_rd_value").unwrap()).to_equal(row[6])
+            expect(held.value_of("selected_pc_after").unwrap()).to_equal(0x104)
+            val accepted = evaluate_strict_comb_hwir(module, v5_inputs(module, row[0], row[1], row[2], row[3], row[4], row[5], 1)).unwrap()
+            expect(accepted.value_of("uop_ready").unwrap()).to_equal(1)
+        var payloads = 0
+        for port in module.ports:
+            if port.direction == "out" and port.name.starts_with("selected_") and port.name != "selected_valid": payloads = payloads + 1
+        expect(payloads).to_equal(25)
+
+    it "fails closed on ownership, provider, and authoritative held-uop violations":
+        val module = strict_riscv_scalar_runtime_completion_selector_v5("selector_v5_faults", CoreConfig.rv32()).unwrap()
+        for lanes in [(1, 1, 0, 0), (1, 0, 1, 0), (1, 0, 0, 1),
+                (0, 1, 1, 0), (0, 1, 0, 1), (0, 0, 1, 1)]:
+            expect_v5_fault(module, v5_inputs(module, 1, 0, lanes[0], lanes[1], lanes[2], lanes[3], 1))
+        expect_v5_fault(module, v5_inputs(module, 1, 0, 0, 0, 0, 0, 1))
+        expect_v5_fault(module, v5_inputs(module, 2, 0, 1, 0, 0, 0, 1))
+        expect_v5_fault(module, v5_inputs(module, 0, 0, 1, 0, 0, 0, 1, "", "", 0))
+        for lane in ["alu", "control", "system", "illegal"]:
+            expect_v5_fault(module, v5_inputs(module, 1, 0, 1, 0, 0, 0, 1, lane))
+        expect_v5_fault(module, v5_inputs(module, 1, 0, 1, 0, 0, 0, 1, "", "uop_pc_before"))
+
+    it "is idle and has deterministic config-bound identity":
+        val first = strict_riscv_scalar_runtime_completion_selector_v5("selector_v5_identity", CoreConfig.rv32()).unwrap()
+        val repeated = strict_riscv_scalar_runtime_completion_selector_v5("selector_v5_identity", CoreConfig.rv32()).unwrap()
+        val rv64 = strict_riscv_scalar_runtime_completion_selector_v5("selector_v5_identity", CoreConfig.rv64()).unwrap()
+        val idle = evaluate_strict_comb_hwir(first, v5_inputs(first, 0, 0, 0, 0, 0, 0, 1, "", "", 0)).unwrap()
+        expect(idle.value_of("selector_fault").unwrap()).to_equal(0)
+        expect(idle.value_of("selected_valid").unwrap()).to_equal(0)
+        expect(first.structural_sha256()).to_equal(repeated.structural_sha256())
+        expect(first.structural_sha256() == rv64.structural_sha256()).to_be(false)

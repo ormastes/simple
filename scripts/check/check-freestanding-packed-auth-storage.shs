@@ -1,0 +1,25 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+tmp_root=${SIMPLEOS_PACKED_AUTH_TEST_ROOT:-/mnt/data/.simple/qemu/tmp/packed-auth-storage}
+src="$repo_root/src/os/kernel/arch/common/freestanding_packed_auth_storage.c"
+fixture="$repo_root/test/01_unit/os/kernel/arch/freestanding_packed_auth_storage_fixture.c"
+
+mkdir -p "$tmp_root"
+cc -std=c11 -Wall -Wextra -Werror -O2 \
+    -I"$repo_root/src/os/kernel/arch/common" \
+    "$src" "$fixture" -o "$tmp_root/packed-auth-storage"
+"$tmp_root/packed-auth-storage"
+
+defined=$(nm -g --defined-only "$tmp_root/packed-auth-storage" | \
+    awk '$3 ~ /^(simpleos|rt)_packed_auth_/ { print $3 }' | sort -u)
+count=$(printf '%s\n' "$defined" | awk 'NF { n += 1 } END { print n + 0 }')
+[ "$count" -eq 9 ] || { echo "expected 9 strong packed-auth symbols, got $count" >&2; exit 1; }
+
+if rg -n '__attribute__\(\(weak\)\)|SIMPLEOS_PACKED_AUTH.*\* 0|return[[:space:]]+0;[[:space:]]*/\*[[:space:]]*stub' "$src" >/dev/null; then
+    echo "weak or stub packed-auth owner detected" >&2
+    exit 1
+fi
+
+echo "freestanding packed auth storage: PASS"

@@ -1,0 +1,189 @@
+#!/bin/sh
+# check-range-shs-hygiene-push.shs — diff-scoped shell hygiene for the outgoing
+# range: every touched *.shs still parses, and every NEW guard script is wired.
+#
+# WHY THIS EXISTS
+# ---------------
+# The full wiring census (scripts/check/check-guard-wiring.shs) walks 1,700+
+# guards and costs ~35-41 s, which is more than the whole pre-push budget
+# (< 20 s, 2026-09-23). It stays the authority — it runs in the non-required
+# "(extended)" CI job and on main — but the two things a PUSH can newly break
+# are diff-scoped and sub-second:
+#   1. a .shs it touched no longer parses (`sh -n` on the COMMITTED blob), and
+#   2. a guard script it ADDED under scripts/check/ is mentioned by no root, so
+#      it would enforce nothing (the "NEW unwired" verdict of the census).
+# Unchanged files are not re-examined here: their verdict is unchanged by this
+# range by construction (a parse error or an unwired guard already on the base
+# is the base's debt, and the census on main owns it), so this is a delta
+# gate, not a fail-open path filter over a tree property.
+#
+# Roots consulted at the TIP (committed content): config/check/must_check_gates.sdn,
+# scripts/check/check-push-must-pass.shs, scripts/check/check-bootstrap-must-pass.shs,
+# scripts/check/pre-push-conflict-tree-guard.shs, scripts/check/guard_wiring_optout.txt,
+# .github/workflows/*.yml.
+#
+# Verdict, always the last line of stdout:
+#   PASS  — <n> file(s) in <range> examined, <s> .shs parsed, <g> new guard(s) wired   exit 0
+#   FAIL  — ... naming each unparsable file / unwired guard                           exit 1
+#   ERROR — nothing was checked (<reason>)                                            exit 2
+# Non-vacuous: n > 0 always; a range that changes no file is ERROR.
+# --selftest runs before every scan and is fatal.
+#
+# Usage:
+#   sh scripts/check/check-range-shs-hygiene-push.shs [--root <repo>] <base>..<tip>
+#   sh scripts/check/check-range-shs-hygiene-push.shs --selftest
+
+set -u
+
+RANGE=""
+ROOT=""
+SELFTEST_ONLY=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --root) ROOT=${2:-}; shift 2 ;;
+        --range) RANGE=${2:-}; shift 2 ;;
+        --selftest) SELFTEST_ONLY=1; shift ;;
+        -*) echo "unknown argument: $1" >&2; echo "ERROR — nothing was checked (unknown argument $1)"; exit 2 ;;
+        *) RANGE=$1; shift ;;
+    esac
+done
+
+# scan <root> <base>..<tip> -> verdict on stdout, returns 0/1/2
+scan() {
+    _root=$1; _range=$2
+    case "$_range" in *..*) ;; *) echo "ERROR — nothing was checked (need <base>..<tip>, got '$_range')"; return 2 ;; esac
+    _base=${_range%%..*}; _tip=${_range#*..}
+    git -C "$_root" rev-parse --verify --quiet "$_base^{commit}" >/dev/null 2>&1 ||
+        { echo "ERROR — nothing was checked (base $_base is not a commit)"; return 2; }
+    git -C "$_root" rev-parse --verify --quiet "$_tip^{commit}" >/dev/null 2>&1 ||
+        { echo "ERROR — nothing was checked (tip $_tip is not a commit)"; return 2; }
+    _work=$(mktemp -d) || { echo "ERROR — nothing was checked (mktemp failed)"; return 2; }
+    git -C "$_root" diff --name-status --diff-filter=AMRC "$_base" "$_tip" > "$_work/status.txt" 2>/dev/null ||
+        { rm -rf "$_work"; echo "ERROR — nothing was checked (git diff failed for $_range)"; return 2; }
+    _n=$(grep -c . "$_work/status.txt")
+    if [ "$_n" -eq 0 ]; then
+        rm -rf "$_work"
+        echo "ERROR — nothing was checked (no file changed in $_range)"
+        return 2
+    fi
+    _parsed=0; _bad=""; _new=0; _unwired=""
+    while IFS="$(printf '\t')" read -r _st _p1 _p2; do
+        case "$_st" in R*|C*) _path=$_p2 ;; *) _path=$_p1 ;; esac
+        [ -n "$_path" ] || continue
+        case "$_path" in
+            *.shs)
+                _parsed=$((_parsed + 1))
+                if ! git -C "$_root" show "$_tip:$_path" 2>/dev/null | sh -n 2>"$_work/err.txt"; then
+                    _bad="$_bad $_path"
+                    sed "s|^|  $_path: |" "$_work/err.txt" | head -3 >> "$_work/parse_errors.txt"
+                fi
+                ;;
+        esac
+        case "$_st:$_path" in
+            A:scripts/check/check-*.shs|C*:scripts/check/check-*.shs)
+                _new=$((_new + 1))
+                _name=$(basename "$_path")
+                git -C "$_root" grep -q -F "$_name" "$_tip" -- \
+                    config/check/must_check_gates.sdn \
+                    scripts/check/check-push-must-pass.shs \
+                    scripts/check/check-bootstrap-must-pass.shs \
+                    scripts/check/pre-push-conflict-tree-guard.shs \
+                    scripts/check/guard_wiring_optout.txt \
+                    '.github/workflows/*.yml' 2>/dev/null ||
+                    _unwired="$_unwired $_path"
+                ;;
+        esac
+    done < "$_work/status.txt"
+    if [ -n "$_bad" ] || [ -n "$_unwired" ]; then
+        if [ -n "$_bad" ]; then
+            echo "touched .shs that no longer parse (sh -n on the committed blob):"
+            cat "$_work/parse_errors.txt" 2>/dev/null
+        fi
+        if [ -n "$_unwired" ]; then
+            echo "NEW guard script(s) mentioned by no root (manifest row + dispatch arm, or an opt-out with a reason):"
+            printf '%s\n' "$_unwired" | tr ' ' '\n' | grep -v '^$' | sed 's/^/  /'
+        fi
+        rm -rf "$_work"
+        echo "FAIL — $_n file(s) in $_range examined, $_parsed .shs parsed, $_new new guard(s):$( [ -n "$_bad" ] && printf ' unparsable:%s' "$_bad")$( [ -n "$_unwired" ] && printf ' unwired:%s' "$_unwired")"
+        return 1
+    fi
+    rm -rf "$_work"
+    echo "PASS — $_n file(s) in $_range examined, $_parsed .shs parsed, $_new new guard(s) wired"
+    return 0
+}
+
+selftest() {
+    _t=$(mktemp -d) || return 1
+    _fails=0
+    _mk() { mkdir -p "$1/scripts/check/x" "$1/config/check" "$1/.github/workflows" && git -C "$1" init -q && git -C "$1" config user.email s@t && git -C "$1" config user.name selftest; }
+    _commit() { git -C "$1" add -A && git -C "$1" commit -q -m "$2"; }
+
+    _mk "$_t/r"
+    printf 'must_check_gates |id, tier, push_blocking, mode, command, ci_job, inputs, description|\n' > "$_t/r/config/check/must_check_gates.sdn"
+    printf '#!/bin/sh\necho ok\n' > "$_t/r/scripts/check/x/helper.shs"
+    printf 'notes\n' > "$_t/r/README.md"
+    _commit "$_t/r" base
+
+    # 1 a touched .shs that no longer parses -> FAIL naming it
+    printf '#!/bin/sh\nif [ 1 ]; then\n' > "$_t/r/scripts/check/x/helper.shs"
+    _commit "$_t/r" broken
+    _out=$(scan "$_t/r" HEAD~1..HEAD); _rc=$?
+    case "$_rc:$(printf '%s' "$_out" | tail -1)" in
+        1:*unparsable:*scripts/check/x/helper.shs*) ;;
+        *) echo "selftest FAIL 1: broken .shs not rejected (rc=$_rc: $(printf '%s' "$_out" | tail -1))"; _fails=$((_fails + 1)) ;;
+    esac
+
+    # 2 a NEW guard script no root mentions -> FAIL naming it
+    printf '#!/bin/sh\necho ok\n' > "$_t/r/scripts/check/x/helper.shs"
+    printf '#!/bin/sh\necho "PASS — 1 thing"\n' > "$_t/r/scripts/check/check-orphan-gate.shs"
+    _commit "$_t/r" new-guard
+    _out=$(scan "$_t/r" HEAD~1..HEAD); _rc=$?
+    case "$_rc:$(printf '%s' "$_out" | tail -1)" in
+        1:*unwired:*scripts/check/check-orphan-gate.shs*) ;;
+        *) echo "selftest FAIL 2: unwired new guard not rejected (rc=$_rc: $(printf '%s' "$_out" | tail -1))"; _fails=$((_fails + 1)) ;;
+    esac
+
+    # 3 the same new guard with a manifest row at the tip -> PASS
+    printf '    push-orphan-gate, push, true, tree, "sh scripts/check/check-orphan-gate.shs", -, -, "x"\n' >> "$_t/r/config/check/must_check_gates.sdn"
+    _commit "$_t/r" wired
+    _out=$(scan "$_t/r" HEAD~2..HEAD); _rc=$?
+    case "$_rc:$(printf '%s' "$_out" | tail -1)" in
+        0:"PASS — "*" 2 .shs parsed, 1 new guard(s) wired") ;;
+        *) echo "selftest FAIL 3: wired new guard rejected (rc=$_rc: $(printf '%s' "$_out" | tail -1))"; _fails=$((_fails + 1)) ;;
+    esac
+
+    # 4 a range touching no .shs and adding no guard -> PASS with 0 parsed
+    printf 'more notes\n' >> "$_t/r/README.md"
+    _commit "$_t/r" docs
+    _out=$(scan "$_t/r" HEAD~1..HEAD); _rc=$?
+    case "$_rc:$(printf '%s' "$_out" | tail -1)" in
+        0:"PASS — 1 file(s) in HEAD~1..HEAD examined, 0 .shs parsed, 0 new guard(s) wired") ;;
+        *) echo "selftest FAIL 4: docs-only range not accepted (rc=$_rc: $(printf '%s' "$_out" | tail -1))"; _fails=$((_fails + 1)) ;;
+    esac
+
+    # 5 an empty range is ERROR, never a pass
+    _out=$(scan "$_t/r" HEAD..HEAD); _rc=$?
+    [ "$_rc" -eq 2 ] || { echo "selftest FAIL 5: empty range did not ERROR (rc=$_rc)"; _fails=$((_fails + 1)); }
+
+    # 6 the working copy must not decide: an uncommitted breakage is invisible
+    printf '#!/bin/sh\nif\n' > "$_t/r/scripts/check/x/helper.shs"
+    _out=$(scan "$_t/r" HEAD~1..HEAD); _rc=$?
+    [ "$_rc" -eq 0 ] || { echo "selftest FAIL 6: uncommitted working-copy edit changed the verdict (rc=$_rc)"; _fails=$((_fails + 1)); }
+
+    rm -rf "$_t"
+    [ "$_fails" -eq 0 ] || { echo "selftest: $_fails fixture(s) failed"; return 1; }
+    echo "selftest: 6 fixtures passed"
+}
+
+selftest || { echo "ERROR — nothing was checked (selftest failed; the guard itself is not trustworthy)"; exit 2; }
+if [ "$SELFTEST_ONLY" -eq 1 ]; then
+    echo "PASS — 6 fixture(s) checked, selftest only"
+    exit 0
+fi
+[ -n "$RANGE" ] || { echo "ERROR — nothing was checked (<base>..<tip> is required)"; exit 2; }
+if [ -z "$ROOT" ]; then
+    ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || ROOT=""
+    [ -n "$ROOT" ] || { echo "ERROR — nothing was checked (not inside a git repository and no --root)"; exit 2; }
+fi
+scan "$ROOT" "$RANGE"
+exit $?

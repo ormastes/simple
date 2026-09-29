@@ -27,7 +27,7 @@ hosted_wm_capture_simple_bin_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 3 | 3 | 0 | 0 |
+| 2 | 2 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -47,7 +47,7 @@ Hosted WM capture evidence is part of GUI renderer hardening. The wrapper must e
 | Design | doc/04_architecture/compiler/graphics/accelerated_shared_ui_backend_architecture.md |
 | Research | doc/01_research/ui/render_path/gui_web_2d_path_assessment_2026-06-12.md |
 | Source | `test/03_system/check/hosted_wm_capture_simple_bin_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-06-27 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -66,8 +66,6 @@ capture checks do not hide regressions behind the bootstrap seed.
   `simple-bin-forbidden` before capture or validation programs run.
 - REQ-HOSTED-WM-CAPTURE-BIN-003: Evidence records selected Simple binary,
   source, and status fields.
-- REQ-HOSTED-WM-CAPTURE-BIN-004: The capture producer emits the same
-  first-frame pixel diagnostics that the PPM validator independently checks.
 
 ## Plan
 
@@ -75,11 +73,9 @@ capture checks do not hide regressions behind the bootstrap seed.
 
 1. Inspect the wrapper source for self-hosted candidate selection.
 2. Inspect the wrapper source for Rust seed detection and provenance fields.
-3. Inspect the capture producer for nonzero pixel diagnostics and checksum
-   emission.
-4. Run the wrapper with a Rust seed `SIMPLE_BIN` override.
-5. Confirm stdout and report show `simple-bin-forbidden`.
-6. Confirm capture and validation logs are not created for the forbidden path.
+3. Run the wrapper with a Rust seed `SIMPLE_BIN` override.
+4. Confirm stdout and report show `simple-bin-forbidden`.
+5. Confirm capture and validation logs are not created for the forbidden path.
 
 ## Design
 
@@ -138,23 +134,20 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val producer = file_read("src/os/compositor/hosted_wm_capture_evidence.spl")
-expect(producer).to_contain("class HostedWmCaptureMetrics")
-expect(producer).to_contain("theme_id: text")
-expect(producer).to_contain("theme_source_manifest_sha256: text")
-expect(producer).to_contain("hosted_wm_capture_theme_id=")
-expect(producer).to_contain("hosted_wm_capture_theme_source_manifest_sha256=")
+expect(producer).to_contain("render_crop_ppm_with_metrics")
+expect(producer).to_contain("HostedCropMetrics")
+expect(producer).to_contain("r != 15 or g != 23 or b != 42")
+expect(producer).to_contain("r > 210 and g > 210 and b > 210")
+expect(producer).to_contain("_crop_max3(r, g, b) - _crop_min3(r, g, b) > 65")
+expect(producer).to_contain("(col % 17) == 0 and (row % 13) == 0")
+expect(producer).to_contain("sample_checksum: metrics.sample_checksum")
 expect(producer).to_contain("hosted_wm_capture_non_background_pixels=\" + metrics.non_background_pixels")
 expect(producer).to_contain("hosted_wm_capture_bright_pixels=\" + metrics.bright_pixels")
 expect(producer).to_contain("hosted_wm_capture_accent_pixels=\" + metrics.accent_pixels")
 expect(producer).to_contain("hosted_wm_capture_sample_checksum=\" + metrics.sample_checksum")
-expect(producer).to_contain("hosted_wm_capture_theme_id")
-expect(producer).to_contain("hosted_wm_capture_theme_source_manifest_sha256")
 
 val validator = file_read("scripts/check/validate_hosted_wm_capture_ppm.spl")
-expect(validator).to_contain("LEGACY_EXPECTED_WIDTH")
-expect(validator).to_contain("CROPPED_EXPECTED_WIDTH")
-expect(validator).to_contain("CROPPED_BACKGROUND_R")
-expect(validator).to_contain("r != bg_r")
+expect(validator).to_contain("r != 15 or g != 23 or b != 42")
 expect(validator).to_contain("r > 210 and g > 210 and b > 210")
 expect(validator).to_contain("max3(r, g, b) - min3(r, g, b) > 65")
 expect(validator).to_contain("(x % 17) == 0 and (y % 13) == 0")
@@ -197,8 +190,8 @@ expect(validation_code).to_equal(0)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 3 |
-| Active scenarios | 3 |
+| Total scenarios | 2 |
+| Active scenarios | 2 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

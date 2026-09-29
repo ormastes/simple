@@ -1,4 +1,8 @@
 # origin/main unbuildable — the missing half exists locally at `1e40de916bb` (unpushed)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-18
 **Status:** NO SOURCE REPAIR MADE — do not revert; land the existing commit.
@@ -54,3 +58,4 @@ broken tree reported PASS without compiling anything. The guard validates a *ran
 the resulting *tree* — same class of gap that `check-c-runtime-compiles-push.shs` closed
 for the C runtime by checking a TREE. Proposal: make the seed-build guard tree-scoped, or
 at minimum drop the fast path whenever the base tip is not already known-green.
+

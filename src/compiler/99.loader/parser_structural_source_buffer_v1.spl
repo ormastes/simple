@@ -1,0 +1,169 @@
+# Loader-owned stable native source buffer. The public handle contains no
+# pointer; bytes cross from the shared owner exactly once during creation.
+use compiler.loader.smf_mmap_native.{native_alloc_rw_memory,
+    native_write_exec_memory, native_mmap_read_bytes, native_free_exec_memory}
+use std.nogc_sync_mut.composition.environment_variants.structural_mask_leases_v1.{
+    StructuralMaskLeaseOwnerV1, StableSourceBufferTransferV1,
+    stable_source_buffer_transfer_validate_v1,
+    stable_source_buffer_transfer_consume_v1}
+
+pub enum ParserStructuralSourceBufferErrorV1:
+    InvalidTransfer
+    SourceTooShort
+    CapacityExceeded
+    AllocationFailed
+    CopyFailed
+    CopyVerificationFailed
+    UnknownOrRetired
+    Busy
+    RetainCapacityExceeded
+
+pub struct ParserStructuralNativeSourceLeaseV1:
+    native_lease_id: u64
+    source_lease_id: u64
+    source_lease_generation: u64
+    byte_length: u64
+
+pub struct ParserStructuralSourceCallTokenV1:
+    token_id: u64
+    native_lease_id: u64
+
+struct _NativeSourceRecordV1:
+    lease: ParserStructuralNativeSourceLeaseV1
+    address: i64
+    live: bool
+    retain_count: u64
+
+struct _NativeSourceRetainV1:
+    token: ParserStructuralSourceCallTokenV1
+
+pub class ParserStructuralSourceBufferOwnerV1:
+    var records: [_NativeSourceRecordV1]
+    var next_id: u64
+    var retains: [_NativeSourceRetainV1]
+    var next_retain_id: u64
+    pub static fn create() -> ParserStructuralSourceBufferOwnerV1:
+        ParserStructuralSourceBufferOwnerV1(records: [], next_id: 1u64,
+            retains: [], next_retain_id: 1u64)
+
+fn _find(owner: ParserStructuralSourceBufferOwnerV1,
+         lease: ParserStructuralNativeSourceLeaseV1) -> i64:
+    var i = 0
+    while i < owner.records.len():
+        val found = owner.records[i].lease
+        if found.native_lease_id == lease.native_lease_id and
+           found.source_lease_id == lease.source_lease_id and
+           found.source_lease_generation == lease.source_lease_generation and
+           found.byte_length == lease.byte_length: return i
+        i = i + 1
+    -1
+
+pub fn parser_structural_source_buffer_map_v1(
+    owner: ParserStructuralSourceBufferOwnerV1,
+    source_owner: StructuralMaskLeaseOwnerV1,
+    transfer: StableSourceBufferTransferV1
+) -> Result<ParserStructuralNativeSourceLeaseV1, ParserStructuralSourceBufferErrorV1>:
+    if not stable_source_buffer_transfer_validate_v1(source_owner, transfer):
+        return Err(ParserStructuralSourceBufferErrorV1.InvalidTransfer)
+    if transfer.bytes.len() < 32:
+        return Err(ParserStructuralSourceBufferErrorV1.SourceTooShort)
+    if owner.records.len() >= 256 or owner.next_id == 0u64 or
+       owner.next_id == 0xffffffffffffffffu64:
+        return Err(ParserStructuralSourceBufferErrorV1.CapacityExceeded)
+    val address = native_alloc_rw_memory(transfer.bytes.len())
+    if address == 0: return Err(ParserStructuralSourceBufferErrorV1.AllocationFailed)
+    val written = unsafe(capabilities: [raw_ptr]):
+        native_write_exec_memory(address, transfer.bytes, 0)
+    if written != transfer.bytes.len():
+        unsafe(capabilities: [raw_ptr]):
+            _ = native_free_exec_memory(address, transfer.bytes.len())
+        return Err(ParserStructuralSourceBufferErrorV1.CopyFailed)
+    if native_mmap_read_bytes(address, 0, transfer.bytes.len()) != transfer.bytes:
+        unsafe(capabilities: [raw_ptr]):
+            _ = native_free_exec_memory(address, transfer.bytes.len())
+        return Err(ParserStructuralSourceBufferErrorV1.CopyVerificationFailed)
+    if not stable_source_buffer_transfer_consume_v1(source_owner, transfer):
+        unsafe(capabilities: [raw_ptr]):
+            _ = native_free_exec_memory(address, transfer.bytes.len())
+        return Err(ParserStructuralSourceBufferErrorV1.InvalidTransfer)
+    val lease = ParserStructuralNativeSourceLeaseV1(native_lease_id: owner.next_id,
+        source_lease_id: transfer.source_lease.lease_id,
+        source_lease_generation: transfer.source_lease.lease_generation,
+        byte_length: transfer.bytes.len() as u64)
+    owner.next_id = owner.next_id + 1u64
+    owner.records.push(_NativeSourceRecordV1(lease: lease, address: address, live: true,
+        retain_count: 0u64))
+    Ok(lease)
+
+pub fn parser_structural_source_buffer_close_v1(owner: ParserStructuralSourceBufferOwnerV1,
+    lease: ParserStructuralNativeSourceLeaseV1
+) -> Result<(), ParserStructuralSourceBufferErrorV1>:
+    val index = _find(owner, lease)
+    if index < 0 or not owner.records[index].live:
+        return Err(ParserStructuralSourceBufferErrorV1.UnknownOrRetired)
+    if owner.records[index].retain_count > 0u64:
+        return Err(ParserStructuralSourceBufferErrorV1.Busy)
+    var record = owner.records[index]
+    val freed = unsafe(capabilities: [raw_ptr]):
+        native_free_exec_memory(record.address, record.lease.byte_length as i64)
+    if not freed: return Err(ParserStructuralSourceBufferErrorV1.UnknownOrRetired)
+    record.live = false; record.address = 0; owner.records[index] = record
+    Ok(())
+
+fn parser_structural_source_buffer_resolve_private_v1(
+    owner: ParserStructuralSourceBufferOwnerV1,
+    lease: ParserStructuralNativeSourceLeaseV1, offset: u64, count: u64
+) -> Result<i64, ParserStructuralSourceBufferErrorV1>:
+    val index = _find(owner, lease)
+    if index < 0 or not owner.records[index].live:
+        return Err(ParserStructuralSourceBufferErrorV1.UnknownOrRetired)
+    if offset > lease.byte_length or count > lease.byte_length - offset:
+        return Err(ParserStructuralSourceBufferErrorV1.SourceTooShort)
+    Ok(owner.records[index].address + offset as i64)
+
+pub fn parser_structural_source_call_retain_v1(owner: ParserStructuralSourceBufferOwnerV1,
+    lease: ParserStructuralNativeSourceLeaseV1
+) -> Result<ParserStructuralSourceCallTokenV1, ParserStructuralSourceBufferErrorV1>:
+    val index = _find(owner, lease)
+    if index < 0 or not owner.records[index].live:
+        return Err(ParserStructuralSourceBufferErrorV1.UnknownOrRetired)
+    if owner.retains.len() >= 256 or owner.next_retain_id == 0u64 or
+       owner.next_retain_id == 0xffffffffffffffffu64:
+        return Err(ParserStructuralSourceBufferErrorV1.RetainCapacityExceeded)
+    val token = ParserStructuralSourceCallTokenV1(token_id: owner.next_retain_id,
+        native_lease_id: lease.native_lease_id)
+    owner.next_retain_id = owner.next_retain_id + 1u64
+    owner.retains.push(_NativeSourceRetainV1(token: token))
+    var record = owner.records[index]; record.retain_count = record.retain_count + 1u64
+    owner.records[index] = record
+    Ok(token)
+
+pub fn parser_structural_source_call_release_v1(owner: ParserStructuralSourceBufferOwnerV1,
+    token: ParserStructuralSourceCallTokenV1) -> bool:
+    var ti: i64 = -1; var i = 0
+    while i < owner.retains.len():
+        if owner.retains[i].token == token: ti = i
+        i = i + 1
+    if ti < 0: return false
+    var ri: i64 = -1; i = 0
+    while i < owner.records.len():
+        if owner.records[i].lease.native_lease_id == token.native_lease_id: ri = i
+        i = i + 1
+    if ri < 0 or owner.records[ri].retain_count == 0u64: return false
+    var kept: [_NativeSourceRetainV1] = []; i = 0
+    while i < owner.retains.len():
+        if i != ti: kept.push(owner.retains[i])
+        i = i + 1
+    owner.retains = kept
+    var record = owner.records[ri]; record.retain_count = record.retain_count - 1u64
+    owner.records[ri] = record
+    true
+
+fn parser_structural_source_buffer_resolve_retained_private_v1(
+    owner: ParserStructuralSourceBufferOwnerV1, lease: ParserStructuralNativeSourceLeaseV1,
+    token: ParserStructuralSourceCallTokenV1, offset: u64, count: u64
+) -> Result<i64, ParserStructuralSourceBufferErrorV1>:
+    for retain in owner.retains:
+        if retain.token == token and token.native_lease_id == lease.native_lease_id:
+            return parser_structural_source_buffer_resolve_private_v1(owner, lease, offset, count)
+    Err(ParserStructuralSourceBufferErrorV1.UnknownOrRetired)

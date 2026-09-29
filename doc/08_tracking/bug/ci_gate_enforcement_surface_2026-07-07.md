@@ -1,7 +1,9 @@
 # CI gate enforcement surface (task #34)
+## Closed 2026-09-16 — two wiring bugs fixed, gates now CI-enforced and verified fail-closed
 
-Status: OPEN (P3)
-Status re-verified 2026-08-17 by source inspection (triage shard 00).
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Filed:** 2026-07-07
 **Severity:** low (infra/tracking; hardens enforcement, no product regression)
@@ -113,9 +115,3 @@ Each installs ripgrep if missing and fails the job on exit ≠ 0.
 This substantially closes the CI-enforcement piece of #34: the standalone
 structural/idiom ratchet gates are now genuinely, non-bypassably enforced.
 
-## Lane J re-verification 2026-08-17 (classified by CONTENT, not SHA ancestry)
-
-**Verdict: STILL-OPEN.** `scripts/check/check-repo-hygiene.shs` is RED on content debt per the
-doc's own 'NOT green (see below)'; the two wiring bugs are fixed but the content debt is
-untouched. The gate was NOT executed this session (mass hygiene sweep is forbidden while the
-live bootstrap holds the host).

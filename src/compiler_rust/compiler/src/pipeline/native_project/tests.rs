@@ -8,10 +8,386 @@ use std::sync::{Mutex, OnceLock};
 use crate::codegen::common_backend::{enum_runtime_module_name_from_path, module_init_symbol, module_prefix_from_path};
 use crate::incremental::SourceInfo;
 use crate::pipeline::execution::runtime_bundle_env_lock_for_tests as runtime_bundle_env_lock;
-use super::linker::{add_extra_link_objects, split_extra_link_objects, validate_extra_link_objects};
+use super::linker::{
+    add_extra_link_objects, is_boot_c_translation_unit, minimal_boot_source_allowed, split_extra_link_objects,
+    validate_extra_link_objects,
+};
 use super::tools::find_hosted_runtime_rlib;
 use simple_simd::{host_cpu_config, reset_host_cpu_config_cache_for_tests, HostCpuConfig, SimdTier};
 use super::*;
+
+fn repo_root_for_native_project_tests() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf()
+}
+
+fn source_defines_callable(path: &Path, name: &str) -> bool {
+    let source = std::fs::read_to_string(path).unwrap();
+    let mut parser = simple_parser::Parser::new(&source);
+    let module = parser.parse().unwrap();
+    module.items.iter().any(|item| {
+        matches!(item, simple_parser::ast::Node::Function(def)
+            if def.name == name && !def.body.statements.is_empty())
+    })
+}
+
+#[test]
+fn boot_source_discovery_keeps_required_core_and_skips_fragments() {
+    assert!(is_boot_c_translation_unit(Path::new("boot_entry.c")));
+    // This legacy file is intentionally still a standalone TU: it owns unique
+    // runtime definitions until it is wrapped by a real .c source.
+    assert!(is_boot_c_translation_unit(Path::new("baremetal_runtime_core.inc.c")));
+    assert!(!is_boot_c_translation_unit(Path::new("runtime_tail.inc.c")));
+    assert!(!is_boot_c_translation_unit(Path::new("crt0.S")));
+}
+
+#[test]
+fn minimal_rv64_boot_keeps_entry_and_required_runtime_owners() {
+    assert!(minimal_boot_source_allowed("boot_entry", false));
+    assert!(minimal_boot_source_allowed("baremetal_runtime_core.inc", false));
+    assert!(minimal_boot_source_allowed("freestanding_runtime", false));
+    assert!(minimal_boot_source_allowed("baremetal_stubs", false));
+    assert!(minimal_boot_source_allowed("rv64_display_backend", false));
+    assert!(!minimal_boot_source_allowed("full_networking_runtime", false));
+    assert!(minimal_boot_source_allowed("full_networking_runtime", true));
+    assert!(!minimal_boot_source_allowed("unrelated_service", false));
+}
+
+#[test]
+fn terminal_facade_routes_name_physical_callable_owners() {
+    let repo_root = repo_root_for_native_project_tests();
+    let cli_facade = std::fs::read_to_string(repo_root.join("src/app/io/cli_compile.spl")).unwrap();
+    let qemu_facade = std::fs::read_to_string(repo_root.join("src/os/qemu_runner.spl")).unwrap();
+
+    let routes = [
+        (
+            "app.io._CliCompile.compile_targets",
+            "src/app/io/_CliCompile/compile_targets.spl",
+            &["cli_native_build"][..],
+        ),
+        (
+            "os._QemuRunner.scenario_catalog",
+            "src/os/_QemuRunner/scenario_catalog.spl",
+            &["test_os", "test_all_architectures", "scenario_by_name_direct"][..],
+        ),
+        (
+            "os._QemuRunner.scenario_exec",
+            "src/os/_QemuRunner/scenario_exec.spl",
+            &[
+                "build_scenario",
+                "run_scenario",
+                "test_scenario",
+                "scenario_test_timeout_ms",
+            ][..],
+        ),
+        (
+            "os._QemuRunner.scenario_disks",
+            "src/os/_QemuRunner/scenario_disks.spl",
+            &[
+                "_is_arm_fs_exec_scenario_name",
+                "_is_arm_fs_exec_scenario",
+                "_is_riscv_fs_exec_scenario_name",
+                "_is_riscv_fs_exec_scenario",
+                "_catalog_platform_name_for_scenario",
+                "_catalog_lane_for_scenario",
+                "_catalog_has_lane_for_scenario",
+                "_catalog_lane_for_scenario_direct",
+            ][..],
+        ),
+    ];
+
+    for (module, relative, callables) in routes {
+        let facade = if module.starts_with("app.") {
+            &cli_facade
+        } else {
+            &qemu_facade
+        };
+        assert!(
+            facade.contains(&format!("export use {module}.{{")),
+            "missing physical route {module}"
+        );
+        let owner = repo_root.join(relative);
+        assert!(owner.is_file(), "physical owner does not exist: {}", owner.display());
+        for callable in callables {
+            assert!(
+                source_defines_callable(&owner, callable),
+                "terminal {module}.{callable} is absent or has no body"
+            );
+        }
+    }
+
+    for part in 1..=9 {
+        let module = format!("os.qemu_runner_part{part}");
+        let physical = repo_root.join(format!("src/os/qemu_runner_part{part}.spl"));
+        assert!(
+            physical.exists() || !qemu_facade.contains(&module),
+            "facade references absent qemu_runner_part{part}"
+        );
+    }
+    assert!(!cli_facade.contains("app.io._CliCompile.native_build"));
+    assert!(!cli_facade.contains("play_cli_main"));
+    assert!(!qemu_facade.contains("bootstrap_authorization_receipt_v2"));
+}
+
+#[test]
+fn qemu_facade_preserves_exact_historical_public_surface_on_physical_owners() {
+    fn explicit_names(source: &str, marker: &str) -> std::collections::BTreeSet<String> {
+        let tail = source.split_once(marker).unwrap().1;
+        let body = tail.split_once('{').unwrap().1.split_once('}').unwrap().0;
+        body.split(',')
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+            .collect()
+    }
+
+    fn names(surface: &str) -> std::collections::BTreeSet<String> {
+        surface.split_whitespace().map(str::to_owned).collect()
+    }
+
+    let repo_root = repo_root_for_native_project_tests();
+    let facade = std::fs::read_to_string(repo_root.join("src/os/qemu_runner.spl")).unwrap();
+    let expected = [
+        ("os._QemuRunner.runner_targets.", "_MULTIARCH_RESULT_ROOT _OS_BUILD_DEFAULT_TIMEOUT_MS _OS_BUILD_DEFAULT_LOG_MODE _parse_timeout_ms _os_build_timeout_ms _normalize_os_log_mode _os_build_log_mode _os_build_backend_for_target default_os_build_backend_for_target _now_ms _result_arch_slug _result_arch_dir _smoke_result_path _smoke_serial_log_path _smoke_serial_sample_path _bootstrap_result_path _native_build_failure_log_path _json_bool _escape_json _status_text _loader_name_for_arch _backend_title_case _platform_name_for_arch _image_path_for_target _ensure_result_dir _smoke_result_body _bootstrap_result_body _write_smoke_result _write_bootstrap_result _write_native_build_failure_log _tail_lines native_build_prerequisite_hint _print_native_build_failure_hint is_qemu_success OsTarget QemuRunOptions qemu_run_options_default qemu_run_options_debug_gui qemu_run_options_headless _qemu_command_binary _lane_to_target catalog_os_target simpleos_platform_arch get_target get_qemu_target get_gui_target get_gpu_test_target get_tools_test_target get_fs_test_target get_browser_soft_target get_browser_probe_target get_desktop_browser_target get_desktop_gui_target get_ssh_live_target get_toolchain_vfs_probe_target get_ssh_x25519_probe_target get_desktop_probe_target get_wm_simple_web_check_target get_arm64_wm_qemu_target get_riscv64_ssh_live_target"),
+        ("os._QemuRunner.scenario_catalog.", "test_os run_all_architectures test_all_architectures QemuScenario scenario_lane_kind _acceptance_lane_scenario _scenario_from_target _arm_fs_exec_platform_name _riscv_fs_exec_platform_name _arm_fs_exec_scenario _riscv_fs_exec_target _riscv_fs_exec_scenario _desktop_disk_scenario_target _is_desktop_disk_scenario_name _desktop_disk_scenario_target_direct _desktop_scenario_timeout_ms _ensure_desktop_scenario_media scenario_rv64_base scenario_rv64_dtb_pci scenario_rv64_ssh scenario_rv64_x25519_probe scenario_x64_pci_lab scenario_x64_nvme scenario_x64_net_user scenario_x64_ssh scenario_x64_toolchain_vfs_probe scenario_x64_q35_pure_nvme_perf scenario_x64_gpu_2d scenario_x64_gui scenario_x64_gui_tablet scenario_x64_wm_input_test scenario_x64_wm_simple_web_check scenario_x64_nvme_fat32 scenario_arm64_virtio_fat32_smf scenario_arm64_wm_ramfb scenario_arm32_virtio_fat32_smf scenario_riscv64_virtio_fat32_smf scenario_riscv32_virtio_fat32_smf scenario_riscv64_hosted scenario_x64_full_stack scenario_x64_desktop_test arm_fs_exec_disk_image_path arm_fs_exec_kernel_bin_path _arm_virtio_blk_exec_disk_args riscv_fs_exec_disk_image_path _riscv_virtio_blk_exec_disk_args ovmf_code_candidates ovmf_code_path desktop_uefi_bootloader_candidates desktop_uefi_bootloader_path desktop_uefi_disk_image_path desktop_uefi_esp_dir_path desktop_uefi_boot_media_ready _x64_desktop_uefi_args scenario_x64_desktop_uefi get_all_scenarios get_scenario scenario_exists scenario_by_name_direct _arm_fs_exec_scenario_name _riscv_fs_exec_scenario_name"),
+        ("os._QemuRunner.scenario_disks.", "_is_arm_fs_exec_scenario_name _is_arm_fs_exec_scenario _is_riscv_fs_exec_scenario_name _is_riscv_fs_exec_scenario _catalog_platform_name_for_scenario _catalog_lane_for_scenario _catalog_has_lane_for_scenario _catalog_lane_for_scenario_direct _ensure_catalog_scenario_media scenario_target get_arm64_fs_exec_target get_arm32_fs_exec_target get_riscv64_fs_exec_target get_riscv32_fs_exec_target get_riscv64_hosted_target get_riscv64_ssh_live_target get_riscv64_x25519_probe_target _desktop_release_version desktop_release_disk_image_path_in desktop_release_disk_image_path desktop_release_installer_iso_path_in desktop_release_installer_iso_path desktop_disk_image_candidates_in desktop_disk_image_candidates desktop_installer_iso_candidates_in desktop_installer_iso_candidates desktop_disk_image_path_in desktop_disk_image_path desktop_disk_make_script_args desktop_uefi_disk_make_script_args fs_test_disk_image_path _x64_nvme_fs_test_disk_args desktop_installer_iso_path_in desktop_installer_iso_path _x64_nvme_disk_args scenario_x64_desktop_disk scenario_x64_desktop_gui ensure_desktop_disk_image ensure_removable_disk_image desktop_uefi_disk_image_tool_app_validation_command _desktop_uefi_disk_image_has_required_tool_apps ensure_desktop_uefi_boot_image board_bundle_command _board_bundle_expected_artifact _board_bundle_output_path _board_qemu_linked_scenario_name board_lane_test_command ensure_board_bundle test_board_lane test_board ensure_fs_test_disk_image ensure_arm_fs_exec_disk_image"),
+        ("os._QemuRunner.scenario_disks.", "_is_arm_fs_exec_scenario_name _is_arm_fs_exec_scenario _is_riscv_fs_exec_scenario_name _is_riscv_fs_exec_scenario _catalog_platform_name_for_scenario _catalog_lane_for_scenario _catalog_has_lane_for_scenario _catalog_lane_for_scenario_direct _ensure_catalog_scenario_media scenario_target get_arm64_fs_exec_target get_arm32_fs_exec_target get_riscv64_fs_exec_target get_riscv32_fs_exec_target get_riscv64_hosted_target get_riscv64_ssh_live_target get_riscv64_x25519_probe_target _desktop_release_version desktop_release_disk_image_path_in desktop_release_disk_image_path desktop_release_installer_iso_path_in desktop_release_installer_iso_path desktop_disk_image_candidates_in desktop_disk_image_candidates desktop_installer_iso_candidates_in desktop_installer_iso_candidates desktop_disk_image_path_in desktop_disk_image_path desktop_disk_make_script_args desktop_uefi_disk_make_script_args fs_test_disk_image_path _x64_nvme_fs_test_disk_args desktop_installer_iso_path_in desktop_installer_iso_path _x64_nvme_disk_args scenario_x64_desktop_disk scenario_x64_desktop_gui ensure_desktop_disk_image ensure_removable_disk_image desktop_uefi_disk_image_tool_app_validation_command _desktop_uefi_disk_image_has_required_tool_apps ensure_desktop_uefi_boot_image board_bundle_command _board_bundle_expected_artifact _board_bundle_output_path _board_qemu_linked_scenario_name board_lane_test_command ensure_board_bundle test_board_lane test_board ensure_fs_test_disk_image ensure_arm_fs_exec_disk_image"),
+        ("os._QemuRunner.scenario_exec.", "ensure_riscv_fs_exec_disk_image _fs_test_disk_image_has_required_fixtures _ensure_catalog_fs_exec_disk_image _catalog_fs_exec_disk_image_has_required_smf _staged_tool_app_smf_name _native_tool_version_path _native_tool_version_pattern _native_tool_pipeline_path _native_tool_pipeline_pattern _catalog_lane_disk_image_has_required_staged_apps _arm_fs_exec_disk_image_has_required_smf _riscv_fs_exec_disk_image_has_required_smf ensure_arm_fs_exec_kernel_binary scenario_kernel_path _desktop_disk_image_has_required_manifests build_scenario_command build_scenario_command_headless _build_scenario_command_impl build_scenario run_scenario run_scenario_headless _run_scenario_impl test_scenario scenario_qemu_exit_success arm64_wm_ramfb_serial_log_path arm_fs_exec_required_marker_fragments riscv64_hosted_required_marker_fragments arm64_wm_ramfb_required_marker_fragments _scenario_required_marker_fragments _scenario_uses_catalog_completion_contract _scenario_serial_accepts_completion _scenario_serial_accepts_completion_with_optional_protection fs_exec_lane_name_rejects_resident_fallback qemu_scenario_serial_acceptance_reason qemu_scenario_serial_accepts_completion _print_scenario_missing_markers qemu_protection_serial_reason qemu_protection_serial_accepts_hardening qemu_scenario_protection_board_id qemu_scenario_protection_serial_reason qemu_scenario_protection_serial_accepts_hardening scenario_test_timeout_ms ensure_scenario_media boot_disk_image_serial"),
+    ];
+    for (owner, historical_surface) in expected {
+        assert_eq!(
+            explicit_names(&facade, owner),
+            names(historical_surface),
+            "public facade parity changed for {owner}"
+        );
+    }
+}
+
+#[test]
+fn terminal_facades_use_canonical_cli_contract_and_explicit_qemu_owner_scc() {
+    let repo_root = repo_root_for_native_project_tests();
+    let cli = std::fs::read_to_string(repo_root.join("src/app/io/cli_compile.spl")).unwrap();
+    let canonical = std::fs::read_to_string(repo_root.join("src/app/io/_CliCompile/compile_targets.spl")).unwrap();
+    assert!(cli.contains("export use app.io._CliCompile.compile_targets.{cli_native_build}"));
+    assert!(!cli.contains("app.io._CliCompile.native_build"));
+    for contract_marker in [
+        "cli_native_build_option_error(args)",
+        "--emit-archive",
+        "--parse-shard=",
+        "cli_native_build_resolve_output",
+    ] {
+        assert!(
+            canonical.contains(contract_marker),
+            "canonical CLI owner lost {contract_marker}"
+        );
+    }
+
+    // These five files are one real ownership SCC: target constructors use
+    // disk helpers, catalog selection prepares media, and media preparation
+    // can invoke scenario execution. Spell the SCC with physical imports so
+    // entry closure never needs the public facade as an internal back-edge.
+    let owners = [
+        "runner_targets",
+        "os_build_run",
+        "scenario_catalog",
+        "scenario_disks",
+        "scenario_exec",
+    ];
+    for owner in owners {
+        let source = std::fs::read_to_string(repo_root.join(format!("src/os/_QemuRunner/{owner}.spl"))).unwrap();
+        assert!(!source.contains("use os.qemu_runner"), "{owner} imports its facade");
+        for dependency in owners.into_iter().filter(|dependency| *dependency != owner) {
+            assert!(
+                source.contains(&format!("use os._QemuRunner.{dependency}.*")),
+                "QEMU owner SCC edge {owner} -> {dependency} is implicit or missing"
+            );
+        }
+    }
+}
+
+#[test]
+fn entry_closure_resolver_reaches_terminal_facade_owners_only_when_routed() {
+    let repo_root = repo_root_for_native_project_tests();
+    let source_root = repo_root.join("src");
+    let resolved = |entry: &str| {
+        NativeProjectBuilder::new(repo_root.clone(), repo_root.join("build/test-terminal-facade"))
+            .config(NativeBuildConfig {
+                entry_closure: true,
+                ..NativeBuildConfig::default()
+            })
+            .source_dir(source_root.clone())
+            .entry_file(repo_root.join(entry))
+            .discover_files()
+            .unwrap()
+    };
+
+    let cli_files = resolved("src/app/io/cli_compile.spl");
+    assert!(cli_files
+        .iter()
+        .any(|path| { path.ends_with("src/app/io/_CliCompile/compile_targets.spl") }));
+    assert!(!cli_files
+        .iter()
+        .any(|path| path.ends_with("src/app/io/_CliCompile/native_build.spl")));
+
+    let qemu_files = resolved("src/os/qemu_runner.spl");
+    for relative in [
+        "src/os/_QemuRunner/scenario_catalog.spl",
+        "src/os/_QemuRunner/scenario_exec.spl",
+        "src/os/_QemuRunner/scenario_disks.spl",
+    ] {
+        assert!(
+            qemu_files.iter().any(|path| path.ends_with(relative)),
+            "resolver missed {relative}"
+        );
+    }
+    assert!(!qemu_files
+        .iter()
+        .any(|path| path.ends_with("src/os/qemu_runner_part4.spl")));
+}
+
+#[test]
+fn interpreter_sources_resolve_the_physical_treesitter_facade() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let treesitter_owner = repo_root.join("src/compiler_rust/lib/std/src/parser/treesitter/__init__.spl");
+    let owner_source = std::fs::read_to_string(&treesitter_owner).unwrap();
+    for public_type in ["Tree", "Node", "NodeId", "NodeArena", "TreeSitterParser"] {
+        assert!(
+            owner_source.contains(&format!("pub struct {public_type}:")),
+            "physical treesitter facade does not expose {public_type}"
+        );
+    }
+    for public_api in [
+        "pub fn get_node(self, id: NodeId) -> Option<Node>",
+        "pub fn get_text(self, node: Node) -> text",
+        "children: [NodeId]",
+    ] {
+        assert!(
+            owner_source.contains(public_api),
+            "physical treesitter facade is missing compatibility API {public_api}"
+        );
+    }
+    assert!(!repo_root
+        .join("src/compiler_rust/lib/std/src/parser/treesitter/tree.spl")
+        .exists());
+    assert!(!repo_root
+        .join("src/compiler_rust/lib/std/src/parser/treesitter/parser.spl")
+        .exists());
+
+    for (relative, needs_treesitter) in [
+        ("src/app/interpreter/ast_convert.spl", true),
+        ("src/app/interpreter/ast_convert_expr.spl", true),
+        ("src/app/interpreter/ast_convert_pattern.spl", true),
+        ("src/app/interpreter/ast_convert_stmt.spl", true),
+        ("src/app/interpreter/ast_types.spl", false),
+        ("src/app/interpreter/parser.spl", true),
+    ] {
+        let source = std::fs::read_to_string(repo_root.join(relative)).unwrap();
+        assert!(
+            !source.contains("parser.treesitter.tree"),
+            "{relative} retains synthetic tree module"
+        );
+        assert!(
+            !source.contains("parser.treesitter.parser"),
+            "{relative} retains synthetic parser module"
+        );
+        assert!(
+            !source.contains("NodeId") && !source.contains("NodeArena"),
+            "{relative} imports absent APIs"
+        );
+
+        let files = NativeProjectBuilder::new(repo_root.clone(), repo_root.join("build/test-interpreter-treesitter"))
+            .config(NativeBuildConfig {
+                entry_closure: true,
+                ..NativeBuildConfig::default()
+            })
+            .source_dir(repo_root.join("src/app"))
+            .source_dir(repo_root.join("src/compiler_rust/lib/std/src"))
+            .entry_file(repo_root.join(relative))
+            .discover_files()
+            .unwrap();
+        assert_eq!(
+            files.iter().any(|path| same_file_path(path, &treesitter_owner)),
+            needs_treesitter,
+            "{relative} treesitter facade reachability is incorrect"
+        );
+    }
+}
+
+#[test]
+fn simpleos_entry_closure_compatibility_owners_are_explicit() {
+    fn explicit_names(source: &str, marker: &str) -> std::collections::BTreeSet<String> {
+        let tail = source.split_once(marker).unwrap().1;
+        let body = tail.split_once('{').unwrap().1.split_once('}').unwrap().0;
+        body.split(',')
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+            .collect()
+    }
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let facade = std::fs::read_to_string(repo_root.join("src/os/port/simpleos_multiplatform_build.spl")).unwrap();
+    let part1 = std::fs::read_to_string(repo_root.join("src/os/port/simpleos_multiplatform_build_part1.spl")).unwrap();
+    let part2 = std::fs::read_to_string(repo_root.join("src/os/port/simpleos_multiplatform_build_part2.spl")).unwrap();
+    let part3 = std::fs::read_to_string(repo_root.join("src/os/port/simpleos_multiplatform_build_part3.spl")).unwrap();
+    let catalog =
+        std::fs::read_to_string(repo_root.join("src/os/port/_SimpleosMultiplatformBuild/platform_target_catalog.spl"))
+            .unwrap();
+    let contracts =
+        std::fs::read_to_string(repo_root.join("src/os/port/_SimpleosMultiplatformBuild/build_target_contracts.spl"))
+            .unwrap();
+    let accessors = std::fs::read_to_string(
+        repo_root.join("src/os/port/_SimpleosMultiplatformBuild/platform_target_accessors.spl"),
+    )
+    .unwrap();
+    assert!(part1.contains("build_target_contracts.{") && !part1.contains("build_target_contracts.*"));
+    assert!(
+        part2.contains("platform_target_catalog.{simpleos_platform_targets}")
+            && !part2.contains("platform_target_catalog.*")
+    );
+    assert!(part3.contains("platform_target_accessors.{") && !part3.contains("platform_target_accessors.*"));
+    assert!(!part2.contains("_simpleos_x86_64_platform_target"));
+    assert!(!part3.contains("_simpleos_platform_target_index"));
+    assert!(catalog.contains("_simpleos_x86_64_platform_target, _simpleos_i686_platform_target"));
+    for implementation in [&contracts, &catalog, &accessors] {
+        assert!(!implementation.contains("use os.port.simpleos_multiplatform_build.*"));
+    }
+    assert!(catalog.contains("build_target_contracts.{"));
+    assert!(accessors.contains("build_target_contracts.{"));
+    assert!(accessors.contains("platform_target_catalog.{simpleos_platform_targets}"));
+    assert!(part1.contains("intentionally compatibility-public"));
+    assert_eq!(
+        explicit_names(&facade, "build_target_contracts."),
+        explicit_names(&part1, "build_target_contracts.")
+    );
+    assert_eq!(
+        explicit_names(&facade, "platform_target_catalog."),
+        explicit_names(&part2, "platform_target_catalog.")
+    );
+    assert_eq!(
+        explicit_names(&facade, "platform_target_accessors."),
+        explicit_names(&part3, "platform_target_accessors.")
+    );
+}
 
 #[test]
 fn pure_simple_lambda_inline_helper_has_both_callers() {
@@ -20,6 +396,128 @@ fn pure_simple_lambda_inline_helper_has_both_callers() {
     assert!(lowering.contains("me lower_inline_lambda_with_locals("));
     assert!(lowering.contains("self.lower_inline_lambda_with_locals(params, body, arg_locals)"));
     assert!(methods.contains("self.lower_inline_lambda_with_locals(map_params, map_body, [some_val_map])"));
+}
+
+#[test]
+fn folded_global_scalar_type_calls_keep_mir_lowering_receiver_ownership() {
+    let dispatch = include_str!("../../../../../compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl");
+    assert!(dispatch.contains("fn folded_global_scalar_type(constant: MirConstant) -> MirType:"));
+    assert!(dispatch.contains("self.folded_global_scalar_type(constant)"));
+    assert!(dispatch.contains("self.folded_global_scalar_type(mir_const)"));
+    assert!(!dispatch.contains("= folded_global_scalar_type(constant)"));
+    assert!(!dispatch.contains("= folded_global_scalar_type(mir_const)"));
+}
+
+#[test]
+fn flattened_decl_env_helper_keeps_a_matching_mir_definition_and_call_target() {
+    use crate::codegen::JitCompiler;
+    use crate::mir::{lower_to_mir, MirInst};
+
+    let root = repo_root_for_native_project_tests();
+    let path = root.join("src/compiler/10.frontend/core/_Ast/decl_nodes.spl");
+    let source = std::fs::read_to_string(&path).expect("read declaration owner");
+    let mut declaration_parser = simple_parser::Parser::new(&source);
+    let declaration_ast = declaration_parser.parse().expect("parse declaration owner");
+    assert!(
+        declaration_ast.items.iter().any(|item| matches!(item,
+            simple_parser::ast::Node::Function(function)
+                if function.name == "_env_get_i64" && !function.body.statements.is_empty()
+        )),
+        "the source declaration owner must retain its private helper spelling"
+    );
+
+    // Use the same lenient, project-aware lowering route as `run_file_jit`.
+    // Plain `hir::lower` is intentionally stricter and rejects an unrelated
+    // list-comprehension in this large owner graph before it reaches the
+    // declaration map we are attributing here.
+    let mut visited = std::collections::HashSet::new();
+    let flattened_ast = crate::pipeline::module_loader::load_module_with_imports(&path, &mut visited)
+        .expect("load flattened declaration owner");
+    let project_hint = crate::pipeline::native_single_file_project_hint(&path);
+    let flattened_hir =
+        crate::hir::lower_with_context_lenient_and_project_hint(&flattened_ast, &path, project_hint.as_deref())
+            .expect("JIT-compatible HIR lower flattened declaration owner");
+    let flattened_mir = lower_to_mir(&flattened_hir).expect("JIT-compatible MIR lower flattened declaration owner");
+    assert!(
+        flattened_mir
+            .functions
+            .iter()
+            .any(|function| { function.name == "_env_get_i64" && !function.blocks.is_empty() }),
+        "flattened JIT MIR must retain the private helper body under its exact spelling"
+    );
+    let flattened_caller = flattened_mir
+        .functions
+        .iter()
+        .find(|function| function.name == "ast_decl_arena_default")
+        .expect("flattened arena-default caller");
+    assert!(
+        flattened_caller
+            .blocks
+            .iter()
+            .flat_map(|block| &block.instructions)
+            .any(|instruction| {
+                matches!(instruction, MirInst::Call { target, .. } if target.name() == "_env_get_i64")
+            }),
+        "flattened caller must target the retained helper by its exact MIR definition name"
+    );
+
+    // Pair the actual flattened-map inspection with a small executable fixture
+    // that compares the private free helper with an ordinary free helper and
+    // proves that its real `rt_env_get_i64` provider resolves in the JIT.
+    let source = r#"
+@unsafe(reason: "test runtime ABI", capabilities: [ffi])
+extern fn rt_env_get_i64(key: text, default_value: i64) -> i64
+
+fn _sffi_env_get_i64(key: text, default_value: i64) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_env_get_i64(key, default_value)
+
+fn known_good_free_helper(value: i64) -> i64:
+    value + 1
+
+fn probe_private_env_helper() -> i64:
+    _sffi_env_get_i64("SIMPLE_JIT_PRIVATE_HELPER_TEST_ABSENT", 41) + known_good_free_helper(0)
+"#;
+    let mut parser = simple_parser::Parser::new(source);
+    let ast = parser.parse().expect("parse helper resolution fixture");
+    let hir = crate::hir::lower(&ast).expect("HIR lower helper resolution fixture");
+    let mir = lower_to_mir(&hir).expect("MIR lower flattened declaration module");
+
+    assert!(
+        mir.functions
+            .iter()
+            .any(|function| function.name == "_sffi_env_get_i64" && !function.blocks.is_empty()),
+        "MIR must retain the private helper body under its exact spelling"
+    );
+    let caller = mir
+        .functions
+        .iter()
+        .find(|function| function.name == "probe_private_env_helper")
+        .expect("private helper caller");
+    assert!(
+        caller
+            .blocks
+            .iter()
+            .flat_map(|block| &block.instructions)
+            .any(|instruction| {
+                matches!(instruction, MirInst::Call { target, .. } if target.name() == "_sffi_env_get_i64")
+            }),
+        "the caller must target the retained helper by its exact MIR definition name"
+    );
+    assert!(
+        mir.extern_fn_names.iter().any(|name| name == "rt_env_get_i64"),
+        "the helper's real runtime provider must remain the registered rt_env_get_i64 extern"
+    );
+    assert!(
+        !mir.extern_fn_names.iter().any(|name| name == "sffi_env_get_i64"),
+        "the helper itself must not become a bare external import"
+    );
+
+    let mut jit = JitCompiler::new_static().expect("create static JIT");
+    jit.compile_module(&mir)
+        .expect("private helper must resolve locally while rt_env_get_i64 resolves through runtime provider");
+    let result = unsafe { jit.call_i64_void("probe_private_env_helper") }.expect("call private helper fixture");
+    assert_eq!(result, 42, "private helper and known-good helper must both execute");
 }
 
 #[test]
@@ -90,11 +588,15 @@ fn enum_runtime_identity_uses_unique_global_enum_suffix() {
     let mut mir = MirModule::new();
     let mut function = MirFunction::new("probe".to_string(), TypeId::I64, Visibility::Private);
     let dest = function.new_vreg();
-    function.block_mut(BlockId(0)).unwrap().instructions.push(MirInst::EnumUnit {
-        dest,
-        enum_name: "FixConfidence".to_string(),
-        variant_name: "Safe".to_string(),
-    });
+    function
+        .block_mut(BlockId(0))
+        .unwrap()
+        .instructions
+        .push(MirInst::EnumUnit {
+            dest,
+            enum_name: "FixConfidence".to_string(),
+            variant_name: "Safe".to_string(),
+        });
     mir.functions.push(function);
 
     let runtime_names = std::collections::HashMap::from([(
@@ -126,11 +628,15 @@ fn enum_runtime_identity_preserves_unlisted_external_owner() {
     let mut mir = MirModule::new();
     let mut function = MirFunction::new("probe".to_string(), TypeId::I64, Visibility::Private);
     let dest = function.new_vreg();
-    function.block_mut(BlockId(0)).unwrap().instructions.push(MirInst::EnumUnit {
-        dest,
-        enum_name: "ByteOrder".to_string(),
-        variant_name: "LittleEndian".to_string(),
-    });
+    function
+        .block_mut(BlockId(0))
+        .unwrap()
+        .instructions
+        .push(MirInst::EnumUnit {
+            dest,
+            enum_name: "ByteOrder".to_string(),
+            variant_name: "LittleEndian".to_string(),
+        });
     mir.functions.push(function);
 
     super::mangle::qualify_enum_runtime_names(
@@ -146,6 +652,76 @@ fn enum_runtime_identity_preserves_unlisted_external_owner() {
         &mir.functions[0].blocks[0].instructions[0],
         MirInst::EnumUnit { enum_name, .. } if enum_name == "ByteOrder"
     ));
+}
+
+/// Site 18 (macOS Stage 2, 2026-09-13): HIR folds the enum-id argument of
+/// `rt_enum_check_variant` into an integer from the BARE enum name, while the
+/// constructor's `EnumUnit` name is qualified by `qualify_enum_runtime_names`.
+/// The check therefore expected `hash("Mixed")` against a value stamped
+/// `hash("pkg.owner.Mixed")`, every arm failed and the match fell to its last
+/// arm -- `BackendKind.to_text()` returned the wrong text and the K1 backend
+/// table validator refused the Stage 2 composition. Both sides must agree.
+fn enum_match_check_ids_after_qualify(module_name: &str) -> (Vec<i64>, Vec<String>) {
+    use crate::mir::MirInst;
+
+    let source = "enum Mixed:\n    A\n    B\n    Custom(text)\n\nfn pick(m: Mixed) -> i64:\n    match m:\n        case A: 10\n        case B: 20\n        case Custom(_): 30\n\nfn build() -> Mixed:\n    Mixed.B\n";
+    let ast = simple_parser::Parser::new(source).parse().unwrap();
+    let lowered = crate::hir::Lowerer::new().lower_module(&ast).expect("enum match module should lower");
+    let mut mir = crate::mir::lower_to_mir(&lowered).expect("enum match module should reach MIR");
+    super::mangle::qualify_enum_runtime_names(
+        &mut mir,
+        module_name,
+        &std::collections::HashMap::new(),
+        &std::collections::HashMap::new(),
+        &std::collections::HashMap::new(),
+    )
+    .unwrap();
+
+    let mut check_ids = Vec::new();
+    let mut ctor_names = Vec::new();
+    for func in &mir.functions {
+        let mut const_ints = std::collections::HashMap::new();
+        for block in &func.blocks {
+            for inst in &block.instructions {
+                if let MirInst::ConstInt { dest, value } = inst {
+                    const_ints.insert(*dest, *value);
+                }
+            }
+        }
+        for block in &func.blocks {
+            for inst in &block.instructions {
+                match inst {
+                    MirInst::Call { target, args, .. } if target.name() == "rt_enum_check_variant" => {
+                        check_ids.push(const_ints[&args[1]]);
+                    }
+                    MirInst::EnumUnit { enum_name, .. } => ctor_names.push(enum_name.clone()),
+                    _ => {}
+                }
+            }
+        }
+    }
+    assert!(!check_ids.is_empty(), "expected rt_enum_check_variant calls in the lowered match");
+    assert!(!ctor_names.is_empty(), "expected an EnumUnit constructor");
+    (check_ids, ctor_names)
+}
+
+#[test]
+fn enum_match_check_id_is_qualified_like_its_constructor() {
+    let qualified = crate::codegen::shared::enum_runtime_type_id("pkg.owner.Mixed");
+    let (check_ids, ctor_names) = enum_match_check_ids_after_qualify("pkg.owner");
+    assert!(ctor_names.iter().all(|name| name == "pkg.owner.Mixed"), "{ctor_names:?}");
+    assert!(
+        check_ids.iter().all(|&id| id == i64::from(qualified)),
+        "check ids {check_ids:?} must equal the qualified ctor id {qualified}"
+    );
+}
+
+#[test]
+fn enum_match_check_id_stays_bare_without_a_module_name() {
+    let bare = crate::codegen::shared::enum_runtime_type_id("Mixed");
+    let (check_ids, ctor_names) = enum_match_check_ids_after_qualify("");
+    assert!(ctor_names.iter().all(|name| name == "Mixed"), "{ctor_names:?}");
+    assert!(check_ids.iter().all(|&id| id == i64::from(bare)), "{check_ids:?} vs {bare}");
 }
 
 #[test]
@@ -330,7 +906,7 @@ fn native_project_extra_provider_resolves_symbol_and_suppresses_stub() {
 }
 
 fn archive_members(path: &Path) -> Option<Vec<String>> {
-    let tool = find_archive_tool();
+    let tool = find_archive_tool().ok()?;
     let output = archive_list_command(&tool, path).output().ok()?;
     if !output.status.success() {
         return None;
@@ -402,6 +978,35 @@ fn llvm_ar_archive_commands_keep_gnu_argument_forms() {
     assert_eq!(command_args(&list), ["t", "libout.a"]);
 }
 
+#[test]
+fn archive_batches_keep_long_windows_object_paths_within_command_line_limit() {
+    let archive = PathBuf::from("D:/cache/native-objects/output/libspl_objects.a");
+    let objects: Vec<PathBuf> = (0..430)
+        .map(|index| PathBuf::from(format!(
+            "D:/cache/compiler-tools/stage2/very-long-producer-sha/very-long-closure-sha/native-objects/object_{index:04}_{}.obj",
+            "segment".repeat(14)
+        )))
+        .collect();
+    let batches = super::linker::archive_object_batches("lib.exe", &archive, &objects).unwrap();
+    assert!(batches.len() > 3, "long absolute paths must be split by length");
+    assert_eq!(batches.iter().map(|batch| batch.len()).sum::<usize>(), objects.len());
+    for (index, batch) in batches.iter().enumerate() {
+        assert!(!batch.is_empty());
+        let command = archive_create_command("lib.exe", &archive, batch, index > 0, false);
+        let budget = super::linker::archive_arg_budget(command.get_program())
+            + command.get_args().map(super::linker::archive_arg_budget).sum::<usize>();
+        assert!(budget <= super::linker::ARCHIVE_BATCH_ARG_LIMIT);
+    }
+}
+
+#[test]
+fn archive_batch_rejects_an_object_path_too_long_for_one_command() {
+    let object = PathBuf::from("x".repeat(super::linker::ARCHIVE_BATCH_ARG_LIMIT));
+    let error = super::linker::archive_object_batches("lib.exe", Path::new("out.lib"), &[object])
+        .unwrap_err();
+    assert!(error.contains("archive object path exceeds Windows command-line budget"));
+}
+
 fn test_host_object_extension() -> &'static str {
     #[cfg(target_os = "windows")]
     {
@@ -440,7 +1045,7 @@ fn hosted_freebsd_cross_target_build_fails_closed() {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn build_compiler_backfill_test_archive(root: &Path, name: &str, sources: &[&str]) -> PathBuf {
     let mut objects = Vec::new();
     for (index, source) in sources.iter().enumerate() {
@@ -458,7 +1063,7 @@ fn build_compiler_backfill_test_archive(root: &Path, name: &str, sources: &[&str
         objects.push(object_path);
     }
     let archive = root.join(format!("lib{name}.a"));
-    let tool = find_archive_tool();
+    let tool = find_archive_tool().unwrap();
     assert!(archive_create_command(&tool, &archive, &objects, false, false)
         .status()
         .unwrap()
@@ -540,7 +1145,9 @@ __attribute__((constructor)) static void llvm_style_ctor(void) {}
                 "expected .init_array among {sections:?}"
             );
             assert!(
-                StripError::VerificationFailed { sections }.to_string().contains("LIM-010"),
+                StripError::VerificationFailed { sections }
+                    .to_string()
+                    .contains("LIM-010"),
                 "post-condition failure is untagged"
             );
         }
@@ -1012,7 +1619,10 @@ fn test_multi_root_sibling_dirs_do_not_collide_on_module_prefix() {
     assert_eq!(compiler_root, src, "multi-root naming must use the shared ancestor");
     let app_prefix = module_prefix_from_path(&app_init, &app_root);
     let compiler_prefix = module_prefix_from_path(&compiler_init, &compiler_root);
-    assert_ne!(app_prefix, compiler_prefix, "sibling roots must not collide after sanitization");
+    assert_ne!(
+        app_prefix, compiler_prefix,
+        "sibling roots must not collide after sanitization"
+    );
     assert_eq!(app_prefix, "app____init__");
     assert_eq!(compiler_prefix, "compiler____init__");
 
@@ -1081,10 +1691,21 @@ fn test_collect_spl_files() {
     std::fs::write(dir.join("b.txt"), "not spl").unwrap();
     std::fs::create_dir(dir.join("sub")).unwrap();
     std::fs::write(dir.join("sub/c.spl"), "# test").unwrap();
+    std::fs::create_dir_all(dir.join("cli")).unwrap();
+    std::fs::write(dir.join("cli/check.spl"), "# production check command").unwrap();
+    std::fs::write(dir.join("cli/arch_check.spl"), "# production check command").unwrap();
+    std::fs::create_dir_all(dir.join("check.spl.assets")).unwrap();
+    std::fs::write(dir.join("check.spl.assets/ordinary.spl"), "# nested production module").unwrap();
 
     let mut files = Vec::new();
     collect_spl_files_recursive(dir, &mut files);
-    assert_eq!(files.len(), 2);
+    assert_eq!(files.len(), 5);
+    assert!(files.contains(&dir.join("a.spl")));
+    assert!(files.contains(&dir.join("sub/c.spl")));
+    assert!(files.contains(&dir.join("cli/check.spl")));
+    assert!(files.contains(&dir.join("cli/arch_check.spl")));
+    assert!(files.contains(&dir.join("check.spl.assets/ordinary.spl")));
+    assert!(!files.contains(&dir.join("b.txt")));
 }
 
 #[test]
@@ -1129,8 +1750,8 @@ fn test_security_registry_init_source_filters_and_escapes() {
         "capability == \"engine2d-composited-glass-material-v1\" or ready\n"
     ));
 
-    let escaped = cxx_raw_string_literal("before )SECURITY_SDN\" after");
-    assert!(!escaped.contains(")SECURITY_SDN\""));
+    let escaped = c_string_literal("before \\ and \"quote\"\n after");
+    assert_eq!(escaped, "before \\\\ and \\\"quote\\\"\\n\"\n\" after");
 }
 
 #[test]
@@ -1350,10 +1971,23 @@ fn test_incremental_cache_dir_default() {
     let cache_dir = builder.cache_dir().to_string_lossy().replace('\\', "/");
     // Entries are partitioned by a per-lane scope subdirectory (see
     // doc/05_design/compiler/incremental_build/per_lane_private_caches.md).
-    let parent = builder.cache_dir().parent().unwrap().to_string_lossy().replace('\\', "/");
-    assert!(parent.ends_with("/project/.simple/native_cache"), "unexpected cache dir {cache_dir}");
+    let parent = builder
+        .cache_dir()
+        .parent()
+        .unwrap()
+        .to_string_lossy()
+        .replace('\\', "/");
     assert!(
-        builder.cache_dir().file_name().unwrap().to_string_lossy().starts_with("scope-"),
+        parent.ends_with("/project/.simple/native_cache"),
+        "unexpected cache dir {cache_dir}"
+    );
+    assert!(
+        builder
+            .cache_dir()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("scope-"),
         "unexpected cache dir {cache_dir}"
     );
 }
@@ -1462,7 +2096,12 @@ fn test_incremental_cache_dir_custom() {
         NativeProjectBuilder::new(PathBuf::from("/project"), PathBuf::from("/project/bin/simple")).config(config);
 
     assert_eq!(builder.cache_dir().parent().unwrap(), PathBuf::from("/tmp/my_cache"));
-    assert!(builder.cache_dir().file_name().unwrap().to_string_lossy().starts_with("scope-"));
+    assert!(builder
+        .cache_dir()
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .starts_with("scope-"));
 }
 
 #[test]
@@ -1560,6 +2199,7 @@ fn test_discover_files_includes_explicit_entry_outside_source_dirs() {
     let entry_file = tools_dir.join("main.spl");
     std::fs::write(&lib_file, "fn helper(): pass").unwrap();
     std::fs::write(&entry_file, "fn main(): pass").unwrap();
+    assert!(entry_file.is_absolute());
 
     let builder = NativeProjectBuilder::new(project_root.clone(), project_root.join("bin/tool"))
         .config(NativeBuildConfig {
@@ -1848,9 +2488,11 @@ fn test_bootstrap_entry_closure_avoids_driver_package_hub() {
     assert!(!files
         .iter()
         .any(|path| path.starts_with(repo_root.join("src/app/leak_finder"))));
-    assert!(!files
+    let rust_std_mirror: Vec<_> = files
         .iter()
-        .any(|path| path.starts_with(repo_root.join("src/compiler_rust/lib/std/src"))));
+        .filter(|path| path.starts_with(repo_root.join("src/compiler_rust/lib/std/src")))
+        .collect();
+    assert!(rust_std_mirror.is_empty(), "bootstrap closure reached the seed std mirror: {rust_std_mirror:?}");
 }
 
 #[test]
@@ -1967,7 +2609,7 @@ void rt_process_run(void) {}
         .status()
         .unwrap()
         .success());
-    let tool = find_archive_tool();
+    let tool = find_archive_tool().unwrap();
     assert!(
         archive_create_command(&tool, &runtime, std::slice::from_ref(&object), false, false)
             .status()
@@ -2122,6 +2764,18 @@ fn test_core_lane_runtime_archives_expose_required_abi_symbols() {
     assert!(core_c_symbols.contains("rt_crc32_text"));
     assert!(core_c_symbols.contains("rt_file_create_excl"));
     assert!(core_c_symbols.contains("rt_file_sync"));
+    for symbol in [
+        "rt_file_view_open_beneath_no_follow_v1",
+        "rt_file_view_pread_exact_v1",
+        "rt_file_view_close_v1",
+        "rt_pinned_archive_open_beneath_v1",
+        "rt_pinned_archive_close_v1",
+    ] {
+        assert!(
+            core_c_symbols.contains(symbol),
+            "core-c runtime archive must include file-view provider `{symbol}`"
+        );
+    }
     assert!(core_c_symbols.contains("rt_bytes_alloc"));
     for symbol in [
         "rt_getpid",
@@ -2273,6 +2927,7 @@ fn test_core_c_runtime_target_flags_cover_aarch64_atomics_and_riscv_vectors() {
     assert_eq!(
         core_c_target_flags(
             Target::new(TargetArch::Aarch64, TargetOS::Linux),
+            "clang",
             "runtime_native.c",
             false
         ),
@@ -2281,6 +2936,7 @@ fn test_core_c_runtime_target_flags_cover_aarch64_atomics_and_riscv_vectors() {
     assert_eq!(
         core_c_target_flags(
             Target::new(TargetArch::Riscv64, TargetOS::Linux),
+            "clang",
             "runtime_simd_dispatch.c",
             true
         ),
@@ -2288,10 +2944,24 @@ fn test_core_c_runtime_target_flags_cover_aarch64_atomics_and_riscv_vectors() {
     );
     assert!(core_c_target_flags(
         Target::new(TargetArch::Riscv64, TargetOS::Linux),
+        "clang",
         "runtime_native.c",
         true
     )
     .is_empty());
+}
+
+#[test]
+fn test_windows_gnu_target_flag_is_only_for_clang_drivers() {
+    use simple_common::target::Target;
+
+    let target = Target::parse("x86_64-pc-windows-gnu").unwrap();
+    assert_eq!(target_c_compiler(target), "clang");
+    assert_eq!(
+        windows_gnu_target_flag(target, "clang"),
+        Some("--target=x86_64-w64-windows-gnu")
+    );
+    assert_eq!(windows_gnu_target_flag(target, "x86_64-w64-mingw32-gcc"), None);
 }
 
 #[cfg(target_os = "linux")]
@@ -2569,6 +3239,9 @@ fn test_compiler_backfill_archive_keeps_exact_manifest_and_localizes_dependency_
         &[r#"
 void hidden_helper(void) {}
 void rt_cranelift_requested_hook(void) { hidden_helper(); }
+void spl_cranelift_new_aot_module_config_v2(void) { hidden_helper(); }
+void spl_cranelift_aot_isa_feature_v2(void) { hidden_helper(); }
+void spl_cranelift_aot_opt_level_v2(void) { hidden_helper(); }
 __attribute__((constructor)) static void compiler_ctor(void) { hidden_helper(); }
 "#],
     );
@@ -2579,13 +3252,16 @@ __attribute__((constructor)) static void compiler_ctor(void) { hidden_helper(); 
     assert_eq!(output, output_dir.join("libsimple_compiler_backfill.a"));
     let (defined, undefined) = super::tools::archive_global_symbols(&output).unwrap();
     assert_eq!(defined.get("rt_cranelift_requested_hook"), Some(&1));
+    assert_eq!(defined.get("spl_cranelift_new_aot_module_config_v2"), Some(&1));
+    assert_eq!(defined.get("spl_cranelift_aot_isa_feature_v2"), Some(&1));
+    assert_eq!(defined.get("spl_cranelift_aot_opt_level_v2"), Some(&1));
     assert!(!defined.contains_key("hidden_helper"));
-    assert_eq!(defined.len(), 1);
+    assert_eq!(defined.len(), 4);
     assert!(!undefined
         .iter()
         .any(|symbol| symbol.starts_with("rt_") || symbol.starts_with("spl_")));
     assert_eq!(archive_members(&output).unwrap(), ["compiler_backfill_local.o"]);
-    let symbols = nm_command().arg("--defined-only").arg(&output).output().unwrap();
+    let symbols = nm_command().unwrap().arg("--defined-only").arg(&output).output().unwrap();
     assert!(symbols.status.success());
     let symbols = String::from_utf8_lossy(&symbols.stdout);
     assert!(symbols.lines().any(|line| {
@@ -2684,6 +3360,19 @@ fn test_compiler_backfill_archive_rejects_provider_symbol_overlap() {
 
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 #[test]
+fn test_stage4_compiler_core_c_omits_cranelift_stubs() {
+    let temp = tempfile::tempdir().unwrap();
+    let runtime = super::tools::build_stage4_compiler_core_c_runtime_library(temp.path())
+        .expect("Stage4 compiler core-C archive should build");
+    let members = archive_members(&runtime).unwrap();
+    assert!(!members.iter().any(|member| member == "runtime_cranelift_bridge_stub.o"));
+    let (defined, _) = super::tools::archive_global_symbols(&runtime).unwrap();
+    assert!(defined.contains_key("rt_string_new"));
+    assert!(!defined.keys().any(|symbol| symbol.starts_with("rt_cranelift_") || symbol.starts_with("spl_cranelift_")));
+}
+
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[test]
 fn test_stage4_cli_c_provider_archives_have_exact_members_and_contracts() {
     let temp = tempfile::tempdir().unwrap();
     let archives = build_stage4_cli_c_provider_archives(temp.path()).unwrap();
@@ -2711,7 +3400,87 @@ fn test_stage4_cli_c_providers_are_disjoint_from_current_core_c() {
     );
     let providers = build_stage4_cli_c_provider_archives(&temp.path().join("providers")).unwrap();
 
+    let (core_defined, _) = super::tools::archive_global_symbols(&core).unwrap();
+    for symbol in [
+        "copy_mem",
+        "rt_alloc",
+        "rt_free",
+        "rt_mem_guard_stats",
+        "rt_memcpy",
+        "rt_memset",
+        "rt_ptr_read_i32",
+        "rt_ptr_read_i64",
+        "rt_ptr_read_u8",
+        "rt_ptr_write_bytes_raw",
+        "rt_ptr_write_i16",
+        "rt_ptr_write_i32",
+        "rt_ptr_write_i64",
+        "rt_ptr_write_u8",
+        "rt_realloc",
+        "rt_struct_alloc",
+        "rt_struct_receiver_valid",
+    ] {
+        assert_eq!(
+            core_defined.get(symbol),
+            Some(&1),
+            "core-C must have one memory provider for `{symbol}`"
+        );
+    }
+    for symbol in [
+        "rt_mem_harden_check_native",
+        "rt_mem_profile_abi_version",
+        "rt_mem_profile_features",
+        "rt_ptr_read_i32",
+        "rt_transient_raw_scope_begin",
+        "rt_transient_raw_scope_end",
+        "spl_i64_is_zero",
+    ] {
+        assert!(
+            core_defined.contains_key(symbol),
+            "core-C must retain runtime_memory export `{symbol}`"
+        );
+    }
+
     validate_stage4_cli_c_provider_archive_disjointness(&core, &compiler, &providers).unwrap();
+}
+
+#[test]
+fn pure_simple_runtime_bundle_separates_memory_and_hosted_ownership() {
+    let source = include_str!("../../../../../compiler/70.backend/backend/runtime_compiler.spl");
+    for (memory_flag, standalone_flag, dynload_flag) in [
+        (
+            "comp_args.push(\"/DSIMPLE_RUNTIME_MEMORY_OWNER=1\")",
+            "comp_args.push(\"/DSIMPLE_CORE_C_STANDALONE=1\")",
+            "comp_args.push(\"/DSIMPLE_RUNTIME_DYNLOAD_OWNER=1\")",
+        ),
+        (
+            "comp_args.push(\"-DSIMPLE_RUNTIME_MEMORY_OWNER=1\")",
+            "comp_args.push(\"-DSIMPLE_CORE_C_STANDALONE=1\")",
+            "comp_args.push(\"-DSIMPLE_RUNTIME_DYNLOAD_OWNER=1\")",
+        ),
+    ] {
+        assert_eq!(
+            source.matches(memory_flag).count(),
+            1,
+            "memory-owner flag must be emitted once per compiler flavor"
+        );
+        assert_eq!(
+            source.matches(standalone_flag).count(),
+            1,
+            "memory-owner flag must be emitted once per compiler flavor"
+        );
+        assert_eq!(
+            source.matches(dynload_flag).count(),
+            1,
+            "dynload-owner flag must be emitted once per compiler flavor"
+        );
+        assert!(
+            source.find(memory_flag).unwrap() < source.find(standalone_flag).unwrap(),
+            "memory ownership must be selected before the include_dynload-only standalone branch"
+        );
+        assert!(source.find(standalone_flag).unwrap() < source.find(dynload_flag).unwrap());
+    }
+    assert!(source.contains("if include_dynload:\n                # Only the standalone core-C composition"));
 }
 
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
@@ -3104,6 +3873,66 @@ __attribute__((constructor)) static void discarded_ctor(void) { retained_helper(
     assert_eq!(archive_members(&output).unwrap(), ["stage4_runtime_capsule_local.o"]);
 }
 
+/// The Stage4 entry stub writes argv through core-C.  Keep every public argv
+/// reader in the same capsule: if one is localized, the Rust staticlib can
+/// provide a different strong reader and commands silently see an empty argv.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[test]
+fn test_stage4_core_c_argv_capsule_exports_one_initialized_provider_family() {
+    let temp = tempfile::tempdir().unwrap();
+    let core = build_core_c_runtime_library(&temp.path().join("core")).unwrap();
+    let providers = build_stage4_cli_c_provider_archives(&temp.path().join("providers")).unwrap();
+    let requested = super::linker::STAGE4_CORE_C_ARGV_PROVIDER_SYMBOLS
+        .iter()
+        .map(|symbol| (*symbol).to_string())
+        .collect::<Vec<_>>();
+    let capsule =
+        build_stage4_runtime_capsule_archive(&core, &providers, &requested, &temp.path().join("capsule")).unwrap();
+
+    let (defined, undefined) = super::tools::archive_global_symbols(&capsule).unwrap();
+    assert_eq!(
+        defined,
+        requested
+            .iter()
+            .map(|symbol| (symbol.clone(), 1))
+            .collect::<std::collections::BTreeMap<_, _>>()
+    );
+    assert!(!undefined
+        .iter()
+        .any(|symbol| symbol.starts_with("rt_") || symbol.starts_with("spl_")));
+
+    run_stage4_c_probe(
+        temp.path(),
+        "stage4_core_c_argv_provider_probe",
+        r#"
+#include <string.h>
+#include <stdint.h>
+
+extern void rt_set_args(int, char **);
+extern int64_t spl_arg_count(void);
+extern const char *spl_get_arg(int64_t);
+extern int64_t rt_cli_arg_count(void);
+
+int main(void) {
+    char first[] = "simple";
+    char second[] = "native-build";
+    char third[] = "--help";
+    char *argv[] = { first, second, third };
+    rt_set_args(3, argv);
+    if (spl_arg_count() != 3 || rt_cli_arg_count() != 3) return 1;
+    if (strcmp(spl_get_arg(1), "native-build") != 0) return 2;
+    if (strcmp(spl_get_arg(2), "--help") != 0) return 3;
+    return 0;
+}
+"#,
+        &[&capsule],
+        // Stage4 executables link -no-pie (linker.rs stage4 link flags); the
+        // capsule is a non-PIC `-r` closure, so the probe must match.
+        &["-no-pie", "-lm", "-lpthread", "-ldl"],
+        &[],
+    );
+}
+
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 #[test]
 fn test_stage4_linux_exact_core_projects_fail_closed_platform_abi() {
@@ -3174,6 +4003,24 @@ int main(void) {
 
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 #[test]
+fn test_stage4_rust_runtime_projection_allows_no_live_rust_roots() {
+    let temp = tempfile::tempdir().unwrap();
+    let output = build_stage4_rust_runtime_projection_archive(
+        &temp.path().join("unneeded_runtime.a"),
+        &[],
+        &[],
+        &temp.path().join("projection"),
+    )
+    .unwrap();
+
+    assert!(archive_members(&output).unwrap().is_empty());
+    let (defined, undefined) = super::tools::archive_global_symbols(&output).unwrap();
+    assert!(defined.is_empty());
+    assert!(undefined.is_empty());
+}
+
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[test]
 fn test_stage4_rust_runtime_projection_keeps_roots_and_allowed_runtime_externals_only() {
     let temp = tempfile::tempdir().unwrap();
     let rust_runtime = build_compiler_backfill_test_archive(
@@ -3209,6 +4056,53 @@ __attribute__((constructor)) static void discarded_ctor(void) { rt_unrequested_e
         ["rt_adjacent_capsule"]
     );
     assert_eq!(archive_members(&output).unwrap(), ["stage4_rust_runtime_local.o"]);
+}
+
+// Reproduces the macOS Stage4 link gate 2026-09-07: Rust's own C-ABI runtime
+// exports (`#[no_mangle] pub extern "C" fn rt_array_get`, etc. in
+// runtime/src/value/collections.rs) are always STRONG on stable Rust -- there
+// is no portable `#[linkage = "weak"]`. When one of those symbols shares an
+// object/codegen-unit with a requested root, `ld -r` cannot drop it from the
+// closure, so it rides along even though nothing requested it. If that
+// symbol is also owned by the core-C providers (an `allowed_external`
+// runtime symbol), the projection must demote it to WEAK so the outer C
+// definition can still win the final link -- the whole point of
+// `allowed_external`. Before the 2026-09-07 fix this fixture failed with
+// "Stage4 runtime capsule defines owner-provided runtime symbols STRONGLY".
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn test_stage4_rust_runtime_projection_weakens_owner_provided_passenger_symbol() {
+    let temp = tempfile::tempdir().unwrap();
+    // `rt_passenger_owned` sits in the SAME translation unit as the requested
+    // root `rt_projected_root2`, mimicking a Rust codegen unit that bundles
+    // multiple `#[no_mangle]` exports into one object: pulling in the root
+    // for liveness necessarily pulls in the passenger too, strong and all.
+    let rust_runtime = build_compiler_backfill_test_archive(
+        temp.path(),
+        "stage4_rust_runtime_source2",
+        &[r#"
+void rt_projected_root2(void) { }
+void rt_passenger_owned(void) { }
+"#],
+    );
+    let output = build_stage4_rust_runtime_projection_archive(
+        &rust_runtime,
+        &["rt_projected_root2".to_string()],
+        &["rt_passenger_owned".to_string()],
+        &temp.path().join("projection2"),
+    )
+    .unwrap();
+
+    let (defined, _undefined) = super::tools::archive_global_symbols(&output).unwrap();
+    let weak = super::tools::archive_weak_global_symbols(&output).unwrap();
+    assert!(
+        defined.keys().any(|raw| raw.trim_start_matches('_') == "rt_passenger_owned"),
+        "passenger symbol must still be present (kept global, not localized): {defined:?}"
+    );
+    assert!(
+        weak.iter().any(|raw| raw.trim_start_matches('_') == "rt_passenger_owned"),
+        "owner-provided passenger symbol must be demoted to WEAK so the outer C definition can override it, found strong: {weak:?}"
+    );
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -3292,6 +4186,105 @@ fn test_stage4_compiler_entry_authorization_requires_both_envs_and_exact_entry()
     match old_compiler_entry {
         Some(value) => unsafe { std::env::set_var("SIMPLE_COMPILER_ENTRY_STAGE4", value) },
         None => unsafe { std::env::remove_var("SIMPLE_COMPILER_ENTRY_STAGE4") },
+    }
+}
+
+/// The Stage4 compiler entry may link the SHARED runtime.
+///
+/// Pre-fix this test fails at the lane assertion: `dynamic-runtime` was not a
+/// name `resolve_runtime_lane` knew, so it fell through to `core-c-bootstrap`,
+/// and `selected_runtime_library` then short-circuited every authorized Stage4
+/// entry onto the core-C static archive -- hard-erroring "Stage4 compiler entry
+/// requires the core-c-bootstrap runtime lane" for any other lane. The shared
+/// `libsimple_runtime.so` was therefore unreachable and the Stage4 link died
+/// with 167 unresolved `rt_*` symbols. Simple does not unwind, so nothing about
+/// that archive was load-bearing for the compiler binary.
+///
+/// The other two assertions pin the scope of the change: the lane is refused for
+/// a non-Stage4 entry, and it is never inferred -- only an explicit
+/// `--runtime-bundle dynamic-runtime` selects it.
+#[cfg(target_os = "linux")]
+#[test]
+fn test_stage4_compiler_entry_dynamic_runtime_lane_selects_the_shared_library() {
+    let _guard = runtime_bundle_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let old_compiler_entry = std::env::var_os("SIMPLE_COMPILER_ENTRY_STAGE4");
+    let old_bundle = std::env::var_os("SIMPLE_NATIVE_RUNTIME_BUNDLE");
+    let old_runtime_path = std::env::var_os("SIMPLE_RUNTIME_PATH");
+    unsafe {
+        std::env::remove_var("SIMPLE_NATIVE_RUNTIME_BUNDLE");
+        std::env::remove_var("SIMPLE_RUNTIME_PATH");
+        std::env::set_var("SIMPLE_COMPILER_ENTRY_STAGE4", "1");
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let runtime_dir = temp.path().join("runtime");
+    std::fs::create_dir_all(&runtime_dir).unwrap();
+    let shared = runtime_dir.join("libsimple_runtime.so");
+    std::fs::write(&shared, b"\x7fELF-not-really-but-non-empty").unwrap();
+
+    let entry = temp.path().join("src/compiler/80.driver/main.spl");
+    std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
+    std::fs::write(&entry, "fn main() -> i64: 0\n").unwrap();
+
+    let dynamic_config = NativeBuildConfig {
+        runtime_path: Some(runtime_dir.clone()),
+        runtime_bundle: "dynamic-runtime".to_string(),
+        ..Default::default()
+    };
+    let builder = NativeProjectBuilder::new(temp.path().to_path_buf(), temp.path().join("out/simple"))
+        .config(dynamic_config)
+        .entry_file(entry.clone());
+    assert!(builder.is_authorized_stage4_compiler_entry());
+    assert_eq!(builder.resolve_runtime_lane().display_name(), "dynamic-runtime");
+
+    // THE regression assertion: pre-fix this was
+    // Err("Stage4 compiler entry requires the core-c-bootstrap runtime lane").
+    let (selected, is_native_all) = builder
+        .selected_runtime_library(temp.path())
+        .expect("the Stage4 compiler entry must be allowed onto the dynamic runtime lane")
+        .expect("the dynamic lane must select a runtime library");
+    assert_eq!(selected, shared);
+    assert!(!is_native_all);
+
+    // Scope 1: the lane is refused for an entry that is not the Stage4 compiler.
+    let other_entry = temp.path().join("src/app/tool/main.spl");
+    std::fs::create_dir_all(other_entry.parent().unwrap()).unwrap();
+    std::fs::write(&other_entry, "fn main() -> i64: 0\n").unwrap();
+    let other_config = NativeBuildConfig {
+        runtime_path: Some(runtime_dir.clone()),
+        runtime_bundle: "dynamic-runtime".to_string(),
+        ..Default::default()
+    };
+    let other = NativeProjectBuilder::new(temp.path().to_path_buf(), temp.path().join("other-out"))
+        .config(other_config)
+        .entry_file(other_entry);
+    let err = other
+        .selected_runtime_library(temp.path())
+        .expect_err("only the Stage4 compiler entry may use the dynamic lane");
+    assert!(err.contains("dynamic-runtime lane is available only"), "{err}");
+
+    // Scope 2: the lane is never inferred. Without the explicit bundle the same
+    // Stage4 entry still resolves to the core-C lane it always did.
+    let auto_config = NativeBuildConfig {
+        runtime_path: Some(runtime_dir),
+        ..Default::default()
+    };
+    let auto = NativeProjectBuilder::new(temp.path().to_path_buf(), temp.path().join("auto-out"))
+        .config(auto_config)
+        .entry_file(entry);
+    assert_eq!(auto.resolve_runtime_lane().display_name(), "core-c-bootstrap");
+
+    match old_compiler_entry {
+        Some(value) => unsafe { std::env::set_var("SIMPLE_COMPILER_ENTRY_STAGE4", value) },
+        None => unsafe { std::env::remove_var("SIMPLE_COMPILER_ENTRY_STAGE4") },
+    }
+    match old_bundle {
+        Some(value) => unsafe { std::env::set_var("SIMPLE_NATIVE_RUNTIME_BUNDLE", value) },
+        None => unsafe { std::env::remove_var("SIMPLE_NATIVE_RUNTIME_BUNDLE") },
+    }
+    match old_runtime_path {
+        Some(value) => unsafe { std::env::set_var("SIMPLE_RUNTIME_PATH", value) },
+        None => unsafe { std::env::remove_var("SIMPLE_RUNTIME_PATH") },
     }
 }
 
@@ -3444,7 +4437,7 @@ fn test_stage4_compiler_entries_select_only_dedicated_compiler_backfill() {
     for entry in [focused_entry, full_entry, os_entry] {
         for (bundle, expected) in [
             ("hosted", "removed Rust-hosted runtime bundles"),
-            ("simple-core", "requires the core-c-bootstrap runtime lane"),
+            ("simple-core", "requires the core-c-bootstrap or dynamic-runtime runtime lane"),
         ] {
             let mut rejected = NativeBuildConfig {
                 runtime_path: Some(runtime_path.clone()),
@@ -3508,10 +4501,49 @@ fn test_core_c_runtime_native_focus_contract() {
     );
 }
 
+#[test]
+fn test_core_c_runtime_owns_required_ascii_text_family() {
+    let temp = tempfile::tempdir().unwrap();
+    let runtime = build_core_c_runtime_library(temp.path()).expect("core-c runtime archive should build");
+    let symbols = archive_defined_symbols(&runtime).expect("core-c runtime symbols should be readable");
+    for symbol in ["rt_text_is_ascii", "rt_text_to_lower_ascii", "rt_text_to_upper_ascii"] {
+        assert!(symbols.contains(symbol), "core-c runtime must own `{symbol}`");
+    }
+}
+
+#[test]
+fn test_core_c_runtime_owns_tool_host_service_family() {
+    let temp = tempfile::tempdir().unwrap();
+    let runtime = build_core_c_runtime_library(temp.path()).expect("core-c runtime archive should build");
+    let symbols = archive_defined_symbols(&runtime).expect("core-c runtime symbols should be readable");
+    for symbol in [
+        "rt_process_run_owned_observed_bounded_value",
+        "rt_hostname",
+        "rt_unix_socket_connect",
+        "rt_metal_is_available",
+        "rt_coverage_clear",
+        "rt_coverage_dump_sdn",
+        "rt_package_chmod",
+        "rt_is_debug_mode_enabled",
+        "rt_file_stat",
+        "rt_process_exists",
+        "rt_ptr_read_i32",
+        "rt_string_index_of",
+        "rt_array_max",
+        "rt_array_sort",
+        "max",
+        "f64.sqrt",
+        "f64.floor",
+        "f64.ceil",
+    ] {
+        assert!(symbols.contains(symbol), "core-c runtime must own `{symbol}`");
+    }
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn test_struct_receiver_guard_native_contract() {
-    let _guard = runtime_bundle_env_lock().lock().unwrap();
+    let _guard = runtime_bundle_env_lock().lock().unwrap_or_else(|e| e.into_inner());
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
@@ -3734,7 +4766,7 @@ fn test_runtime_bundle_hosted_is_allowed_for_bootstrap_entry_only() {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn test_bootstrap_mutex_capsule_exports_only_canonical_bootstrap_abi() {
     let _guard = runtime_bundle_env_lock().lock().unwrap_or_else(|e| e.into_inner());
@@ -3752,10 +4784,28 @@ fn test_bootstrap_mutex_capsule_exports_only_canonical_bootstrap_abi() {
         "rt_mem_snapshot_open",
         "rt_mem_snapshot_record",
         "rt_mem_snapshot_close",
+        "rt_file_create_excl",
+        "rt_file_sync",
+        "rt_simple_abi_version",
+        "rt_simple_abi_version_deferred",
     ]
     .into_iter()
     .map(str::to_string)
     .collect::<std::collections::BTreeSet<_>>();
+    let secure_staging = ["rt_secure_temp_dir", "rt_file_publish_noreplace"]
+        .into_iter()
+        .map(str::to_string)
+        .collect::<std::collections::BTreeSet<_>>();
+    // `defined` is a BTreeMap<String, usize>, not a set, so intersect over its keys.
+    // Trim the leading '_' the same way the rest of this test does (Mach-O mangling).
+    assert_eq!(
+        defined
+            .keys()
+            .filter(|symbol| secure_staging.contains(symbol.trim_start_matches('_')))
+            .count(),
+        0,
+        "bootstrap supplement must not duplicate the full Rust runtime's secure-staging provider"
+    );
     // rt_heap_live_bytes / rt_heap_peak_bytes are OWNED by the outer (Rust)
     // runtime. runtime_memtrack.c ships them as WEAK fallbacks (93e0b028ffb), so
     // the capsule may carry them only as weak globals the owner overrides --
@@ -3786,7 +4836,10 @@ fn test_bootstrap_mutex_capsule_exports_only_canonical_bootstrap_abi() {
             "{symbol} must be owner-overridable (weak or undefined) in the capsule, found strong/local"
         );
     }
-    assert!(unresolved_runtime.is_subset(&owner_provided), "unexpected unresolved: {unresolved_runtime:?}");
+    assert!(
+        unresolved_runtime.is_subset(&owner_provided),
+        "unexpected unresolved: {unresolved_runtime:?}"
+    );
 }
 
 #[cfg(target_os = "linux")]
@@ -3807,10 +4860,9 @@ fn test_runtime_bundle_host_gpu_rejects_missing_engine2d_queue_symbols() {
     config.runtime_bundle = "host-gpu".to_string();
     let builder = NativeProjectBuilder::new(PathBuf::from("/project"), temp.path().join("engine2d")).config(config);
 
-    let error = builder.selected_runtime_library(temp.path()).unwrap_err();
-    assert!(error.contains("missing Engine2D queue symbols"));
-    assert!(error.contains("rt_host_gpu_queue_emit_payload"));
-    assert!(error.contains("rt_host_gpu_queue_emit_payload_text"));
+    let selected = builder.selected_runtime_library(temp.path()).unwrap().unwrap();
+    assert!(selected.0.ends_with("host_gpu_core_c_runtime/libsimple_runtime.a"));
+    assert!(!selected.1);
 }
 
 #[cfg(target_os = "linux")]
@@ -3829,9 +4881,9 @@ fn test_runtime_bundle_host_gpu_discovers_cargo_deps_runtime_archive() {
     config.runtime_bundle = "host-gpu".to_string();
     let builder = NativeProjectBuilder::new(PathBuf::from("/project"), temp.path().join("engine2d")).config(config);
 
-    let error = builder.selected_runtime_library(temp.path()).unwrap_err();
-    assert!(error.contains("missing Engine2D queue symbols"));
-    assert!(!error.contains("feature-built libsimple_runtime.a is missing"));
+    let selected = builder.selected_runtime_library(temp.path()).unwrap().unwrap();
+    assert!(selected.0.ends_with("host_gpu_core_c_runtime/libsimple_runtime.a"));
+    assert!(!selected.1);
 }
 
 #[cfg(target_os = "linux")]
@@ -3850,7 +4902,9 @@ fn test_runtime_bundle_host_gpu_discovers_target_root_bootstrap_authority() {
     config.runtime_bundle = "host-gpu".to_string();
     let builder = NativeProjectBuilder::new(PathBuf::from("/project"), temp.path().join("checker")).config(config);
 
-    assert_eq!(builder.selected_runtime_library(temp.path()).unwrap(), Some((runtime, false)));
+    let selected = builder.selected_runtime_library(temp.path()).unwrap().unwrap();
+    assert!(selected.0.ends_with("host_gpu_core_c_runtime/libsimple_runtime.a"));
+    assert!(!selected.1);
     assert_eq!(find_hosted_runtime_rlib(&target_root), Some(hosted));
 }
 
@@ -3870,7 +4924,9 @@ fn test_runtime_bundle_host_gpu_accepts_adjacent_bootstrap_root() {
     config.runtime_bundle = "host-gpu".to_string();
     let builder = NativeProjectBuilder::new(PathBuf::from("/project"), temp.path().join("checker")).config(config);
 
-    assert_eq!(builder.selected_runtime_library(temp.path()).unwrap(), Some((runtime, false)));
+    let selected = builder.selected_runtime_library(temp.path()).unwrap().unwrap();
+    assert!(selected.0.ends_with("host_gpu_core_c_runtime/libsimple_runtime.a"));
+    assert!(!selected.1);
     assert_eq!(find_hosted_runtime_rlib(&bootstrap_root), Some(hosted));
 }
 
@@ -3886,8 +4942,9 @@ fn test_runtime_bundle_host_gpu_missing_authority_fails_closed() {
     config.runtime_bundle = "host-gpu".to_string();
     let builder = NativeProjectBuilder::new(PathBuf::from("/project"), temp.path().join("checker")).config(config);
 
-    let error = builder.selected_runtime_library(temp.path()).unwrap_err();
-    assert!(error.contains("feature-built libsimple_runtime.a is missing"));
+    let selected = builder.selected_runtime_library(temp.path()).unwrap().unwrap();
+    assert!(selected.0.ends_with("host_gpu_core_c_runtime/libsimple_runtime.a"));
+    assert!(!selected.1);
     assert_eq!(find_hosted_runtime_rlib(temp.path()), None);
 }
 
@@ -4051,6 +5108,89 @@ fn test_freestanding_linker_uses_c_compiler_without_runtime_bundle_probe() {
 }
 
 #[test]
+fn selective_alias_prefers_exact_owner_over_nested_same_named_wrapper() {
+    let owner = "compiler__loader__smf_mmap_native__native_munmap".to_string();
+    let wrapper = "compiler__loader__loader__smf_mmap_native__native_munmap".to_string();
+    let all_mangled = std::collections::HashMap::from([
+        ("native_munmap".to_string(), vec![wrapper, owner.clone()]),
+        (
+            "stderr_write".to_string(),
+            vec!["lib__nogc_sync_mut__io__stderr_ops__stderr_write".to_string()],
+        ),
+    ]);
+    let source = "use compiler.loader.smf_mmap_native.{native_munmap as owner_munmap}\n\
+                  use std.io.stderr_ops.{stderr_write}\n\
+                  fn native_munmap(address: i64, size: i64) -> bool:\n    owner_munmap(address, size)\n";
+    let ast = simple_parser::Parser::new(source).parse().unwrap();
+    let use_map = super::imports::build_use_map_from_ast(
+        &ast,
+        &all_mangled,
+        &std::collections::HashMap::new(),
+    );
+
+    assert_eq!(use_map.get("owner_munmap"), Some(&owner));
+    let reduced_owner = "loader__owner__native_probe_value".to_string();
+    let reduced = std::collections::HashMap::from([(
+        "native_probe_value".to_string(),
+        vec![
+            "loader__loader__owner__native_probe_value".to_string(),
+            reduced_owner.clone(),
+        ],
+    )]);
+    let reduced_ast = simple_parser::Parser::new(
+        "use loader.owner.{native_probe_value as owner_probe_value}\n",
+    )
+    .parse()
+    .unwrap();
+    let reduced_use_map = super::imports::build_use_map_from_ast(
+        &reduced_ast,
+        &reduced,
+        &std::collections::HashMap::new(),
+    );
+    assert_eq!(reduced_use_map.get("owner_probe_value"), Some(&reduced_owner));
+    // The tier-inserted std/lib spelling has no exact path. Preserve its
+    // existing subsequence fallback while fixing the nested-owner collision.
+    assert_eq!(
+        use_map.get("stderr_write").map(String::as_str),
+        Some("lib__nogc_sync_mut__io__stderr_ops__stderr_write"),
+    );
+}
+
+#[cfg(not(target_os = "windows"))]
+#[test]
+fn selective_alias_nested_owner_archive_has_no_bare_alias_reference() {
+    let repo_root = repo_root_for_native_project_tests();
+    let source_root = repo_root.join("test/fixtures/macos_alias_link");
+    let temp = tempfile::tempdir().unwrap();
+    let archive = temp.path().join("libalias_probe.a");
+    NativeProjectBuilder::new(repo_root, archive.clone())
+        .config(NativeBuildConfig {
+            emit_archive: true,
+            entry_closure: true,
+            incremental: false,
+            ..NativeBuildConfig::default()
+        })
+        .source_dir(source_root.clone())
+        .entry_file(source_root.join("main.spl"))
+        .build()
+        .unwrap();
+
+    let symbols = std::process::Command::new("nm")
+        .arg("-g")
+        .arg(&archive)
+        .output()
+        .unwrap();
+    assert!(symbols.status.success());
+    let stdout = String::from_utf8_lossy(&symbols.stdout);
+    assert!(stdout.contains("loader__owner__native_probe_value"));
+    assert!(stdout.contains("loader__loader__owner__native_probe_value"));
+    assert!(
+        !stdout.lines().any(|line| line.trim() == "U _owner_probe_value" || line.trim() == "U owner_probe_value"),
+        "unresolved selective-import alias survived object emission:\n{stdout}"
+    );
+}
+
+#[test]
 fn test_build_use_map_glob_import_populates_symbol_entries() {
     let temp = tempfile::tempdir().unwrap();
     let project_root = temp.path().join("project");
@@ -4096,7 +5236,7 @@ fn native_project_fs_platform_aliases_keep_the_sync_path_owner() {
         src_root.join("lib/nogc_sync_mut/platform.spl"),
         src_root.join("lib/nogc_async_mut/path.spl"),
         src_root.join("lib/nogc_async_mut/platform.spl"),
-        src_root.join("std/platform.spl"),
+        src_root.join("lib/platform.spl"),
         src_root.join("lib/nogc_sync_mut/fs.spl"),
         src_root.join("lib/nogc_async_mut/fs.spl"),
     ];
@@ -4136,9 +5276,21 @@ fn aliased_family_facade_rejects_adjacent_duplicate_path_owner() {
     let sync_platform = sync_root.join("platform.spl");
     let gc_path = gc_root.join("path.spl");
     let consumer = sync_root.join("consumer.spl");
-    std::fs::write(&sync_path, "fn normalize_path(path: text) -> text:\n    path\nfn is_absolute_path(path: text) -> bool:\n    true\n").unwrap();
-    std::fs::write(&sync_platform, "export use std.nogc_sync_mut.path.{normalize_path, is_absolute_path}\n").unwrap();
-    std::fs::write(&gc_path, "fn normalize_path(path: text) -> text:\n    \"wrong\"\nfn is_absolute_path(path: text) -> bool:\n    false\n").unwrap();
+    std::fs::write(
+        &sync_path,
+        "fn normalize_path(path: text) -> text:\n    path\nfn is_absolute_path(path: text) -> bool:\n    true\n",
+    )
+    .unwrap();
+    std::fs::write(
+        &sync_platform,
+        "export use std.nogc_sync_mut.path.{normalize_path, is_absolute_path}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        &gc_path,
+        "fn normalize_path(path: text) -> text:\n    \"wrong\"\nfn is_absolute_path(path: text) -> bool:\n    false\n",
+    )
+    .unwrap();
     std::fs::write(&consumer, "use std.nogc_sync_mut.platform.{normalize_path as platform_normalize, is_absolute_path as platform_is_absolute}\n").unwrap();
     let file_sources = [&sync_path, &sync_platform, &gc_path, &consumer]
         .into_iter()
@@ -4151,7 +5303,10 @@ fn aliased_family_facade_rejects_adjacent_duplicate_path_owner() {
     let use_map = super::imports::build_use_map_from_ast(&ast, &result.all_mangled, &result.re_exports);
     let expected_prefix = module_prefix_from_path(&sync_path, &src_root);
 
-    assert_eq!(use_map.get("platform_normalize"), Some(&format!("{expected_prefix}__normalize_path")));
+    assert_eq!(
+        use_map.get("platform_normalize"),
+        Some(&format!("{expected_prefix}__normalize_path"))
+    );
     assert_eq!(
         use_map.get("platform_is_absolute"),
         Some(&format!("{expected_prefix}__is_absolute_path"))
@@ -4497,10 +5652,14 @@ fn test_entry_closure_follows_use_inside_unwrap_or_return_fallback() {
     let fallback_path = src_root.join("lib/fallback_value.spl");
     std::fs::create_dir_all(main_path.parent().unwrap()).unwrap();
     std::fs::create_dir_all(fallback_path.parent().unwrap()).unwrap();
-    std::fs::write(&main_path, "use app.worker.{run_worker}\nfn main() -> i64:\n    return run_worker(nil)\n").unwrap();
+    std::fs::write(
+        &main_path,
+        "use app.worker.{run_worker}\nfn main() -> i64:\n    return run_worker(nil)\n",
+    )
+    .unwrap();
     std::fs::write(
         &worker_path,
-        "fn run_worker(value: i64?) -> i64:\n    val unwrapped = value unwrap or_return: do:\n        use lib.fallback_value.{load_fallback}\n        load_fallback()\n    return unwrapped\n",
+        "fn run_worker(value: i64?) -> i64:\n    val unwrapped = value unwrap or_return: \\:\n        use lib.fallback_value.{load_fallback}\n        load_fallback()\n    return unwrapped\n",
     )
     .unwrap();
     std::fs::write(&fallback_path, "fn load_fallback() -> i64:\n    return 7\n").unwrap();
@@ -4711,6 +5870,51 @@ fn test_build_import_map_records_primitive_return_types() {
         result.fn_return_types.get("vmm_read_pte"),
         Some(&simple_parser::Type::Simple("u64".to_string()))
     );
+}
+
+#[test]
+fn test_duplicate_imported_functions_keep_selected_owner_return_type() {
+    let temp = tempfile::tempdir().unwrap();
+    let src_root = temp.path().join("project/src");
+    let lib_root = src_root.join("lib");
+    let int_path = lib_root.join("int_api.spl");
+    let text_path = lib_root.join("text_api.spl");
+    let caller_path = lib_root.join("caller.spl");
+    std::fs::create_dir_all(&lib_root).unwrap();
+    std::fs::write(&int_path, "pub fn convert(value: i64) -> i64:\n    value + 1\n").unwrap();
+    std::fs::write(&text_path, "pub fn convert(value: i64) -> text:\n    \"wrong\"\n").unwrap();
+    std::fs::write(
+        &caller_path,
+        "use lib.int_api.convert\n\nfn answer() -> i64:\n    val result = convert(41)\n    result\n",
+    )
+    .unwrap();
+
+    let paths = [&int_path, &text_path, &caller_path];
+    let file_sources: Vec<_> = paths
+        .iter()
+        .map(|path| ((*path).clone(), std::fs::read_to_string(path).unwrap()))
+        .collect();
+    let imports = super::imports::build_import_map(&file_sources, std::slice::from_ref(&lib_root), &src_root);
+    assert!(imports.fn_return_types.get("convert").is_none());
+
+    let ast = simple_parser::Parser::new(&std::fs::read_to_string(&caller_path).unwrap())
+        .parse()
+        .unwrap();
+    let use_map = super::imports::build_use_map_from_ast(&ast, &imports.all_mangled, &imports.re_exports);
+    let selected = use_map.get("convert").expect("selective import must resolve an owner");
+    assert_eq!(
+        imports.fn_return_types.get(selected),
+        Some(&simple_parser::Type::Simple("i64".to_string()))
+    );
+
+    let mut lowerer = crate::hir::Lowerer::new();
+    lowerer.set_lenient_types(true);
+    lowerer.set_global_fn_return_types(std::sync::Arc::new(imports.fn_return_types.clone()));
+    lowerer.set_qualified_import_functions(std::sync::Arc::new(use_map));
+    let lowered = lowerer.lower_module(&ast).unwrap();
+    let answer = lowered.functions.iter().find(|function| function.name == "answer").unwrap();
+    let result = answer.locals.iter().find(|local| local.name == "result").unwrap();
+    assert_eq!(result.ty, crate::hir::TypeId::I64);
 }
 
 #[test]
@@ -5476,7 +6680,7 @@ int main(void) { app_call(); return 0; }
         .status()
         .unwrap()
         .success());
-    let tool = find_archive_tool();
+    let tool = find_archive_tool().unwrap();
     assert!(
         archive_create_command(&tool, &runtime_a, std::slice::from_ref(&runtime_o), false, false)
             .status()
@@ -5545,7 +6749,7 @@ int main(void) { app_call(); return 0; }
         .unwrap()
         .success());
     assert!(std::process::Command::new(&linked).status().unwrap().success());
-    let symbols = nm_command().arg("-g").arg(&linked).output().unwrap();
+    let symbols = nm_command().unwrap().arg("-g").arg(&linked).output().unwrap();
     assert!(symbols.status.success());
     assert!(String::from_utf8_lossy(&symbols.stdout)
         .lines()
@@ -5654,7 +6858,68 @@ fn test_compiler_rt_builtin_symbols_are_not_stub_candidates() {
     ));
 }
 
+/// GCC's x86 CPU-feature-dispatch support symbols, defined with real bodies in
+/// libgcc's `cpuinfo.o`. Regression test for the Windows/MinGW GNU-lane
+/// incident where the stub generator fabricated a weak *function* body named
+/// `__cpu_model` for what libgcc actually defines as `.bss` *data*, colliding
+/// at final link as "multiple definition of `__cpu_model`" (`ld.exe` against
+/// `libgcc.a(cpuinfo.o)`).
 #[test]
+fn test_gcc_cpu_dispatch_symbols_are_not_stub_candidates() {
+    assert!(super::tools::is_compiler_rt_builtin_symbol("__cpu_model"));
+    assert!(super::tools::is_compiler_rt_builtin_symbol("__cpu_indicator_init"));
+    assert!(super::tools::is_compiler_rt_builtin_symbol("__cpu_features2"));
+    // Mach-O's extra leading underscore.
+    assert!(super::tools::is_compiler_rt_builtin_symbol("___cpu_model"));
+    // Must stay an EXACT match, not a prefix: an unrelated application symbol
+    // that merely starts with "__cpu" is a real stub candidate and must not
+    // be silently swallowed by this exclusion.
+    assert!(!super::tools::is_compiler_rt_builtin_symbol(
+        "__cpu_scaling_governor_get"
+    ));
+}
+
+#[test]
+/// A fabricated stub returns the tagged-nil sentinel 3, so a stubbed `bcmp`
+/// answers "different" for every comparison. aarch64 clang lowers
+/// equality-only memcmp to `bcmp`, which made `text == text` and
+/// `starts_with` silently false in every native-built binary on this host and
+/// left the Stage-3 admission planner rejecting its own valid
+/// `--bootstrap-reason`. These names must never be stub candidates.
+#[test]
+fn test_libc_names_are_not_stub_candidates() {
+    for symbol in [
+        "bcmp",
+        "strncasecmp",
+        "strpbrk",
+        "strtok_r",
+        "atoi",
+        "isatty",
+        "fsync",
+        "openat",
+        "pread",
+        "pwrite",
+        "localtime_r",
+        "sched_yield",
+        "pthread_once",
+        "pthread_mutex_trylock",
+        "__assert_fail",
+        "__clear_cache",
+        "__sigsetjmp",
+        // glibc >= 2.38 emits these C23 spellings; a host newer than the list
+        // anticipated used to stub them.
+        "__ctype_b_loc",
+        "__isoc23_strtol",
+        "__isoc23_sscanf",
+        "__isoc99_sscanf",
+    ] {
+        assert!(
+            super::tools::is_system_symbol(symbol),
+            "{symbol} must resolve from libc, never be weak-stubbed"
+        );
+    }
+}
+
 fn test_cxx_abi_symbols_are_not_stub_candidates() {
     assert!(super::tools::is_system_symbol("__Znwm"));
     assert!(super::tools::is_system_symbol("_Znwm"));
@@ -5674,6 +6939,7 @@ fn test_cxx_abi_symbols_are_not_stub_candidates() {
     for symbol in [
         "_cfgetispeed",
         "_clock_getres",
+        "_flock",
         "_recvmsg",
         "_sendfile",
         "_sigaltstack",
@@ -5699,6 +6965,32 @@ fn test_cxx_abi_symbols_are_not_stub_candidates() {
         }
     }
     assert!(!super::tools::is_system_symbol("app__mcp__main"));
+}
+
+#[test]
+fn test_mingw_crt_symbols_follow_output_target_not_build_host() {
+    let target = simple_common::target::Target::parse("x86_64-pc-windows-gnu").unwrap();
+    for symbol in [
+        "__main",
+        "_tls_index",
+        "__mingw_strtod",
+        "cbrt",
+        "cosh",
+        "fma",
+        "fmaf",
+        "hypot",
+        "raise",
+        "sinh",
+        "tanh",
+        "wcscmp",
+        "wcscpy",
+    ] {
+        assert!(
+            super::tools::is_system_symbol_for_target(symbol, target),
+            "{symbol} must resolve from the MinGW CRT, never generated stubs"
+        );
+    }
+    assert!(!super::tools::is_system_symbol_for_target("app__main", target));
 }
 
 #[test]
@@ -5806,6 +7098,7 @@ fn empty_module_init_set_still_emits_main_stub_owner() {
     let init_object = builder
         .generate_init_caller(temp.path(), &[], None)
         .unwrap()
+        .0
         .expect("empty init set must still own __simple_call_module_inits");
     let symbols = std::process::Command::new("nm")
         .arg("-g")
@@ -5818,11 +7111,7 @@ fn empty_module_init_set_still_emits_main_stub_owner() {
     let main_object = builder.compile_main_stub(temp.path()).unwrap();
     let args_provider = temp.path().join("args-provider.cpp");
     let args_provider_object = temp.path().join("args-provider.o");
-    std::fs::write(
-        &args_provider,
-        "extern \"C\" void rt_set_args(int, char**) {}\n",
-    )
-    .unwrap();
+    std::fs::write(&args_provider, "extern \"C\" void rt_set_args(int, char**) {}\n").unwrap();
     assert!(std::process::Command::new("c++")
         .args(["-c"])
         .arg(&args_provider)
@@ -5841,9 +7130,9 @@ fn empty_module_init_set_still_emits_main_stub_owner() {
             .unwrap();
         let symbols = String::from_utf8_lossy(&symbols.stdout);
         assert!(symbols.lines().any(|line| line.contains(" U _rt_set_args")));
-        assert!(!symbols.lines().any(|line| {
-            line.contains(" _rt_set_args") && !line.contains(" U _rt_set_args")
-        }));
+        assert!(!symbols
+            .lines()
+            .any(|line| { line.contains(" _rt_set_args") && !line.contains(" U _rt_set_args") }));
     }
 
     let linked_probe = temp.path().join("linked-probe");
@@ -6497,7 +7786,14 @@ int main(void) {
     if (rt_value_bool(1) != 11) return 11;
     if (rt_value_bool(0) != 19) return 12;
     if (rt_value_nil() != 3) return 13;
-    if (rt_value_float(0x123456789LL) != ((0x123456789LL & ~7LL) | 2LL)) return 14;
+    double float_input = 3.141592653589793;
+    int64_t float_bits = 0;
+    memcpy(&float_bits, &float_input, sizeof(float_bits));
+    int64_t boxed_float = rt_value_float(float_input);
+    int64_t float_ptr = boxed_float & ~7LL;
+    if ((boxed_float & 7LL) != 1LL || float_ptr < 4096 ||
+        (*(uint32_t*)(uintptr_t)float_ptr) != UINT32_C(0x464C5431) ||
+        (*(int64_t*)(uintptr_t)(float_ptr + 8)) != float_bits) return 14;
 
     uint8_t* p = (uint8_t*)rt_alloc(4);
     if (!p) return 20;
@@ -6560,7 +7856,10 @@ int main(void) {
     if (rt_string_len(trim_started) != 4 || memcmp(rt_string_data(trim_started), "123 ", 4) != 0) return 105;
     int64_t t = rt_string_new((const uint8_t*)"abc", 3);
     SplArray* t_bytes = (SplArray*)rt_string_bytes(t);
-    if (rt_array_len(t_bytes) != 3 || rt_value_as_int(rt_array_get(t_bytes, 1)) != 'b') return 77;
+    /* text.bytes() is [u8]: its physical slots are raw bytes, not tagged Any
+       integers. The untyped C probe must inspect the raw slot exactly as typed
+       native [u8] lowering does; rt_value_as_int would shift 0x62 to 12. */
+    if (rt_array_len(t_bytes) != 3 || rt_array_get(t_bytes, 1) != 'b') return 77;
     if (rt_string_char_code_at(t, 2) != 'c') return 78;
     int64_t utf8 = rt_string_new((const uint8_t*)"\xC3\xA9", 2);
     if (rt_string_char_code_at(utf8, 0) != 0xE9) return 79;
@@ -6654,6 +7953,41 @@ int main(void) {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn test_simple_lsp_mcp_reduced_closure_avoids_broad_runtime_facades() {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let repo_root = manifest_dir.parent().unwrap().parent().unwrap().parent().unwrap();
+    for relative in [
+        "src/app/simple_lsp_mcp/main.spl",
+        "src/app/simple_lsp_mcp/startup_log.spl",
+        "src/app/simple_lsp_mcp/json_helpers.spl",
+        "src/app/simple_lsp_mcp/tools.spl",
+    ] {
+        let source = std::fs::read_to_string(repo_root.join(relative)).unwrap();
+        assert!(
+            !source.contains("use std.io_runtime")
+                && !source.contains("use std.log")
+                && !source.contains("use std.nogc_sync_mut.io.process_ops"),
+            "{relative} reintroduced a broad facade into the reduced entry closure"
+        );
+    }
+
+    let boundary = std::fs::read_to_string(repo_root.join("src/app/io/minimal_runtime_ops.spl")).unwrap();
+    for forbidden in [
+        "rt_time_day",
+        "rt_process_output",
+        "rt_file_mmap_read_bytes",
+        "rt_term_write",
+        "rt_cpu_count",
+    ] {
+        assert!(
+            !boundary.contains(forbidden),
+            "narrow runtime boundary admitted unused symbol family member {forbidden}"
+        );
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -7005,7 +8339,10 @@ fn test_compile_failure_preserves_completed_objects_for_retry() {
                 .source_dir(source_dir.clone())
                 .build()
                 .unwrap();
-            assert_eq!(result.cached, 1, "retry did not reuse the object completed before the failed batch");
+            assert_eq!(
+                result.cached, 1,
+                "retry did not reuse the object completed before the failed batch"
+            );
 
             fs::write(&failing, "fn failing_probe() -> i64:\n    return 202\n").unwrap();
             NativeProjectBuilder::new(temp.path().to_path_buf(), archive.clone())
@@ -7071,7 +8408,10 @@ fn test_incremental_cache_rejects_corrupt_mangled_object() {
     fs::write(source_dir.join("b.spl"), "fn cache_b() -> i64:\n    return 33\n").unwrap();
     let changed = build();
     assert_eq!(changed.cached, 1, "unchanged sibling should still hit its key");
-    assert_eq!(changed.compiled, 1, "changed source key must not reuse stale object bytes");
+    assert_eq!(
+        changed.compiled, 1,
+        "changed source key must not reuse stale object bytes"
+    );
 }
 
 #[test]
@@ -7127,7 +8467,10 @@ fn test_cache_invalid_read_never_unlinks_concurrent_publication_path() {
     let path = temp.path().join("shared.o");
     fs::write(&path, b"invalid").unwrap();
     assert!(super::read_usable_cached_object(&path).is_none());
-    assert!(path.exists(), "reader must not unlink a path another builder can publish");
+    assert!(
+        path.exists(),
+        "reader must not unlink a path another builder can publish"
+    );
 }
 
 #[test]
@@ -7889,6 +9232,335 @@ fn test_linker_fails_closed_on_undefined_runtime_symbol() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// riscv64 mcp row: a `class`/`struct`/`extend` method's declared return type
+// must reach `fn_return_types` under the qualified `"{Type}.{method}"` key.
+//
+// doc/08_tracking/bug/riscv64_erased_receiver_routes_class_method_to_rt_find_2026-08-31.md
+//
+// #202 added this capture for `Node::Impl` only. The three arms that declare
+// methods INLINE were left without it, so `var reg = DispatchRegistry.new_for_test()`
+// — a `class` with an inline `static fn` factory — had no row, the local was
+// erased to `TypeId::ANY`, and MIR emitted a BARE `MethodCallStatic{"find"}`
+// that codegen's builtin-collection heuristic routed to `rt_find`, trapping the
+// riscv64 guest. Each assertion below FAILS before the `record_method_return_type`
+// wiring in `imports.rs`.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_build_import_map_records_class_inline_static_factory_return_type() {
+    let temp = tempfile::tempdir().unwrap();
+    let src_root = temp.path().join("project/src");
+    let lib_root = src_root.join("lib");
+    let path = lib_root.join("mcp/dispatch.spl");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &path,
+        "class DispatchRegistry:\n    count: i64\n\n    static fn new_for_test() -> DispatchRegistry:\n        return DispatchRegistry(0)\n\n    me find(tool_name: text) -> i64:\n        return self.count\n",
+    )
+    .unwrap();
+
+    let file_sources = vec![(path.clone(), std::fs::read_to_string(&path).unwrap())];
+    let result = super::imports::build_import_map(&file_sources, std::slice::from_ref(&lib_root), &src_root);
+
+    // The static factory: this row is what types the local and prevents ANY erasure.
+    assert_eq!(
+        result.fn_return_types.get("DispatchRegistry.new_for_test"),
+        Some(&simple_parser::Type::Simple("DispatchRegistry".to_string())),
+        "class inline `static fn` factory return type missing from fn_return_types"
+    );
+    // The `me` method is recorded under the same qualified scheme.
+    assert_eq!(
+        result.fn_return_types.get("DispatchRegistry.find"),
+        Some(&simple_parser::Type::Simple("i64".to_string())),
+        "class inline `me` method return type missing from fn_return_types"
+    );
+    // Bare function names share no namespace with the qualified keys.
+    assert!(result.fn_return_types.get("new_for_test").is_none());
+}
+
+#[test]
+fn test_build_import_map_records_struct_inline_method_return_type() {
+    let temp = tempfile::tempdir().unwrap();
+    let src_root = temp.path().join("project/src");
+    let lib_root = src_root.join("lib");
+    let path = lib_root.join("model/point.spl");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &path,
+        "struct Point:\n    x: i64\n\n    static fn origin() -> Point:\n        return Point(0)\n\n    me get(k: i64) -> i64:\n        return self.x\n",
+    )
+    .unwrap();
+
+    let file_sources = vec![(path.clone(), std::fs::read_to_string(&path).unwrap())];
+    let result = super::imports::build_import_map(&file_sources, std::slice::from_ref(&lib_root), &src_root);
+
+    assert_eq!(
+        result.fn_return_types.get("Point.origin"),
+        Some(&simple_parser::Type::Simple("Point".to_string())),
+        "struct inline `static fn` factory return type missing from fn_return_types"
+    );
+    // `get` is another name in `is_bare_builtin_collection_method` — same defect class.
+    assert_eq!(
+        result.fn_return_types.get("Point.get"),
+        Some(&simple_parser::Type::Simple("i64".to_string())),
+        "struct inline `me get` return type missing from fn_return_types"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Same-named instance methods on sibling types must not collapse.
+// doc/08_tracking/bug/native_cross_module_same_name_methods_collapse_to_one_impl_2026-09-13.md
+// ---------------------------------------------------------------------------
+
+fn ints_suffix_index() -> std::collections::HashMap<String, Vec<String>> {
+    std::collections::HashMap::from([(
+        "store".to_string(),
+        vec![
+            "lib__common__bytes__ints__U16le_dot_store".to_string(),
+            "lib__common__bytes__ints__U32be_dot_store".to_string(),
+        ],
+    )])
+}
+
+fn mir_with_method_calls(names: &[&str]) -> crate::mir::MirModule {
+    let mut mir = crate::mir::MirModule::new();
+    let mut func = crate::mir::MirFunction::new(
+        "main".to_string(),
+        crate::hir::TypeId::VOID,
+        simple_parser::Visibility::Private,
+    );
+    for name in names {
+        func.blocks[0].instructions.push(crate::mir::MirInst::MethodCallStatic {
+            dest: None,
+            receiver: crate::mir::VReg(0),
+            func_name: (*name).to_string(),
+            args: vec![],
+        });
+    }
+    func.blocks[0].terminator = crate::mir::Terminator::Return(None);
+    mir.functions.push(func);
+    mir
+}
+
+fn mangled_method_names(mir: &crate::mir::MirModule) -> Vec<String> {
+    mir.functions[0].blocks[0]
+        .instructions
+        .iter()
+        .map(|inst| match inst {
+            crate::mir::MirInst::MethodCallStatic { func_name, .. } => func_name.clone(),
+            other => panic!("expected static method call, got {other:?}"),
+        })
+        .collect()
+}
+
+/// (a) Two sibling types with same-named instance methods each keep their own
+/// target, so both bodies stay referenced and both get emitted.
+#[test]
+fn test_sibling_types_same_named_methods_each_resolve_to_their_own_owner() {
+    let mut mir = mir_with_method_calls(&["U16le.store", "U32be.store"]);
+    super::mangle::mangle_mir(
+        &mut mir,
+        "app__entry",
+        true,
+        &std::collections::HashMap::new(),
+        &std::collections::HashSet::new(),
+        &std::collections::HashMap::new(),
+        &ints_suffix_index(),
+    );
+    assert_eq!(
+        mangled_method_names(&mir),
+        vec![
+            "lib__common__bytes__ints__U16le_dot_store".to_string(),
+            "lib__common__bytes__ints__U32be_dot_store".to_string(),
+        ],
+        "same-named sibling methods collapsed onto one implementation"
+    );
+}
+
+/// (b) A typed receiver whose own method is absent must NOT be bound to an
+/// arbitrary same-named method of an unrelated type.
+///
+/// Scope note: a SINGLE same-named candidate still binds, because a struct
+/// calling an inherited trait default legitimately reaches the resolver as
+/// `Button.render` against the trait's lone `Widget.render`
+/// (`qualified_enum_helpers_never_rebind_in_resolve_call_target` pins that).
+/// What must never happen is choosing one of SEVERAL, which is the shape that
+/// collapsed the six `ints.spl` types.
+#[test]
+fn test_qualified_receiver_never_falls_back_to_unrelated_candidates() {
+    let suffix_index = std::collections::HashMap::from([(
+        "store".to_string(),
+        vec![
+            "lib__common__bytes__ints__U32be_dot_store".to_string(),
+            "lib__common__bytes__ints__U64be_dot_store".to_string(),
+        ],
+    )]);
+    let mut mir = mir_with_method_calls(&["U16le.store"]);
+    super::mangle::mangle_mir(
+        &mut mir,
+        "app__entry",
+        true,
+        &std::collections::HashMap::new(),
+        &std::collections::HashSet::new(),
+        &std::collections::HashMap::new(),
+        &suffix_index,
+    );
+    assert_eq!(
+        mangled_method_names(&mir),
+        vec!["U16le.store".to_string()],
+        "qualified receiver was rebound to an unrelated type's method"
+    );
+}
+
+/// (c) A bare (erased-receiver) name with more than one candidate must refuse
+/// to bind rather than pick an arbitrary one.
+#[test]
+fn test_bare_method_with_multiple_candidates_refuses_to_bind() {
+    let mut mir = mir_with_method_calls(&["store"]);
+    let use_map = std::collections::HashMap::from([
+        (
+            "U16le.store".to_string(),
+            "lib__common__bytes__ints__U16le_dot_store".to_string(),
+        ),
+        (
+            "U32be.store".to_string(),
+            "lib__common__bytes__ints__U32be_dot_store".to_string(),
+        ),
+    ]);
+    super::mangle::mangle_mir(
+        &mut mir,
+        "app__entry",
+        true,
+        &std::collections::HashMap::new(),
+        &std::collections::HashSet::new(),
+        &use_map,
+        &ints_suffix_index(),
+    );
+    assert_eq!(
+        mangled_method_names(&mir),
+        vec!["store".to_string()],
+        "an ambiguous bare method name was bound to an arbitrary candidate"
+    );
+}
+
+#[test]
+fn test_method_owner_matches_accepts_both_mangled_spellings() {
+    assert!(super::mangle::method_owner_matches(
+        "lib__common__bytes__ints__U16le_dot_store",
+        "U16le"
+    ));
+    assert!(super::mangle::method_owner_matches(
+        "lib__common__bytes__ints__U16le.store",
+        "U16le"
+    ));
+    assert!(!super::mangle::method_owner_matches(
+        "lib__common__bytes__ints__U32be_dot_store",
+        "U16le"
+    ));
+    assert!(!super::mangle::method_owner_matches("store", "U16le"));
+}
+
+#[test]
+#[cfg(windows)]
+fn respell_strips_verbatim_prefix_from_every_link_argument() {
+    // Replays the 2026-09-26 Stage 2 link failure: GNU ld reported
+    // "cannot find \\_main_stub.o" because each object arrived verbatim.
+    let mut cmd = std::process::Command::new("clang");
+    cmd.arg(r"\\?\C:\repo\objects\_main_stub.o")
+        .arg("-Wl,--allow-multiple-definition")
+        .arg(r"\\?\C:\repo\objects\libspl_objects.a")
+        .arg("-lkernel32")
+        .env("SIMPLE_TEST_ENV", "kept")
+        .current_dir(r"C:\repo");
+
+    let respelled = super::tools::respell_args_for_external_tool(&cmd);
+    let args: Vec<String> = respelled
+        .get_args()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+
+    assert_eq!(
+        args,
+        vec![
+            r"C:\repo\objects\_main_stub.o".to_string(),
+            "-Wl,--allow-multiple-definition".to_string(),
+            r"C:\repo\objects\libspl_objects.a".to_string(),
+            "-lkernel32".to_string(),
+        ],
+        "every verbatim argument must be respelled; non-path flags must be untouched"
+    );
+    assert_eq!(respelled.get_program().to_string_lossy(), "clang");
+    assert_eq!(
+        respelled.get_current_dir().map(|d| d.to_string_lossy().into_owned()),
+        Some(r"C:\repo".to_string()),
+        "the working directory must survive the rebuild"
+    );
+    assert!(
+        respelled.get_envs().any(|(k, v)| k == "SIMPLE_TEST_ENV"
+            && v.map(|v| v.to_string_lossy().into_owned()) == Some("kept".to_string())),
+        "explicit environment must survive the rebuild"
+    );
+}
+
+#[test]
+fn platform_c_symbols_are_never_aliased_to_simple_functions() {
+    // Replays the 2026-09-27 Stage 2 link: winsock's `select` must NOT resolve
+    // to lib__nogc_async_mut__async__combinators__select. Aliasing it defined a
+    // global `select` against ws2_32's, crashed ld.lld 23.1.0, and would have
+    // sent every socket select() into an async combinator had it linked.
+    let mut defined = std::collections::HashSet::new();
+    defined.insert("lib__nogc_async_mut__async__combinators__select".to_string());
+    defined.insert("lib__common__text__trim".to_string());
+
+    assert_eq!(
+        super::stubs::resolve_defined_suffix_alias("select", &defined),
+        None,
+        "a platform C symbol must be left for the platform's import library"
+    );
+
+    // The legitimate case must still work: a bare Simple symbol with no
+    // platform meaning still resolves by suffix.
+    assert_eq!(
+        super::stubs::resolve_defined_suffix_alias("trim", &defined),
+        Some("lib__common__text__trim".to_string()),
+        "non-platform bare symbols must still resolve"
+    );
+}
+
+#[test]
+fn windows_compat_aliases_reject_ambiguous_bare_names() {
+    let defined = std::collections::HashSet::from([
+        "lib__network__getaddrinfo".to_string(),
+        "lib__io__printf".to_string(),
+        "lib__async__select".to_string(),
+        "lib__common__text__trim".to_string(),
+        "lib__common__text__qualified".to_string(),
+    ]);
+
+    assert_eq!(
+        super::stubs::resolve_windows_compat_alias("getaddrinfo", &defined),
+        None,
+        "an unlisted C import must not become a Simple trampoline"
+    );
+    for c_name in ["select", "_select", "printf", "_printf"] {
+        assert_eq!(
+            super::stubs::resolve_windows_compat_alias(c_name, &defined),
+            None,
+            "C import {c_name} must not become a Simple trampoline"
+        );
+    }
+    assert_eq!(
+        super::stubs::resolve_windows_compat_alias("trim", &defined),
+        None,
+        "bare names have no source provenance even when a Simple match exists"
+    );
+    assert_eq!(
+        super::stubs::resolve_windows_compat_alias("text__qualified", &defined),
+        Some("lib__common__text__qualified".to_string()),
+        "qualified Simple aliases still resolve"
+    );
+}
 #[test]
 fn test_archive_weak_parser_macho_definitions_preserve_raw_names() {
     let output = "archive(member.o):\n0000000000000624 (__TEXT,__text) weak external _rt_heap_live_bytes\n0000000000000630 (__TEXT,__text) weak external _rt_heap_peak_bytes\n0000000000000640 (__DATA,__data) weak external automatically hidden _hidden\n";
@@ -7900,8 +9572,17 @@ fn test_archive_weak_parser_macho_definitions_preserve_raw_names() {
 
 #[test]
 fn test_archive_weak_parser_macho_rejects_strong_undefined_and_malformed() {
-    let output = "0000000000000624 (__TEXT,__text) external _strong\n                 (undefined) weak external _reference\n0000000000000000 (undefined) weak external _reference_with_address\n0000000000000000 (__TEXT,__text) weak reference _weak_reference\n0000000000000000 (__TEXT,__text) weak external\narchive.o: (__TEXT,__text) weak external _header\n0000000000000000 (__TEXT,__text) weak external extra fields _bad\n";
+    let output = "0000000000000624 (__TEXT,__text) external _strong\n                 (undefined) weak external _reference\n0000000000000000 (undefined) weak external _reference_with_address\n---------------- (undefined) weak external _lto_reference\n0000000000000000 (__TEXT,__text) weak reference _weak_reference\n0000000000000000 (__TEXT,__text) weak external\narchive.o: (__TEXT,__text) weak external _header\n0000000000000000 (broken weak external _bad_section\n0000000000000000 (__TEXT,__text) weak external [unknown] _bad_annotation\n0000000000000000 (__TEXT,__text) weak external extra fields _bad\n";
     assert!(super::tools::parse_archive_weak_global_symbols(output, true).is_empty());
+}
+
+#[test]
+fn test_archive_weak_parser_macho_accepts_lto_and_annotations() {
+    let output = "---------------- (LTO,CODE) weak external _lto\n0000000000000010 (__TEXT,__text) weak external [no dead strip] _retained\n0000000000000020 (__TEXT,__text) [referenced dynamically] weak external automatically hidden [alt entry] _hidden\n";
+    let actual = super::tools::parse_archive_weak_global_symbols(output, true);
+    let expected = ["_lto", "_retained", "_hidden"]
+        .into_iter().map(str::to_string).collect();
+    assert_eq!(actual, expected);
 }
 
 #[test]

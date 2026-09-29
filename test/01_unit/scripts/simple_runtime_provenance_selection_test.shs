@@ -1,0 +1,72 @@
+#!/bin/sh
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+. "$ROOT/scripts/lib/simple-runtime-provenance.shs"
+
+TMP=$(mktemp -d "${TMPDIR:-/tmp}/simple-runtime-provenance-test.XXXXXX")
+trap 'rm -rf "$TMP"' EXIT HUP INT TERM
+mkdir -p "$TMP/bin/release/aarch64-apple-darwin" "$TMP/bin/release/macos-arm64" "$TMP/scripts/lib/runtime-provenance"
+
+make_runtime() {
+    _path=$1
+    _version=$2
+    cat >"$_path" <<EOF
+#!/bin/sh
+if [ "\${1:-}" = --version ]; then printf '%s\\n' '$_version'; exit 0; fi
+exit 0
+EOF
+    chmod +x "$_path"
+}
+
+write_receipt() {
+    _path=$1
+    _implementation=$2
+    _target=$3
+    _version=$4
+    _hash=$(simple_runtime_sha256 "$_path")
+    cat >"$TMP/scripts/lib/runtime-provenance/$_hash.env" <<EOF
+schema=simple-runtime-provenance-v1
+status=admitted
+implementation=$_implementation
+artifact_sha256=$_hash
+target_triple=$_target
+version_output=$_version
+producer=unit-test
+evidence=unit-test
+EOF
+}
+
+canonical="$TMP/bin/release/aarch64-apple-darwin/simple"
+legacy="$TMP/bin/release/macos-arm64/simple"
+make_runtime "$canonical" 'WARNING: this Rust-built Simple binary is a bootstrap seed only'
+make_runtime "$legacy" 'Simple v9.9.9-test'
+write_receipt "$canonical" pure-simple aarch64-apple-darwin 'WARNING: this Rust-built Simple binary is a bootstrap seed only'
+write_receipt "$legacy" pure-simple aarch64-apple-darwin 'Simple v9.9.9-test'
+
+SIMPLE_RUNTIME_HOST_OS=Darwin SIMPLE_RUNTIME_HOST_ARCH=arm64
+export SIMPLE_RUNTIME_HOST_OS SIMPLE_RUNTIME_HOST_ARCH
+selected=$(simple_runtime_select "$TMP")
+[ "$selected" = "$(simple_runtime_real_path "$legacy")" ] || { echo 'FAIL: canonical seed was not skipped' >&2; exit 1; }
+
+. "$ROOT/scripts/lib/simple-compiler-select.shs"
+simple_compiler_default_candidates() {
+    printf '%s\n' "$canonical" "$legacy"
+}
+selected=$(SIMPLE_COMPILER_PROBE_TIMEOUT=2 simple_compiler_select --root "$TMP" --quiet)
+[ "$selected" = "$legacy" ] || { echo 'FAIL: canonical compiler selector did not choose admitted legacy alias' >&2; exit 1; }
+
+legacy_receipt=$(simple_runtime_receipt_for "$legacy" "$TMP")
+cp "$legacy_receipt" "$TMP/good.env"
+sed 's/^artifact_sha256=.*/artifact_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/' "$TMP/good.env" >"${legacy}.provenance.env"
+! simple_runtime_provenance_admits "$legacy" "$TMP" || { echo 'FAIL: stale hash admitted' >&2; exit 1; }
+
+cp "$TMP/good.env" "${legacy}.provenance.env"
+sed -i.bak 's/^target_triple=.*/target_triple=x86_64-apple-darwin/' "${legacy}.provenance.env"
+! simple_runtime_provenance_admits "$legacy" "$TMP" || { echo 'FAIL: mismatched target admitted' >&2; exit 1; }
+
+cp "$TMP/good.env" "${legacy}.provenance.env"
+make_runtime "$legacy" 'Simple v9.9.8-stale'
+! simple_runtime_provenance_admits "$legacy" "$TMP" || { echo 'FAIL: stale version/hash admitted' >&2; exit 1; }
+
+echo 'PASS simple-runtime-provenance selection seed=reject stale=reject target=reject version=reject'

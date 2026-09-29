@@ -1,0 +1,70 @@
+# Revalidated lookup and target-profile tuple binding over an inert mapping
+# candidate. No registry admission or trust authority is issued here.
+use std.common.crypto.sha256.sha256_text
+use compiler.driver.environment_target_identity_mapping_candidate_v1.*
+use std.nogc_sync_mut.composition.environment_variants.target_codegen_profile_v1.{
+    TargetCodegenProfileV1, target_codegen_profile_validate_v1}
+
+pub enum EnvironmentTargetMappingLookupErrorV1:
+    InvalidCandidate
+    UnknownTargetTriple
+    UnknownTargetProfileId
+    TargetProfileMismatch
+
+pub struct EnvironmentTargetMappingBindingV1:
+    target_profile_id: u32
+    target_triple: text
+    mapping_generation: u64
+    mapping_digest: text
+    profile_binding_digest: text
+
+fn _validated_tml(candidate: EnvironmentTargetIdentityMappingCandidateV1
+) -> EnvironmentTargetIdentityMappingCandidateV1?:
+    val checked = environment_target_identity_mapping_candidate_v1(
+        candidate.mapping_generation, candidate.registry_identity, candidate.rows)
+    if checked.is_err() or checked.unwrap().mapping_digest != candidate.mapping_digest: return nil
+    checked.unwrap()
+
+pub fn environment_target_mapping_lookup_triple_v1(
+    candidate: EnvironmentTargetIdentityMappingCandidateV1, target_triple: text
+) -> Result<EnvironmentTargetIdentityMappingRowV1, EnvironmentTargetMappingLookupErrorV1>:
+    val checked = _validated_tml(candidate)
+    if checked.is_none(): return Err(EnvironmentTargetMappingLookupErrorV1.InvalidCandidate)
+    for row in checked.unwrap().rows:
+        if row.target_triple == target_triple: return Ok(row)
+    Err(EnvironmentTargetMappingLookupErrorV1.UnknownTargetTriple)
+
+pub fn environment_target_mapping_lookup_profile_id_v1(
+    candidate: EnvironmentTargetIdentityMappingCandidateV1, target_profile_id: u32
+) -> Result<EnvironmentTargetIdentityMappingRowV1, EnvironmentTargetMappingLookupErrorV1>:
+    val checked = _validated_tml(candidate)
+    if checked.is_none(): return Err(EnvironmentTargetMappingLookupErrorV1.InvalidCandidate)
+    for row in checked.unwrap().rows:
+        if row.target_profile_id == target_profile_id: return Ok(row)
+    Err(EnvironmentTargetMappingLookupErrorV1.UnknownTargetProfileId)
+
+pub fn environment_target_mapping_bind_profile_v1(
+    candidate: EnvironmentTargetIdentityMappingCandidateV1, target_triple: text,
+    profile: TargetCodegenProfileV1, feature_words: [u64]
+) -> Result<EnvironmentTargetMappingBindingV1, EnvironmentTargetMappingLookupErrorV1>:
+    val row_result = environment_target_mapping_lookup_triple_v1(candidate, target_triple)
+    if row_result.is_err(): return Err(row_result.unwrap_err())
+    val row = row_result.unwrap()
+    if (target_codegen_profile_validate_v1(profile, feature_words).is_err() or
+        profile.target_architecture != row.architecture_id or
+        profile.target_abi_id != row.abi_id or
+        profile.target_object_format_id != row.object_format_id or
+        profile.target_endian_id != row.endian_id or
+        profile.target_pointer_width_bits != row.pointer_width_bits):
+        return Err(EnvironmentTargetMappingLookupErrorV1.TargetProfileMismatch)
+    val profile_words = [profile.profile_identity.w0.to_text(), profile.profile_identity.w1.to_text(),
+        profile.profile_identity.w2.to_text(), profile.profile_identity.w3.to_text(),
+        profile.target_identity.w0.to_text(), profile.target_identity.w1.to_text(),
+        profile.target_identity.w2.to_text(), profile.target_identity.w3.to_text()]
+    val digest = sha256_text("simple/environment-target-mapping-profile-binding/v1\n" +
+        candidate.mapping_digest + "\n" + candidate.mapping_generation.to_text() + "\n" +
+        row.target_profile_id.to_text() + "\n" + row.target_triple + "\n" +
+        profile_words.join(":"))
+    Ok(EnvironmentTargetMappingBindingV1(target_profile_id: row.target_profile_id,
+        target_triple: row.target_triple, mapping_generation: candidate.mapping_generation,
+        mapping_digest: candidate.mapping_digest, profile_binding_digest: digest))

@@ -1,0 +1,24 @@
+#!/bin/sh
+# Static cross-lane clock guard for dashboard collection metadata.
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+source="$root/src/app/llm_dashboard/data/project_stats.spl"
+runtime="$root/src/runtime/runtime_time.c"
+interpreter="$root/src/compiler_rust/compiler/src/interpreter_extern/time.rs"
+
+grep -Fq 'extern fn rt_time_now_unix_micros() -> i64' "$source"
+! grep -Fq 'rt_time_now_seconds' "$source"
+grep -Fq 'stats.last_updated = if updated_micros < 0:' "$source"
+grep -Fq 'int64_t rt_time_now_unix_micros(void)' "$runtime"
+grep -Fq 'pub fn rt_time_now_unix_micros' "$interpreter"
+
+raw_calls=$(awk '
+    /unsafe\(capabilities: \[ffi\]\):/ { pending=1; next }
+    pending && /^[[:space:]]+rt_time_now_unix_micros/ { count++; pending=0; next }
+    pending { pending=0 }
+    END { print count + 0 }
+' "$source")
+test "$raw_calls" -eq 1
+
+echo 'Dashboard stats clock SFFI authority: PASS integer_cross_lane_abi=shared lexical_raw_calls=1 failure_sentinel=negative no_extra_clock_read=1'

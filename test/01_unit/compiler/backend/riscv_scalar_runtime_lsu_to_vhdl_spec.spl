@@ -1,0 +1,65 @@
+use std.spec.*
+use compiler.mir.hwir.types.{CoreConfig}
+use compiler.mir.hwir.riscv_lsu_config.{LsuConfig}
+use compiler.mir.hwir.riscv_scalar_runtime_lsu_composition.{
+    strict_riscv_scalar_runtime_lsu_composition}
+use compiler.backend.backend.riscv_scalar_runtime_lsu_to_vhdl.{
+    compile_strict_riscv_scalar_runtime_lsu_vhdl,
+    render_strict_riscv_scalar_runtime_lsu_vhdl,
+    scalar_runtime_lsu_vhdl_closure_diagnostic}
+
+describe "dedicated strict runtime LSU VHDL backend":
+    it "renders the canonical mixed composition with closed typed wiring and provenance":
+        val composition = strict_riscv_scalar_runtime_lsu_composition(
+            "runtime_lsu_vhdl_rv32", CoreConfig.rv32(), LsuConfig.xlen(32)).unwrap()
+        expect(scalar_runtime_lsu_vhdl_closure_diagnostic(composition)).to_equal("")
+        val result = compile_strict_riscv_scalar_runtime_lsu_vhdl(
+            "runtime_lsu_vhdl_rv32", CoreConfig.rv32(), LsuConfig.xlen(32))
+        expect(result.is_success()).to_equal(true)
+        if result.is_success():
+            expect(result.route).to_equal("hwir-gen2-scalar-runtime-lsu-composition-v1")
+            expect(result.hwir_graph_sha256).to_equal(composition.structural_sha256())
+            for marker in ["top=", "config=", "bus=", "plan=" + composition.plan.structural_sha256(),
+                    "schema=" + composition.decoded.structural_sha256(),
+                    "protocol=" + composition.protocol.structural_sha256(),
+                    "child-decoder=" + composition.decoder.structural_sha256(),
+                    "child-pending=" + composition.pending.structural_sha256(),
+                    "child-projection=" + composition.projection.structural_sha256(),
+                    "child-lsu=" + composition.lsu.structural_sha256(),
+                    "child-idle=" + composition.idle.structural_sha256(),
+                    "child-route=" + composition.route.structural_sha256()]:
+                expect(result.vhdl).to_contain("-- simple-hwir " + marker)
+            expect(result.vhdl).to_contain("pending: entity work." + composition.pending.entity_name)
+            expect(result.vhdl).to_contain("lsu: entity work." + composition.lsu.entity_name)
+            expect(result.vhdl).to_contain("projection: entity work." + composition.projection.summary.name)
+            expect(result.vhdl).to_contain("idle: entity work." + composition.idle.summary.name)
+            expect(result.vhdl).to_contain("route_owner: entity work." + composition.route.summary.name)
+            expect(result.vhdl).to_contain(
+                "wire_o10_projection_p21_canonical_instruction <= source_o7_pending_p33_lsu_request_canonical_instruction")
+            expect(result.vhdl).to_contain(
+                "bus_request_valid <= source_o3_lsu_p17_bus_request_valid")
+
+    it "specializes exact RV64 top, bus, and child widths":
+        val result = compile_strict_riscv_scalar_runtime_lsu_vhdl(
+            "runtime_lsu_vhdl_rv64", CoreConfig.rv64(), LsuConfig.xlen(64))
+        expect(result.is_success()).to_equal(true)
+        if result.is_success():
+            expect(result.config_xlen).to_equal(64)
+            expect(result.vhdl).to_contain(
+                "bus_request_write_data : out std_logic_vector(63 downto 0)")
+            expect(result.vhdl).to_contain(
+                "dispatch_rs1_value : in std_logic_vector(63 downto 0)")
+
+    it "rejects alien routes and non-XLEN bus geometry while retaining its route":
+        val composition = strict_riscv_scalar_runtime_lsu_composition(
+            "runtime_lsu_route_guard", CoreConfig.rv32(), LsuConfig.xlen(32)).unwrap()
+        val alien = render_strict_riscv_scalar_runtime_lsu_vhdl(composition,
+            "hwir-generic-composition")
+        expect(alien.is_success()).to_equal(false)
+        expect(alien.route).to_equal("hwir-gen2-scalar-runtime-lsu-composition-v1")
+        expect(alien.diagnostic).to_contain("HWIR-E-RISCV-RUNTIME-LSU-VHDL-ROUTE")
+        val width = compile_strict_riscv_scalar_runtime_lsu_vhdl(
+            "runtime_lsu_bad_bus", CoreConfig.rv32(), LsuConfig.xlen(64))
+        expect(width.is_success()).to_equal(false)
+        expect(width.route).to_equal("hwir-gen2-scalar-runtime-lsu-composition-v1")
+        expect(width.diagnostic).to_contain("one XLEN-wide LSU beat")

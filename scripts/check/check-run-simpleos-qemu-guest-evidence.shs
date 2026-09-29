@@ -1,0 +1,21 @@
+#!/bin/sh
+set -eu
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+runner=$repo_root/scripts/check/run-simpleos-qemu-guest-evidence.shs
+work=$(mktemp -d "${TMPDIR:-/tmp}/simpleos-qemu-contract.XXXXXX")
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+for f in qemu base firmware cloudinit key; do printf '%s\n' "$f" > "$work/$f"; done
+chmod +x "$work/qemu"
+"$runner" --fixture --qemu "$work/qemu" --isa riscv64 --accel tcg \
+  --base-image "$work/base" --overlay "$work/overlay.qcow2" --firmware "$work/firmware" \
+  --cloudinit "$work/cloudinit" --ssh-port 2222 --ssh-user root --ssh-key "$work/key" \
+  --timeout 30 --guest-command payload-list --serial "$work/serial" --ssh-log "$work/ssh" > "$work/out"
+grep -qx 'simpleos_qemu_guest_evidence_status=CONTRACT_ONLY' "$work/out"
+grep -qx 'contract_only=true' "$work/ssh"
+if "$runner" --fixture --qemu "$work/qemu" --isa riscv64 --accel tcg \
+  --base-image "$work/base" --overlay "$work/overlay.qcow2" --firmware "$work/firmware" \
+  --cloudinit "$work/cloudinit" --ssh-port 2222 --ssh-user root --ssh-key "$work/key" \
+  --timeout 30 --guest-command 'sh -c id' --serial "$work/serial2" --ssh-log "$work/ssh2"; then
+  echo 'accepted arbitrary guest command' >&2; exit 1
+fi
+echo 'run-simpleos-qemu-guest-evidence contract: PASS'

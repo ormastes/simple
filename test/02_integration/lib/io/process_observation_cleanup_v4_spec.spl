@@ -1,0 +1,181 @@
+# G5 C02/C03/C18/C19/C23 component contract. The common schema and facade are
+# integrated. Host-backed fixture acquisition and live ownership inspection
+# remain fail-fast; they must never become synthetic green evidence.
+# @req REQ-POV4-C02 REQ-POV4-C03 REQ-POV4-C18 REQ-POV4-C19 REQ-POV4-C23
+
+use std.spec.*
+use std.spec.step
+use std.common.process.observation_v4.{
+    ProcessObservationPacketKindV4, ProcessObservationStatusV4,
+    ProcessObservationWireV4, ProcessObservationRequestV4,
+    ProcessObservationCleanupFrozenReceiptV4,
+    decode_process_observation_v4,
+    freeze_process_observation_cleanup_receipt_v4}
+use std.nogc_sync_mut.io.process_ops.{ProcessObservationLeaseV4}
+
+fn pov4_cleanup_fixture_request() -> ProcessObservationRequestV4:
+    fail("MissingEvidence: qualified host-backed V4 cleanup request fixture is unavailable")
+
+fn pov4_cleanup_fixture_wire(case_id: text) -> ProcessObservationWireV4:
+    fail("MissingEvidence: cleanup wire fixture {case_id} requires a qualified host receipt")
+
+fn pov4_cleanup_fixture_lease(case_id: text) -> ProcessObservationLeaseV4:
+    fail("MissingEvidence: cleanup lease fixture {case_id} requires a qualified live host owner")
+
+fn pov4_cleanup_fixture_cleanup_receipt(case_id: text) -> ProcessObservationCleanupFrozenReceiptV4:
+    fail("MissingEvidence: cleanup receipt fixture {case_id} requires a qualified host receipt")
+
+fn pov4_ticket_from_receipt(receipt) -> [i64]:
+    [4, receipt.packet.request_id_high, receipt.packet.request_id_low,
+        receipt.packet.ticket_high, receipt.packet.ticket_low]
+
+fn pov4_assert_cleanup_packet(receipt, expected_kind: ProcessObservationPacketKindV4,
+                              expected_status: ProcessObservationStatusV4,
+                              expected_exec: i64):
+    expect(receipt.packet.packet_kind).to_equal(expected_kind)
+    expect(receipt.packet.status).to_equal(expected_status)
+    if expected_exec == 0:
+        expect(receipt.packet.exec_errno).to_equal(0)
+    else:
+        expect(receipt.packet.exec_errno).to_be_greater_than(0)
+    expect(receipt.binding_digest.len()).to_equal(32)
+    expect(receipt.stdout.len()).to_equal(receipt.packet.stdout.delivered_bytes)
+    expect(receipt.stderr.len()).to_equal(receipt.packet.stderr.delivered_bytes)
+
+fn pov4_assert_same_snapshot(first, second):
+    expect(pov4_ticket_from_receipt(first)).to_equal(
+        pov4_ticket_from_receipt(second))
+    expect(first.packet.packet_kind).to_equal(second.packet.packet_kind)
+    expect(first.packet.status).to_equal(second.packet.status)
+    expect(first.binding_digest).to_equal(second.binding_digest)
+    expect(first.stdout).to_equal(second.stdout)
+    expect(first.stderr).to_equal(second.stderr)
+
+fn pov4_assert_live_ownership(ticket, expected_live: bool):
+    fail("MissingEvidence: live owner oracle requires a qualified host inspection receipt")
+
+fn pov4_assert_deadlines_unchanged(before, after):
+    expect(after.packet.execution_deadline_ns).to_equal(
+        before.packet.execution_deadline_ns)
+    expect(after.packet.kill_deadline_ns).to_equal(
+        before.packet.kill_deadline_ns)
+    expect(after.packet.cleanup_deadline_ns).to_equal(
+        before.packet.cleanup_deadline_ns)
+
+fn pov4_assert_no_child_leak(evidence):
+    fail("MissingEvidence: child/descriptor oracle requires the host boundary")
+
+fn pov4_assert_cleanup_ack_refusal(
+    lease: ProcessObservationLeaseV4,
+    wrong_receipt: ProcessObservationCleanupFrozenReceiptV4,
+    expected_ticket: [i64]):
+    expect(lease.ticket).to_equal(expected_ticket)
+    val result = lease.acknowledge_cleanup(wrong_receipt)
+    expect(result.is_err()).to_equal(true)
+    pov4_assert_live_ownership(expected_ticket, true)
+
+fn pov4_ack_cleanup_exact(
+    lease: ProcessObservationLeaseV4,
+    cleanup_receipt: ProcessObservationCleanupFrozenReceiptV4,
+    expected_ticket: [i64]):
+    expect(lease.ticket).to_equal(expected_ticket)
+    val result = lease.acknowledge_cleanup(cleanup_receipt)
+    expect(result.is_ok()).to_equal(true)
+    val ack = result.unwrap()
+    expect(ack.packet.packet_kind).to_equal(ProcessObservationPacketKindV4.CleanupAck)
+    expect(pov4_ticket_from_receipt(ack)).to_equal(expected_ticket)
+    expect(ack.binding_digest).to_equal(cleanup_receipt.binding_digest)
+    pov4_assert_live_ownership(expected_ticket, false)
+
+describe "G5 Process Observation V4 cleanup lifecycle":
+    it "should retain CleanupPending authority through repeated observations":
+        step("Prepare a pinned process request")
+        pov4_cleanup_fixture_request()
+        step("Trigger startup cleanup")
+        val first_wire = pov4_cleanup_fixture_wire("startup-abort")
+        val first = decode_process_observation_v4(first_wire).unwrap()
+        step("Observe retained cleanup authority")
+        pov4_assert_cleanup_packet(first, ProcessObservationPacketKindV4.Poll,
+            ProcessObservationStatusV4.CleanupPending, 0)
+        val first_ticket = pov4_ticket_from_receipt(first)
+        pov4_assert_live_ownership(first_ticket, true)
+        step("Collect the cleanup snapshot")
+        val second_wire = pov4_cleanup_fixture_wire("startup-abort-replay")
+        val second = decode_process_observation_v4(second_wire).unwrap()
+        val second_ticket = pov4_ticket_from_receipt(second)
+        expect(second_ticket).to_equal(first_ticket)
+        pov4_assert_live_ownership(second_ticket, true)
+        pov4_assert_cleanup_packet(second, ProcessObservationPacketKindV4.Poll,
+            ProcessObservationStatusV4.CleanupPending, 0)
+        pov4_assert_deadlines_unchanged(first, second)
+        step("Acknowledge the exact snapshot")
+        val cleanup = pov4_cleanup_fixture_cleanup_receipt("startup-abort-final")
+        val lease = pov4_cleanup_fixture_lease("startup-abort-final")
+        pov4_ack_cleanup_exact(lease, cleanup, first_ticket)
+        pov4_assert_no_child_leak(cleanup)
+
+    it "should preserve a cleanup snapshot until an exact acknowledgement":
+        step("Prepare a pinned process request")
+        pov4_cleanup_fixture_request()
+        step("Trigger startup cleanup")
+        val frozen_wire = pov4_cleanup_fixture_wire("cleanup-frozen")
+        val frozen = freeze_process_observation_cleanup_receipt_v4(
+            decode_process_observation_v4(frozen_wire).unwrap()).unwrap()
+        step("Observe retained cleanup authority")
+        pov4_assert_cleanup_packet(frozen, ProcessObservationPacketKindV4.CleanupFrozen,
+            ProcessObservationStatusV4.ProviderFailed, 0)
+        val frozen_ticket = pov4_ticket_from_receipt(frozen)
+        pov4_assert_live_ownership(frozen_ticket, true)
+        step("Collect the cleanup snapshot")
+        val frozen_replay = freeze_process_observation_cleanup_receipt_v4(
+            decode_process_observation_v4(frozen_wire).unwrap()).unwrap()
+        pov4_assert_same_snapshot(frozen, frozen_replay)
+        pov4_assert_deadlines_unchanged(frozen, frozen_replay)
+        step("Acknowledge the exact snapshot")
+        val ack_result = frozen.binding_digest
+        expect(ack_result.len()).to_equal(32)
+        val lease = pov4_cleanup_fixture_lease("exact-ack")
+        pov4_ack_cleanup_exact(lease, frozen, frozen_ticket)
+        pov4_assert_no_child_leak(frozen)
+
+    it "should leave ownership live after a wrong-digest or wrong-kind response":
+        step("Prepare a pinned process request")
+        pov4_cleanup_fixture_request()
+        step("Trigger startup cleanup")
+        val original = freeze_process_observation_cleanup_receipt_v4(
+            decode_process_observation_v4(
+                pov4_cleanup_fixture_wire("cleanup-frozen")).unwrap()).unwrap()
+        step("Observe retained cleanup authority")
+        val original_ticket = pov4_ticket_from_receipt(original)
+        pov4_assert_live_ownership(original_ticket, true)
+        step("Collect the cleanup snapshot")
+        pov4_assert_cleanup_packet(original, ProcessObservationPacketKindV4.CleanupFrozen,
+            ProcessObservationStatusV4.ProviderFailed, 0)
+        step("Acknowledge the exact snapshot")
+        # The host/facade must reject this response and leave the owner active.
+        val lease = pov4_cleanup_fixture_lease("wrong-digest")
+        val wrong_receipt = pov4_cleanup_fixture_cleanup_receipt("wrong-digest")
+        expect(wrong_receipt.binding_digest == original.binding_digest).to_equal(false)
+        pov4_assert_cleanup_ack_refusal(lease, wrong_receipt, original_ticket)
+        step("Acknowledge the exact snapshot")
+        pov4_ack_cleanup_exact(lease, original, original_ticket)
+        pov4_assert_no_child_leak(original)
+
+    it "should preserve cleanup-only error classification and exact bytes":
+        step("Prepare a pinned process request")
+        pov4_cleanup_fixture_request()
+        step("Trigger startup cleanup")
+        val failed_wire = pov4_cleanup_fixture_wire("child-exec-error")
+        val failed = decode_process_observation_v4(failed_wire).unwrap()
+        step("Observe retained cleanup authority")
+        pov4_assert_cleanup_packet(failed, ProcessObservationPacketKindV4.CleanupFrozen,
+            ProcessObservationStatusV4.ProviderFailed, 1)
+        expect(failed.packet.stdout.delivered_bytes).to_be_greater_than(-1)
+        expect(failed.packet.stderr.delivered_bytes).to_be_greater_than(-1)
+        step("Collect the cleanup snapshot")
+        pov4_assert_same_snapshot(failed, decode_process_observation_v4(failed_wire).unwrap())
+        step("Acknowledge the exact snapshot")
+        val cleanup = freeze_process_observation_cleanup_receipt_v4(failed).unwrap()
+        val lease = pov4_cleanup_fixture_lease("child-exec-error")
+        pov4_ack_cleanup_exact(lease, cleanup, pov4_ticket_from_receipt(cleanup))
+        pov4_assert_no_child_leak(failed)

@@ -20,7 +20,7 @@ Operator signs off the LLM Caret agent infrastructure end to end.
 | Category | Application |
 | Status | Active |
 | Source | `test/03_system/app/llm_caret/caret_agent_infra_acceptance_spec.spl` |
-| Updated | 2026-08-25 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 Operator signs off the LLM Caret agent infrastructure end to end.
@@ -51,6 +51,7 @@ faked green.
 
 #### attaches two isolated agents, broadcasts to every pane, reads the suite verdict off a pane, and leaves nothing behind
 
+- attaches two isolated agents, broadcasts to every pane, reads the suite verdict off a pane, and leaves nothing behind
 - Start the workspace and attach two agents, each in its own detached worktree and tmux window
    - Expected: attached.status equals `ok`
    - Expected: list_panes(ws).len() equals `3`
@@ -74,10 +75,12 @@ faked green.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 80 lines folded for reproduction.
+Runnable source: 82 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("attaches two isolated agents, broadcasts to every pane, reads the suite verdict off a pane, and leaves nothing behind")
 if not tmux_available():
     pending("BLOCKED: tmux not installed on this host")
     return
@@ -166,6 +169,7 @@ dir_remove_all(root)
 
 #### refuses a wiki write without permission, then writes and reads the page back byte-identical once granted
 
+- refuses a wiki write without permission, then writes and reads the page back byte-identical once granted
 - Under the default policy the mutating write is REFUSED and nothing lands on disk
 - With an explicit grant for wiki_write the page is created
 - The page reads back byte-identical — checked on disk AND through the read tool
@@ -175,10 +179,12 @@ dir_remove_all(root)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 43 lines folded for reproduction.
+Runnable source: 45 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("refuses a wiki write without permission, then writes and reads the page back byte-identical once granted")
 val run_id = current_time_ms().to_text()
 val ws_root = _scratch("wiki_" + run_id)
 dir_remove_all(ws_root)
@@ -230,6 +236,7 @@ dir_remove_all(ws_root)
 
 #### puts an object and gets the same bytes back through the storage tools
 
+- puts an object and gets the same bytes back through the storage tools
 - Under the default policy storage_put is REFUSED: it is a mutating tool
 - With a grant the object is stored on the real server
 - The object reads back with exactly the bytes that were written
@@ -238,10 +245,12 @@ dir_remove_all(ws_root)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 34 lines folded for reproduction.
+Runnable source: 36 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("puts an object and gets the same bytes back through the storage tools")
 # No live MinIO on this host means NO EVIDENCE, which is not a pass.
 if not _live("LLM_CARET_STORAGE_LIVE"):
     pending("BLOCKED: no local S3-compatible (minio) server on this host — set LLM_CARET_STORAGE_LIVE=1 with credentials (LLM_CARET_CONFIG + access_key_env/secret_key_env) to run")
@@ -292,3 +301,56 @@ dir_remove_all(ws_root)
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+- `REQ-APP-LLM-CARET-INFRA-ACCEPTANCE-001`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `bdffa117034fb08a6631a757991ada3e01ce890cf7333428594985d694fde230`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `bdffa117034fb08a6631a757991ada3e01ce890cf7333428594985d694fde230`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `bdffa117034fb08a6631a757991ada3e01ce890cf7333428594985d694fde230`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **82/100**; effective score: **49/100**; blockers: **1**.
+
+SSpec documentization score: 49/100
+source: test/03_system/app/llm_caret/caret_agent_infra_acceptance_spec.spl
+mirror: doc/06_spec/03_system/app/llm_caret/caret_agent_infra_acceptance_spec.md (current)
+findings: 6 blockers: 1
+  narrative=100 structure=100 oracle=70
+  traceability=60 evidence=80 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+  raw=82; blocker cap makes effective=49
+doc/06_spec/03_system/app/llm_caret/caret_agent_infra_acceptance_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/app/llm_caret/caret_agent_infra_acceptance_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/app/llm_caret/caret_agent_infra_acceptance_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 4 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/app/llm_caret/caret_agent_infra_acceptance_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 1 declared requirement(s) have no scenario binding
+  why: A requirement list without scenario evidence is inventory, not traceability.
+  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
+test/03_system/app/llm_caret/caret_agent_infra_acceptance_spec.spl:172:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'refuses a wiki write without permission, then writes and reads the page back byte-identical once granted' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/llm_caret/caret_agent_infra_acceptance_spec.spl:223:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'puts an object and gets the same bytes back through the storage tools' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

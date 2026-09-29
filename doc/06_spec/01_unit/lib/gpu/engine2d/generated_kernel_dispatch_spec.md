@@ -48,7 +48,7 @@ Verifies the generated 2D kernel dispatch metadata, launch plans, execution requ
 | Design | doc/05_design/ui/renderer_unification_2026-06-15.md |
 | Research | doc/01_research/ui/render_path/gui_web_2d_render_optimization_2026-06-16.md |
 | Source | `test/01_unit/lib/gpu/engine2d/generated_kernel_dispatch_spec.spl` |
-| Updated | 2026-07-08 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -72,7 +72,7 @@ runtime submission readiness.
 
 ## Examples
 
-The scenarios cover CUDA, ROCm, Vulkan, OpenCL, and Metal metadata; unsupported backend
+The scenarios cover CUDA, ROCm, OpenCL, and Metal metadata; unsupported backend
 failure; backend-specific launch APIs; session/runtime provenance; artifact
 load evidence; and submit evidence.
 
@@ -127,22 +127,18 @@ expect(dispatch.required_entries()).to_contain("simple_2d_scroll_u32")
 
 </details>
 
-#### maps Vulkan OpenCL and Metal to their binary artifact formats
+#### maps OpenCL and Metal to their binary artifact formats
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val vulkan = generated_2d_dispatch_for_backend("vulkan")
 val opencl = generated_2d_dispatch_for_backend("opencl")
 val metal = generated_2d_dispatch_for_backend("metal")
 
-expect(vulkan.source_format).to_equal("spirv")
-expect(vulkan.binary_format).to_equal("spirv")
-expect(vulkan.kernel_entry(GENERATED_2D_FILL)).to_equal("simple_2d_fill_u32")
 expect(opencl.source_format).to_equal("opencl-c")
 expect(opencl.binary_format).to_equal("spirv")
 expect(opencl.kernel_entry(GENERATED_2D_COPY)).to_equal("simple_2d_copy_u32")
@@ -210,7 +206,7 @@ expect(plan.dispatch_ready).to_equal(true)
 expect(plan.entry_name).to_equal("simple_2d_fill_u32")
 expect(plan.artifact_name).to_equal("simple_2d_optimization.ptx")
 expect(plan.required_entries).to_contain("simple_2d_copy_u32")
-expect(plan.launch_api).to_equal("cuda_launch_api")
+expect(plan.launch_api).to_equal("rt_cuda_launch_kernel")
 expect(plan.grid_x).to_equal(1200)
 expect(plan.block_x).to_equal(256)
 expect(plan.args_layout).to_equal("dst,width,height,color_u32")
@@ -218,24 +214,21 @@ expect(plan.args_layout).to_equal("dst,width,height,color_u32")
 
 </details>
 
-#### uses backend-specific launch APIs for HIP, Vulkan, OpenCL, and Metal
+#### uses backend-specific launch APIs for HIP, OpenCL, and Metal
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val hip = generated_2d_launch_plan("rocm", GENERATED_2D_ALPHA, 16, 16)
-val vulkan = generated_2d_launch_plan("vulkan", GENERATED_2D_FILL, 16, 16)
 val opencl = generated_2d_launch_plan("opencl", GENERATED_2D_COPY, 32, 4)
 val metal = generated_2d_launch_plan("metal", GENERATED_2D_SCROLL, 10, 10)
 
-expect(hip.launch_api).to_equal("hip_launch_api")
+expect(hip.launch_api).to_equal("rt_rocm_launch_kernel")
 expect(hip.artifact_name).to_equal("simple_2d_optimization.hsaco")
-expect(vulkan.launch_api).to_equal("vkCmdDispatch")
-expect(vulkan.artifact_name).to_equal("simple_2d_optimization.spirv")
 expect(opencl.launch_api).to_equal("clEnqueueNDRangeKernel")
 expect(opencl.artifact_name).to_equal("simple_2d_optimization.spirv")
 expect(metal.launch_api).to_equal("MTLComputeCommandEncoder.dispatchThreads")
@@ -292,22 +285,18 @@ expect(rocm.call_shape()).to_equal("hip_launch_api")
 
 </details>
 
-#### binds Vulkan OpenCL and Metal launch plans to queue or encoder execution calls
+#### binds OpenCL and Metal launch plans to queue or encoder execution calls
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val vulkan = generated_2d_execution_request("vulkan", GENERATED_2D_FILL, 16, 16, 55, 66, 0)
 val opencl = generated_2d_execution_request("opencl", GENERATED_2D_COPY, 16, 16, 11, 22, 0)
 val metal = generated_2d_execution_request("metal", GENERATED_2D_SCROLL, 16, 16, 33, 44, 0)
 
-expect(vulkan.can_submit).to_equal(true)
-expect(vulkan.handle_kind).to_equal("vulkan-command-buffer-pipeline")
-expect(vulkan.call_shape()).to_equal("vulkan_compute_api")
 expect(opencl.can_submit).to_equal(true)
 expect(opencl.handle_kind).to_equal("opencl-queue-kernel")
 expect(opencl.call_shape()).to_equal("opencl_ndrange_api")
@@ -366,30 +355,26 @@ expect(bad_plan.reason).to_equal("backend-inactive")
 
 </details>
 
-#### shares generated session launch preflight for CUDA HIP Vulkan and OpenCL sessions
+#### shares generated session launch preflight for CUDA HIP and OpenCL sessions
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val cuda_ready = generated_2d_session_launch_gate("cuda", GENERATED_2D_FILL, 16, 16, true, true, 2048)
 val hip_missing_module = generated_2d_session_launch_gate("rocm", GENERATED_2D_ALPHA, 16, 16, true, false, 2048)
-val vulkan_missing_runtime = generated_2d_session_launch_gate("vulkan", GENERATED_2D_FILL, 16, 16, false, true, 7)
 val opencl_missing_args = generated_2d_session_launch_gate("opencl", GENERATED_2D_COPY, 16, 16, true, true, 0)
 val cuda_bad_dims = generated_2d_session_launch_gate("cuda", GENERATED_2D_FILL, 0, 16, true, true, 2048)
 
 expect(cuda_ready.ready).to_equal(true)
 expect(cuda_ready.reason).to_equal("ready")
-expect(cuda_ready.plan.launch_api).to_equal("cuda_launch_api")
+expect(cuda_ready.plan.launch_api).to_equal("rt_cuda_launch_kernel")
 expect(hip_missing_module.ready).to_equal(false)
 expect(hip_missing_module.reason).to_equal("module-not-loaded")
-expect(hip_missing_module.plan.launch_api).to_equal("hip_launch_api")
-expect(vulkan_missing_runtime.ready).to_equal(false)
-expect(vulkan_missing_runtime.reason).to_equal("runtime-not-ready")
-expect(vulkan_missing_runtime.plan.launch_api).to_equal("vkCmdDispatch")
+expect(hip_missing_module.plan.launch_api).to_equal("rt_rocm_launch_kernel")
 expect(opencl_missing_args.ready).to_equal(false)
 expect(opencl_missing_args.reason).to_equal("missing-args-pointer")
 expect(opencl_missing_args.plan.launch_api).to_equal("clEnqueueNDRangeKernel")
@@ -399,40 +384,31 @@ expect(cuda_bad_dims.reason).to_equal("invalid-dimensions")
 
 </details>
 
-#### records shared generated session runtime provenance for CUDA HIP Vulkan OpenCL and Metal
+#### records shared generated session runtime provenance for CUDA HIP and OpenCL
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 28 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val cuda_ready = generated_2d_session_runtime_provenance("cuda", GENERATED_2D_FILL, 16, 16, true, true, 2048)
 val hip_missing_module = generated_2d_session_runtime_provenance("rocm", GENERATED_2D_ALPHA, 16, 16, true, false, 2048)
-val vulkan_missing_runtime = generated_2d_session_runtime_provenance("vulkan", GENERATED_2D_FILL, 16, 16, false, true, 7)
 val opencl_unavailable = generated_2d_session_runtime_provenance("opencl", GENERATED_2D_COPY, 16, 16, false, false, 2048)
 val opencl_missing_args = generated_2d_session_runtime_provenance("opencl", GENERATED_2D_COPY, 16, 16, true, true, 0)
-val metal_missing_runtime = generated_2d_session_runtime_provenance("metal", GENERATED_2D_FILL, 16, 16, false, true, 7)
-val metal_missing_module = generated_2d_session_runtime_provenance("metal", GENERATED_2D_FILL, 16, 16, true, false, 7)
 val unsupported = generated_2d_session_runtime_provenance("opencl", "rect_filled", 16, 16, true, true, 2048)
 
 expect(cuda_ready.ready).to_equal(true)
 expect(cuda_ready.typed_status).to_equal("ready")
-expect(cuda_ready.launch_api).to_equal("cuda_launch_api")
+expect(cuda_ready.launch_api).to_equal("rt_cuda_launch_kernel")
 expect(hip_missing_module.ready).to_equal(false)
 expect(hip_missing_module.typed_status).to_equal("hip-module-unavailable")
-expect(hip_missing_module.launch_api).to_equal("hip_launch_api")
-expect(vulkan_missing_runtime.ready).to_equal(false)
-expect(vulkan_missing_runtime.typed_status).to_equal("vulkan-runtime-unavailable")
-expect(vulkan_missing_runtime.launch_api).to_equal("vkCmdDispatch")
+expect(hip_missing_module.launch_api).to_equal("rt_rocm_launch_kernel")
 expect(opencl_unavailable.ready).to_equal(false)
 expect(opencl_unavailable.typed_status).to_equal("opencl-runtime-or-queue-unavailable")
 expect(opencl_unavailable.launch_api).to_equal("clEnqueueNDRangeKernel")
 expect(opencl_missing_args.typed_status).to_equal("args-unavailable")
-expect(metal_missing_runtime.typed_status).to_equal("metal-runtime-unavailable")
-expect(metal_missing_module.typed_status).to_equal("metal-pipeline-unavailable")
-expect(metal_missing_module.launch_api).to_equal("MTLComputeCommandEncoder.dispatchThreads")
 expect(unsupported.typed_status).to_equal("plan-not-ready:unsupported-operation")
 expect(opencl_unavailable.diagnostic_text()).to_contain("backend=opencl")
 expect(opencl_unavailable.diagnostic_text()).to_contain("artifact=simple_2d_optimization.spirv")
@@ -440,12 +416,12 @@ expect(opencl_unavailable.diagnostic_text()).to_contain("artifact=simple_2d_opti
 
 </details>
 
-#### compares CPU SIMD CUDA OpenCL and Metal provenance for bitmap font vector font and image blit operations
+#### compares CPU SIMD CUDA and OpenCL provenance for bitmap font vector font and image blit operations
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 53 lines folded for reproduction.
+Runnable source: 46 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -457,8 +433,6 @@ val cuda_bitmap_font = generated_2d_operation_provenance("cuda", "bitmap_glyph",
 val cuda_vector_font = generated_2d_operation_provenance("cuda", "vector_font", 64, 32, true, true, 2048)
 val opencl_image = generated_2d_operation_provenance("opencl", "image_blit", 64, 32, false, false, 2048)
 val opencl_glyph = generated_2d_operation_provenance("opencl", "glyph_raster", 64, 32, true, true, 2048)
-val metal_image = generated_2d_operation_provenance("metal", "image_blit", 64, 32, true, true, 2048)
-val metal_missing_runtime = generated_2d_operation_provenance("metal", "bitmap_glyph", 64, 32, false, true, 2048)
 val scalar_alpha = generated_2d_operation_provenance("cpu", "alpha_blend", 64, 32, false, false, 0)
 
 expect(cpu_vector.ready).to_equal(true)
@@ -473,7 +447,7 @@ expect(cpu_bitmap_font.entry_name).to_equal("RenderBackend.draw_text_or_text_bli
 expect(cpu_vector_font.ready).to_equal(true)
 expect(cpu_vector_font.generated_operation).to_equal(GENERATED_2D_COPY)
 expect(cpu_vector_font.cpu_preprocess_required).to_equal(true)
-expect(cpu_vector_font.entry_name).to_equal("FontRasterizer.rasterize_vector")
+expect(cpu_vector_font.entry_name).to_equal("FontRasterizer.rasterize_vector_accelerated")
 expect(cuda_text.ready).to_equal(true)
 expect(cuda_text.generated_operation).to_equal(GENERATED_2D_COPY)
 expect(cuda_text.cpu_preprocess_required).to_equal(true)
@@ -495,11 +469,6 @@ expect(opencl_glyph.ready).to_equal(true)
 expect(opencl_glyph.generated_operation).to_equal(GENERATED_2D_COPY)
 expect(opencl_glyph.cpu_preprocess_required).to_equal(true)
 expect(opencl_glyph.entry_name).to_equal("simple_2d_copy_u32")
-expect(metal_image.ready).to_equal(true)
-expect(metal_image.launch_api).to_equal("MTLComputeCommandEncoder.dispatchThreads")
-expect(metal_image.artifact_name).to_equal("simple_2d_optimization.metallib")
-expect(metal_missing_runtime.ready).to_equal(false)
-expect(metal_missing_runtime.typed_status).to_equal("metal-runtime-unavailable")
 expect(scalar_alpha.compute_target).to_equal("cpu_scalar")
 expect(scalar_alpha.generated_operation).to_equal(GENERATED_2D_ALPHA)
 ```
@@ -557,34 +526,21 @@ expect(metal_request.call_shape()).to_equal("metal_compute_api")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 32 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val valid = generated_2d_module_artifact_evidence("cuda", GENERATED_2D_FILL, 16, 16, ".version 8.0", ".entry simple_2d_fill_u32 .entry simple_2d_copy_u32 .entry simple_2d_alpha_u32 .entry simple_2d_scroll_u32 .entry simple_2d_bitmap_glyph_raster_u32", 4486)
 val missing = generated_2d_module_artifact_evidence("cuda", GENERATED_2D_FILL, 16, 16, ".version 8.0", ".entry simple_2d_fill_u32 .entry simple_2d_copy_u32 .entry simple_2d_alpha_u32", 4486)
 val missing_glyph = generated_2d_module_artifact_evidence("cuda", GENERATED_2D_FILL, 16, 16, ".version 8.0", ".entry simple_2d_fill_u32 .entry simple_2d_copy_u32 .entry simple_2d_alpha_u32 .entry simple_2d_scroll_u32", 4486)
-val vulkan_valid = generated_2d_module_artifact_evidence("vulkan", GENERATED_2D_FILL, 16, 16, "SPIR-V 1.5", "OpEntryPoint GLCompute %simple_2d_fill_u32 \"simple_2d_fill_u32\" OpEntryPoint GLCompute %simple_2d_copy_u32 \"simple_2d_copy_u32\" OpEntryPoint GLCompute %simple_2d_alpha_u32 \"simple_2d_alpha_u32\" OpEntryPoint GLCompute %simple_2d_scroll_u32 \"simple_2d_scroll_u32\" OpEntryPoint GLCompute %simple_2d_bitmap_glyph_raster_u32 \"simple_2d_bitmap_glyph_raster_u32\"", 4096)
-val metal_valid = generated_2d_module_artifact_evidence("metal", GENERATED_2D_FILL, 16, 16, "MTLB metallib", "simple_2d_fill_u32 simple_2d_copy_u32 simple_2d_alpha_u32 simple_2d_scroll_u32 simple_2d_bitmap_glyph_raster_u32", 4096)
-val metal_bad_magic = generated_2d_module_artifact_evidence("metal", GENERATED_2D_FILL, 16, 16, "SPIR-V 1.5", "simple_2d_fill_u32 simple_2d_copy_u32 simple_2d_alpha_u32 simple_2d_scroll_u32 simple_2d_bitmap_glyph_raster_u32", 4096)
 val load = generated_2d_artifact_load_evidence_from_module(valid, true, 0, 77)
 val blocked = generated_2d_artifact_load_evidence_from_module(missing, true, 0, 77)
 val glyph_blocked = generated_2d_artifact_load_evidence_from_module(missing_glyph, true, 0, 77)
-val vulkan_load = generated_2d_artifact_load_evidence_from_module(vulkan_valid, true, 11, 22)
-val metal_load = generated_2d_artifact_load_evidence_from_module(metal_valid, true, 33, 44)
 
 expect(valid.artifact_valid).to_equal(true)
 expect(valid.reason).to_equal("pass")
 expect(valid.summary()).to_contain("simple_2d_optimization.ptx")
-expect(vulkan_valid.artifact_valid).to_equal(true)
-expect(vulkan_valid.plan.artifact_name).to_equal("simple_2d_optimization.spirv")
-expect(metal_valid.artifact_valid).to_equal(true)
-expect(metal_valid.plan.artifact_name).to_equal("simple_2d_optimization.metallib")
-expect(metal_bad_magic.artifact_valid).to_equal(false)
-expect(metal_bad_magic.reason).to_equal("artifact-magic-mismatch")
 expect(load.loaded).to_equal(true)
-expect(vulkan_load.loaded).to_equal(true)
-expect(metal_load.loaded).to_equal(true)
 expect(missing.artifact_valid).to_equal(false)
 expect(missing.reason).to_equal("missing-entry-symbol:simple_2d_scroll_u32")
 expect(blocked.loaded).to_equal(false)

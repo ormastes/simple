@@ -1,7 +1,17 @@
 # JIT SIGSEGV: field access on a `nil` receiver (`b.n` where `b` is nil)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
+
+## Re-verified OPEN 2026-09-13 — REOPENED: still a hard SIGSEGV, the null guard is not effective here
+- **measured** (Windows Rust seed v1.0.0-rc.1): `struct B: n: i64` + `fn get(b: B?) -> i64: return b.n` called with `nil` printed `start` then died with `Segmentation fault`, rc=139, and **no** message on stdout or stderr — not a "defined trap".
+- **measured**: `SIMPLE_JIT_TRACE_ADDR=1 SIMPLE_EXECUTION_MODE=jit` emitted `[jit-addr] get` and `[jit-addr] main` with 0 fallback lines, so the crashing code really was JIT-compiled.
+- **measured**: `SIMPLE_EXECUTION_MODE=interpret` on the same file exits rc=0 with `error: semantic: undefined field 'n': cannot access field on value of type 'nil'` — the interpreter arm is correct, the Cranelift arm is not.
+- **inferred**: the status line was flipped back to OPEN. The fix lives in `src/compiler_rust/**` (Cranelift FieldGet/FieldSet), which is off-limits this session (concurrent bootstrap), so no repair was attempted.
 
 **Date:** 2026-06-25
-**Status:** RESOLVED 2026-06-25 — null guard added in Cranelift FieldGet/FieldSet codegen.
+**Status:** REOPENED 2026-09-13 — SIGSEGV reproduces on the Windows Rust seed (see section above)
 **Area:** Cranelift JIT codegen (`run`/`-c` path), NOT interpreter / type inference.
 **Severity:** crash (SIGSEGV) — was a wild null deref; now a defined trap.
 
@@ -121,7 +131,7 @@ returns `!special || payload!=NIL` so it works on the boxed value.
 - `codegen/instr/mod.rs` `BoxInt`/`UnboxInt` already exist; reuse.
 
 ### Sites to patch (self-hosted `.spl` `src/compiler/…`) — required for `bin/simple`
-- `50.mir/_MirLoweringExpr/method_calls_literals.spl` (`lower_method_call`) — method dispatch.
+- `50.mir/mir_lowering_expr_part3.spl` (`lower_method_call`) — method dispatch.
 - `20.hir/hir_types.spl:479` already has `Optional(inner)` (richer than the seed's
   `Pointer` decay) — box at its coercion + print path.
 - Reaching production needs a **bootstrap rebuild + `--deploy`** (flagged risky in
@@ -172,7 +182,7 @@ all** — `val a: any = 9; print a` already prints `<invalid-heap:0x9>` on
 production `bin/simple`. A faithful port = implement the tagging primitive
 (MIR `Shl`+`BitOr` or a runtime call) + symmetric unbox, wired at every `T→any`
 and `T→T?` coercion site, then a stage-2/3 bootstrap verification. Dispatch site
-for the method half: `src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl`
+for the method half: `src/compiler/50.mir/mir_lowering_expr_part3.spl`
 `lower_method_call`, intercept `Optional(inner)` before `match resolution` (~L151).
 
 **Conclusion:** native typed-optional support is a representation/infra *feature*
@@ -255,3 +265,4 @@ field-type resolution would recurse forever.
    logic bug above too).
 3. Add a runnable guard test (`b: T? = nil; b.field`) that must produce the same
    clean `undefined field … on 'nil'` error as plain `nil`, never a segfault.
+

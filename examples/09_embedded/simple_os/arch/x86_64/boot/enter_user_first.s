@@ -35,40 +35,33 @@
     .type rt_x86_enter_user_first, @function
     .align 16
 rt_x86_enter_user_first:
-    /* --- ring-3 resume savepoint (setjmp) ---------------------------------
-     * Capture the kernel context of THIS caller (the sshd accept-loop frame,
-     * via x86_64_fs_exec_enter_image_ring3 -> arch_x86_64_enter_user_task) so
-     * that when the ring-3 program calls exit(2), rt_syscall_dispatch case 0
-     * can longjmp back here (rt_x86_ring3_resume) instead of taking QEMU down
-     * via isa-debug-exit. This makes the spawn call chain RETURNING, so the
-     * accept loop survives and can service a second command in one boot.
-     *
-     * Safety of the saved rsp: the ring-3 program runs with IF=0 (ctx.rflags
-     * 0x3002, bit 9 clear) and TSS.RSP0 is not used for the syscall path, so
-     * nothing preempts onto — and corrupts — this saved kernel stack while the
-     * user program runs. The exit syscall runs on the separate global
-     * _kernel_syscall_stack, leaving [saved_rsp] (the return address) intact.
-     *
-     * cr3 is captured HERE, before the `movq %rax,%cr3` swap below, so it is
-     * the KERNEL cr3 — restoring it on resume is required (the user AS clones
-     * only the low half; the high-half NVMe BAR / kernel-only mappings live in
-     * the kernel PML4). Must run before `movq %r9,%rax` reloads rax. */
+    /* Stash CR3 into a callee-saved register before any stack push so the
+     * stack writes happen before we swap address spaces. The pushes below
+     * write to the kernel stack, which must still be mapped after cr3 load
+     * (and it is — create_user_address_space copies the kernel mappings). */
+    movq    %r9, %rax               /* cr3 */
+
+    /* Establish the exit savepoint (2026-09-24). Only the CONSUMER of this
+     * mechanism (rt_x86_ring3_resume, below) existed in this file — nothing
+     * ever filled _ring3_resume_buf or set _ring3_resume_valid, so the
+     * ring-3 program's exit(2) syscall had nowhere to longjmp and the kernel
+     * fell off the user stack into garbage. Save the kernel context here,
+     * BEFORE any push: [rsp] is exactly the return address into
+     * arch_x86_64_enter_user_task, and cr3 is still the kernel's. On exit,
+     * rt_x86_ring3_resume restores all of these and rets — so this function
+     * "returns" with the exit status in _ring3_exit_rc. */
     movq    %rbx, _ring3_resume_buf+0(%rip)
     movq    %rbp, _ring3_resume_buf+8(%rip)
     movq    %r12, _ring3_resume_buf+16(%rip)
     movq    %r13, _ring3_resume_buf+24(%rip)
     movq    %r14, _ring3_resume_buf+32(%rip)
     movq    %r15, _ring3_resume_buf+40(%rip)
-    movq    %rsp, _ring3_resume_buf+48(%rip)   /* rsp -> return address */
+    movq    %rsp, _ring3_resume_buf+48(%rip)
+    pushq   %rax
     movq    %cr3, %rax
-    movq    %rax, _ring3_resume_buf+56(%rip)   /* kernel cr3 (pre-swap) */
+    movq    %rax, _ring3_resume_buf+56(%rip)   /* kernel cr3, not the user's */
+    popq    %rax
     movq    $1, _ring3_resume_valid(%rip)
-
-    /* Stash CR3 into a callee-saved register before any stack push so the
-     * stack writes happen before we swap address spaces. The pushes below
-     * write to the kernel stack, which must still be mapped after cr3 load
-     * (and it is — create_user_address_space copies the kernel mappings). */
-    movq    %r9, %rax               /* cr3 */
 
     /* Fault-only IRET receipt.  Capture the unmodified ABI arguments before
      * the diagnostic UART writes and before the frame is built, so an IRET

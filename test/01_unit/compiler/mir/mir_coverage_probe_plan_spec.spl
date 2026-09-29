@@ -1,0 +1,393 @@
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use compiler.mir.mir_coverage.{MirCoverageModeV1, MirCoverageSiteKindV1,
+    MirCoverageSourceV1, MirCoverageSiteKeyV1, MirCoverageConditionSiteV1,
+    MirCoverageCatalogV1, MirCoverageDecisionRecordV1,
+    MirCoverageConditionRecordV1, mir_coverage_finalize_v1,
+    mir_coverage_site_id_v1, mir_coverage_condition_id_v1}
+use compiler.mir.mir_coverage_probe_plan.{MirCoverageBooleanOperandV1,
+    MirCoverageProvisionalDecisionProbeV1,
+    MirCoverageProvisionalConditionProbeV1, MirCoverageProbePlanV1,
+    mir_coverage_resolve_probe_plan_v1}
+
+fn probe_source(path: text, body: text) -> MirCoverageSourceV1:
+    MirCoverageSourceV1(path, sha256_text(body), body)
+
+fn probe_site(
+    source: MirCoverageSourceV1,
+    function_name: text,
+    start: i64,
+    end: i64,
+    column: i64,
+    kind: MirCoverageSiteKindV1,
+    occurrence: i64
+) -> MirCoverageSiteKeyV1:
+    MirCoverageSiteKeyV1(
+        source.authored_path, source.source_sha256, function_name,
+        start, end, 1, column, kind, occurrence,
+        sha256_text(source.source_text.substring(start, end)))
+
+fn probe_catalog(
+    sources: [MirCoverageSourceV1],
+    decisions: [MirCoverageSiteKeyV1],
+    conditions: [MirCoverageConditionSiteV1]
+) -> MirCoverageCatalogV1:
+    match mir_coverage_finalize_v1(
+            MirCoverageModeV1.DecisionsAndConditions,
+            sources, decisions, conditions):
+        case Ok(catalog): catalog
+        case Err(_): MirCoverageCatalogV1(
+            MirCoverageModeV1.Disabled, [], [], [], "", "", "", false)
+
+fn probe_plan_ok(
+    result: Result<MirCoverageProbePlanV1, text>
+) -> MirCoverageProbePlanV1:
+    match result:
+        case Ok(plan): plan
+        case Err(_): MirCoverageProbePlanV1([], [], "")
+
+fn probe_plan_error(result: Result<MirCoverageProbePlanV1, text>) -> text:
+    match result:
+        case Ok(_): ""
+        case Err(message): message
+
+describe "MIR coverage V1 provisional probe planning":
+    it "resolves permutations to one canonical bijective payload plan":
+        val source_b = probe_source("src/product/zeta.spl", "while ready")
+        val source_a = probe_source("src/product/alpha.spl", "if left and right")
+        val decision_b = probe_site(source_b, "product.zeta.poll", 0, 11, 1,
+            MirCoverageSiteKindV1.WhileDecision, 0)
+        val decision_a = probe_site(source_a, "product.alpha.choose", 0, 17, 1,
+            MirCoverageSiteKindV1.IfDecision, 0)
+        val condition_a = probe_site(source_a, "product.alpha.choose", 3, 7, 4,
+            MirCoverageSiteKindV1.AndCondition, 0)
+        val catalog = probe_catalog([source_b, source_a],
+            [decision_b, decision_a],
+            [MirCoverageConditionSiteV1(decision_a, condition_a)])
+        val a_probe = MirCoverageProvisionalDecisionProbeV1(
+            decision_a, MirCoverageBooleanOperandV1.Local(41))
+        val b_probe = MirCoverageProvisionalDecisionProbeV1(
+            decision_b, MirCoverageBooleanOperandV1.Local(9))
+        val condition_probe = MirCoverageProvisionalConditionProbeV1(
+            decision_a, condition_a, MirCoverageBooleanOperandV1.Local(42))
+
+        val forward = probe_plan_ok(mir_coverage_resolve_probe_plan_v1(
+            catalog, [a_probe, b_probe], [condition_probe]))
+        val reverse = probe_plan_ok(mir_coverage_resolve_probe_plan_v1(
+            catalog, [b_probe, a_probe], [condition_probe]))
+
+        expect(forward.canonical_text).to_equal(reverse.canonical_text)
+        expect(forward.decisions.len()).to_equal(catalog.decisions.len())
+        expect(forward.conditions.len()).to_equal(catalog.conditions.len())
+        expect(forward.decisions[0].runtime_id).to_equal(1)
+        expect(forward.decisions[1].runtime_id).to_equal(2)
+        expect(forward.conditions[0].runtime_id).to_equal(1)
+        expect(forward.canonical_text).to_start_with("MirCoverageProbePlan-v1")
+
+    it "retains local and literal boolean operands in finalized payloads":
+        val source = probe_source("src/product/core.spl", "if left and right")
+        val decision = probe_site(source, "product.core.step", 0, 17, 1,
+            MirCoverageSiteKindV1.IfDecision, 0)
+        val condition = probe_site(source, "product.core.step", 3, 7, 4,
+            MirCoverageSiteKindV1.AndCondition, 0)
+        val catalog = probe_catalog([source], [decision],
+            [MirCoverageConditionSiteV1(decision, condition)])
+        val plan = probe_plan_ok(mir_coverage_resolve_probe_plan_v1(
+            catalog,
+            [MirCoverageProvisionalDecisionProbeV1(
+                decision, MirCoverageBooleanOperandV1.Local(0))],
+            [MirCoverageProvisionalConditionProbeV1(
+                decision, condition, MirCoverageBooleanOperandV1.Literal(true))]))
+
+        match plan.decisions[0].operand:
+            case Local(local_id): expect(local_id).to_equal(0)
+            case Literal(_): expect(false).to_be(true)
+        match plan.conditions[0].operand:
+            case Literal(value): expect(value).to_be(true)
+            case Local(_): expect(false).to_be(true)
+        expect(plan.canonical_text).to_contain("local1:0")
+        expect(plan.canonical_text).to_contain("literal-true")
+
+    it "resolves a valid condition through its parent-bound identity":
+        val source = probe_source("src/product/core.spl", "if left and right")
+        val decision = probe_site(source, "product.core.step", 0, 17, 1,
+            MirCoverageSiteKindV1.IfDecision, 0)
+        val condition = probe_site(source, "product.core.step", 3, 7, 4,
+            MirCoverageSiteKindV1.AndCondition, 0)
+        val catalog = probe_catalog([source], [decision],
+            [MirCoverageConditionSiteV1(decision, condition)])
+        val plan = probe_plan_ok(mir_coverage_resolve_probe_plan_v1(
+            catalog,
+            [MirCoverageProvisionalDecisionProbeV1(
+                decision, MirCoverageBooleanOperandV1.Local(0))],
+            [MirCoverageProvisionalConditionProbeV1(
+                decision, condition, MirCoverageBooleanOperandV1.Literal(true))]))
+
+        expect(plan.decisions[0].semantic_id).to_equal(
+            mir_coverage_site_id_v1(decision))
+        expect(plan.conditions[0].decision_semantic_id).to_equal(
+            mir_coverage_site_id_v1(decision))
+        expect(plan.conditions[0].semantic_id).to_equal(
+            mir_coverage_condition_id_v1(decision, condition))
+
+    it "rejects missing extra and duplicate provisional mappings":
+        val source = probe_source("src/product/core.spl", "if ready")
+        val decision = probe_site(source, "product.core.step", 0, 8, 1,
+            MirCoverageSiteKindV1.IfDecision, 0)
+        val other = probe_site(source, "product.core.step", 0, 8, 1,
+            MirCoverageSiteKindV1.WhileDecision, 1)
+        val catalog = probe_catalog([source], [decision], [])
+        val probe = MirCoverageProvisionalDecisionProbeV1(
+            decision, MirCoverageBooleanOperandV1.Local(1))
+        val other_probe = MirCoverageProvisionalDecisionProbeV1(
+            other, MirCoverageBooleanOperandV1.Local(2))
+
+        expect(probe_plan_error(mir_coverage_resolve_probe_plan_v1(
+            catalog, [], []))).to_contain("BIJECTION")
+        expect(probe_plan_error(mir_coverage_resolve_probe_plan_v1(
+            catalog, [probe, probe], []))).to_contain("BIJECTION")
+        expect(probe_plan_error(mir_coverage_resolve_probe_plan_v1(
+            catalog, [other_probe], []))).to_contain("DECISION-MAPPING")
+
+    it "rejects wrong kinds invalid operands and mismatched condition parents":
+        val source = probe_source("src/product/core.spl", "if left and right")
+        val decision = probe_site(source, "product.core.step", 0, 17, 1,
+            MirCoverageSiteKindV1.IfDecision, 0)
+        val other_parent = probe_site(source, "product.core.step", 0, 17, 1,
+            MirCoverageSiteKindV1.WhileDecision, 1)
+        val condition = probe_site(source, "product.core.step", 3, 7, 4,
+            MirCoverageSiteKindV1.AndCondition, 0)
+        val catalog = probe_catalog([source], [decision],
+            [MirCoverageConditionSiteV1(decision, condition)])
+        val decision_probe = MirCoverageProvisionalDecisionProbeV1(
+            decision, MirCoverageBooleanOperandV1.Local(1))
+
+        expect(probe_plan_error(mir_coverage_resolve_probe_plan_v1(
+            catalog,
+            [MirCoverageProvisionalDecisionProbeV1(
+                condition, MirCoverageBooleanOperandV1.Local(1))],
+            [MirCoverageProvisionalConditionProbeV1(
+                decision, condition, MirCoverageBooleanOperandV1.Local(2))]
+        ))).to_contain("PROVISIONAL-KIND")
+        expect(probe_plan_error(mir_coverage_resolve_probe_plan_v1(
+            catalog,
+            [MirCoverageProvisionalDecisionProbeV1(
+                decision, MirCoverageBooleanOperandV1.Local(-1))],
+            [MirCoverageProvisionalConditionProbeV1(
+                decision, condition, MirCoverageBooleanOperandV1.Local(2))]
+        ))).to_contain("OPERAND")
+        expect(probe_plan_error(mir_coverage_resolve_probe_plan_v1(
+            catalog, [decision_probe],
+            [MirCoverageProvisionalConditionProbeV1(
+                other_parent, condition, MirCoverageBooleanOperandV1.Local(2))]
+        ))).to_contain("CONDITION-MAPPING")
+
+    it "rejects zero duplicate and identity-conflicting catalog mappings":
+        val source = probe_source("src/product/core.spl", "if left and right")
+        val decision = probe_site(source, "product.core.step", 0, 17, 1,
+            MirCoverageSiteKindV1.IfDecision, 0)
+        val condition = probe_site(source, "product.core.step", 3, 7, 4,
+            MirCoverageSiteKindV1.AndCondition, 0)
+        val valid = probe_catalog([source], [decision],
+            [MirCoverageConditionSiteV1(decision, condition)])
+        val decision_probe = MirCoverageProvisionalDecisionProbeV1(
+            decision, MirCoverageBooleanOperandV1.Local(1))
+        val condition_probe = MirCoverageProvisionalConditionProbeV1(
+            decision, condition, MirCoverageBooleanOperandV1.Local(2))
+        val decision_record = valid.decisions[0]
+        val condition_record = valid.conditions[0]
+        val zero_catalog = MirCoverageCatalogV1(
+            valid.mode, valid.sources,
+            [MirCoverageDecisionRecordV1(
+                decision_record.semantic_id, 0, decision_record.site)],
+            valid.conditions, valid.zero_count_sdn, valid.zero_count_sdn_sha256,
+            valid.catalog_sha256, valid.publishable)
+        expect(probe_plan_error(mir_coverage_resolve_probe_plan_v1(
+            zero_catalog, [decision_probe], [condition_probe]))).to_contain(
+                "ZERO-MAPPING")
+
+        val duplicate_catalog = MirCoverageCatalogV1(
+            valid.mode, valid.sources,
+            [decision_record,
+                MirCoverageDecisionRecordV1(
+                    decision_record.semantic_id, 2, decision_record.site)],
+            valid.conditions, valid.zero_count_sdn, valid.zero_count_sdn_sha256,
+            valid.catalog_sha256, valid.publishable)
+        expect(probe_plan_error(mir_coverage_resolve_probe_plan_v1(
+            duplicate_catalog, [decision_probe, decision_probe],
+            [condition_probe]))).to_contain("CATALOG-DUPLICATE")
+
+        val identity_catalog = MirCoverageCatalogV1(
+            valid.mode, valid.sources, valid.decisions,
+            [MirCoverageConditionRecordV1(
+                condition_record.decision_semantic_id,
+                condition_record.decision_runtime_id, "mir-v1-c-wrong",
+                condition_record.runtime_id, condition_record.site)],
+            valid.zero_count_sdn, valid.zero_count_sdn_sha256,
+            valid.catalog_sha256, valid.publishable)
+        expect(probe_plan_error(mir_coverage_resolve_probe_plan_v1(
+            identity_catalog, [decision_probe], [condition_probe]))).to_contain(
+                "CATALOG-IDENTITY")
+
+    it "rejects wrong-kind records in an otherwise shaped catalog":
+        val source = probe_source("src/product/core.spl", "if left and right")
+        val decision = probe_site(source, "product.core.step", 0, 17, 1,
+            MirCoverageSiteKindV1.IfDecision, 0)
+        val condition = probe_site(source, "product.core.step", 3, 7, 4,
+            MirCoverageSiteKindV1.AndCondition, 0)
+        val valid = probe_catalog([source], [decision],
+            [MirCoverageConditionSiteV1(decision, condition)])
+        val wrong = MirCoverageCatalogV1(
+            valid.mode, valid.sources,
+            [MirCoverageDecisionRecordV1(
+                mir_coverage_site_id_v1(condition), 1, condition)],
+            valid.conditions, valid.zero_count_sdn, valid.zero_count_sdn_sha256,
+            valid.catalog_sha256, valid.publishable)
+        expect(probe_plan_error(mir_coverage_resolve_probe_plan_v1(
+            wrong,
+            [MirCoverageProvisionalDecisionProbeV1(
+                decision, MirCoverageBooleanOperandV1.Local(1))],
+            [MirCoverageProvisionalConditionProbeV1(
+                decision, condition, MirCoverageBooleanOperandV1.Local(2))]
+        ))).to_contain("CATALOG-KIND")
+
+    it "rejects noncanonical gapped overflow and reordered runtime IDs":
+        val source_b = probe_source("src/product/zeta.spl", "while ready")
+        val source_a = probe_source("src/product/alpha.spl", "if ready")
+        val decision_b = probe_site(source_b, "product.zeta.poll", 0, 11, 1,
+            MirCoverageSiteKindV1.WhileDecision, 0)
+        val decision_a = probe_site(source_a, "product.alpha.step", 0, 8, 1,
+            MirCoverageSiteKindV1.IfDecision, 0)
+        val valid = probe_catalog([source_b, source_a],
+            [decision_b, decision_a], [])
+        val first = valid.decisions[0]
+        val second = valid.decisions[1]
+        val probes = [
+            MirCoverageProvisionalDecisionProbeV1(
+                first.site, MirCoverageBooleanOperandV1.Local(1)),
+            MirCoverageProvisionalDecisionProbeV1(
+                second.site, MirCoverageBooleanOperandV1.Local(2))]
+        val swapped = MirCoverageCatalogV1(
+            valid.mode, valid.sources,
+            [MirCoverageDecisionRecordV1(
+                first.semantic_id, 2, first.site),
+             MirCoverageDecisionRecordV1(
+                second.semantic_id, 1, second.site)],
+            valid.conditions, valid.zero_count_sdn, valid.zero_count_sdn_sha256,
+            valid.catalog_sha256, valid.publishable)
+        expect(probe_plan_error(mir_coverage_resolve_probe_plan_v1(
+            swapped, probes, []))).to_contain("CATALOG-RUNTIME-ID")
+
+        val gapped = MirCoverageCatalogV1(
+            valid.mode, valid.sources,
+            [first, MirCoverageDecisionRecordV1(
+                second.semantic_id, 3, second.site)],
+            valid.conditions, valid.zero_count_sdn, valid.zero_count_sdn_sha256,
+            valid.catalog_sha256, valid.publishable)
+        expect(probe_plan_error(mir_coverage_resolve_probe_plan_v1(
+            gapped, probes, []))).to_contain("CATALOG-RUNTIME-ID")
+
+        val overflow = MirCoverageCatalogV1(
+            valid.mode, valid.sources,
+            [MirCoverageDecisionRecordV1(
+                first.semantic_id, 4294967296, first.site), second],
+            valid.conditions, valid.zero_count_sdn, valid.zero_count_sdn_sha256,
+            valid.catalog_sha256, valid.publishable)
+        expect(probe_plan_error(mir_coverage_resolve_probe_plan_v1(
+            overflow, probes, []))).to_contain("CATALOG-RUNTIME-ID")
+
+        val reordered = MirCoverageCatalogV1(
+            valid.mode, valid.sources,
+            [MirCoverageDecisionRecordV1(
+                second.semantic_id, 1, second.site),
+             MirCoverageDecisionRecordV1(
+                first.semantic_id, 2, first.site)],
+            valid.conditions, valid.zero_count_sdn, valid.zero_count_sdn_sha256,
+            valid.catalog_sha256, valid.publishable)
+        expect(probe_plan_error(mir_coverage_resolve_probe_plan_v1(
+            reordered, probes, []))).to_contain("CATALOG-ORDER")
+
+    it "rejects forged cross-function and out-of-span condition records":
+        val source = probe_source("src/product/core.spl", "if left and right")
+        val decision = probe_site(source, "product.core.step", 0, 11, 1,
+            MirCoverageSiteKindV1.IfDecision, 0)
+        val valid = probe_catalog([source], [decision], [])
+        val decision_record = valid.decisions[0]
+        val decision_probe = MirCoverageProvisionalDecisionProbeV1(
+            decision, MirCoverageBooleanOperandV1.Local(1))
+        val cross_function = probe_site(
+            source, "product.core.other", 3, 7, 4,
+            MirCoverageSiteKindV1.AndCondition, 0)
+        val cross_function_catalog = MirCoverageCatalogV1(
+            valid.mode, valid.sources, valid.decisions,
+            [MirCoverageConditionRecordV1(
+                decision_record.semantic_id, decision_record.runtime_id,
+                mir_coverage_condition_id_v1(decision, cross_function), 1,
+                cross_function)],
+            valid.zero_count_sdn, valid.zero_count_sdn_sha256,
+            valid.catalog_sha256, valid.publishable)
+        expect(probe_plan_error(mir_coverage_resolve_probe_plan_v1(
+            cross_function_catalog, [decision_probe],
+            [MirCoverageProvisionalConditionProbeV1(
+                decision, cross_function,
+                MirCoverageBooleanOperandV1.Local(2))]
+        ))).to_contain("CATALOG-OWNER")
+
+        val outside = probe_site(source, "product.core.step", 12, 17, 13,
+            MirCoverageSiteKindV1.OrCondition, 0)
+        val outside_catalog = MirCoverageCatalogV1(
+            valid.mode, valid.sources, valid.decisions,
+            [MirCoverageConditionRecordV1(
+                decision_record.semantic_id, decision_record.runtime_id,
+                mir_coverage_condition_id_v1(decision, outside), 1, outside)],
+            valid.zero_count_sdn, valid.zero_count_sdn_sha256,
+            valid.catalog_sha256, valid.publishable)
+        expect(probe_plan_error(mir_coverage_resolve_probe_plan_v1(
+            outside_catalog, [decision_probe],
+            [MirCoverageProvisionalConditionProbeV1(
+                decision, outside, MirCoverageBooleanOperandV1.Local(3))]
+        ))).to_contain("CATALOG-SPAN")
+
+    it "rejects a nested condition reparented to a containing outer decision":
+        val body = "if outer then if inner and ready"
+        val source = probe_source("src/product/nested.spl", body)
+        val outer = probe_site(source, "product.nested.step", 0, body.len(), 1,
+            MirCoverageSiteKindV1.IfDecision, 0)
+        val inner = probe_site(source, "product.nested.step", 14, body.len(), 15,
+            MirCoverageSiteKindV1.IfDecision, 1)
+        val condition = probe_site(source, "product.nested.step", 17, 22, 18,
+            MirCoverageSiteKindV1.AndCondition, 0)
+        val valid = probe_catalog([source], [outer, inner],
+            [MirCoverageConditionSiteV1(inner, condition)])
+        val condition_record = valid.conditions[0]
+        val outer_record = if valid.decisions[0].semantic_id ==
+                mir_coverage_site_id_v1(outer):
+            valid.decisions[0]
+        else:
+            valid.decisions[1]
+        val forged = MirCoverageCatalogV1(
+            valid.mode, valid.sources, valid.decisions,
+            [MirCoverageConditionRecordV1(
+                outer_record.semantic_id, outer_record.runtime_id,
+                condition_record.semantic_id, condition_record.runtime_id,
+                condition_record.site)],
+            valid.zero_count_sdn, valid.zero_count_sdn_sha256,
+            valid.catalog_sha256, valid.publishable)
+        val decision_probes = [
+            MirCoverageProvisionalDecisionProbeV1(
+                outer, MirCoverageBooleanOperandV1.Local(1)),
+            MirCoverageProvisionalDecisionProbeV1(
+                inner, MirCoverageBooleanOperandV1.Local(2))]
+        val inner_probe = MirCoverageProvisionalConditionProbeV1(
+            inner, condition, MirCoverageBooleanOperandV1.Local(3))
+
+        expect(condition_record.semantic_id).to_equal(
+            mir_coverage_condition_id_v1(inner, condition))
+        expect(probe_plan_error(mir_coverage_resolve_probe_plan_v1(
+            forged, decision_probes, [inner_probe]))).to_contain(
+                "CATALOG-IDENTITY")
+        expect(probe_plan_error(mir_coverage_resolve_probe_plan_v1(
+            valid, decision_probes,
+            [MirCoverageProvisionalConditionProbeV1(
+                outer, condition, MirCoverageBooleanOperandV1.Local(3))]
+        ))).to_contain("CONDITION-MAPPING")

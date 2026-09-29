@@ -73,7 +73,7 @@ expect(boot_driver.driver_name()).to_equal("Fat32Driver")
 
 </details>
 
-#### stays on the shared FsFat32Driver surface
+#### keeps each shared FsFat32Driver instance independently mounted
 
 <details>
 <summary>Executable SSpec</summary>

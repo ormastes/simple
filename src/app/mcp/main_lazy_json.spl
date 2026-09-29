@@ -1,8 +1,7 @@
 # MCP Lazy Server - JSON helpers
 # Extracted from main_lazy.spl
 
-use std.io_runtime.{env_get, process_run, file_read, file_write}
-use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+use std.io_runtime.{env_get, process_run, process_run_bounded, file_read, file_write}
 
 # --- Safe string helpers (workaround for 2-arg substring bug) ---
 
@@ -10,15 +9,6 @@ fn _slice_text(s: text, start: i64, end: i64) -> text:
     # Use native 2-arg substring (O(1) pointer math in Rust) instead of
     # the previous O(n^2) per-char concat loop.
     s.substring(start, end)
-
-fn strip_last(s: text) -> text:
-    val n = s.len()
-    if n <= 0:
-        return ""
-    _slice_text(s, 0, n - 1)
-
-fn strip_first_last(s: text) -> text:
-    strip_last(_slice_text(s, 1, s.len()))
 
 fn first_n_chars(s: text, n: i64) -> text:
     val limit = if n < s.len(): n else: s.len()
@@ -49,14 +39,61 @@ fn SB_L() -> text:
 fn SB_R() -> text:
     "]"
 
+# The 32 C0 control characters, indexed by code point. JSON strings must not
+# carry any of them raw (RFC 8259 §7), so every one maps to an escape.
+fn _json_ctrl_chars() -> [text]:
+    ["\u0000", "\u0001", "\u0002", "\u0003", "\u0004", "\u0005", "\u0006", "\u0007", 
+     "\u0008", "\t", "\n", "\u000B", "\u000C", "\r", "\u000E", "\u000F", 
+     "\u0010", "\u0011", "\u0012", "\u0013", "\u0014", "\u0015", "\u0016", "\u0017", 
+     "\u0018", "\u0019", "\u001A", "\u001B", "\u001C", "\u001D", "\u001E", "\u001F"]
+
+fn _json_ctrl_escape(ch: text) -> text:
+    if ch == "\n":
+        return r"\n"
+    if ch == "\r":
+        return r"\r"
+    if ch == "\t":
+        return r"\t"
+    val table = _json_ctrl_chars()
+    val hex = "0123456789ABCDEF"
+    var i = 0
+    while i < table.len():
+        if table[i] == ch:
+            return r"\u00" + hex.substring(i / 16, i / 16 + 1) + hex.substring(i % 16, i % 16 + 1)
+        i = i + 1
+    # Not a C0 control char (multi-byte or >= 0x20): pass through.
+    ch
+
+fn _json_needs_escape(ch: text) -> bool:
+    ch == Q() or ch == "\\" or ch < " "
+
+# Single-pass JSON string escaper. Deliberately does NOT chain `.replace()`:
+# the chained form left raw control characters in the payload and, on the
+# deployed 2026-08-10 native server, shifted the `\n` escape two bytes
+# ("WARNING" -> "W\nRNING"). Every byte is copied or escaped exactly once.
 fn escape_json(s: text) -> text:
-    var result = s
-    result = result.replace(r"\", r"\\")
-    result = result.replace(Q(), r"\" + Q())
-    result = result.replace("\n", r"\n")
-    result = result.replace("\r", r"\r")
-    result = result.replace("\t", r"\t")
-    result
+    var plain = true
+    for ch in s:
+        if _json_needs_escape(ch):
+            plain = false
+            break
+    if plain:
+        return s
+    var parts: [text] = []
+    for ch in s:
+        if ch == Q():
+            parts.push("\\" + Q())
+        elif ch == "\\":
+            parts.push("\\\\")
+        elif ch < " ":
+            parts.push(_json_ctrl_escape(ch))
+        else:
+            parts.push(ch)
+    parts.join("")
+
+# Public alias: the escaper body without quotes (used by api_tools).
+fn escape_json_text(s: text) -> text:
+    escape_json(s)
 
 fn js(s: text) -> text:
     Q() + escape_json(s) + Q()
@@ -214,34 +251,6 @@ fn make_error(id: text, code: i64, message: text) -> text:
 
 # --- MCP Tool Result helpers ---
 
-fn infer_json_value_type(raw: text) -> text:
-    val t = raw.trim()
-    if t == "":
-        return "empty"
-    if t.starts_with("{"):
-        return "object"
-    if t.starts_with("["):
-        return "array"
-    if t.starts_with(Q()):
-        return "string"
-    if t == "true" or t == "false":
-        return "boolean"
-    if t == "null":
-        return "null"
-    var has_digit = false
-    var all_num = true
-    for ch in t:
-        if ch >= "0" and ch <= "9":
-            has_digit = true
-        elif ch == "." or ch == "-" or ch == "+":
-            pass
-        else:
-            all_num = false
-            break
-    if has_digit and all_num:
-        return "number"
-    "text"
-
 fn top_level_item_count(raw: text) -> i64:
     val t = raw.trim()
     if t == "":
@@ -285,82 +294,22 @@ fn top_level_item_count(raw: text) -> i64:
             return 0
     count
 
-fn summarize_json_shape(raw: text, depth: i64) -> text:
-    val value_type = infer_json_value_type(raw)
-    if depth <= 0:
-        return value_type
-    if value_type == "array":
-        var inner = raw.trim()
-        if inner.len() >= 2:
-            inner = strip_first_last(inner).trim()
-        var first = ""
-        var d = 0
-        var in_s = false
-        var esc = false
-        var parts: [text] = []
-        for ch in inner:
-            if in_s:
-                parts.push(ch)
-                if esc:
-                    esc = false
-                elif ch == "\\":
-                    esc = true
-                elif ch == Q():
-                    in_s = false
-                continue
-            if ch == Q():
-                in_s = true
-                parts.push(ch)
-            elif ch == "[" or ch == "{":
-                d = d + 1
-                parts.push(ch)
-            elif ch == "]" or ch == "}":
-                d = d - 1
-                parts.push(ch)
-            elif ch == "," and d == 0:
-                first = parts.join("").trim()
-                break
-            else:
-                parts.push(ch)
-        if first == "":
-            first = parts.join("").trim()
-        var elem_shape = "unknown"
-        if first != "":
-            elem_shape = summarize_json_shape(first, depth - 1)
-        return "array<" + elem_shape + ">"
-    if value_type == "object":
-        var pair_count = 0
-        var in_s = false
-        var esc = false
-        for ch in raw:
-            if in_s:
-                if esc:
-                    esc = false
-                elif ch == "\\":
-                    esc = true
-                elif ch == Q():
-                    in_s = false
-                continue
-            if ch == Q():
-                in_s = true
-            elif ch == ":":
-                pair_count = pair_count + 1
-        val lb = "{"
-        val rb = "}"
-        return "object" + lb + "pairs=" + str(pair_count) + rb
-    value_type
-
 fn make_tool_result(id: text, output: text) -> text:
+    make_tool_result_status(id, output, false)
+
+# Tool result with an explicit MCP `isError` flag. A failed tool call is still
+# a successful JSON-RPC response (the protocol reserves `error` for transport
+# faults), so the failure travels in `result.isError`, never as prose inside a
+# success payload.
+fn make_tool_result_status(id: text, output: text, is_error: bool) -> text:
     val escaped = escape_json(output)
     val quoted = Q() + escaped + Q()
     val content = SB_L() + jo2(p1: jp(key: "type", value: js("text")), p2: jp(key: "text", value: quoted)) + SB_R()
-    val inferred = infer_json_value_type(output)
-    val shape = summarize_json_shape(output, 2)
-    val structured = jo2(
-        p1: jp(key: "inferredType", value: js(inferred)),
-        p2: jp(key: "shape", value: js(shape))
+    val err_flag = if is_error: "true" else: "false"
+    val result = jo2(
+        p1: jp(key: "content", value: content),
+        p2: jp(key: "isError", value: err_flag)
     )
-    val result = jo2(p1: jp(key: "content", value: content), p2: jp(key: "structuredContent", value: structured))
     make_json_result(id: id, result: result)
 
 fn make_tool_error(id: text, code: i64, msg: text) -> text:
@@ -391,11 +340,10 @@ fn log_level_to_int(level: text) -> i64:
     elif level == "emergency": 7
     else: -1
 
-export LB, RB, Q, jp, js, jo1, jo2, jo3, jo4, make_tool_result, make_tool_error
+export LB, RB, Q, jp, js, jo1, jo2, jo3, jo4, make_tool_result, make_tool_result_status, make_tool_error
+export escape_json_text
 export extract_json_string, extract_json_value, make_error_response, log_level_to_int
-export first_n_chars
-export make_json_result, make_error, extract_field, escape_json
-export top_level_item_count, shell_cmd, mcp_run_argv, _mcp_normalize_process_exit, strip_ansi, _slice_text
+export first_n_chars, strip_ansi, shell_cmd, mcp_run_argv
 
 # --- Shell helper ---
 # Uses process_run (returns an anonymous (text, text, i64) tuple). Destructuring
@@ -421,30 +369,29 @@ fn _mcp_detect_shell() -> text:
 fn _get_shell() -> text:
     _mcp_detect_shell()
 
+# Remove ANSI CSI sequences (ESC '[' params final-byte) and bare ESC bytes.
+# No subprocess: the old version spawned `printf '\033'` on every tool call
+# and then only deleted the ESC byte, leaving `[33m` fragments in the text.
 fn strip_ansi(s: text) -> text:
+    val esc = "\u001B"
+    if not s.contains(esc):
+        return s
     var parts: [text] = []
-    var escape_state = 0
+    var in_csi = false
+    var after_esc = false
     for ch in s:
-        if escape_state == 1:
+        if in_csi:
+            # CSI ends at the first byte in 0x40..0x7E
+            if ch >= "@" and ch <= "~":
+                in_csi = false
+            continue
+        if after_esc:
+            after_esc = false
             if ch == "[":
-                escape_state = 2
-            elif ch == "\033" or ch == "\x1b":
-                escape_state = 1
-            else:
-                escape_state = 0
-                parts.push(ch)
+                in_csi = true
             continue
-        if escape_state == 2:
-            if ch == "\033" or ch == "\x1b":
-                escape_state = 1
-            elif ch >= "@" and ch <= "~":
-                escape_state = 0
-            elif ch < " " or ch > "?":
-                escape_state = 0
-                parts.push(ch)
-            continue
-        if ch == "\033" or ch == "\x1b":
-            escape_state = 1
+        if ch == esc:
+            after_esc = true
             continue
         parts.push(ch)
     parts.join("")
@@ -491,18 +438,27 @@ fn shell_cmd(command: text) -> (text, i64):
         stdout = strip_ansi(stdout)
     (stdout, code)
 
-# Run a fixed executable with literal arguments.  Keep this beside shell_cmd so
-# callers handling public fields do not accidentally rebuild a shell command.
-fn mcp_run_argv(binary: text, args: [text], timeout_ms: i64, max_output_bytes: i64) -> (text, i64):
-    val result = process_run_bounded(binary, args, timeout_ms, max_output_bytes)
-    var output = result.0 + result.1
+# Execute literal argv with bounded time and captured output. Public MCP fields
+# must never be reconstructed into a shell command.
+fn mcp_run_argv(
+    binary: text, args: [text], timeout_ms: i64, max_output_bytes: i64
+) -> (text, i64):
+    val (stdout, stderr, code) = process_run_bounded(
+        binary, args, timeout_ms, max_output_bytes)
+    var output = stdout + stderr
     if output != "":
         output = strip_ansi(output)
-    (output, _mcp_normalize_process_exit(result.2, result.1))
+    (output, _mcp_normalize_process_exit(code, stderr))
 
 fn _mcp_normalize_process_exit(code: i64, stderr: text) -> i64:
-    if code == -1 and stderr.contains("[TIMEOUT: Process killed after "):
-        return 124
+    if code == -1:
+        if stderr.ends_with("\nTIMEOUT\n"):
+            return 124
+        if stderr.ends_with("Process timed out"):
+            return 124
+        if stderr.ends_with("ms]") and stderr.contains(
+            "[TIMEOUT: Process killed after "):
+            return 124
     code
 
 fn text_byte_len(s: text) -> i64:

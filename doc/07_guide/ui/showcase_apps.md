@@ -2,23 +2,27 @@
 
 The canonical app IDs are `graphics_2d_showcase`, `web_standards_showcase`, and `gui_widget_showcase`. Readiness is recorded in `src/lib/common/ui/showcase_catalog.spl`; a false entry means the surface is not yet accepted even if an older demo window exists.
 
-## Canonical identity and title mapping
+## Canonical rendering showcases (2026-09-24)
 
-| app_id | catalog title | runtime window/title pattern |
-|---|---|---|
-| `graphics_2d_showcase` | `2D Rendering Showcase` | `2d_showcase_backed_<backend>` |
-| `web_standards_showcase` | `Web Standards Showcase` | `web_showcase_backed_<backend>` |
-| `gui_widget_showcase` | `Widget Showcase` | `gui_showcase_backed_<backend>` |
+The current canonical set lives in `examples/06_io/ui/rendering/` — ten
+entries (`rendering_{tui,gui,wm}_{core,full}.spl`,
+`rendering_{2d,web}_{core,extended}.spl`) plus the shared
+`rendering_items.ui.sdn` item list, the `rendering_switch.spl` UI-base
+switch, and a per-directory `doc.md` run table. Tier split is file-based
+(extended imports core); every entry prints honest-fail
+`showcase status=blocked|pass` lines. Headless verification:
 
-Host/installed WM and SimpleOS launchers use the same backend-aware pattern as each app:
+```text
+SIMPLE_LIB=src SIMPLE_TIMEOUT_SECONDS=0 bin/simple run examples/06_io/ui/rendering/rendering_2d_core.spl
+SIMPLE_LIB=src SIMPLE_TIMEOUT_SECONDS=0 bin/simple run examples/06_io/ui/rendering/rendering_wm_full.spl
+bin/simple test test/03_system/ui_showcase/rendering_showcases_spec.spl --mode=interpreter
+sh scripts/check/check-rendering-showcase-captures.shs
+```
 
-- `2d_showcase_backed_<backend>`
-- `web_showcase_backed_<backend>`
-- `gui_showcase_backed_<backend>`
-
-Where:
-
-- `<backend>` is resolved in `showcase_backend_token()` (`software`, `simd`, `cpu_simd`, `cpu-simd`, `simd_cpu`, `simd-cpu`, `vulkan`, `metal`, `tauri2`, `electron`, etc.)
+Web-server GUI (REQ-001): `bin/simple ui web examples/06_io/ui/rendering/rendering_items.ui.sdn --port 8080`
+— currently blocked by `doc/08_tracking/bug/ui_web_seed_exits_before_bind_2026-09-24.md`.
+The legacy standalone entries below remain as-is; new work should extend the
+canonical subtree, not add flat demos.
 
 ## Standalone
 
@@ -29,22 +33,6 @@ SIMPLE_GUI=1 scripts/gui/macos-gui-run.shs examples/06_io/ui/widget_showcase_gui
 ```
 
 On Linux, use `scripts/gui/linux-gui-run.shs` with the same source/page arguments. The graphics and web entries currently remain blocked by the recorded nil-receiver runtime failures; the commands are reproductions, not PASS claims.
-
-## Backend control (ground-truth behavior)
-
-All showcase apps that render with Engine2D use `SIMPLE_GUI_BACKEND` unless another knob is wired in source.
-
-- `widget_showcase_gui.spl`: CLI wins first (`--backend=<name>`), then `SIMPLE_GUI_BACKEND`, default `software`.
-- `graphics_2d_showcase_gui.spl`: `SIMPLE_GUI_BACKEND`, default `software` (standalone `run_graphics_2d_showcase` path), while the host-WM child path defaults to `cpu_simd`.
-- `web_render_file_gui.spl` / `web_standards_showcase_gui.spl`: `SIMPLE_GUI_BACKEND`, default `cpu_simd`.
-- Host-WM launchers forward `SIMPLE_GUI_BACKEND` to their child process; if set, they require exact backend match between requested and actual engine in the child.
-
-Backend string handling is normalized by the engine layer; known aliases like `simd_cpu` and `cpu-simd` resolve to `cpu_simd`, and unknown names fall back to `software`.
-
-Validation checks in these showcases commonly reject:
-- requested GPU backends that resolve to CPU mirrors,
-- missing device readback for GPU verification (`vulkan`/`metal` cases),
-- zero or synthetic backend handles and missing provenance.
 
 ## Host WM
 
@@ -63,6 +51,35 @@ No showcase entry is accepted in the installed SimpleOS launcher yet. A valid re
 ## Verification flow
 
 For each ready surface: open the catalog, launch the app, snapshot the visible window, find a labeled control/section, act through the real input route, inspect event history, capture the post-action semantic state, and retain the same-run framebuffer/readback plus backend provenance. Blank frames, source-only assertions, synthetic GPU handles, and action logs without a changed frame/state fail verification.
+
+## Web standards 4K hardening (active, not accepted)
+
+The standalone web source now defaults to `3840x2160`, requests Vulkan unless
+`SIMPLE_GUI_BACKEND` overrides it, rejects backend mismatch/degraded output,
+and requires device readback plus positive backend/device identities. Its page
+has seven semantic tabs (`Overview`, `HTML`, `CSS Layout`, `CSS Paint`,
+`Forms & Media`, `Animation`, `Evidence`) with pointer and keyboard behavior.
+These source changes do **not** make the catalog readiness flag true: a PASS
+still needs an installed Stage-4 runner, physical Vulkan first-complete-frame
+`<=1000000us`, real Chrome evidence for the identical fixture/tab set, and
+per-tab capture comparison.
+
+The runner injects the typed `WebRenderableFeatureInventory` into the rendered
+document: 113 HTML rows and the current 131-property implemented CSS subset,
+each labeled renderable, partial, nonpaint, or unsupported with production
+owner and tab. This replaces “text occurred in a fixture” as the intended
+source of support truth, but executable pixel traceability is still required.
+The Chrome harness now makes real bounded 4K PNG captures for all seven tabs;
+until Chrome GPU backing and repeated warm samples are proven it emits
+`gpu_backend_status=unverified`, `warm_sample_count=0`, and
+`comparison_admitted=false`.
+
+Do not compile this entry from an implicit repo-wide source scan. Use explicit
+source roots, `--entry-closure`, `--low-memory`, one thread, isolated cache,
+and timeout/RSS guards. The admitted compiler currently retains the ordinary
+parse closure and has reached about 1.69 GiB without producing an artifact;
+that is tracked as a compiler parse/AST-retention blocker, not a 4K runtime
+framebuffer result.
 
 ## Spec wiring (landed, still RED — 2026-07-14)
 

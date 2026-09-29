@@ -1,4 +1,9 @@
 # SIMPLE_BOOTSTRAP=1 textually deleted every try-operator; builtin Result/Option unresolvable as qualified constructors under the interpreter
+## Closed 2026-09-16 — Status FIXED 2026-07-30; LIVE gap closed same session, regressions landed
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** FIXED (2026-07-30). Two independent defects found while
 root-causing "Result-wrapped APIs are untestable under `bin/simple test`"
@@ -186,3 +191,4 @@ Regressions: all 8 pre-existing `bootstrap_rewrite_tests` still pass
 `dict_index_try_operator_currently_stripped_documented_gap`, which
 documents the raw function's behavior and is unaffected by the gate);
 `cargo build --release --bin simple` clean.
+

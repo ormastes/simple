@@ -1,4 +1,8 @@
 # Bug: sspec test runner kills a heavy subprocess example at a fixed 10s timeout
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Filed:** 2026-06-29
 **Severity:** medium (workaround: keep per-example subprocess work under ~10s)
@@ -41,16 +45,3 @@ timeout, surface the timeout reason in the example's captured `err` (or a distin
 so a spec can distinguish "child timed out" from "child failed", instead of a silent
 partial capture with `code == 1`.
 
-## FIXED BY CONTENT — verified 2026-08-17
-The fixed 10s cap is gone. A measured run reports
-`reason=child-timeout budget_ms=120000` (default 120s, not 10s), and the budget
-is configurable two ways:
-- CLI `--timeout <secs>` (`src/app/test_runner_new/test_runner_client.spl:113,117`;
-  also `test_runner_single.spl:137,141`)
-- per-spec header directive `# @timeout_secs <N>`
-  (`src/app/test_runner_new/test_runner_main.spl:120 spec_timeout_secs_directive`,
-  mirrored in `test_runner_single.spl` / `test_runner_client.spl:334`)
-Both were exercised today on
-`test/01_unit/os/apps/sshd/ssh_kex_rsa_contract_spec.spl`: default run cut off at
-120250ms, and with `# @timeout_secs 600` the child was allowed to run past 600s,
-proving the directive is honoured. Status: FIXED.

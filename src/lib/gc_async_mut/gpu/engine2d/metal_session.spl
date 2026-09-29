@@ -19,7 +19,7 @@
 # See doc/08_tracking/bug/metal_session_variant_unqualified_import_resolves_wrong_2026-07-08.md
 
 use std.gpu.engine2d.backend_metal_msl.{_engine2d_msl}
-use std.common.gpu.font_atlas_composite.{FONT_ATLAS_COMPOSITE_ENTRY, font_atlas_composite_metal_source}
+use std.common.gpu.font_atlas_composite.{FONT_ATLAS_COMPOSITE_ENTRY, font_atlas_composite_metal_source, font_atlas_composite_metal_packed_source}
 use std.nogc_sync_mut.io.metal_sffi.{
     metal_sffi_init, metal_sffi_is_available, metal_sffi_device_count,
     metal_sffi_create_device, metal_sffi_destroy_device,
@@ -78,6 +78,8 @@ class MetalSession:
     # Appended so existing cross-module/native field offsets remain stable.
     pipe_glass_snapshot: i64  # Optional: immutable device framebuffer snapshot
     pipe_glass_material: i64  # Optional: device glass material compositor
+    font_shader_lib_packed: i64        # Packed font-atlas MSL library (Vulkan-parity lane)
+    pipe_font_atlas_composite_packed: i64  # One-dispatch-per-frame font composite pipeline
 
     static fn create(mode: text) -> MetalSession:
         """Return a zero-initialised, uninitialised session. Call init() before use."""
@@ -103,6 +105,8 @@ class MetalSession:
             pipe_indexed_fill: 0,
             pipe_glyph_atlas_blit: 0,
             pipe_font_atlas_composite: 0,
+            font_shader_lib_packed: 0,
+            pipe_font_atlas_composite_packed: 0,
             ref_count: 0,
             is_initialized: false,
             generation: 0,
@@ -182,6 +186,12 @@ class MetalSession:
         self.font_shader_lib = metal_sffi_compile_shader(self.device, font_atlas_composite_metal_source())
         if self.font_shader_lib != 0:
             self.pipe_font_atlas_composite = metal_sffi_create_compute_pipeline(self.device, self.font_shader_lib, FONT_ATLAS_COMPOSITE_ENTRY)
+        # Packed twin: one dispatch composites every glyph of a frame, the same
+        # shape Vulkan uses. Optional for the same reason as the per-quad
+        # library — a compile failure must degrade, never disable the renderer.
+        self.font_shader_lib_packed = metal_sffi_compile_shader(self.device, font_atlas_composite_metal_packed_source())
+        if self.font_shader_lib_packed != 0:
+            self.pipe_font_atlas_composite_packed = metal_sffi_create_compute_pipeline(self.device, self.font_shader_lib_packed, FONT_ATLAS_COMPOSITE_ENTRY)
         self.ref_count = 1
         self.is_initialized = true
         self.last_error = 0
@@ -277,6 +287,10 @@ class MetalSession:
             metal_sffi_destroy_pipeline(self.pipe_glyph_atlas_blit)
         if self.pipe_font_atlas_composite != 0:
             metal_sffi_destroy_pipeline(self.pipe_font_atlas_composite)
+        if self.pipe_font_atlas_composite_packed != 0:
+            metal_sffi_destroy_pipeline(self.pipe_font_atlas_composite_packed)
+        if self.font_shader_lib_packed != 0:
+            metal_sffi_destroy_shader(self.font_shader_lib_packed)
         if self.font_shader_lib != 0:
             metal_sffi_destroy_shader(self.font_shader_lib)
         if self.shader_lib != 0:
@@ -302,6 +316,8 @@ class MetalSession:
         self.pipe_indexed_fill = 0
         self.pipe_glyph_atlas_blit = 0
         self.pipe_font_atlas_composite = 0
+        self.pipe_font_atlas_composite_packed = 0
+        self.font_shader_lib_packed = 0
         self.font_shader_lib = 0
         self.shader_lib = 0
         self.command_queue = 0

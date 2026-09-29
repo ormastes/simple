@@ -1,7 +1,8 @@
 # Hosted WM Capture `put_pixel` Lowering Failure
+## Open 2026-09-16 — needs owner triage
 
-Status: OPEN (P2)
-Status re-verified 2026-08-17 by source inspection (triage shard 01).
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -33,3 +34,4 @@ This is a compiler/lowering prerequisite rather than a theme ownership bug.
 The theme implementation must not substitute fixture, synthetic, or private
 renderer evidence. Fix the owner-level lowering defect, then rerun the checker
 once in a fresh verification session.
+

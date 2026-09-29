@@ -1,0 +1,159 @@
+# Rendering showcases — UI-base switch (shared cross-lane piece, lane L6)
+#
+# lane: switch
+# tier: full
+# core: examples/06_io/ui/rendering/rendering_items.ui.sdn
+#
+# Reads SIMPLE_RENDERING_UI (default tui) and drives the SAME shared item
+# list through three presentations of the ScreenHost seam (REQ-004):
+#   tui -> TUI sdn loader: app.ui.tui.app.run_tui (parser-backed char-grid TUI)
+#   gui -> GUI sdn loader: spawns `bin/simple ui gui <items>` (the `gui` mode of
+#          src/app/ui/main.spl auto-detects tauri/electron/browser/web/tui)
+#   web -> spawns examples/06_io/ui/rendering/rendering_webserver.spl — the
+#          pure-Simple HTTP server (std.nogc_sync_mut.http_server, REQ-001),
+#          prints the URL; the entry self-exits after serving (bounded serve).
+#          POSIX only (spawns via `env` to pass SIMPLE_SHOWCASE_PORT).
+#
+# Honest-fail lines: `showcase status=blocked <reason>` / `showcase status=pass <path>`.
+
+use std.io_runtime.{env_get, file_exists}
+use std.common.string_core.{text_to_bytes}
+use std.nogc_sync_mut.io.tcp.{TcpStream}
+use std.nogc_sync_mut.concurrent.thread.{thread_sleep}
+use app.io.process_ops.{process_spawn_async, process_wait, process_is_running}
+use app.io.env_ops.{host_os, cwd}
+use app.ui.tui.app.{run_tui}
+
+val ITEMS_SDN: text = "examples/06_io/ui/rendering/rendering_items.ui.sdn"
+val WEB_PORT: i64 = 8080
+val WEBSERVER_ENTRY: text = "examples/06_io/ui/rendering/rendering_webserver.spl"
+
+fn main() -> i64:
+    val mode = (env_get("SIMPLE_RENDERING_UI") ?? "tui").trim().lower()
+    val items_path = resolve_items_path()
+    if items_path == "":
+        print "showcase status=blocked missing-item-list path={ITEMS_SDN}"
+        return 2
+    match mode:
+        "tui" =>
+            return run_tui_branch(items_path)
+        "gui" =>
+            return run_gui_branch(items_path)
+        "web" =>
+            return run_web_branch(items_path)
+        _ =>
+            print "showcase status=blocked unknown-ui-base value={mode} expected=tui|gui|web"
+            return 2
+
+# ---------------------------------------------------------------------------
+# Branches
+# ---------------------------------------------------------------------------
+
+fn run_tui_branch(items_path: text) -> i64:
+    """TUI sdn loader branch: the parser-backed terminal UI renders the item list."""
+    return run_tui(items_path)
+
+fn run_gui_branch(items_path: text) -> i64:
+    """GUI sdn loader branch: `simple ui gui <file.ui.sdn>` auto-detects the
+    GUI backend (src/app/ui/main.spl, `gui` | `desktop` mode -> detect_gui_backend).
+    GUI needs a display/runtime; honest-fail if the backend exits immediately."""
+    val bin = simple_bin_path()
+    if bin == "":
+        print "showcase status=blocked gui reason=no-simple-binary"
+        return 2
+    val pid = process_spawn_async(bin, ["ui", "gui", items_path])
+    if pid <= 0:
+        print "showcase status=blocked gui reason=spawn-failed bin={bin}"
+        return 2
+    # -2 from process_wait means still running past the grace window.
+    val rc = process_wait(pid, 4000)
+    if rc == -2:
+        print "showcase status=pass gui pid={pid} (backend window open; kill pid to exit)"
+        return 0
+    print "showcase status=blocked gui reason=backend-exited rc={rc} (no display or GUI runtime unavailable)"
+    return 2
+
+fn run_web_branch(items_path: text) -> i64:
+    """Web branch: spawn `bin/simple ui web <items> --port 8080`, wait for the
+    port to accept connections, print the URL. Honest-fail on spawn/bind."""
+    val bin = simple_bin_path()
+    if bin == "":
+        print "showcase status=blocked web reason=no-simple-binary"
+        return 2
+    val entry = path_join(resolve_repo_root(), WEBSERVER_ENTRY)
+    if not file_exists(entry):
+        print "showcase status=blocked web reason=missing-webserver-entry path={entry}"
+        return 2
+    val pid = process_spawn_async("env", ["SIMPLE_SHOWCASE_PORT={WEB_PORT}", bin, "run", entry])
+    if pid <= 0:
+        print "showcase status=blocked web reason=spawn-failed bin={bin}"
+        return 2
+    val addr = "127.0.0.1:{WEB_PORT}"
+    var attempts = 0
+    # The child needs minutes to compile the http stack under the seed before
+    # it binds; probe for up to 5 minutes. The orphaned child self-exits on
+    # its own serve cap if we give up first.
+    while attempts < 1200:
+        if not process_is_running(pid):
+            print "showcase status=blocked web reason=server-exited-early (bind failure on port {WEB_PORT}?)"
+            return 2
+        val probe = TcpStream.connect(addr)
+        match probe:
+            case Ok(stream):
+                stream.write(text_to_bytes("GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"))
+                val status_line = stream.read_line_or_empty()
+                stream.close()
+                print "Rendering items served at http://localhost:{WEB_PORT} ({status_line.trim()})"
+                process_wait(pid, 15000)
+                print "showcase status=pass http://localhost:{WEB_PORT} pid={pid}"
+                return 0
+            case _:
+                pass_dn
+        thread_sleep(250)
+        attempts = attempts + 1
+    print "showcase status=blocked web reason=port-{WEB_PORT}-no-response"
+    return 2
+
+# ---------------------------------------------------------------------------
+# Path resolution
+# ---------------------------------------------------------------------------
+
+fn resolve_items_path() -> text:
+    if file_exists(ITEMS_SDN):
+        return ITEMS_SDN
+    val root = resolve_repo_root()
+    if root != "":
+        val candidate = path_join(root, ITEMS_SDN)
+        if file_exists(candidate):
+            return candidate
+    return ""
+
+fn simple_bin_path() -> text:
+    val root = resolve_repo_root()
+    if root == "":
+        return ""
+    val bin = path_join(root, "bin/simple")
+    if file_exists(bin):
+        return bin
+    if host_os().lower().contains("windows"):
+        val bin_exe = path_join(root, "bin/simple.exe")
+        if file_exists(bin_exe):
+            return bin_exe
+    return ""
+
+fn resolve_repo_root() -> text:
+    val explicit = env_get("SIMPLE_REPO_ROOT") ?? ""
+    if explicit != "":
+        return explicit
+    val lib = env_get("SIMPLE_LIB") ?? ""
+    if lib.ends_with("/src") or lib.ends_with("\\src"):
+        return lib.substring(0, lib.len() - 4)
+    val here = cwd()
+    if file_exists(path_join(here, "bin/simple")):
+        return here
+    return ""
+
+fn path_join(root: text, rel: text) -> text:
+    if root.ends_with("/") or root.ends_with("\\"):
+        return root + rel
+    root + "/" + rel

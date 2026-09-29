@@ -1,6 +1,171 @@
 #!/bin/sh
 set -eu
 
+# Retained Web 2D WM perf receipt admission (opt-in; no synthetic live run).
+
+# Validate one externally captured WM receipt's schema and artifact linkage.
+# Schema admission is not a live performance verdict.
+usage() {
+    echo "usage: $0 --validate-retained-perf-receipt RECEIPT.env" >&2
+    exit 2
+}
+
+fail() {
+    echo "wm_retained_web2d_perf_schema_status=fail reason=$1"
+    exit 1
+}
+
+field() {
+    sed -n "s/^$1=//p" "$receipt" | tail -n 1
+}
+
+positive() {
+    case "$1" in ''|*[!0-9]*|0*) return 1 ;; esac
+    [ "${#1}" -le 12 ]
+}
+
+receipt_sha256() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    else
+        fail sha256-tool-unavailable
+    fi
+}
+
+linked_artifact() {
+    path=$(field "$1")
+    digest=$(field "$2")
+    [ -s "$path" ] || fail "missing-$1"
+    case "$digest" in *[!0-9a-f]*|'') fail "invalid-$2" ;; esac
+    [ "${#digest}" -eq 64 ] || fail "invalid-$2"
+    [ "$(receipt_sha256 "$path")" = "$digest" ] || fail "mismatched-$2"
+}
+
+validate() {
+    receipt=$1
+    [ -f "$receipt" ] || fail missing-receipt
+    platform=$(field platform)
+    backend=$(field backend)
+    actual_backend=$(field actual_backend)
+    case "$platform:$backend" in
+        hosted:software|hosted:cpu_simd|hosted:metal|simpleos:software|simpleos:cpu_simd) ;;
+        *) fail unsupported-platform-backend ;;
+    esac
+    [ "$(field status)" = pass ] || fail unavailable-or-failed-backend
+    [ "$actual_backend" = "$backend" ] || fail backend-fallback
+    [ "$(field fallback)" = none ] || fail backend-fallback
+    [ "$(field workload)" = filesystem-wm-client-live-retained-frame ] || fail non-live-workload
+    case "$backend:$(field readback_source)" in
+        software:presented-pixel-buffer|cpu_simd:presented-pixel-buffer|metal:device-readback) ;;
+        *) fail non-live-readback ;;
+    esac
+    [ "$(field readback_mode)" = pixels ] || fail missing-pixel-readback
+    [ "$(field source_revision)" != '' ] || fail missing-source-revision
+    linked_artifact executable_path executable_sha256
+    linked_artifact before_capture_path checksum_before
+    linked_artifact capture_path checksum_after
+    linked_artifact launch_log_path launch_log_sha256
+    [ "$(field checksum_before)" != "$(field checksum_after)" ] || fail unchanged-framebuffer
+    grep -Fqx "wm_retained_web2d_perf_capture backend=$backend viewport=$(field viewport_width)x$(field viewport_height) samples=$(field sample_frames)" "$(field launch_log_path)" || fail missing-live-log-marker
+    [ "$(field baseline_platform)" = "$platform" ] || fail incomparable-baseline
+    [ "$(field baseline_backend)" = "$backend" ] || fail incomparable-baseline
+    [ "$(field baseline_viewport_width)" = "$(field viewport_width)" ] || fail incomparable-baseline
+    [ "$(field baseline_viewport_height)" = "$(field viewport_height)" ] || fail incomparable-baseline
+    [ "$(field baseline_source_revision)" != '' ] || fail missing-baseline-revision
+
+    for name in viewport_width viewport_height warmup_frames sample_frames \
+        frame_p50_ns frame_p95_ns frame_budget_ns max_rss_kib rss_budget_kib \
+        baseline_p95_ns baseline_max_rss_kib; do
+        value=$(field "$name")
+        positive "$value" || fail "invalid-$name"
+    done
+    [ "$(field frame_p95_ns)" -ge "$(field frame_p50_ns)" ] || fail invalid-distribution
+    [ "$(field sample_frames)" -ge 20 ] || fail insufficient-samples
+    [ "$(field frame_p95_ns)" -le "$(field frame_budget_ns)" ] || fail frame-budget-exceeded
+    [ "$(field max_rss_kib)" -le "$(field rss_budget_kib)" ] || fail rss-budget-exceeded
+    # Keep memory bounded when a speed improvement is proposed, and keep
+    # latency bounded when a memory improvement is proposed.
+    [ "$(field frame_p95_ns)" -le "$(( $(field baseline_p95_ns) * 110 / 100 ))" ] || fail p95-regression
+    [ "$(field max_rss_kib)" -le "$(( $(field baseline_max_rss_kib) * 105 / 100 ))" ] || fail rss-regression
+    echo "wm_retained_web2d_perf_schema_status=pass platform=$platform backend=$backend viewport=$(field viewport_width)x$(field viewport_height) p50_ns=$(field frame_p50_ns) p95_ns=$(field frame_p95_ns) max_rss_kib=$(field max_rss_kib) checksum_after=$(field checksum_after)"
+}
+
+if [ "${1:-}" = --self-test-retained-perf-receipt ]; then
+    tmp=$(mktemp -d)
+    trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+    printf 'before' > "$tmp/before.ppm"
+    printf 'after' > "$tmp/after.ppm"
+    printf 'binary' > "$tmp/executable"
+    printf 'wm_retained_web2d_perf_capture backend=cpu_simd viewport=3840x2160 samples=40\n' > "$tmp/launch.log"
+    before_digest=$(receipt_sha256 "$tmp/before.ppm")
+    after_digest=$(receipt_sha256 "$tmp/after.ppm")
+    executable_digest=$(receipt_sha256 "$tmp/executable")
+    log_digest=$(receipt_sha256 "$tmp/launch.log")
+    cat > "$tmp/receipt.env" <<EOF
+platform=hosted
+backend=cpu_simd
+actual_backend=cpu_simd
+status=pass
+fallback=none
+workload=filesystem-wm-client-live-retained-frame
+readback_source=presented-pixel-buffer
+readback_mode=pixels
+source_revision=test-source
+executable_path=$tmp/executable
+executable_sha256=$executable_digest
+before_capture_path=$tmp/before.ppm
+checksum_before=$before_digest
+capture_path=$tmp/after.ppm
+checksum_after=$after_digest
+launch_log_path=$tmp/launch.log
+launch_log_sha256=$log_digest
+viewport_width=3840
+viewport_height=2160
+warmup_frames=12
+sample_frames=40
+frame_p50_ns=4000000
+frame_p95_ns=5000000
+frame_budget_ns=12500000
+max_rss_kib=100000
+rss_budget_kib=262144
+baseline_p95_ns=5000000
+baseline_max_rss_kib=100000
+baseline_platform=hosted
+baseline_backend=cpu_simd
+baseline_viewport_width=3840
+baseline_viewport_height=2160
+baseline_source_revision=test-baseline
+EOF
+    "$0" --validate-retained-perf-receipt "$tmp/receipt.env" >/dev/null || exit 1
+    for change in 'actual_backend=software:backend-fallback' \
+        'readback_source=cache:non-live-readback' \
+        'checksum_after=1:invalid-checksum_after' \
+        'launch_log_sha256=1:invalid-launch_log_sha256' \
+        'baseline_backend=software:incomparable-baseline' \
+        'frame_p95_ns=08:invalid-frame_p95_ns' \
+        'frame_p95_ns=6000000:p95-regression' \
+        'max_rss_kib=110000:rss-regression'; do
+        key=${change%%=*}
+        rest=${change#*=}
+        value=${rest%%:*}
+        reason=${rest#*:}
+        sed "s/^$key=.*/$key=$value/" "$tmp/receipt.env" > "$tmp/next.env"
+        output=$(/bin/sh "$0" --validate-retained-perf-receipt "$tmp/next.env" 2>&1) && exit 1
+        [ "$output" = "wm_retained_web2d_perf_schema_status=fail reason=$reason" ] || exit 1
+    done
+    echo wm_retained_web2d_perf_self_test_status=pass
+    exit 0
+fi
+
+if [ "${1:-}" = --validate-retained-perf-receipt ]; then
+    [ "$#" -eq 2 ] || usage
+    validate "$2"
+    exit 0
+fi
+
+
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
 

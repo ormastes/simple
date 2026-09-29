@@ -1,4 +1,9 @@
 # Front-end parse costs seconds per file; string-interpolation expansion is superlinear
+## Closed 2026-09-16 — defects D1-D4 fixed with A/B pre/post ratios and regression spec
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - **Date:** 2026-08-21
 - **Area:** `src/compiler/10.frontend/**` (self-hosted front end)
@@ -226,3 +231,4 @@ guard.
    pin a wall-clock bound cannot be: it distinguishes avoidable work from a
    slow host, and it is the counter that proved
    `expand_string_interpolations` innocent and the placeholder passes guilty.
+

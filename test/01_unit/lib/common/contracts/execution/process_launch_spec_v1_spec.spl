@@ -1,0 +1,39 @@
+"""Shared process launch values reject ambiguous environment vectors."""
+
+use std.spec.*
+use std.common.contracts.execution.process_launch_spec_v1.{
+    ProcessLaunchIoV1, ProcessLaunchResourcesV1, ProcessLaunchSpecV1,
+    process_launch_spec_validate_v1
+}
+
+fn launch_with_environment(environment: [text]) -> ProcessLaunchSpecV1:
+    val inherit = ProcessLaunchIoV1(mode: "inherit", capability_name: "")
+    ProcessLaunchSpecV1(
+        executable: "/system/bin/simple", argv: ["simple", "--version"],
+        environment: environment, cwd: "/user/bootstrap",
+        stdin: inherit, stdout: inherit, stderr: inherit,
+        namespace_name: "bootstrap-qualification",
+        resources: ProcessLaunchResourcesV1(
+            memory_bytes: 536870912, cpu_time_us: 120000000,
+            open_handles: 128),
+        cpu_affinity: [], runtime_profile: "simpleos-dev",
+        capabilities: ["fs.read"], service_grants: ["sosix.process"])
+
+describe "shared process launch environment validation":
+    it "accepts distinct bounded keys without creating a process":
+        val check = process_launch_spec_validate_v1(
+            launch_with_environment(["SIMPLE_LIB=src", "MODE=dev"]))
+        expect(check.accepted).to_equal(true)
+        expect(check.reason).to_equal("ready")
+
+    it "refuses duplicate keys even when their values differ":
+        val check = process_launch_spec_validate_v1(
+            launch_with_environment(["MODE=dev", "MODE=release"]))
+        expect(check.accepted).to_equal(false)
+        expect(check.reason).to_equal("duplicate-environment-key")
+
+    it "refuses malformed entries before duplicate checking":
+        val check = process_launch_spec_validate_v1(
+            launch_with_environment(["=bad", "MODE=dev", "MODE=release"]))
+        expect(check.accepted).to_equal(false)
+        expect(check.reason).to_equal("invalid-environment-entry")

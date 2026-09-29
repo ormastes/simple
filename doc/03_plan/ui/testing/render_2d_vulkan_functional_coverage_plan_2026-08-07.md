@@ -241,7 +241,10 @@ probe (a subcommand only the current build has) — size and banner both lie.
   `test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_software_kernel_table_bucket_spec.spl`,
   `test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_software_rounded_rect_spec.spl`,
   `test/01_unit/os/compositor/{engine2d_damage_report,engine2d_compositor_revision_cache,engine2d_render_evidence,engine2d_baremetal_core_parity,vulkan_compositor_backend}_spec.spl`,
-  `test/01_unit/os/drivers/virtio/virtio_gpu_capset_spec.spl`.
+  `test/01_unit/os/drivers/virtio/virtio_gpu_capset_spec.spl`,
+  `test/03_system/ui_showcase/{showcase_hosts,primitive_hosts_system,showcase_live_interaction_evidence}_spec.spl`,
+  `test/03_system/check/ui_showcase_exact_backend_matrix_spec.spl`, and
+  `test/05_perf/app/ui_showcase/web_retained_hot_path_perf_spec.spl`.
 - **Done**: every listed spec green in-container with `--no-cache --no-cover-check`;
   any red is triaged as environment vs product and filed before Wave 2 starts.
 - **Collision set**: read-only (script file only). **Depends**: none.

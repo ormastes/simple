@@ -89,6 +89,3 @@ CPU-reference deliverables in every lane are wave-1 and do not wait on
 
 Operator guide for the generic layout lane:
 `doc/07_guide/platform/structural_compute/layout_framework.md`.
-
-Browser consumer guide:
-`doc/07_guide/platform/structural_compute/web_layout_manager.md`.

@@ -1,0 +1,67 @@
+# codex-system-test
+# @feature mcdc_hal_runtime_hardening
+# @req REQ-015 REQ-016 REQ-017 REQ-018 NFR-005 NFR-006 NFR-007 NFR-010
+# @evidence-class host-fixture
+
+use std.spec.*
+use std.common.structural.environment_instruction.*
+use std.common.structural.hal_provider.*
+
+fn access(sequence: i64, opcode: EnvOpcodeV1) -> EnvAccessEventV1:
+    env_access_event_v1(17, sequence, opcode, 21, 0, 0, 16, 16, 16, 32, 48)
+
+fn observation(sequence: i64, status: EnvInstructionStatusV1,
+               digest: i64) -> EnvObservationV1:
+    env_observation_v1(17, sequence, status, 0, 16, 32, 91, digest)
+
+describe "typed bounded HAL environment extraction and replay":
+    it "should extract and seal ordered typed interactions":
+        step("Build the controlled fixture")
+        var cursor = env_extraction_cursor_v1(17, 2)
+        val first = env_extract_access_v1(cursor, access(0, EnvOpcodeV1.FileRead))
+        cursor = first.cursor
+        val second = env_extract_access_v1(cursor, access(1, EnvOpcodeV1.ClockRead))
+        val sealed = env_extraction_cursor_seal(second.cursor)
+        val trace = env_extraction_trace_v1(sealed)
+        expect(first.accepted).to_be(true)
+        expect(second.accepted).to_be(true)
+        expect(env_extraction_complete(sealed)).to_be(true)
+        expect(trace.instruction_count).to_equal(2)
+
+    it "should fail closed on reordered duplicated and overflowing interactions":
+        val initial = env_extraction_cursor_v1(17, 1)
+        val reordered = env_extract_access_v1(initial, access(1, EnvOpcodeV1.FileRead))
+        val accepted = env_extract_access_v1(initial, access(0, EnvOpcodeV1.FileRead))
+        val overflow = env_extract_access_v1(accepted.cursor, access(1, EnvOpcodeV1.ClockRead))
+        expect(reordered.accepted).to_be(false)
+        expect(reordered.cursor.instruction_count).to_equal(0)
+        expect(overflow.accepted).to_be(false)
+        expect(overflow.cursor.status).to_equal(EnvInstructionStatusV1.Overflow)
+
+    it "should replay the exact instruction and observation without a second effect":
+        val extracted = env_extract_access_v1(
+            env_extraction_cursor_v1(17, 1), access(0, EnvOpcodeV1.RandomFill))
+        val plan = env_extraction_trace_v1(env_extraction_cursor_seal(extracted.cursor))
+        val state = env_deterministic_replay_accept(
+            env_deterministic_replay_v1(plan), extracted.instruction,
+            extracted.instruction,
+            observation(0, EnvInstructionStatusV1.Applied, 92),
+            observation(0, EnvInstructionStatusV1.Replayed, 92))
+        val trace = env_deterministic_replay_seal(
+            state, plan.plan_digest_hi, plan.plan_digest_lo)
+        expect(env_trace_v1_complete(trace)).to_be(true)
+        expect(trace.instruction_count).to_equal(1)
+
+    it "should reject changed extra missing and malformed replay evidence":
+        val extracted = env_extract_access_v1(
+            env_extraction_cursor_v1(17, 1), access(0, EnvOpcodeV1.FileRead))
+        val plan = env_extraction_trace_v1(env_extraction_cursor_seal(extracted.cursor))
+        val changed = env_access_event_instruction(access(0, EnvOpcodeV1.FileWrite))
+        val state = env_deterministic_replay_accept(
+            env_deterministic_replay_v1(plan), extracted.instruction, changed,
+            observation(0, EnvInstructionStatusV1.Applied, 92),
+            observation(0, EnvInstructionStatusV1.Replayed, 92))
+        val trace = env_deterministic_replay_seal(
+            state, plan.plan_digest_hi, plan.plan_digest_lo)
+        expect(env_trace_v1_complete(trace)).to_be(false)
+        expect(state.cursor.status).to_equal(EnvInstructionStatusV1.Diverged)

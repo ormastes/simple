@@ -287,7 +287,8 @@ Generated: 2026-05-17
 | rt_future_new | 3 | Rust-keep | Rust | Future construction; Rust async runtime |
 | rt_future_await | 3 | Rust-keep | Rust | Poll loop; Rust async runtime |
 | rt_actor_* | 3 | Rust-keep | Rust | Actor mailbox + executor |
-| rt_channel_* | 3 | Rust-keep | Rust | MPSC channel over RuntimeValue |
+| rt_channel_* | 3 | C-owned | C | Fixed-capacity scalar-ID/status ABI; nonblocking backpressure |
+| rt_value_channel_* | 3 | Rust-keep | Rust | Fixed-capacity RuntimeValue object API in a distinct namespace; never aliases scalar `rt_channel_*` |
 | rt_executor_* | 3 | Rust-keep | Rust | Task scheduler |
 | rt_generator_* | 3 | Rust-keep | Rust | Generator coroutine state |
 

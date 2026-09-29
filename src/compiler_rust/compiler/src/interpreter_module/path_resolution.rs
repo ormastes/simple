@@ -18,7 +18,7 @@ use tracing::trace;
 
 use crate::error::CompileError;
 use crate::fs_probe::{clear_fs_probe_cache, p_exists, p_is_dir, p_is_file, STAT_CALLS, STAT_MISSES};
-use crate::stdlib_variant::{active_simd_tier_name, stdlib_root_candidates};
+use crate::stdlib_variant::{active_simd_tier_name, stdlib_root_candidates_present};
 
 fn normalize_base_dir(base_dir: &Path) -> PathBuf {
     if base_dir.is_absolute() {
@@ -215,7 +215,11 @@ fn resolve_with_numbered_dirs(base: &Path, parts: &[String]) -> Option<PathBuf> 
 
     // Only attempt numbered dir resolution if base is within a project source tree.
     // Scanning arbitrary dirs like /tmp or / for numbered subdirs wastes ~90 syscalls.
-    let base_str = base.to_string_lossy();
+    // Normalize separators so the gate also matches Windows backslash paths.
+    // Measured 2026-08-31 on win32: every `compiler.core.*` import failed with
+    // "Cannot resolve module" under `bin/simple test` because this gate never
+    // matched `C:\...\src\compiler` and numbered-dir resolution was skipped.
+    let base_str = base.to_string_lossy().replace('\\', "/");
     let in_src =
         base_str.contains("/src/") || base_str.ends_with("/src") || base_str.starts_with("src/") || base_str == "src";
     if !in_src {
@@ -241,8 +245,11 @@ fn resolve_with_numbered_dirs(base: &Path, parts: &[String]) -> Option<PathBuf> 
 /// Only blocks package-level imports (__init__.spl) which could trigger loading entire
 /// subtrees. Individual module file imports are allowed.
 fn is_blocked_compiler_resolution(base: &Path, resolved: &Path) -> bool {
-    let base_str = base.to_string_lossy();
-    let resolved_str = resolved.to_string_lossy();
+    // Separator-normalized for Windows (see resolve_with_numbered_dirs): with
+    // backslash paths none of the substring tests below ever matched, so the
+    // OOM blocklist silently failed open on win32.
+    let base_str = base.to_string_lossy().replace('\\', "/");
+    let resolved_str = resolved.to_string_lossy().replace('\\', "/");
     if resolved_str.contains("src/compiler/80.driver/__init__.spl") {
         return false;
     }
@@ -856,7 +863,7 @@ fn resolve_module_path_uncached(parts: &[String], base_dir: &Path) -> Result<Pat
 
                     let stdlib_relative: PathBuf = stdlib_parts.iter().collect();
 
-                    for stdlib_root in stdlib_root_candidates(&stdlib_candidate) {
+                    for stdlib_root in stdlib_root_candidates_present(&stdlib_candidate) {
                         if stdlib_parts.len() == 1 && stdlib_parts[0] == "io" {
                             let compat_init = stdlib_root.join("nogc_sync_mut").join("io").join("__init__.spl");
                             if p_exists(&compat_init) && p_is_file(&compat_init) {

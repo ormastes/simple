@@ -1,0 +1,183 @@
+# codex-system-test
+# @tag: integration, native, simd, avx512, environment-gated, receipt
+# @evidence-class host-fixture
+# @req REQ-AVX512-001 REQ-AVX512-002 REQ-AVX512-006 NFR-SIMD-008
+
+"""
+Capability-gated native execution lane.
+
+The spec always runs its classifier and prints a row.  It invokes a native
+fixture only when all CPUID/OS-state requirements for the requested operation
+are present and SIMPLE_AVX512_NATIVE_FIXTURE points at an admitted executable.
+An unavailable host is visible as UNSUPPORTED; a qualified host without a
+fixture is visible as BLOCKED.  Neither state enables or attempts AVX-512.
+
+The fixture must print one line containing:
+  AVX512_RUNTIME_RECEIPT|status=PASS|operation=<op>|environment=<tag>
+and return exit code zero.  This makes native execution evidence auditable and
+keeps a target triple or a synthetic capability record from counting as a run.
+
+Set SIMPLE_AVX512_NATIVE_PROBE=1 for a qualified run.  Leaving it unset keeps
+older bootstrap seeds without rt_xgetbv in the explicit BLOCKED state.
+"""
+
+use std.spec.{describe, it, expect}
+use std.spec.step
+use std.io_runtime.{env_get, host_arch, host_os, platform_name, process_run}
+use compiler.types.simd_capabilities.{detect_capabilities, SimdFeatureSet}
+
+struct Avx512EnvironmentReceipt:
+    schema: text
+    os: text
+    platform: text
+    arch: text
+    environment_tag: text
+    operation: text
+    cpu_avx512f: bool
+    cpu_avx512bw: bool
+    cpu_avx512dq: bool
+    cpu_avx512vl: bool
+    osxsave: bool
+    xcr0_xmm_ymm: bool
+    xcr0_opmask_zmm: bool
+    native_enabled: bool
+    execution_attempted: bool
+    status: text
+    reason: text
+
+fn environment_tag(os: text) -> text:
+    val wsl = env_get("WSL_INTEROP") != "" or env_get("WSL_DISTRO_NAME") != ""
+    if os == "linux" and wsl: return "wsl-linux"
+    if os == "linux": return "native-linux"
+    if os == "windows": return "native-windows"
+    if os == "freebsd": return "native-freebsd"
+    if os == "macos": return "native-macos"
+    "unknown-{os}"
+
+fn operation_ready(features: SimdFeatureSet, operation: text) -> bool:
+    # Required subsets are operation-specific.  FMA and ordinary fixed-width
+    # floating arithmetic use AVX-512F; byte/word, DQ, and VL rows opt in to
+    # their named subsets explicitly.
+    if operation == "byte-word":
+        return features.has_avx512f and features.has_avx512bw
+    if operation == "dq":
+        return features.has_avx512f and features.has_avx512dq
+    if operation == "vl":
+        return features.has_avx512f and features.has_avx512vl
+    features.has_avx512f
+
+fn probe_blocked_receipt(os: text, platform: text, arch: text, operation: text, reason: text) -> Avx512EnvironmentReceipt:
+    Avx512EnvironmentReceipt(
+        schema: "simple-avx512-environment/v1",
+        os: os,
+        platform: platform,
+        arch: arch,
+        environment_tag: environment_tag(os),
+        operation: operation,
+        cpu_avx512f: false,
+        cpu_avx512bw: false,
+        cpu_avx512dq: false,
+        cpu_avx512vl: false,
+        osxsave: false,
+        xcr0_xmm_ymm: false,
+        xcr0_opmask_zmm: false,
+        native_enabled: false,
+        execution_attempted: false,
+        status: "BLOCKED",
+        reason: reason)
+
+fn current_receipt() -> Avx512EnvironmentReceipt:
+    val os = host_os().lower()
+    val arch = host_arch().lower()
+    val operation = env_get("SIMPLE_AVX512_NATIVE_OPERATION")
+    val selected_operation = if operation == "": "fma-f32x16" else operation
+    val fixture = env_get("SIMPLE_AVX512_NATIVE_FIXTURE")
+    # The bootstrap seed shipped on some hosts predates rt_xgetbv.  Keep this
+    # lane checkable there by requiring an explicit probe opt-in; a qualified
+    # run sets the opt-in together with its fixture path.  No missing provider
+    # is converted into a false AVX-512 admission.
+    if env_get("SIMPLE_AVX512_NATIVE_PROBE") != "1" and fixture == "":
+        return probe_blocked_receipt(os, platform_name().lower(), arch, selected_operation, "cpuid-xgetbv-probe-not-enabled")
+    val features = detect_capabilities()
+    val tag = environment_tag(os)
+    val state_ready = features.has_osxsave and features.xcr0_xmm_ymm and features.xcr0_opmask_zmm
+    val op_ready = operation_ready(features, selected_operation)
+    var status = "READY"
+    var reason = "qualified-avx512-host"
+    if arch != "x86_64":
+        status = "UNSUPPORTED"
+        reason = "requires-x86_64"
+    elif not state_ready:
+        status = "UNSUPPORTED"
+        reason = "osxsavexcr0-state-not-admitted"
+    elif not op_ready:
+        status = "UNSUPPORTED"
+        reason = "required-subset-not-admitted-{selected_operation}"
+    elif fixture == "":
+        status = "BLOCKED"
+        reason = "qualified-host-needs-SIMPLE_AVX512_NATIVE_FIXTURE"
+    Avx512EnvironmentReceipt(
+        schema: "simple-avx512-environment/v1",
+        os: os,
+        platform: platform_name().lower(),
+        arch: arch,
+        environment_tag: tag,
+        operation: selected_operation,
+        cpu_avx512f: features.has_avx512f,
+        cpu_avx512bw: features.has_avx512bw,
+        cpu_avx512dq: features.has_avx512dq,
+        cpu_avx512vl: features.has_avx512vl,
+        osxsave: features.has_osxsave,
+        xcr0_xmm_ymm: features.xcr0_xmm_ymm,
+        xcr0_opmask_zmm: features.xcr0_opmask_zmm,
+        native_enabled: status == "READY",
+        execution_attempted: false,
+        status: status,
+        reason: reason)
+
+fn receipt_line(receipt: Avx512EnvironmentReceipt) -> text:
+    "AVX512_ENV_RECEIPT|schema={receipt.schema}|os={receipt.os}|platform={receipt.platform}|arch={receipt.arch}|environment={receipt.environment_tag}|operation={receipt.operation}|avx512f={receipt.cpu_avx512f}|avx512bw={receipt.cpu_avx512bw}|avx512dq={receipt.cpu_avx512dq}|avx512vl={receipt.cpu_avx512vl}|osxsave={receipt.osxsave}|xcr0_xmm_ymm={receipt.xcr0_xmm_ymm}|xcr0_opmask_zmm={receipt.xcr0_opmask_zmm}|status={receipt.status}|reason={receipt.reason}|enabled={receipt.native_enabled}|attempted={receipt.execution_attempted}"
+
+describe "x86 AVX-512 native execution environment gate":
+    it "should classify every host and leave an auditable capability receipt":
+        step("Read the production host and CPUID/XCR0 capability facades")
+        val receipt = current_receipt()
+        val line = receipt_line(receipt)
+        print line
+        expect(receipt.schema).to_equal("simple-avx512-environment/v1")
+        expect(receipt.os.len()).to_be_greater_than(0)
+        expect(receipt.arch.len()).to_be_greater_than(0)
+        expect(receipt.environment_tag.len()).to_be_greater_than(0)
+        expect(line).to_contain("AVX512_ENV_RECEIPT")
+        expect(receipt.status == "READY" or receipt.status == "UNSUPPORTED" or receipt.status == "BLOCKED").to_be(true)
+
+    it "should never enable or attempt AVX-512 when the host is unavailable":
+        step("Evaluate the fail-closed branch from the actual host receipt")
+        val receipt = current_receipt()
+        if receipt.status == "UNSUPPORTED":
+            print "AVX512_NATIVE_ROW|status=UNSUPPORTED|reason={receipt.reason}|environment={receipt.environment_tag}"
+            expect(receipt.native_enabled).to_be(false)
+            expect(receipt.execution_attempted).to_be(false)
+            expect(receipt.reason.len()).to_be_greater_than(0)
+        elif receipt.status == "BLOCKED":
+            print "AVX512_NATIVE_ROW|status=BLOCKED|reason={receipt.reason}|environment={receipt.environment_tag}"
+            expect(receipt.native_enabled).to_be(false)
+            expect(receipt.execution_attempted).to_be(false)
+        else:
+            expect(receipt.native_enabled).to_be(true)
+            expect(receipt.execution_attempted).to_be(false)
+
+    it "should execute the admitted fixture only after capability and fixture admission":
+        step("Require the explicit native fixture path before attempting execution")
+        val receipt = current_receipt()
+        val fixture = env_get("SIMPLE_AVX512_NATIVE_FIXTURE")
+        if receipt.status == "UNSUPPORTED" or receipt.status == "BLOCKED":
+            expect(fixture == "" or receipt.native_enabled == false).to_be(true)
+            expect(receipt.execution_attempted).to_be(false)
+        else:
+            val (stdout, stderr, exit_code) = process_run(fixture, [])
+            expect(exit_code).to_equal(0)
+            expect(stderr).to_equal("")
+            expect(stdout).to_contain("AVX512_RUNTIME_RECEIPT|status=PASS")
+            expect(stdout).to_contain("operation={receipt.operation}")
+            expect(stdout).to_contain("environment={receipt.environment_tag}")

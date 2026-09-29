@@ -1,0 +1,150 @@
+"""
+# Nil condition truthiness Specification
+
+**Feature IDs:** N/A
+**Category:** Runtime
+**Difficulty:** 3/5
+**Status:** Fixed
+**Requirements:** N/A
+**Plan:** N/A
+**Design:** N/A
+**Research:** doc/08_tracking/bug/jit_if_nil_takes_true_branch_2026-08-04.md
+
+## Overview
+
+`jit_if_nil_takes_true_branch_2026-08-04` reported that a `nil` condition was
+**truthy** under Cranelift and falsy under the tree-walk interpreter, so the
+two engines took opposite branches with no diagnostic. The 2026-08-17 sweep in
+that record widened the claim from the bare `if nil:` literal to seven
+condition forms.
+
+This spec pins all seven forms to the single correct answer — `nil` is
+**falsy** in every condition position — so an engine divergence cannot come
+back silently. Re-checked 2026-09-12: every form already agrees on both lanes.
+
+## Syntax
+
+```simple
+if nil:            # never taken
+while nil:         # zero iterations
+if not nil:        # always taken
+if nil and true:   # never taken
+if false or nil:   # never taken
+if returns_nil_optional():  # never taken
+```
+
+"""
+
+use std.spec
+
+
+fn nil_opt() -> i64?:
+    return nil
+
+
+fn some_opt() -> i64?:
+    return 7
+
+
+fn bare_if() -> text:
+    if nil:
+        return "true-branch"
+    return "false-branch"
+
+
+fn negated() -> text:
+    if not nil:
+        return "true-branch"
+    return "false-branch"
+
+
+fn conjunction() -> text:
+    if nil and true:
+        return "true-branch"
+    return "false-branch"
+
+
+fn disjunction() -> text:
+    if false or nil:
+        return "true-branch"
+    return "false-branch"
+
+
+fn loop_iterations() -> i64:
+    var n = 0
+    while nil:
+        n = n + 1
+        if n > 3:
+            return n
+    return n
+
+
+fn call_returning_nil() -> text:
+    if nil_opt():
+        return "true-branch"
+    return "false-branch"
+
+
+fn call_returning_some() -> text:
+    if some_opt():
+        return "true-branch"
+    return "false-branch"
+
+
+# ============================================================================
+# Test Group 1: nil in statement-condition position
+# ============================================================================
+
+describe "nil as an if/while condition":
+    """
+    ## nil is falsy
+
+    A bare `nil` condition must take the false branch and must run a `while`
+    body zero times.
+    """
+
+    it "takes the false branch for a bare if nil":
+        expect(bare_if()).to_equal("false-branch")
+
+    it "runs a while nil body zero times":
+        expect(loop_iterations()).to_equal(0)
+
+
+# ============================================================================
+# Test Group 2: nil under the logical operators
+# ============================================================================
+
+describe "nil under not/and/or":
+    """
+    ## Operand position
+
+    `not nil` is true; `nil` as either operand of a decision is falsy.
+    """
+
+    it "treats not nil as true":
+        expect(negated()).to_equal("true-branch")
+
+    it "treats nil and true as false":
+        expect(conjunction()).to_equal("false-branch")
+
+    it "treats false or nil as false":
+        expect(disjunction()).to_equal("false-branch")
+
+
+# ============================================================================
+# Test Group 3: a call whose optional result is nil
+# ============================================================================
+
+describe "optional-returning call in condition position":
+    """
+    ## Presence test
+
+    A call returning `T?` must be tested for presence, not read raw: `nil`
+    is falsy and a present value is truthy.
+    """
+
+    it "treats a nil optional result as false":
+        expect(call_returning_nil()).to_equal("false-branch")
+
+    it "treats a present optional result as true":
+        expect(call_returning_some()).to_equal("true-branch")

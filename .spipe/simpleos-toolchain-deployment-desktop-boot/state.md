@@ -143,23 +143,3 @@ dev-done
   behavior. Full umbrella implementation is approximately 40%: AC-6/7 source
   is complete, but Stage-4 execution/docgen/maintenance evidence and all live
   deployment prerequisites remain blocked.
-- impl 2026-08-16 supporting-spec modernization: defined canonical
-  `source-contract`/`host-fixture`/`image-admission`/`live-guest` evidence
-  profiles in the SPipe system-test skill, plans, guide, and expert wikis.
-  Byte-identical `test/system/` copies are retired; the bootstrap scenario is
-  narrowed to an explicit source contract with no Rust-seed/`bin/simple`
-  acceptance. Supporting specs cannot promote live guest or desktop
-  acceptance.
-- impl 2026-08-16 combined-wrapper boundary: added canonical Stage-4
-  provenance admission, production fail-closed preflight, a shared
-  sorted/hashed receipt validator, and a 16-case hermetic self-test
-  (`platform_acceptance_claimed=false`). Live mode remains blocked at the
-  precise owner gap: canonical fullscreen QEMU uses `-net none` and exits
-  after capture, while `gui_entry_desktop.spl` has no cooperative SSHD poll.
-- system-test 2026-08-16: extended the canonical umbrella SSpec with visible
-  positive host-fixture, CLI-edge, and missing-admission error steps plus the
-  frozen live-guest flow. All four scenarios use concrete built-in matcher
-  assertions and REQ-SOS-TD-001..004 traceability. Runtime, docgen, and
-  `sspec-maintain scan` are `TEST_BLOCKED`: no current-source CLI with canonical
-  adjacent Stage-4 provenance exists. The spec stays fail-closed for automatic
-  execution when a qualified environment becomes available.

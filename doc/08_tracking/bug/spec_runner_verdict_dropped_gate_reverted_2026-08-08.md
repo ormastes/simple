@@ -1,4 +1,9 @@
 # The `dropped=` greenwash gate was silently reverted by a docs-titled commit, and the tail-expression fix widened the hole (2026-08-08)
+## Closed 2026-09-16 — ...ened the hole (2026-08-08) **Status: FIXED.** ## Summary `SPEC FILE VERDICT: <path> declar
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status: FIXED.**
 
@@ -91,3 +96,4 @@ different subsystem. `git log --oneline <file>` listed it, but nobody reads a
 docs commit's diff. The generalisable guard is the one this doc adds: encode
 load-bearing gates as *source invariants* in a `scripts/check/` fence, because
 a fence fires on the content regardless of what the commit message claims.
+

@@ -15,7 +15,7 @@ this layer resolves toward recomputation.
 ## Pipeline Links
 
 - [verify skill](../../../../.claude/skills/verify/SKILL.md)
-- [impl skill](../../../../.claude/skills/impl/IMPL.md)
+- [impl skill](../../../../.claude/skills/impl.md)
 
 ## Layer Links
 

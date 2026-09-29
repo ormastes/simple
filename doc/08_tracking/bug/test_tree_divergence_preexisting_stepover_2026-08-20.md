@@ -1,4 +1,8 @@
 # Pre-existing test-tree divergence stepped over on 2026-08-20 landing
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Range: origin/main..<hardening landing>. Delta verdict: PASS — 2 pre-existing offender(s), 0 introduced by this range.
 Recorded per the scoped-delta escape in .claude/rules/vcs.md. List: 855 lines, sha256 157b3ad28d92a1cc54675d5ebd828fd5ae00e06b308b933066091341c12a8a2b.
@@ -193,7 +197,7 @@ unit:app/package/semver_mini_spec.spl
 unit:app/project_cli_spec.spl
 unit:app/semihost/reader_spec.spl
 unit:app/simpleos_nvme_serial_check_spec.spl
-unit:app/slang_pack/main_spec.spl
+unit:app/svllm_pack/main_spec.spl
 unit:app/test_runner_new/container_backend_spec.spl
 unit:app/test_runner_new/test_config_spec.spl
 unit:app/test_runner_new/test_manifest_spec.spl
@@ -644,8 +648,8 @@ unit:lib/gc_async_mut/gpu/engine2d/baremetal_constructor_spec.spl
 unit:lib/gc_async_mut/gpu/engine2d/draw_text_bg_spec.spl
 unit:lib/gc_async_mut/mcp_sdk/core/core_facade_spec.spl
 unit:lib/gc_async_mut/src/tooling/tooling_facade_spec.spl
-unit:lib/gc_async_mut/slang/model_executor/model_loader/manifest_spec.spl
-unit:lib/gc_async_mut/slang/model_executor/model_loader/safetensors_spec.spl
+unit:lib/gc_async_mut/svllm/model_executor/model_loader/manifest_spec.spl
+unit:lib/gc_async_mut/svllm/model_executor/model_loader/safetensors_spec.spl
 unit:lib/gc_async_mut/text_layout/text_layout_facade_spec.spl
 unit:lib/gc_async_mut/udp_utils_facade_spec.spl
 unit:lib/gc_async_mut/web_ui/web_ui_facade_spec.spl
@@ -860,3 +864,4 @@ unit:test_runner/mode_filter_spec.spl
 unit:tools/cat_spec.spl
 unit:tools/simple_os_primary_spec.spl
 ```
+

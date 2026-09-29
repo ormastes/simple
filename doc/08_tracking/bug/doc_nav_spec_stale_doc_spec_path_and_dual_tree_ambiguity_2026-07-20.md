@@ -1,7 +1,8 @@
 # `doc_nav_spec.spl`: hardcoded dead `doc/spec/...` path + ambiguous dual doc/test tree
+## Open 2026-09-16 — needs owner triage
 
-Status: OPEN (P3)
-Status re-verified 2026-08-17 by source inspection (triage shard 01).
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-20
 **Component:** `test/02_integration/app/doc_nav/doc_nav_spec.spl`
@@ -63,3 +64,4 @@ every content assertion).
 Spec left unmodified — the assertions themselves are reasonable content
 checks; only the path prefix needs correcting, and doing that safely
 requires resolving the dual-tree ambiguity first.
+

@@ -20,6 +20,8 @@ use os.tools.pkg.pkg_repository.{fetch_index}
 use os.userlib.syscall_raw.{syscall}
 use os.kernel.log.klog_api.{log_raw_println}
 
+extern fn serial_println(msg: text)
+
 # ============================================================================
 # IPC Method IDs
 # ============================================================================
@@ -57,41 +59,41 @@ pub fn pkg_service_init():
     val load_result = mgr.load()
     match load_result:
         case Err(e):
-            log_raw_println("[pkg_service] load warning (empty db ok on first boot): {e}")
+            serial_println("[pkg_service] load warning (empty db ok on first boot): {e}")
         case Ok(_):
-            log_raw_println("[pkg_service] package database loaded")
+            serial_println("[pkg_service] package database loaded")
     g_pkg_mgr = mgr
     g_pkg_initialized = true
-    log_raw_println("[pkg_service] initialized")
+    serial_println("[pkg_service] initialized")
 
 pub fn pkg_service_install(name: text) -> bool:
     if g_pkg_initialized == false:
-        log_raw_println("[pkg_service] install called before init: {name}")
+        serial_println("[pkg_service] install called before init: {name}")
         return false
     var mgr = g_pkg_mgr.unwrap()
     val result = mgr.install(name)
     g_pkg_mgr = mgr
     match result:
         case Ok(_):
-            log_raw_println("[pkg_service] installed: {name}")
+            serial_println("[pkg_service] installed: {name}")
             return true
         case Err(e):
-            log_raw_println("[pkg_service] install failed ({name}): {e}")
+            serial_println("[pkg_service] install failed ({name}): {e}")
             return false
 
 pub fn pkg_service_remove(name: text) -> bool:
     if g_pkg_initialized == false:
-        log_raw_println("[pkg_service] remove called before init: {name}")
+        serial_println("[pkg_service] remove called before init: {name}")
         return false
     var mgr = g_pkg_mgr.unwrap()
     val result = mgr.remove(name)
     g_pkg_mgr = mgr
     match result:
         case Ok(_):
-            log_raw_println("[pkg_service] removed: {name}")
+            serial_println("[pkg_service] removed: {name}")
             return true
         case Err(e):
-            log_raw_println("[pkg_service] remove failed ({name}): {e}")
+            serial_println("[pkg_service] remove failed ({name}): {e}")
             return false
 
 pub fn pkg_service_list_installed() -> [text]:
@@ -116,7 +118,7 @@ pub fn pkg_service_list_available() -> [text]:
                 for pkg in idx.packages:
                     names = names.push(pkg.name)
             case Err(e):
-                log_raw_println("[pkg_service] list_available fetch error: {e}")
+                serial_println("[pkg_service] list_available fetch error: {e}")
     names
 
 pub fn pkg_service_search(query: text) -> [text]:
@@ -131,7 +133,7 @@ pub fn pkg_service_search(query: text) -> [text]:
                 names = names.push(pkg.name)
             return names
         case Err(e):
-            log_raw_println("[pkg_service] search error: {e}")
+            serial_println("[pkg_service] search error: {e}")
             return []
 
 # ============================================================================
@@ -144,41 +146,41 @@ pub fn pkg_service_start():
 
     val port_result = syscall(SYS_IPC_CREATE_PORT, 0, 0, 0, 0, 0)
     if port_result < 0:
-        log_raw_println("[pkg_service] FATAL: Failed to create IPC port (error {port_result})")
+        serial_println("[pkg_service] FATAL: Failed to create IPC port (error {port_result})")
         return
 
     val port_handle = port_result as u64
-    log_raw_println("[pkg_service] Service ready on IPC port (handle={port_handle})")
+    serial_println("[pkg_service] Service ready on IPC port (handle={port_handle})")
 
     _pkg_service_loop(port_handle)
 
 fn _pkg_service_loop(port_handle: u64):
-    log_raw_println("[pkg_service] Entering service loop...")
+    serial_println("[pkg_service] Entering service loop...")
     while true:
         val msg_result = syscall(SYS_IPC_RECV, port_handle, 0, 0, 0, 0)
         if msg_result < 0:
-            log_raw_println("[pkg_service] IPC recv error: {msg_result}")
+            serial_println("[pkg_service] IPC recv error: {msg_result}")
             continue
         val cmd = msg_result.to_i32()
         if cmd == PKG_CMD_INSTALL:
-            log_raw_println("[pkg_service] dispatch: INSTALL")
+            serial_println("[pkg_service] dispatch: INSTALL")
             pkg_service_install("pending")
         elif cmd == PKG_CMD_REMOVE:
-            log_raw_println("[pkg_service] dispatch: REMOVE")
+            serial_println("[pkg_service] dispatch: REMOVE")
             pkg_service_remove("pending")
         elif cmd == PKG_CMD_LIST_INSTALLED:
-            log_raw_println("[pkg_service] dispatch: LIST_INSTALLED")
+            serial_println("[pkg_service] dispatch: LIST_INSTALLED")
             val items = pkg_service_list_installed()
-            log_raw_println("[pkg_service] installed count={items.len()}")
+            serial_println("[pkg_service] installed count={items.len()}")
         elif cmd == PKG_CMD_LIST_AVAILABLE:
-            log_raw_println("[pkg_service] dispatch: LIST_AVAILABLE")
+            serial_println("[pkg_service] dispatch: LIST_AVAILABLE")
             val items = pkg_service_list_available()
-            log_raw_println("[pkg_service] available count={items.len()}")
+            serial_println("[pkg_service] available count={items.len()}")
         elif cmd == PKG_CMD_SEARCH:
-            log_raw_println("[pkg_service] dispatch: SEARCH")
+            serial_println("[pkg_service] dispatch: SEARCH")
             val items = pkg_service_search("")
-            log_raw_println("[pkg_service] search results={items.len()}")
+            serial_println("[pkg_service] search results={items.len()}")
         elif cmd == PKG_CMD_UPDATE:
-            log_raw_println("[pkg_service] dispatch: UPDATE")
+            serial_println("[pkg_service] dispatch: UPDATE")
         else:
-            log_raw_println("[pkg_service] unknown command: {cmd}")
+            serial_println("[pkg_service] unknown command: {cmd}")

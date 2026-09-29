@@ -1,0 +1,85 @@
+use std.spec.*
+use compiler.mir.hwir.types.{CoreConfig}
+use compiler.mir.hwir.host_evaluator.{HwHostInput, evaluate_strict_comb_hwir}
+use compiler.mir.hwir.riscv_scalar_runtime_immediate_adapter_v5.{
+    strict_riscv_scalar_runtime_immediate_adapter_v5}
+use compiler.mir.hwir.riscv_scalar_runtime_global_fault_gate_v5.{
+    runtime_global_fault_owner_v5_sticky_gate_binding,
+    runtime_global_fault_gate_v5_fault_owner_binding,
+    strict_riscv_scalar_runtime_global_fault_gate_v5}
+
+describe("runtime pipeline v5 direct-child adapters"):
+    it("ORs every immediate lane into selector uop valid and faults overlap"):
+        val module = strict_riscv_scalar_runtime_immediate_adapter_v5(
+            "runtime_v5_immediate", CoreConfig.rv64()).unwrap()
+        for active in 0..3:
+            var inputs: [HwHostInput] = []
+            for index in 0..3:
+                inputs.push(HwHostInput.bits(module.ports[index].name,
+                    if index == active: 1 else: 0))
+            val result = evaluate_strict_comb_hwir(module, inputs).unwrap()
+            expect(result.value_of("selector_uop_valid").unwrap()).to_equal(1)
+            expect(result.value_of("immediate_valid").unwrap()).to_equal(1)
+            expect(result.value_of("adapter_fault").unwrap()).to_equal(0)
+        val overlap = evaluate_strict_comb_hwir(module, [HwHostInput.bits("alu_valid", 1),
+            HwHostInput.bits("control_valid", 0), HwHostInput.bits("system_valid", 1),
+            HwHostInput.bits("illegal_valid", 0)]).unwrap()
+        expect(overlap.value_of("adapter_fault").unwrap()).to_equal(1)
+        expect(overlap.value_of("selector_uop_valid").unwrap()).to_equal(0)
+        expect(overlap.value_of("immediate_valid").unwrap()).to_equal(0)
+
+    it("aggregates every v5 fault and suppresses admission and completion"):
+        val module = strict_riscv_scalar_runtime_global_fault_gate_v5(
+            "runtime_v5_fault_gate", CoreConfig.rv32()).unwrap()
+        val gated = ["input_valid", "input_ready", "completion_valid", "completion_ready", "bus_request_valid",
+            "bus_response_ready", "fence_effect_valid", "bus_request_ready",
+            "bus_response_valid", "fence_effect_ready"]
+        for active in 0..9:
+            var inputs: [HwHostInput] = []
+            for port in module.ports:
+                if port.direction == "in":
+                    val value = if port.name.starts_with("raw_") or
+                        port.name == module.ports[active].name: 1 else: 0
+                    inputs.push(HwHostInput.bits(port.name, value))
+            val result = evaluate_strict_comb_hwir(module, inputs).unwrap()
+            expect(result.value_of("fault_in").unwrap()).to_equal(1)
+            for name in gated: expect(result.value_of(name).unwrap()).to_equal(0)
+        var clear_inputs: [HwHostInput] = []
+        for port in module.ports:
+            if port.direction == "in":
+                clear_inputs.push(HwHostInput.bits(port.name,
+                    if port.name.starts_with("raw_"): 1 else: 0))
+        val clear = evaluate_strict_comb_hwir(module, clear_inputs).unwrap()
+        expect(clear.value_of("fault_in").unwrap()).to_equal(0)
+        for name in gated: expect(clear.value_of(name).unwrap()).to_equal(1)
+
+        var sticky_inputs: [HwHostInput] = []
+        for port in module.ports:
+            if port.direction == "in":
+                sticky_inputs.push(HwHostInput.bits(port.name,
+                    if port.name.starts_with("raw_") or port.name == "sticky_fault": 1 else: 0))
+        val sticky = evaluate_strict_comb_hwir(module, sticky_inputs).unwrap()
+        expect(sticky.value_of("fault_in").unwrap()).to_equal(0)
+        for name in gated: expect(sticky.value_of(name).unwrap()).to_equal(0)
+
+    it("publishes the exact global gate to sticky sequential fault-owner binding"):
+        val binding = runtime_global_fault_gate_v5_fault_owner_binding()
+        expect(binding.canonical_text()).to_equal(
+            "global_fault_gate|fault_in|fault_owner|fault_in|1")
+        val sticky_binding = runtime_global_fault_owner_v5_sticky_gate_binding()
+        expect(sticky_binding.canonical_text()).to_equal(
+            "fault_owner|protocol_fault|global_fault_gate|sticky_fault|1")
+
+    it("has valid deterministic and config-sensitive identities"):
+        val adapter32 = strict_riscv_scalar_runtime_immediate_adapter_v5("runtime_v5_id", CoreConfig.rv32()).unwrap()
+        val adapter32_again = strict_riscv_scalar_runtime_immediate_adapter_v5("runtime_v5_id", CoreConfig.rv32()).unwrap()
+        val adapter64 = strict_riscv_scalar_runtime_immediate_adapter_v5("runtime_v5_id", CoreConfig.rv64()).unwrap()
+        val gate = strict_riscv_scalar_runtime_global_fault_gate_v5("runtime_v5_gate_id", CoreConfig.rv64()).unwrap()
+        val gate_again = strict_riscv_scalar_runtime_global_fault_gate_v5("runtime_v5_gate_id", CoreConfig.rv64()).unwrap()
+        val gate32 = strict_riscv_scalar_runtime_global_fault_gate_v5("runtime_v5_gate_id", CoreConfig.rv32()).unwrap()
+        expect(adapter32.shape_diagnostic()).to_equal("")
+        expect(gate.shape_diagnostic()).to_equal("")
+        expect(adapter32.structural_sha256()).to_equal(adapter32_again.structural_sha256())
+        expect(adapter32.structural_sha256() == adapter64.structural_sha256()).to_equal(false)
+        expect(gate.structural_sha256()).to_equal(gate_again.structural_sha256())
+        expect(gate.structural_sha256() == gate32.structural_sha256()).to_equal(false)

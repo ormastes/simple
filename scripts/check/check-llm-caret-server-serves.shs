@@ -1,0 +1,285 @@
+#!/bin/bash
+# End-to-end socket proof for the llm_caret dummy-provider demo server.
+#
+# `bin/simple run src/app/llm_caret/main.spl --provider dummy --server --port
+# <N>` is claimed to serve real HTTP over a real socket: GET /v1/health -> 200
+# JSON; POST /v1/chat/completions -> 200 with a full OpenAI chat.completion
+# envelope; the same POST with "stream":true -> 200 text/event-stream with
+# chat.completion.chunk frames terminated by a literal `data: [DONE]`. Every
+# other check in this repo for llm_caret exercises the pure builder functions
+# in-process (test/01_unit/app/llm_caret/server_spec.spl) or drives the CLI —
+# none of them opens a socket. This gate is the only thing that keeps the
+# end-to-end socket claim honest.
+#
+# Uses bash's /dev/tcp (not available in dash/sh — this file is intentionally
+# `#!/bin/bash`, unlike most sh-only scripts in this directory) because
+# curl/wget are blocked by project hooks. Every exit status that matters is
+# read into a variable on the line directly after the command that produced
+# it, never through a pipe — this repo has had false greens from pipeline
+# `$?` before (see .claude/rules/vcs.md).
+#
+# Verdict convention (last line of stdout):
+#   PASS  — <n> request(s) checked, ... -> exit 0
+#   FAIL  — ...                          -> exit 1
+#   ERROR — nothing was checked (...)    -> exit 2
+# A run that issued 0 requests is always ERROR, never a pass.
+
+SELF="check-llm-caret-server-serves.shs"
+
+# This guard speaks HTTP over bash's /dev/tcp, which no POSIX sh provides. Every
+# manifest-driven runner in this repo invokes a guard as `sh <script>`
+# (run_push_gate in scripts/check/check-push-must-pass.shs does `sh "$@"`), and
+# under dash line 83 died with "cannot create /dev/tcp/..." BEFORE any verdict
+# line was printed -- an exit 2 with empty stdout, which is indistinguishable
+# from a crash and is not a verdict. Re-exec under bash so the guard keeps its
+# verdict contract no matter which shell invoked it; with no bash at all, say so
+# as a real ERROR rather than dying silently.
+if [ -z "${BASH_VERSION:-}" ]; then
+    if command -v bash >/dev/null 2>&1; then
+        exec bash "$0" "$@"
+    fi
+    echo "$SELF: ERROR — nothing was checked (needs bash for /dev/tcp; no bash on PATH)"
+    exit 2
+fi
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR" || { echo "$SELF: ERROR — cannot cd to repo root" >&2; echo "$SELF: ERROR — nothing was checked"; exit 2; }
+
+WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/llm-caret-serves.XXXXXX")" || {
+    echo "$SELF: ERROR — mktemp failed" >&2
+    echo "$SELF: ERROR — nothing was checked"
+    exit 2
+}
+cleanup() {
+    [ -n "${SERVER_PID:-}" ] && kill "$SERVER_PID" >/dev/null 2>&1
+    [ -n "${NC_PID:-}" ] && kill "$NC_PID" >/dev/null 2>&1
+    rm -rf "$WORK_DIR"
+}
+trap cleanup EXIT
+
+err() { echo "$SELF: ERROR — $*" >&2; echo "$SELF: ERROR — nothing was checked ($*)"; exit 2; }
+
+# ---------------------------------------------------------------------------
+# Shared HTTP-over-/dev/tcp mechanics (used against BOTH the real server and
+# the --selftest fixture servers, so a selftest pass is evidence the same
+# machinery works against the real thing).
+# ---------------------------------------------------------------------------
+
+port_is_listening() {
+    ss -ltn 2>/dev/null | grep -q ":$1[[:space:]]"
+}
+
+wait_for_port() {
+    port="$1"; tries="$2"
+    i=0
+    while [ "$i" -lt "$tries" ]; do
+        port_is_listening "$port" && return 0
+        sleep 1
+        i=$((i + 1))
+    done
+    return 1
+}
+
+pick_free_port() {
+    tries=0
+    while [ "$tries" -lt 20 ]; do
+        cand=$((20000 + (RANDOM % 20000)))
+        if ! port_is_listening "$cand"; then
+            echo "$cand"
+            return 0
+        fi
+        tries=$((tries + 1))
+    done
+    return 1
+}
+
+# do_raw_request PORT REQUEST_WITH_BACKSLASH_ESCAPES OUT_FILE
+# Returns the exit status of the read (0 on a clean EOF-terminated response).
+do_raw_request() {
+    req_port="$1"; req_raw="$2"; req_out="$3"
+    exec 9<>"/dev/tcp/127.0.0.1/$req_port" || return 1
+    printf '%b' "$req_raw" >&9
+    timeout 15 cat <&9 >"$req_out"
+    rc=$?
+    exec 9<&- 2>/dev/null
+    return "$rc"
+}
+
+status_code_of() { head -n1 "$1" | tr -d '\r' | awk '{print $2}'; }
+header_block_of() { awk 'BEGIN{RS="\r\n\r\n"} {print; exit}' "$1"; }
+body_of() { awk 'BEGIN{RS="\r\n\r\n"; ORS=""} NR==2{print} NR>2{print RS $0}' "$1"; }
+
+has_artifact_text() { grep -qE '<special:|<value:0x' "$1"; }
+
+# check_health_response FILE -> 0 pass / 1 fail, echoes a reason on fail
+check_health_response() {
+    f="$1"
+    [ "$(status_code_of "$f")" = "200" ] || { echo "health status != 200"; return 1; }
+    body_of "$f" | grep -q '"ok"' || { echo "health body missing \"ok\""; return 1; }
+    has_artifact_text "$f" && { echo "health body carries artifact text"; return 1; }
+    return 0
+}
+
+# check_chat_response FILE -> validates the non-streaming OpenAI envelope
+check_chat_response() {
+    f="$1"
+    [ "$(status_code_of "$f")" = "200" ] || { echo "chat status != 200"; return 1; }
+    b="$(body_of "$f")"
+    case "$b" in '{'*'}') ;; *) echo "chat body is not a {...} envelope"; return 1 ;; esac
+    printf '%s' "$b" | grep -q '"chat.completion"' || { echo "chat body missing chat.completion object"; return 1; }
+    printf '%s' "$b" | grep -q '"created"' || { echo "chat body missing created"; return 1; }
+    printf '%s' "$b" | grep -q '"usage"' || { echo "chat body missing usage"; return 1; }
+    has_artifact_text "$f" && { echo "chat body carries artifact text"; return 1; }
+    return 0
+}
+
+# check_stream_response FILE -> validates the OpenAI SSE stream
+check_stream_response() {
+    f="$1"
+    [ "$(status_code_of "$f")" = "200" ] || { echo "stream status != 200"; return 1; }
+    header_block_of "$f" | grep -qi 'Content-Type:[[:space:]]*text/event-stream' || {
+        echo "stream missing text/event-stream content-type"; return 1; }
+    body="$(body_of "$f")"
+    last_frame="$(printf '%s' "$body" | awk 'BEGIN{RS="\n\n"} {f=$0} END{print f}' | tr -d '\r\n')"
+    [ "$last_frame" = "data: [DONE]" ] || { echo "stream terminal frame != 'data: [DONE]', got '$last_frame'"; return 1; }
+    saw_chunk=0
+    printf '%s' "$body" | awk 'BEGIN{RS="\n\n"}{print}' | while IFS= read -r frame; do
+        frame_trim="$(printf '%s' "$frame" | tr -d '\r')"
+        [ -z "$frame_trim" ] && continue
+        if [ "$frame_trim" = "data: [DONE]" ]; then continue; fi
+        case "$frame_trim" in
+            'data: '*) ;;
+            *) echo "non-terminal frame does not start with 'data: ': $frame_trim"; exit 1 ;;
+        esac
+        case "$frame_trim" in *chat.completion.chunk*) ;; *) echo "frame missing chat.completion.chunk: $frame_trim"; exit 1 ;; esac
+    done
+    rc=$?
+    [ "$rc" -eq 0 ] || return 1
+    has_artifact_text "$f" && { echo "stream body carries artifact text"; return 1; }
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# --selftest: prove the checking machinery above actually discriminates,
+# using canned fixture servers (nc) instead of the real bin/simple binary.
+# Fatal — run before every real scan.
+# ---------------------------------------------------------------------------
+run_selftest() {
+    st_dir="$WORK_DIR/selftest"
+    mkdir -p "$st_dir"
+    st_failures=0
+
+    st_serve_and_check() {
+        name="$1"; fixture="$2"; checker="$3"; expect="$4"   # expect: pass|fail
+        st_port="$(pick_free_port)" || { echo "selftest: $name: no free port"; st_failures=$((st_failures + 1)); return; }
+        nc -l 127.0.0.1 "$st_port" <"$fixture" >/dev/null 2>&1 &
+        NC_PID=$!
+        wait_for_port "$st_port" 10 || { echo "selftest: $name: fixture server never bound"; kill "$NC_PID" 2>/dev/null; st_failures=$((st_failures + 1)); return; }
+        out="$st_dir/$name.out"
+        req="GET /v1/x HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
+        if [ "$3" = "check_chat_response" ] || [ "$3" = "check_stream_response" ]; then
+            req="POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}"
+        fi
+        do_raw_request "$st_port" "$req" "$out"
+        wait "$NC_PID" 2>/dev/null
+        NC_PID=""
+        reason="$("$checker" "$out")"; got_rc=$?
+        if [ "$expect" = "pass" ] && [ "$got_rc" -ne 0 ]; then
+            echo "selftest FAIL: $name expected PASS but checker failed: $reason"
+            st_failures=$((st_failures + 1))
+        elif [ "$expect" = "fail" ] && [ "$got_rc" -eq 0 ]; then
+            echo "selftest FAIL: $name expected the checker to FAIL but it passed"
+            st_failures=$((st_failures + 1))
+        fi
+    }
+
+    # Good fixtures: byte-accurate to the real server's real output (captured
+    # 2026-09-06 against a live `--server` run; see scratchpad evidence cited
+    # in the PR/commit for this gate).
+    printf 'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{"ok":true}' >"$st_dir/health_good.raw"
+    printf 'HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nConnection: close\r\n\r\n{"id":"chatcmpl-llm_caret","object":"chat.completion","created":1788675927,"model":"gpt-4o","choices":[{"index":0,"message":{"role":"assistant","content":"PONG"},"finish_reason":"stop"}],"usage":{"prompt_tokens":7,"completion_tokens":3,"total_tokens":10}}' >"$st_dir/chat_good.raw"
+    printf 'HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: {"id":"chatcmpl-llm_caret","object":"chat.completion.chunk","choices":[{"delta":{"role":"assistant"}}]}\n\ndata: {"id":"chatcmpl-llm_caret","object":"chat.completion.chunk","choices":[{"delta":{"content":"Hi"}}]}\n\ndata: [DONE]' >"$st_dir/stream_good.raw"
+
+    # Bad fixtures: replay the exact defect classes this gate exists to catch.
+    printf 'HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{"ok":true}' >"$st_dir/health_bad_status.raw"
+    printf 'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n<special:15>id<special:15>:chatcmpl' >"$st_dir/chat_bad_malformed.raw"
+    printf 'HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nConnection: close\r\n\r\n{"id":"chatcmpl-llm_caret","object":"chat.completion","model":"gpt-4o","choices":[]}' >"$st_dir/chat_bad_no_usage.raw"
+    printf 'HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: {"object":"chat.completion.chunk"}\n\nnot-a-frame\n\ndata: [DONE]' >"$st_dir/stream_bad_frame.raw"
+    printf 'HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: {"object":"chat.completion.chunk"}\n\n' >"$st_dir/stream_bad_no_done.raw"
+
+    st_serve_and_check health_good "$st_dir/health_good.raw" check_health_response pass
+    st_serve_and_check chat_good "$st_dir/chat_good.raw" check_chat_response pass
+    st_serve_and_check stream_good "$st_dir/stream_good.raw" check_stream_response pass
+    st_serve_and_check health_bad_status "$st_dir/health_bad_status.raw" check_health_response fail
+    st_serve_and_check chat_bad_malformed "$st_dir/chat_bad_malformed.raw" check_chat_response fail
+    st_serve_and_check chat_bad_no_usage "$st_dir/chat_bad_no_usage.raw" check_chat_response fail
+    st_serve_and_check stream_bad_frame "$st_dir/stream_bad_frame.raw" check_stream_response fail
+    st_serve_and_check stream_bad_no_done "$st_dir/stream_bad_no_done.raw" check_stream_response fail
+
+    if [ "$st_failures" -ne 0 ]; then
+        echo "$SELF: selftest FAILED ($st_failures fixture(s) misjudged)" >&2
+        return 1
+    fi
+    echo "$SELF: selftest OK (8 fixtures: 3 good must-PASS, 5 bad must-FAIL)"
+    return 0
+}
+
+run_selftest || { echo "$SELF: ERROR — nothing was checked (selftest failed)"; exit 2; }
+
+if [ "${1:-}" = "--selftest" ]; then
+    echo "$SELF: PASS — 8 selftest fixture(s) checked, 0 misjudged"
+    exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Real end-to-end run against the actual server.
+# ---------------------------------------------------------------------------
+# A fresh checkout has no bin/simple: the symlink is created by
+# scripts/setup/setup.shs and is untracked. Without this precondition the guard
+# still reaches the same ERROR, but only after burning the full 60s
+# wait_for_port budget on a server that was never going to start -- unacceptable
+# on a gate that runs on every push. Fail closed and say why.
+[ -x "$ROOT_DIR/bin/simple" ] || \
+    err "no runnable bin/simple in this checkout (untracked; run scripts/setup/setup.shs)"
+
+PORT="$(pick_free_port)" || err "no free port found"
+
+timeout 90 bin/simple run src/app/llm_caret/main.spl --provider dummy --server --port "$PORT" \
+    >"$WORK_DIR/server.log" 2>&1 &
+SERVER_PID=$!
+
+wait_for_port "$PORT" 60 || {
+    kill "$SERVER_PID" >/dev/null 2>&1
+    err "server never bound to 127.0.0.1:$PORT within 60s (see $WORK_DIR/server.log)"
+}
+
+checked=0
+failures=""
+
+do_raw_request "$PORT" 'GET /v1/health HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n' "$WORK_DIR/health.out"
+checked=$((checked + 1))
+reason="$(check_health_response "$WORK_DIR/health.out")" || failures="$failures; health: $reason"
+
+CHAT_BODY='{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}'
+do_raw_request "$PORT" "POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: ${#CHAT_BODY}\r\nConnection: close\r\n\r\n${CHAT_BODY}" "$WORK_DIR/chat.out"
+checked=$((checked + 1))
+reason="$(check_chat_response "$WORK_DIR/chat.out")" || failures="$failures; chat: $reason"
+
+STREAM_BODY='{"model":"gpt-4o","stream":true,"messages":[{"role":"user","content":"hi"}]}'
+do_raw_request "$PORT" "POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: ${#STREAM_BODY}\r\nConnection: close\r\n\r\n${STREAM_BODY}" "$WORK_DIR/stream.out"
+checked=$((checked + 1))
+reason="$(check_stream_response "$WORK_DIR/stream.out")" || failures="$failures; stream: $reason"
+
+kill "$SERVER_PID" >/dev/null 2>&1
+wait "$SERVER_PID" 2>/dev/null
+SERVER_PID=""
+
+[ "$checked" -gt 0 ] || err "0 requests issued"
+
+if [ -n "$failures" ]; then
+    echo "$SELF: FAIL — $checked request(s) checked against port $PORT, failures$failures"
+    exit 1
+fi
+
+echo "$SELF: PASS — $checked request(s) checked against port $PORT (health 200 json, chat 200 chat.completion envelope, stream 200 text/event-stream terminated by data: [DONE])"
+exit 0

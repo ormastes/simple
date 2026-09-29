@@ -1,0 +1,64 @@
+use std.spec.*
+use compiler.mir.hwir.types.{CoreConfig}
+use compiler.mir.hwir.riscv_scalar_runtime_m_provider.{strict_riscv_scalar_runtime_m_provider}
+use lib.hardware.riscv_common.isa.scalar_database.{riscv_scalar_decoder_plan}
+
+fn im32() -> CoreConfig:
+    CoreConfig(xlen: 32, physical_address_bits: 32, register_count: 32,
+        profile: "rv32-im", isa_profile: "rv32im", compressed_decode_profile: "none")
+
+fn im64() -> CoreConfig:
+    CoreConfig(xlen: 64, physical_address_bits: 56, register_count: 32,
+        profile: "rv64-im", isa_profile: "rv64im", compressed_decode_profile: "none")
+
+describe "flat unified runtime M provider":
+    it "owns all eight RV32IM rows and one flat sequential graph":
+        val owner = strict_riscv_scalar_runtime_m_provider("runtime_m32", im32(), riscv_scalar_decoder_plan("rv32im").unwrap()).unwrap()
+        expect(owner.diagnostic()).to_equal("")
+        expect(owner.child_entity).to_equal("")
+        expect(owner.origins.any(_.source_name == "rv.m.mul")).to_be(true)
+        expect(owner.origins.any(_.source_name == "rv.m.div")).to_be(true)
+        expect(owner.origins.any(_.source_name == "rv.m.remu")).to_be(true)
+        expect(owner.plan.registers.any(_.name == "d32_remainder_reg" and _.bit_width == 33)).to_be(true)
+        expect(owner.plan.rules[2].name).to_equal("mul_finish")
+        expect(owner.plan.rules.any(_.name == "d32_iterate" and
+            _.guards.any(_.kind == "high" and _.lhs == "family_div_reg") and
+            not _.guards.any(_.lhs == "word_reg") and
+            _.assignments.any(_.destination == "d32_count_reg") and
+            not _.assignments.any(_.destination == "acc_reg"))).to_be(true)
+
+    it "keeps independent RV64 and word divider geometries for all thirteen rows":
+        val owner = strict_riscv_scalar_runtime_m_provider("runtime_m64", im64(), riscv_scalar_decoder_plan("rv64im").unwrap()).unwrap()
+        expect(owner.diagnostic()).to_equal("")
+        expect(owner.origins.any(_.source_name == "rv64.m.mulw")).to_be(true)
+        expect(owner.origins.any(_.source_name == "rv64.m.divw")).to_be(true)
+        expect(owner.origins.any(_.source_name == "rv64.m.remuw")).to_be(true)
+        expect(owner.plan.registers.any(_.name == "d64_count_reg" and _.bit_width == 7)).to_be(true)
+        expect(owner.plan.registers.any(_.name == "d32_count_reg" and _.bit_width == 6)).to_be(true)
+        expect(owner.datapath_select_ops.any(_.result == "architectural_result" and _.condition == "family_div_reg")).to_be(true)
+        expect(owner.plan.rules.any(_.name == "mul_iterate" and
+            _.guards.any(_.kind == "low" and _.lhs == "family_div_reg") and
+            _.assignments.any(_.destination == "acc_reg") and
+            not _.assignments.any(_.destination == "d64_count_reg") and
+            not _.assignments.any(_.destination == "d32_count_reg"))).to_be(true)
+        expect(owner.plan.rules.any(_.name == "d64_iterate" and
+            _.guards.any(_.kind == "high" and _.lhs == "family_div_reg") and
+            _.guards.any(_.kind == "low" and _.lhs == "word_reg") and
+            _.assignments.any(_.destination == "d64_count_reg") and
+            not _.assignments.any(_.destination == "d32_count_reg") and
+            not _.assignments.any(_.destination == "acc_reg"))).to_be(true)
+        expect(owner.plan.rules.any(_.name == "d32_iterate" and
+            _.guards.any(_.kind == "high" and _.lhs == "family_div_reg") and
+            _.guards.any(_.kind == "high" and _.lhs == "word_reg") and
+            _.assignments.any(_.destination == "d32_count_reg") and
+            not _.assignments.any(_.destination == "d64_count_reg") and
+            not _.assignments.any(_.destination == "acc_reg"))).to_be(true)
+        expect(owner.plan.rules.any(_.name == "d64_capture" and
+            _.assignments.any(_.destination == "d64_count_reg") and
+            not _.assignments.any(_.destination == "d32_count_reg"))).to_be(true)
+        expect(owner.plan.rules.any(_.name == "d32_capture" and
+            _.assignments.any(_.destination == "d32_count_reg") and
+            not _.assignments.any(_.destination == "d64_count_reg"))).to_be(true)
+
+    it "rejects Zmmul because DIV/REM needs an exact IM plan":
+        expect(strict_riscv_scalar_runtime_m_provider("runtime_m_bad", CoreConfig.rv32(), riscv_scalar_decoder_plan("rv32i_zmmul").unwrap()).is_err()).to_be(true)

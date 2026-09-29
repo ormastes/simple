@@ -1,0 +1,206 @@
+# codex-impl
+# Bounded in-memory catalog for inert environment-variant descriptors.
+#
+# This capsule validates metadata and computes admission decisions only.  It
+# deliberately has no loader, symbol, executable mapping, or publication API.
+
+use std.nogc_sync_mut.composition.environment_variants.contracts_v1.{
+    EnvironmentDigest256V1, EnvironmentSnapshotV1, EnvironmentGpuDeviceV1,
+    EnvironmentFeatureSetV1, VariantDependencyV1, VariantDescriptorV1,
+    VariantRejectionV1, variant_descriptor_validate_v1,
+    ENV_VARIANT_MAX_ARENA_BYTES_V1, ENV_VARIANT_MAX_DEPENDENCIES_V1,
+    ENV_VARIANT_MAX_FACET_BINDINGS_V1, ENV_VARIANT_MAX_REJECTIONS_V1
+}
+use std.nogc_sync_mut.composition.environment_variants.admission.{
+    variant_eligibility_reason_v1, ENV_ADMISSION_OK_V1,
+    ENV_ADMISSION_POLICY_REJECTED_V1, ENV_ADMISSION_DEPENDENCY_INVALID_V1,
+    ENV_PHASE_POLICY_V1
+}
+use std.nogc_sync_mut.composition.environment_variants.dependency_resolver_v1.{
+    environment_dependency_resolve_v1
+}
+use std.nogc_sync_mut.composition.environment_variants.policy.{
+    variant_policy_allows_v1, variant_policy_reason_v1, variant_policy_rank_v1
+}
+use std.nogc_sync_mut.composition.environment_variants.catalog_identity_v1.{
+    environment_catalog_identity_compute_v1
+}
+
+pub enum EnvironmentVariantCatalogErrorV1:
+    EmptyCatalog
+    CapacityExceeded
+    InvalidCatalogIdentity
+    InvalidGeneration
+    InvalidDependencyLock
+    InvalidDescriptor
+    DuplicateProviderVariant
+    IdentityComputationFailed
+
+pub struct EnvironmentVariantCatalogV1:
+    catalog_digest: EnvironmentDigest256V1
+    catalog_generation: u64
+    dependency_lock_digest: EnvironmentDigest256V1
+    arena_byte_count: u32
+    feature_word_count: u32
+    descriptors: [VariantDescriptorV1]
+    dependencies: [VariantDependencyV1]
+
+pub struct EnvironmentVariantCatalogSelectionV1:
+    selected_index: i64
+    selected_provider_identity: EnvironmentDigest256V1
+    selected_variant_identity: EnvironmentDigest256V1
+    catalog_digest: EnvironmentDigest256V1
+    catalog_generation: u64
+    dependency_lock_digest: EnvironmentDigest256V1
+    selected_dependency_closure_digest: EnvironmentDigest256V1
+    rejections: [VariantRejectionV1]
+
+fn _digest_declared_v1(value: EnvironmentDigest256V1) -> bool:
+    value.w0 != 0u64 or value.w1 != 0u64 or value.w2 != 0u64 or value.w3 != 0u64
+
+fn _digest_equal_v1(left: EnvironmentDigest256V1, right: EnvironmentDigest256V1) -> bool:
+    left.w0 == right.w0 and left.w1 == right.w1 and
+        left.w2 == right.w2 and left.w3 == right.w3
+
+fn _digest_less_v1(left: EnvironmentDigest256V1, right: EnvironmentDigest256V1) -> bool:
+    if left.w0 != right.w0: return left.w0 < right.w0
+    if left.w1 != right.w1: return left.w1 < right.w1
+    if left.w2 != right.w2: return left.w2 < right.w2
+    left.w3 < right.w3
+
+fn _identity_pair_less_v1(left: VariantDescriptorV1, right: VariantDescriptorV1) -> bool:
+    if not _digest_equal_v1(left.provider_identity, right.provider_identity):
+        return _digest_less_v1(left.provider_identity, right.provider_identity)
+    _digest_less_v1(left.variant_identity, right.variant_identity)
+
+fn _zero_digest_v1() -> EnvironmentDigest256V1:
+    EnvironmentDigest256V1(w0: 0u64, w1: 0u64, w2: 0u64, w3: 0u64)
+
+pub fn environment_variant_catalog_create_v1(
+    catalog_digest: EnvironmentDigest256V1, catalog_generation: u64,
+    dependency_lock_digest: EnvironmentDigest256V1, arena_byte_count: u32,
+    feature_word_count: u32,
+    descriptors: [VariantDescriptorV1], dependencies: [VariantDependencyV1]
+) -> Result<EnvironmentVariantCatalogV1, EnvironmentVariantCatalogErrorV1>:
+    if descriptors.len() == 0:
+        return Err(EnvironmentVariantCatalogErrorV1.EmptyCatalog)
+    if descriptors.len() > ENV_VARIANT_MAX_FACET_BINDINGS_V1 as i64 or
+       dependencies.len() > ENV_VARIANT_MAX_DEPENDENCIES_V1 as i64 or
+       arena_byte_count > ENV_VARIANT_MAX_ARENA_BYTES_V1 or
+       feature_word_count > 192u32:
+        return Err(EnvironmentVariantCatalogErrorV1.CapacityExceeded)
+    if not _digest_declared_v1(catalog_digest):
+        return Err(EnvironmentVariantCatalogErrorV1.InvalidCatalogIdentity)
+    if catalog_generation == 0u64:
+        return Err(EnvironmentVariantCatalogErrorV1.InvalidGeneration)
+    if not _digest_declared_v1(dependency_lock_digest):
+        return Err(EnvironmentVariantCatalogErrorV1.InvalidDependencyLock)
+
+    var i: i64 = 0
+    while i < descriptors.len():
+        val descriptor = descriptors[i]
+        if variant_descriptor_validate_v1(
+            descriptor, arena_byte_count, feature_word_count,
+            dependencies.len() as u32, dependencies
+        ) != Ok(()):
+            return Err(EnvironmentVariantCatalogErrorV1.InvalidDescriptor)
+        var j = 0
+        while j < i:
+            val other = descriptors[j]
+            if _digest_equal_v1(descriptor.provider_identity, other.provider_identity) and
+               _digest_equal_v1(descriptor.variant_identity, other.variant_identity):
+                return Err(EnvironmentVariantCatalogErrorV1.DuplicateProviderVariant)
+            j = j + 1
+        i = i + 1
+
+    Ok(EnvironmentVariantCatalogV1(
+        catalog_digest: catalog_digest,
+        catalog_generation: catalog_generation,
+        dependency_lock_digest: dependency_lock_digest,
+        arena_byte_count: arena_byte_count,
+        feature_word_count: feature_word_count,
+        descriptors: descriptors,
+        dependencies: dependencies
+    ))
+
+pub fn environment_variant_catalog_create_canonical_v1(
+    arena_bytes: [u8], feature_words: [u64], catalog_generation: u64,
+    descriptors: [VariantDescriptorV1], dependencies: [VariantDependencyV1]
+) -> Result<EnvironmentVariantCatalogV1, EnvironmentVariantCatalogErrorV1>:
+    val identity = match environment_catalog_identity_compute_v1(
+        arena_bytes, feature_words, descriptors, dependencies):
+        case Ok(value): value
+        case Err(_):
+            return Err(EnvironmentVariantCatalogErrorV1.IdentityComputationFailed)
+    environment_variant_catalog_create_v1(
+        identity.catalog_content_digest, catalog_generation,
+        identity.dependency_lock_digest, arena_bytes.len() as u32,
+        feature_words.len() as u32, descriptors, dependencies)
+
+pub fn environment_variant_catalog_select_v1(
+    catalog: EnvironmentVariantCatalogV1, snapshot: EnvironmentSnapshotV1,
+    requested_provider: EnvironmentDigest256V1, feature_words: [u64],
+    gpu_devices: [EnvironmentGpuDeviceV1], mode: u16,
+    preferred_variant: EnvironmentDigest256V1, max_architecture: u16,
+    max_startup_budget_us: u64, max_placement: u16,
+    max_feature_ceiling: EnvironmentFeatureSetV1
+) -> EnvironmentVariantCatalogSelectionV1:
+    var best_index: i64 = -1
+    var best_rank: i64 = 9223372036854775807
+    var best_dependency_closure = _zero_digest_v1()
+    var rejections: [VariantRejectionV1] = []
+    var i: i64 = 0
+    while i < catalog.descriptors.len():
+        val descriptor = catalog.descriptors[i]
+        if _digest_equal_v1(descriptor.provider_identity, requested_provider):
+            val eligibility = variant_eligibility_reason_v1(
+                snapshot, descriptor, feature_words, catalog.dependencies, gpu_devices)
+            var reason = eligibility
+            var phase: u16 = 1u16
+            var dependency_closure = _zero_digest_v1()
+            if reason == ENV_ADMISSION_OK_V1:
+                match environment_dependency_resolve_v1(
+                    descriptor, catalog.descriptors, catalog.dependencies):
+                    case Ok(resolution):
+                        dependency_closure = resolution.closure_identity
+                    case Err(_):
+                        reason = ENV_ADMISSION_DEPENDENCY_INVALID_V1
+            if reason == ENV_ADMISSION_OK_V1:
+                reason = variant_policy_reason_v1(
+                    mode, descriptor, snapshot, preferred_variant, max_architecture,
+                    max_startup_budget_us, max_placement, max_feature_ceiling,
+                    feature_words)
+                phase = ENV_PHASE_POLICY_V1
+            if reason == ENV_ADMISSION_OK_V1 and variant_policy_allows_v1(
+                mode, descriptor, snapshot, preferred_variant, max_architecture,
+                max_startup_budget_us, max_placement, max_feature_ceiling,
+                feature_words):
+                val rank = variant_policy_rank_v1(mode, descriptor, preferred_variant)
+                if best_index < 0 or rank < best_rank or
+                   (rank == best_rank and _identity_pair_less_v1(
+                       descriptor, catalog.descriptors[best_index])):
+                    best_index = i
+                    best_rank = rank
+                    best_dependency_closure = dependency_closure
+            elif rejections.len() < ENV_VARIANT_MAX_REJECTIONS_V1 as i64:
+                val captured_reason = if reason == ENV_ADMISSION_OK_V1: ENV_ADMISSION_POLICY_REJECTED_V1 else reason
+                rejections.push(VariantRejectionV1(
+                    provider_identity: descriptor.provider_identity,
+                    variant_identity: descriptor.variant_identity,
+                    reason_code: captured_reason,
+                    phase_code: phase
+                ))
+        i = i + 1
+
+    val selected_provider = if best_index >= 0: catalog.descriptors[best_index].provider_identity else _zero_digest_v1()
+    val selected_variant = if best_index >= 0: catalog.descriptors[best_index].variant_identity else _zero_digest_v1()
+    EnvironmentVariantCatalogSelectionV1(
+        selected_index: best_index,
+        selected_provider_identity: selected_provider,
+        selected_variant_identity: selected_variant,
+        catalog_digest: catalog.catalog_digest,
+        catalog_generation: catalog.catalog_generation,
+        dependency_lock_digest: catalog.dependency_lock_digest,
+        selected_dependency_closure_digest: best_dependency_closure,
+        rejections: rejections
+    )

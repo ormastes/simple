@@ -148,8 +148,9 @@ Replace implementations in `formula.spl` _dispatch_function:
 # Ensure all existing formula tests pass
 bin/simple test test/01_unit/app/office/sheets/formula_*.spl
 
-# Add migration verification tests
-# Create: test/01_unit/app/office/sheets/formula_math_lib_migration_spec.spl
+# Migration verification tests (shipped as the math_bridge_*_spec.spl family, 9 files,
+# not the single formula_math_lib_migration_spec.spl planned here):
+# test/01_unit/app/office/sheets/math_bridge_spec.spl, math_bridge_stats_spec.spl, ...
 ```
 
 ### 2. Add Math Bridge Module
@@ -183,11 +184,55 @@ fn excel_acos(x: f64) -> f64:
 ### 3. Update formula.spl _dispatch_function
 Replace internal `_sin_f64` calls with `math_bridge::excel_sin` etc.
 
+#### Empty-range decision for the aggregate reroute (2026-09-05) — DECIDED, NOT YET APPLIED
+
+The remaining `_dispatch_function` aggregates (`"COUNT"` -> `eval_count`,
+`"PRODUCT"` -> `eval_product`, `formula.spl:4203,4209`) are the only twins whose
+observable behaviour DIFFERS from the bridge, so they cannot be rerouted blind:
+
+| empty input | `eval_*` (spreadsheet twin)   | `excel_*` (library twin)      |
+|-------------|------------------------------|-------------------------------|
+| PRODUCT     | `0.0` (`formula.spl:8451`)   | `1.0` (`math_bridge.spl:136`) |
+| COUNT       | `0.0`, returns `f64`         | `0`, returns `i64`            |
+
+**Decision: reroute through the bridge, but keep the spreadsheet semantics at
+the dispatch boundary** — a `flat.len() == 0` guard returning `0.0` for
+`"PRODUCT"` before calling `excel_product`, and `excel_count(flat).to_f64()`
+for `"COUNT"`.
+
+Rationale: the two answers are not a disagreement to be resolved, they are two
+correct answers to two different questions, and BOTH are pinned by live specs.
+`excel_product([]) == 1.0` (the multiplicative identity) is asserted four times
+— `math_bridge_spec.spl:102`, `math_bridge_working_spec.spl:148`,
+`math_bridge_comprehensive_spec.spl:178,267` — so flipping the library twin
+would break them. Excel itself returns 0 for `=PRODUCT()` over an all-blank
+range, which is what the spreadsheet surface must keep. Putting the guard at
+the dispatch boundary deletes the duplicated bodies (the point of the plan)
+while leaving both observable behaviours byte-identical, and `excel_count`'s
+`i64` is widened at the same boundary rather than changing the library's return
+type.
+
+**Not applied yet, deliberately.** The change cannot be verified: the plan's own
+oracle (`<binary> test test/01_unit/app/office/sheets/`) reports `79 total, 0
+passed, 79 failed` BEFORE any change, for three infrastructure reasons unrelated
+to formulas — see
+`doc/08_tracking/bug/test_runner_ulimit_caps_unusable_on_macos_2026-09-05.md`.
+Landing a real behaviour change with no working regression gate would be
+guessing. Apply it once that suite runs.
+
 ### 4. Remove Duplicated Implementations
 Delete unused helper functions:
-- `_sin_f64`, `_cos_f64`, `_atan_f64` (now use math lib)
-- `_ln_f64`, `_exp_f64`, `_sqrt_f64` (now use special.spl)
-- `_PI` constant (now use MATH_PI)
+- `_sin_f64`, `_cos_f64`, `_atan_f64` (now use math lib) — **DELETED 2026-09-05.**
+  All call sites route through `excel_sin` / `excel_cos` / `excel_atan`.
+- `_sqrt_f64` (now use special.spl) — **DELETED 2026-09-05**; the `"SQRT"` case now
+  calls `excel_sqrt`. `_ln_f64` / `_exp_f64` no longer exist (removed earlier).
+- `_PI` constant (now use MATH_PI) — **DELETED 2026-09-05**; `formula.spl` imports
+  `MATH_PI` from `std.common.math.math`, and `"SQRTPI"` / `"DEGREES"` / `"RADIANS"`
+  now call `excel_sqrt_pi` / `excel_degrees` / `excel_radians`.
+
+`_atan2_f64`, `_sinh_f64` and `_cosh_f64` deliberately remain (used by the complex
+`IM*` functions) but now build on `excel_atan` / `MATH_PI` / `exp_f64`.
+`formula.spl`: 9,606 -> 9,558 lines.
 
 ### 5. Update SPipe Tests
 - Ensure all formula specs pass after migration
@@ -212,10 +257,33 @@ Delete unused helper functions:
 ## Success Criteria
 
 - [ ] All formula tests pass (100% coverage)
+  - blocked 2026-09-05, three stacked infrastructure blockers, none of them a
+    formula defect: (1) `ulimit -v` is unimplemented on Darwin so every bounded
+    child exited 125 (FIXED in `src/lib/nogc_sync_mut/io/resource_scope.spl`);
+    (2) the runner's `ulimit -u 64` is a per-UID cap that makes `timeout` fail
+    to fork on a workstation; (3) DOMINANT -- the deny-level
+    `spipe_empty_examples` lint does not recognise `assert_*` as a real
+    assertion, so `simple test`'s compile-first path fails all 79 sheets specs
+    that every one of which PASSES under `simple run`. Full evidence and fix
+    order: doc/08_tracking/bug/test_runner_ulimit_caps_unusable_on_macos_2026-09-05.md
 - [ ] No performance regression in benchmark suite
 - [ ] Excel functions documented as using stdlib math
 - [ ] Code size reduced by ~500-1000 lines (duplicated implementations)
 - [ ] User-facing guide updated (doc/07_guide/app/office/excel_formulas.md)
+  - status 2026-09-05: the guide now EXISTS and documents the
+    formula -> `math_bridge` -> `std.common.math` chain, the full function map and
+    the ASIN/ACOS endpoint values. Box left OPEN only because its `it` cannot be
+    executed on this host — see the blocker note below.
+
+**Blocker: no acceptance `it` is executable on this host (2026-09-05).** Every
+deployed binary predates the `unsafe(...)` capability blocks that
+`1b4edca296c` (SFFI v2 hardening, #75) added to `src/lib/common/math/math.spl`,
+so any module importing `std.common.math.math` — including `math_bridge.spl`
+and therefore `formula.spl` — fails to load
+(`parse: ... Unexpected token: expected expression, found Colon`). No box is
+ticked, per the tick-only-on-a-passing-`it` rule. Re-run after a seed redeploy:
+`doc/08_tracking/bug/stale_deployed_binaries_reject_current_language_sspec_scorer_unrunnable_2026-09-05.md`
+(section "Second instance, same class").
 
 ## Timeline Estimate
 
@@ -241,3 +309,11 @@ Delete unused helper functions:
 - Test specs: `test/01_unit/app/office/sheets/formula_*.spl`
 - Statistics functions: `src/lib/common/math/statistics.spl`
 - Financial functions: `src/lib/common/math/financial.spl`
+- Bridge module (shipped): `src/app/office/sheets/math_bridge.spl` (`excel_sin` .. `excel_ceiling`),
+  imported by `formula.spl:19`
+
+## Acceptance
+
+Runnable oracles for the remaining open boxes: `test/03_system/plan_acceptance/excel_to_math_lib_migration_spec.spl`
+(tagged `@tag:in-development`; one `it` per open box — see
+`doc/03_plan/agent_tasks/plan_remains_acceptance_2026-09-05.md`).

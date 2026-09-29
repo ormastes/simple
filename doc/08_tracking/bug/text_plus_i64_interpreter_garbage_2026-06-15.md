@@ -1,7 +1,14 @@
 # BUG: `text + i64` produces garbage in interpreter (seed) — use `.to_text()`
 
+## Closed 2026-09-13 — does not reproduce: `text + i64` renders the decimal string
+- **measured** — `print("x" + v)` with `val v: i64 = 42` prints `x42`; `print("" + 7)`
+  prints `7`. Rust seed `bin/simple` v1.0.0-rc.1 on Windows, in both the default JIT run
+  and with `SIMPLE_NO_JIT=1`.
+- **inferred** — filed against the seed driver, which is what was measured; the Linux host
+  was not re-tested.
+
 **Date:** 2026-06-15
-**Status:** source fixed; focused seed-interpreter execution pending
+**Status:** CLOSED 2026-09-13 (triage shard 03) — see the Closed section below
 **Severity:** Medium — silently corrupts string building; no error, just wrong output
 **Found by:** search-custom-types AC-3 (Aho-Corasick) spec, while building canonical
 sort keys with `"" + v`.
@@ -24,7 +31,7 @@ The corruption is value-position-dependent (`0`, `nil`, `0.0`, `<value:0xN>`),
 suggesting the RHS `i64` is being read through the wrong tag / coercion path
 rather than formatted as a number.
 
-## Historical workaround (used in the spec)
+## Workaround (used in the spec)
 
 Call `.to_text()` explicitly on the integer:
 
@@ -33,8 +40,8 @@ fn i64_str(v: i64) -> text:
     "" + v.to_text()   # CORRECT: "42", "3002006", etc.
 ```
 
-`i64.to_text()` and `text + text` both worked correctly; only the implicit
-`text + i64` coercion was broken in the original report.
+`i64.to_text()` and `text + text` both work correctly; only the implicit
+`text + i64` coercion is broken.
 
 ## Reproduction
 
@@ -55,18 +62,9 @@ Run with: `SIMPLE_BOOTSTRAP_DRIVER=$(ls -1 bin/release/*/simple_seed|head -1) bi
   but instead yields garbage.
 - `rt_string_concat_quadratic_2026-06-12.md` — a perf issue, not correctness.
 
-## Historical proposed fix
+## Proposed fix (hypothesis, unverified)
 
 In the interpreter's `+` dispatch, when the LHS is `text` and the RHS is an
 integer/`i64`, format the RHS via the same path as `.to_text()` before
 concatenation, mirroring the documented interpreter rule that `1 + "x"` →
-`"1x"`. The reverse (`"x" + 1`) appeared to misread the RHS payload.
-
-## Resolution status (2026-07-15)
-
-All normal interpreter binary expressions route through `eval_op_expr`. Its
-text-left `+` branch now formats the right value with `to_display_string()`;
-`i64` values therefore produce decimal text before concatenation. A focused
-driver regression exercises the original `"" + v` form through
-`Backend::Interpreter` and expects `42`. Execution remains pending a runnable
-Rust test artifact, so no runtime PASS is claimed.
+`"1x"`. Currently the reverse (`"x" + 1`) appears to misread the RHS payload.

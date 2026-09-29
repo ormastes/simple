@@ -1,0 +1,208 @@
+#!/bin/sh
+# check-simpleos-riscv64-opensbi-guest-boot.shs
+#
+# Real-firmware GUEST-BOOT gate for riscv64, per
+# .claude/rules/board-runnable.md — closes the gap the sibling
+# check-simpleos-riscv64-opensbi-real-firmware-boot.shs honestly states:
+# that gate proves only the OpenSBI FIRMWARE boots; this one proves a
+# SimpleOS-contract riscv64 GUEST KERNEL boots UNDER that firmware, with
+# NO `-kernel` pass semantics and NO isa-debug-exit anywhere in the argv.
+#
+# WHY OpenSBI fw_payload AND NOT fw_dynamic + a loader
+# ----------------------------------------------------
+# fw_dynamic's next-stage address is populated by QEMU's `-kernel`
+# machinery — exactly the banned pass semantics. The EFI chain arm64 uses
+# (EDK2 pflash -> Limine EFI app) has no counterpart on this host for
+# riscv64: no EDK2 RiscVVirtQemu build, no U-Boot qemu-riscv64_smode, and
+# vendor/limine ships no BOOTRISCV64.EFI. `fw_payload` — OpenSBI v1.4
+# built with the kernel image as FW_PAYLOAD_PATH, the whole blob given to
+# QEMU as `-bios` ONLY — is a real board-shipping configuration (it is
+# how OpenSBI ships on flash on JH7110-class boards): the FIRMWARE, not
+# QEMU, performs the S-mode handover (a0=hartid, a1=dtb) to 0x80200000.
+# The same flat Image also carries the RISC-V Linux boot-image header
+# (gated by check-simpleos-riscv64-image-header-contract.shs), so an
+# Image-protocol loader chain (U-Boot booti / Limine) can load the very
+# same artifact the day one is available here.
+#
+# WHY A PROBE PAYLOAD AND NOT THE UNIFIED KERNEL ITSELF: same reasoning as
+# check-simpleos-arm64-unified-boot-contract — the boot-protocol layer
+# lives entirely in crt0.S + linker.ld; building a full SimpleOS riscv64
+# kernel needs the self-hosted compiler, which would make this gate
+# un-runnable for reasons unrelated to boot. The probe is linked against
+# the REAL crt0.S and REAL linker.ld and proves .bss zeroing, .data load,
+# absolute-rodata execution at the link address, a real FDT in a1, and a
+# live SBI ecall answered by the firmware underneath.
+#
+# Verdict is the LAST line of stdout:
+#   PASS  — <n> marker(s) checked, ...            exit 0
+#   FAIL  — ...                                   exit 1
+#   ERROR — nothing was checked: ...              exit 2
+# A run that checks 0 markers is an ERROR, never a PASS. Offline with no
+# cached OpenSBI checkout is an ERROR, never a PASS.
+# `--selftest` (also run, fatally, before every real scan) proves the
+# serial-log evaluator on fixture logs: complete log must PASS, a log
+# missing one marker must FAIL naming it, an empty log must FAIL, and a
+# 0-marker list must be rejected so a vacuous scan cannot pass.
+#
+# Env: RV64_GUEST_TIMEOUT   qemu timeout seconds (default 60)
+#      OPENSBI_SRC          override OpenSBI checkout path
+set -eu
+
+REPO_ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+cd "$REPO_ROOT"
+
+ARCH_DIR=examples/09_embedded/simple_os/arch/riscv64
+CRT0=$ARCH_DIR/boot/crt0.S
+LD_SCRIPT=$ARCH_DIR/linker.ld
+PROBE=scripts/check/fixtures/riscv64_boot_contract_probe.c
+OUT=${OUT_DIR:-build/verify/simpleos-riscv64-opensbi-guest-boot}
+OPENSBI_SRC=${OPENSBI_SRC:-build/os/rv64_opensbi_guest/opensbi-src}
+OPENSBI_TAG=v1.4
+OPENSBI_SHA=a2b255b88918715173942f2c5e1f97ac9e90c877  # v1.4 peeled commit (same pin as build_opensbi_rv64_soc.shs)
+TIMEOUT_S=${RV64_GUEST_TIMEOUT:-60}
+
+verdict_error() { printf 'ERROR — nothing was checked: %s\n' "$1"; exit 2; }
+verdict_fail()  { printf 'FAIL — %s\n' "$1"; exit 1; }
+
+MARKERS='OpenSBI v
+[probe] rv64 c-start
+[probe] bss-zeroed
+[probe] data-ok
+[probe] rodata-ok
+[probe] dtb-ok
+[probe] sbi-ok
+[probe] SIMPLEOS-RV64-REALFW-BOOT-OK'
+
+# eval_log <log> <marker-file> ; prints "CHECKED=<n>" when every marker is
+# present, "MISSING:<marker>" for the first absent one, "CHECKED=0" when the
+# log is empty/absent or the marker list is empty.
+eval_log() {
+    log=$1; mfile=$2
+    [ -s "$mfile" ] || { echo "CHECKED=0"; return 0; }
+    [ -s "$log" ]   || { echo "CHECKED=0"; return 0; }
+    n=0
+    while IFS= read -r m; do
+        [ -n "$m" ] || continue
+        if ! grep -Faq "$m" "$log"; then
+            printf 'MISSING:%s\n' "$m"
+            return 0
+        fi
+        n=$((n + 1))
+    done < "$mfile"
+    echo "CHECKED=$n"
+}
+
+selftest() {
+    st=$OUT/selftest
+    rm -rf "$st"; mkdir -p "$st"
+    printf '%s\n' "$MARKERS" > "$st/markers.txt"
+    mcount=$(grep -c . "$st/markers.txt")
+    # Complete log must PASS with n == marker count.
+    { printf 'noise before\n'; printf '%s\n' "$MARKERS"; printf 'noise after\n'; } > "$st/good.log"
+    r=$(eval_log "$st/good.log" "$st/markers.txt")
+    [ "$r" = "CHECKED=$mcount" ] || { echo "selftest: complete log gave '$r', want CHECKED=$mcount" >&2; return 1; }
+    # A log missing sbi-ok must FAIL naming it.
+    grep -Fv '[probe] sbi-ok' "$st/good.log" > "$st/missing.log"
+    r=$(eval_log "$st/missing.log" "$st/markers.txt")
+    [ "$r" = "MISSING:[probe] sbi-ok" ] || { echo "selftest: missing-marker log gave '$r'" >&2; return 1; }
+    # Empty log must yield CHECKED=0 (caller forced to FAIL/ERROR).
+    : > "$st/empty.log"
+    r=$(eval_log "$st/empty.log" "$st/markers.txt")
+    [ "$r" = "CHECKED=0" ] || { echo "selftest: empty log gave '$r', want CHECKED=0" >&2; return 1; }
+    # Empty marker list must yield CHECKED=0 — a vacuous scan cannot pass.
+    : > "$st/nomarkers.txt"
+    r=$(eval_log "$st/good.log" "$st/nomarkers.txt")
+    [ "$r" = "CHECKED=0" ] || { echo "selftest: empty marker list gave '$r', want CHECKED=0" >&2; return 1; }
+    echo "[guest-boot] selftest OK (4 fixtures)"
+}
+
+mkdir -p "$OUT"
+if ! selftest; then
+    verdict_error "selftest failed — the serial-log evaluator cannot be trusted"
+fi
+if [ "${1:-}" = "--selftest" ]; then
+    printf 'PASS — 4 selftest fixture(s) checked, serial-log evaluator discriminates\n'
+    exit 0
+fi
+
+# --- inputs & toolchain -----------------------------------------------------
+for f in "$CRT0" "$LD_SCRIPT" "$PROBE"; do
+    [ -s "$f" ] || verdict_error "missing input $f"
+done
+command -v qemu-system-riscv64 >/dev/null 2>&1 || verdict_error "missing qemu-system-riscv64"
+CROSS=
+for c in riscv64-unknown-elf riscv64-linux-gnu; do
+    if command -v "$c-gcc" >/dev/null 2>&1; then CROSS=$c-; break; fi
+done
+[ -n "$CROSS" ] || verdict_error "no riscv64 cross-gcc"
+# OpenSBI's link needs an ld accepting --exclude-libs; Ubuntu's unknown-elf
+# ld 2.42 rejects it (packaging defect) — prefer linux-gnu for OpenSBI, same
+# choice as scripts/os/build_opensbi_rv64_soc.shs.
+OPENSBI_CROSS=$CROSS
+command -v riscv64-linux-gnu-gcc >/dev/null 2>&1 && OPENSBI_CROSS=riscv64-linux-gnu-
+
+# --- build the probe kernel against the REAL early-boot sources -------------
+CFLAGS="-march=rv64gc -mabi=lp64d -mcmodel=medany -ffreestanding -nostdlib -O1"
+"${CROSS}gcc" $CFLAGS -c "$CRT0" -o "$OUT/crt0.o" >"$OUT/build.log" 2>&1 \
+    || { cat "$OUT/build.log" >&2; verdict_error "crt0.S did not assemble"; }
+"${CROSS}gcc" $CFLAGS -c "$PROBE" -o "$OUT/probe.o" >>"$OUT/build.log" 2>&1 \
+    || { cat "$OUT/build.log" >&2; verdict_error "probe payload did not compile"; }
+"${CROSS}ld" -T "$LD_SCRIPT" "$OUT/crt0.o" "$OUT/probe.o" -o "$OUT/probe.elf" \
+    >>"$OUT/build.log" 2>&1 \
+    || { cat "$OUT/build.log" >&2; verdict_error "probe kernel did not link"; }
+"${CROSS}objcopy" -O binary "$OUT/probe.elf" "$OUT/probe.Image" \
+    || verdict_error "flat Image extraction failed"
+[ -s "$OUT/probe.Image" ] || verdict_error "flat Image is empty"
+
+# --- OpenSBI v1.4 checkout: reuse pinned, else clone ------------------------
+if [ -d "$OPENSBI_SRC/.git" ]; then
+    have=$(git -C "$OPENSBI_SRC" rev-parse HEAD 2>/dev/null || echo none)
+    [ "$have" = "$OPENSBI_SHA" ] \
+        || verdict_error "OpenSBI checkout $OPENSBI_SRC is at $have, not pinned $OPENSBI_SHA — refusing to build unpinned firmware"
+else
+    git clone --depth 1 --branch "$OPENSBI_TAG" \
+        https://github.com/riscv-software-src/opensbi.git "$OPENSBI_SRC" \
+        >"$OUT/clone.log" 2>&1 \
+        || verdict_error "no cached OpenSBI checkout and clone failed (offline?) — see $OUT/clone.log"
+    have=$(git -C "$OPENSBI_SRC" rev-parse HEAD)
+    [ "$have" = "$OPENSBI_SHA" ] || verdict_error "cloned OpenSBI $OPENSBI_TAG is $have, not pinned $OPENSBI_SHA"
+fi
+
+# --- build fw_payload: REAL FIRMWARE with the guest embedded ----------------
+make -C "$OPENSBI_SRC" PLATFORM=generic CROSS_COMPILE="$OPENSBI_CROSS" \
+    FW_PAYLOAD=y FW_PAYLOAD_PATH="$REPO_ROOT/$OUT/probe.Image" \
+    FW_PAYLOAD_OFFSET=0x200000 -j4 >"$OUT/opensbi-build.log" 2>&1 \
+    || { tail -20 "$OUT/opensbi-build.log" >&2; verdict_error "OpenSBI fw_payload build failed"; }
+FW=$OPENSBI_SRC/build/platform/generic/firmware/fw_payload.bin
+[ -s "$FW" ] || verdict_error "fw_payload.bin missing after build"
+
+# --- boot: -bios ONLY, firmware hands over to the guest ---------------------
+LOG=$OUT/serial.log
+rm -f "$LOG"
+set -- -no-user-config -machine virt -cpu rv64 -smp 1 -m 512M \
+    -bios "$FW" \
+    -serial "file:$LOG" \
+    -display none -monitor none -net none -no-reboot
+
+# Forbidden-flag self-check against the ASSEMBLED argv we are about to run.
+for a in "$@"; do
+    case "$a" in
+        -kernel|*isa-debug-exit*)
+            verdict_fail "argv contains a forbidden flag: $a" ;;
+    esac
+done
+
+timeout "$TIMEOUT_S" qemu-system-riscv64 "$@" >"$OUT/qemu.log" 2>&1 || true
+[ -s "$LOG" ] || verdict_fail "boot produced an empty serial log ($LOG)"
+
+printf '%s\n' "$MARKERS" > "$OUT/markers.txt"
+res=$(eval_log "$LOG" "$OUT/markers.txt")
+case "$res" in
+    CHECKED=0)  verdict_error "no markers were evaluated" ;;
+    MISSING:*)  verdict_fail "serial log is missing marker '${res#MISSING:}' (see $LOG)" ;;
+    CHECKED=*)  : ;;
+    *)          verdict_error "internal: unexpected evaluator result '$res'" ;;
+esac
+n=${res#CHECKED=}
+
+printf 'PASS — %s marker(s) checked, riscv64 guest kernel (real crt0.S + linker.ld) booted under real OpenSBI %s firmware via -bios fw_payload (no -kernel, no isa-debug-exit; live SBI ecall + FDT handover verified; serial: %s)\n' "$n" "$OPENSBI_TAG" "$LOG"

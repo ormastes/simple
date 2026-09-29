@@ -1,0 +1,292 @@
+# Purpose: focused L7 driver/coordinator evidence for cold2/warm3 preparation,
+# coordinator-only RR scheduling, portable semantic refusal, and fail-closed publication.
+# @req REQ-CSM-006 REQ-CSM-016 REQ-CSM-017 REQ-CSM-023 REQ-CSM-024 REQ-CSM-027
+
+use std.spec.*
+use std.spec.step
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use std.common.string_core.{text_to_bytes}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.statements.*
+use compiler.common.cache_contract.physical_tld_v1.{
+    TldPayloadRoleV1, PhysicalTldHeaderV1, physical_tld_section_table_digest_v1
+}
+use compiler.frontend.cache_artifact.physical_tld_codec_v1.{encode_physical_tld_v1}
+use compiler.common.cache_contract.semantic_query_read_manifest_v1.{
+    SemanticCoverageV1, SemanticQueryKeyV1, SemanticQueryReadV1,
+    SemanticQueryReadManifestV1, semantic_query_read_manifest_encode_v1
+}
+use compiler.common.cache_contract.reverse_reference_shard_v1.{
+    ReverseReferenceEdgeV1, ReverseReferenceShardV1
+}
+use compiler.common.cache_contract.portable_object_ref_v1.{
+    PortableObjectStageV1, PortablePortabilityV1
+}
+use compiler.common.cache_contract.three_payload_compile_v2.{
+    ClosureCoverageRootV1, ThreePayloadFallbackV1,
+    three_payload_closure_seal_digest_v2
+}
+use compiler.common.cache_contract.three_payload_worker_v1.{
+    ThreePayloadInputIdentityV1, ThreePayloadReadReceiptV1, ThreePayloadWorkerResultV1,
+    three_payload_worker_result_encode_v1
+}
+use compiler.driver.cache.closure.three_payload_closure_packer_v2.{
+    ThreePayloadSnapshotV2, ThreePayloadParentGenerationV2,
+    ThreePayloadModuleClosureV2, ThreePayloadVerifiedObjectsV2,
+    ThreePayloadPackBoundsV2, PreparedThreePayloadV2,
+    seal_three_payload_closure_v2, verify_prepared_three_payload_v2
+}
+use compiler.driver.cache.worker.three_payload_worker_io_v1.{
+    ThreePayloadWorkerPolicyV1, read_three_payload_confined_objects_v1
+}
+use compiler.common.cache_contract.three_payload_execution_v3.{
+    three_payload_compiled_execution_available_v3
+}
+use compiler.driver.cache.reference.reverse_reference_coordinator_v1.{
+    ChangedSemanticFacetV1, VerifiedSccGroupV1, VerifiedForwardManifestV1,
+    VerifiedAffectedDomainV1, AffectedQueryPlanV1, verified_scc_group_receipt_v1,
+    verified_affected_domain_receipt_v1,
+    plan_affected_queries_v1, stage_reverse_delta_v1
+}
+use compiler.driver.cache.publication.three_payload_generation_publisher_v1.{
+    ThreePayloadImmutableObjectV1, ThreePayloadGenerationPrepareInputV1,
+    prepare_three_payload_generation_v1, publish_three_payload_generation_v1
+}
+use compiler.hir.portable_object_profile_v1.{
+    PortableHirProfileInputV1, encode_portable_hir_object_v1,
+    portable_hir_semantic_verifier_digest_v1,
+    portable_hir_semantic_verifier_available_v1
+}
+
+fn digest(label: text) -> text: sha256_text(label)
+
+fn query(label: text) -> SemanticQueryKeyV1:
+    SemanticQueryKeyV1(kind: "resolve", stable_entity_id: label,
+        semantic_profile_digest: digest("profile"), parameter_digest: digest("parameter"))
+
+fn coverage_roots() -> [ClosureCoverageRootV1]:
+    val dimensions = ["membership", "resolution_absence", "trait_candidates_coherence",
+        "macro_ctfe_inputs", "generic_bodies", "extensions", "aspects_pointcuts",
+        "initialization", "configuration_overlays"]
+    var roots: [ClosureCoverageRootV1] = []
+    for dimension in dimensions:
+        roots.push(ClosureCoverageRootV1(dimension: dimension,
+            root_digest: digest("coverage-" + dimension), coverage: SemanticCoverageV1.Complete))
+    roots
+
+fn tld_header(role: TldPayloadRoleV1, label: text) -> PhysicalTldHeaderV1:
+    PhysicalTldHeaderV1(schema: 1, role: role,
+        semantic_record_digest: digest(label),
+        section_table_digest: physical_tld_section_table_digest_v1([]),
+        payload_bytes: 0, sections: [])
+
+fn pack_payload(warm: bool) -> Result<PreparedThreePayloadV2, ThreePayloadFallbackV1>:
+    val source = text_to_bytes("fn value() -> i64: 7\n")
+    val init_header = tld_header(TldPayloadRoleV1.PackageInitTld, "init-record")
+    val init_bytes = encode_physical_tld_v1(init_header, []).unwrap()
+    var prior_digest: text? = nil
+    var prior_bytes: [u8]? = nil
+    var prior_header: PhysicalTldHeaderV1? = nil
+    if warm:
+        val header = tld_header(TldPayloadRoleV1.PriorModuleTld, "prior-record")
+        val bytes = encode_physical_tld_v1(header, []).unwrap()
+        prior_digest = Some(sha256_u8_hex(bytes))
+        prior_bytes = Some(bytes)
+        prior_header = Some(header)
+    seal_three_payload_closure_v2(
+        ThreePayloadSnapshotV2(snapshot_digest: digest("snapshot"),
+            source_digest: sha256_u8_hex(source), source_bytes: source),
+        ThreePayloadParentGenerationV2(generation_digest: digest("parent"),
+            prior_tld_digest: prior_digest, prior_tld_bytes: prior_bytes,
+            prior_tld_header: prior_header),
+        ThreePayloadModuleClosureV2(module_id: "demo", init_tld_digest: sha256_u8_hex(init_bytes),
+            init_tld_bytes: init_bytes, init_tld_header: init_header,
+            semantic_refs: [], coverage_roots: coverage_roots()),
+        ThreePayloadVerifiedObjectsV2(compiler_semantics_digest: digest("semantics"),
+            consumed_inputs_digest: digest("inputs"), verified_semantic_object_digests: []),
+        ThreePayloadPackBoundsV2(max_sections: 64, max_payload_bytes: 1048576,
+            max_decode_bytes: 1048576))
+
+fn worker_policy() -> ThreePayloadWorkerPolicyV1:
+    ThreePayloadWorkerPolicyV1(executor_digest: digest("executor"),
+        max_read_bytes: 1048576, max_decode_bytes: 1048576,
+        max_decoded_sections: 64, request_external_input: false,
+        request_reverse_reference: false)
+
+fn input_identity(prepared: PreparedThreePayloadV2) -> ThreePayloadInputIdentityV1:
+    ThreePayloadInputIdentityV1(source_digest: prepared.seal.source_digest,
+        prior_tld_digest: prepared.seal.prior_tld_digest,
+        init_tld_digest: prepared.seal.init_tld_digest, seal_digest: prepared.seal_digest)
+
+describe "L7 three-payload driver coordinator":
+    it "prepares cold2 and warm3 identities and keeps the worker confined closed":
+        step("Prepare source/init for cold and source/prior/init for warm")
+        val cold = pack_payload(false).unwrap()
+        val warm = pack_payload(true).unwrap()
+        expect(cold.prior_tld_bytes.is_none()).to_be(true)
+        expect(cold.seal.prior_tld_digest.is_none()).to_be(true)
+        expect(warm.prior_tld_bytes.is_some()).to_be(true)
+        expect(warm.seal.prior_tld_digest.is_some()).to_be(true)
+        var wrong_count_seal = warm.seal
+        wrong_count_seal.section_count = warm.seal.section_count + 1
+        var wrong_count = warm
+        wrong_count.seal = wrong_count_seal
+        wrong_count.seal_digest = three_payload_closure_seal_digest_v2(wrong_count_seal)
+        expect(verify_prepared_three_payload_v2(wrong_count)).to_be(false)
+        var wrong_bytes_seal = warm.seal
+        wrong_bytes_seal.payload_bytes = warm.seal.payload_bytes + 1
+        var wrong_bytes = warm
+        wrong_bytes.seal = wrong_bytes_seal
+        wrong_bytes.seal_digest = three_payload_closure_seal_digest_v2(wrong_bytes_seal)
+        expect(verify_prepared_three_payload_v2(wrong_bytes)).to_be(false)
+        val cold_read = read_three_payload_confined_objects_v1(
+            cold, cold.seal, worker_policy()).unwrap()
+        val warm_read = read_three_payload_confined_objects_v1(
+            warm, warm.seal, worker_policy()).unwrap()
+        expect(cold_read.logical_receipt.logical_read_calls).to_equal(2)
+        expect(warm_read.logical_receipt.logical_read_calls).to_equal(3)
+        expect(cold_read.logical_receipt.rr_input_count).to_equal(0)
+        expect(warm_read.logical_receipt.external_input_count).to_equal(0)
+        expect(three_payload_compiled_execution_available_v3()).to_be(false)
+
+    it "refuses affected-owner and SCC scheduling until domain authority exists":
+        step("Combine reverse edges with forward reads and explicit SCC membership")
+        val producer = query("producer")
+        val consumer = query("consumer")
+        val peer = query("peer")
+        val read = SemanticQueryReadV1(producer: producer, consumer: consumer,
+            facet: "membership", ordinal: 0, consumed_fingerprint: digest("old"),
+            witness_digest: digest("witness"), partition_id: "partition-a",
+            completeness: SemanticCoverageV1.Complete)
+        val manifest = SemanticQueryReadManifestV1(schema: 1, consumer: consumer,
+            ordered_reads: [read])
+        val manifest_digest = sha256_u8_hex(semantic_query_read_manifest_encode_v1(manifest))
+        val group_id = digest("scc-group")
+        val members = [consumer, peer]
+        val group = VerifiedSccGroupV1(partition_id: "partition-a", group_identity: group_id,
+            member_queries: members,
+            receipt_digest: verified_scc_group_receipt_v1("partition-a", group_id, members))
+        var domain = VerifiedAffectedDomainV1(dimension: "membership",
+            candidate_root_digest: digest("candidate-root"),
+            membership_root_digest: digest("membership-root"),
+            absence_root_digest: digest("absence-root"), coverage: SemanticCoverageV1.Complete,
+            receipt_digest: "")
+        domain.receipt_digest = verified_affected_domain_receipt_v1(domain)
+        val verified = VerifiedForwardManifestV1(manifest_digest: manifest_digest,
+            manifest: manifest, scc_group: group, affected_domains: [domain])
+        val shard = ReverseReferenceShardV1(schema: 1, partition_id: "partition-a",
+            coverage: SemanticCoverageV1.Complete,
+            sorted_edges: [ReverseReferenceEdgeV1(producer: producer, facet: "membership",
+                consumer: consumer, consumed_fingerprint: digest("old"),
+                forward_manifest_digest: manifest_digest, partition_id: "partition-a")])
+        val plan = plan_affected_queries_v1([ChangedSemanticFacetV1(producer: producer,
+            facet: "membership", dimension: "membership",
+            old_fingerprint: Some(digest("old")), new_fingerprint: Some(digest("new")))],
+            [], [verified], [shard])
+        expect(plan.accepted).to_be(false)
+        expect(plan.rejection_reason).to_equal("affected_domain_authority_unavailable")
+        val incomplete = plan_affected_queries_v1([ChangedSemanticFacetV1(producer: producer,
+            facet: "membership", dimension: "membership",
+            old_fingerprint: nil, new_fingerprint: Some(digest("new")))], [], [], [])
+        expect(incomplete.accepted).to_be(false)
+        expect(incomplete.rejection_reason).to_equal("affected_evidence_incomplete")
+
+    it "rebinds unchanged reads when the forward manifest changes":
+        step("Stage removal of the old edge and insertion of the new-manifest edge")
+        val producer = query("producer")
+        val extra = query("extra")
+        val consumer = query("consumer")
+        val old_read = SemanticQueryReadV1(producer: producer, consumer: consumer,
+            facet: "membership", ordinal: 0, consumed_fingerprint: digest("same"),
+            witness_digest: digest("witness"), partition_id: "partition-a",
+            completeness: SemanticCoverageV1.Complete)
+        val added_read = SemanticQueryReadV1(producer: extra, consumer: consumer,
+            facet: "resolution_absence", ordinal: 1, consumed_fingerprint: digest("extra-fp"),
+            witness_digest: digest("extra-witness"), partition_id: "partition-a",
+            completeness: SemanticCoverageV1.Complete)
+        val old_manifest = SemanticQueryReadManifestV1(schema: 1, consumer: consumer,
+            ordered_reads: [old_read])
+        val new_manifest = SemanticQueryReadManifestV1(schema: 1, consumer: consumer,
+            ordered_reads: [old_read, added_read])
+        val delta = stage_reverse_delta_v1(Some(old_manifest), new_manifest)
+        expect(delta.removed.len()).to_equal(1)
+        expect(delta.inserted.len()).to_equal(2)
+        expect(delta.removed[0].forward_manifest_digest !=
+            delta.inserted[0].forward_manifest_digest).to_be(true)
+        val duplicate_read = SemanticQueryReadV1(producer: producer, consumer: consumer,
+            facet: "membership", ordinal: 1, consumed_fingerprint: digest("same"),
+            witness_digest: digest("witness-2"), partition_id: "partition-a",
+            completeness: SemanticCoverageV1.Complete)
+        val duplicates = SemanticQueryReadManifestV1(schema: 1, consumer: consumer,
+            ordered_reads: [old_read, duplicate_read])
+        expect(stage_reverse_delta_v1(nil, duplicates).inserted.len()).to_equal(1)
+        val conflicting_read = SemanticQueryReadV1(producer: producer, consumer: consumer,
+            facet: "membership", ordinal: 1, consumed_fingerprint: digest("conflict"),
+            witness_digest: digest("witness-3"), partition_id: "partition-a",
+            completeness: SemanticCoverageV1.Complete)
+        val conflicting = SemanticQueryReadManifestV1(schema: 1, consumer: consumer,
+            ordered_reads: [old_read, conflicting_read])
+        expect(stage_reverse_delta_v1(nil, conflicting).new_manifest_digest).to_equal("")
+        val removed_all = SemanticQueryReadManifestV1(schema: 1, consumer: consumer,
+            ordered_reads: [])
+        val removal = stage_reverse_delta_v1(Some(old_manifest), removed_all)
+        expect(removal.inserted.len()).to_equal(0)
+        expect(removal.removed.len()).to_equal(1)
+
+    it "binds prepared objects but refuses publication before mutation authority":
+        step("Prepare a coherent generation, then refuse before any journal or lookup write")
+        val prepared = pack_payload(false).unwrap()
+        val identity = input_identity(prepared)
+        val consumer = query("consumer")
+        val query_manifest = SemanticQueryReadManifestV1(schema: 1,
+            consumer: consumer, ordered_reads: [])
+        val query_bytes = semantic_query_read_manifest_encode_v1(query_manifest)
+        val summary_bytes = text_to_bytes("summary")
+        val diagnostic_bytes = text_to_bytes("diagnostic")
+        val summary_digest = sha256_u8_hex(summary_bytes)
+        val query_digest = sha256_u8_hex(query_bytes)
+        val diagnostic_digest = sha256_u8_hex(diagnostic_bytes)
+        val receipt = ThreePayloadReadReceiptV1(input_identity: identity,
+            executor_digest: digest("executor"), distinct_source: 1, distinct_prior: 0,
+            distinct_init: 1, external_input_count: 0, rr_input_count: 0,
+            open_calls: 2, read_calls: 2, read_bytes: prepared.seal.payload_bytes,
+            decoded_sections: prepared.seal.section_count, peak_decode_bytes: 1,
+            denied_io_attempts: 0)
+        val result = ThreePayloadWorkerResultV1(input_identity: identity,
+            new_summary_digest: summary_digest, query_reads: query_manifest,
+            portable_refs: [], diagnostic_digest: diagnostic_digest, read_receipt: receipt)
+        val worker_bytes = three_payload_worker_result_encode_v1(result)
+        val worker_digest = sha256_u8_hex(worker_bytes)
+        val objects = [
+            ThreePayloadImmutableObjectV1(digest: diagnostic_digest, kind: "diagnostic", bytes: diagnostic_bytes),
+            ThreePayloadImmutableObjectV1(digest: query_digest, kind: "forward_manifest", bytes: query_bytes),
+            ThreePayloadImmutableObjectV1(digest: summary_digest, kind: "summary", bytes: summary_bytes),
+            ThreePayloadImmutableObjectV1(digest: worker_digest, kind: "worker_result", bytes: worker_bytes)
+        ]
+        val generation = prepare_three_payload_generation_v1(
+            ThreePayloadGenerationPrepareInputV1(snapshot_digest: digest("snapshot"),
+                catalog_digest: digest("catalog"), summary_refs: [summary_digest], scope_refs: [worker_digest],
+                rr_shard_refs: [], forward_manifest_refs: [query_digest], target_refs: [],
+                diagnostic_refs: [diagnostic_digest], worker_result: result,
+                immutable_objects: objects)).unwrap()
+        match publish_three_payload_generation_v1(generation, digest("action")):
+            case Err(AuthorityUnavailable): pass
+            case _: fail("publication bypassed mutation-scoped authority")
+
+    it "keeps portable semantic admission closed independently of physical authorities":
+        step("Distinguish a stable verifier identity from public verifier availability")
+        expect(portable_hir_semantic_verifier_available_v1()).to_be(false)
+        val parsed = parse_full_frontend("fn value() -> i64: 7\n", "portable.spl",
+            "portable", Logger(level: 0))
+        val module = HirLowering.with_filename("portable.spl").lower_module(parsed)
+        val result = encode_portable_hir_object_v1(PortableHirProfileInputV1(
+            module: module, stage: PortableObjectStageV1.Base,
+            portability: PortablePortabilityV1.Portable,
+            required_semantics_digest: digest("semantics"), target_contract_digest: nil,
+            verifier_digest: portable_hir_semantic_verifier_digest_v1()))
+        match result:
+            case Err(reason): expect(reason).to_equal("portable_hir_semantic_verifier_unavailable")
+            case Ok(_): fail("portable semantic admission bypassed its unavailable authority")

@@ -176,9 +176,21 @@ impl MathParser {
                     let right = self.parse_power()?;
                     left = MathExpr::MatMul(Box::new(left), Box::new(right));
                 }
-                // Implicit multiplication: number followed by identifier or paren
-                // e.g., 2x, 3(x+1)
-                MathToken::Ident(_) | MathToken::LParen if self.is_implicit_mul(&left) => {
+                // Implicit multiplication: an operand-starting token directly
+                // after a complete operand, e.g. 2x, 3(x+1), (a)(b)(c), -2x.
+                //
+                // The decision belongs to the CURRENT token, not to the shape of
+                // `left`: at this point in the loop `left` is always a complete
+                // multiplicative operand, so any Ident/LParen that follows starts
+                // a new factor. Enumerating the allowed shapes of `left` was the
+                // old behaviour and it silently DROPPED trailing factors whenever
+                // `left` was a shape not in the list — `Mul` (so `(a)(a)(a)` gave
+                // 4, not 8) and `Neg` (so `-2x` gave -2, not -6).
+                //
+                // Precedence is unchanged: the right operand is parsed with
+                // parse_power(), so implicit multiplication binds exactly like
+                // explicit `*` and `^` still binds tighter (`2x^3` == 2*(x^3)).
+                MathToken::Ident(_) | MathToken::LParen => {
                     let right = self.parse_power()?;
                     left = MathExpr::Mul(Box::new(left), Box::new(right));
                 }
@@ -187,14 +199,6 @@ impl MathParser {
         }
 
         Ok(left)
-    }
-
-    /// Check if implicit multiplication should apply
-    fn is_implicit_mul(&self, left: &MathExpr) -> bool {
-        matches!(
-            left,
-            MathExpr::Int(_) | MathExpr::Float(_) | MathExpr::Var(_) | MathExpr::Group(_) | MathExpr::Subscript(_, _)
-        )
     }
 
     /// Parse power: a ^ b (right-associative)
@@ -249,6 +253,37 @@ impl MathParser {
                     self.warnings
                         .push("subscript syntax `x_i` is deprecated, use `x[i]` instead".to_string());
                     expr = MathExpr::Subscript(Box::new(expr), Box::new(index));
+                }
+                // Tensor postfix/member syntax: A.T, A.sum(0), A.mean(1).
+                MathToken::Dot => {
+                    self.advance();
+                    let member = match self.current().clone() {
+                        MathToken::Ident(name) => {
+                            self.advance();
+                            name
+                        }
+                        other => {
+                            return Err(CompileError::semantic(format!(
+                                "expected member name after '.', got {:?}",
+                                other
+                            )))
+                        }
+                    };
+                    if member == "T" && self.current() != &MathToken::LParen {
+                        expr = MathExpr::App("transpose".to_string(), vec![expr]);
+                    } else {
+                        self.expect(MathToken::LParen)?;
+                        let mut args = vec![expr];
+                        if self.current() != &MathToken::RParen {
+                            args.push(self.parse_expression()?);
+                            while self.current() == &MathToken::Comma {
+                                self.advance();
+                                args.push(self.parse_expression()?);
+                            }
+                        }
+                        self.expect(MathToken::RParen)?;
+                        expr = MathExpr::App(member, args);
+                    }
                 }
                 _ => break,
             }
@@ -751,6 +786,27 @@ mod tests {
             MathExpr::Subscript(
                 Box::new(MathExpr::Var("x".to_string())),
                 Box::new(MathExpr::Var("i".to_string()))
+            )
+        );
+    }
+
+    #[test]
+    fn test_parse_transpose_postfix() {
+        let (expr, _) = parse_math("A.T").unwrap();
+        assert_eq!(
+            expr,
+            MathExpr::App("transpose".to_string(), vec![MathExpr::Var("A".to_string())])
+        );
+    }
+
+    #[test]
+    fn test_parse_axis_reduction_method() {
+        let (expr, _) = parse_math("A.sum(0)").unwrap();
+        assert_eq!(
+            expr,
+            MathExpr::App(
+                "sum".to_string(),
+                vec![MathExpr::Var("A".to_string()), MathExpr::Int(0)]
             )
         );
     }

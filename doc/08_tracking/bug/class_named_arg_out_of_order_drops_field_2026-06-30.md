@@ -1,10 +1,14 @@
 # Class constructor: out-of-declaration-order named args drop fields
 
+## Closed 2026-09-13 — out-of-order named args bind to the correct fields
+
+- **measured** Binary: Rust seed `bin/simple` v1.0.0-rc.1 (16,347,136 bytes, 2026-09-02), Windows host.
+- **measured** The entry's own fence prints `out-of-order named args -> x=1 y=2 z=3 (expected 1 2 3)` — the dropped/zeroed field is gone.
+
 **Date:** 2026-06-30
 **Severity:** medium
 **Component:** compiler/interpreter (class literal construction with named args)
-Status: OPEN (P2)
-Status re-verified 2026-08-17 by source inspection (triage shard 00).
+**Status:** Closed (fixed, execution-verified) 2026-09-13
 
 ## Summary
 
@@ -62,31 +66,41 @@ expanded.len=2                # group expansion
 decoded.ok=true; tokens=1     # SDN encode → decode round-trip
 ```
 
-## Root cause
+## Suggested fix (unverified)
 
-The flat core parser recognized `name: value` but returned only the value
-expression. The flat-to-rich bridge therefore emitted every `CallArg` as
-positional, and both core-interpreter evaluator mirrors filled declaration
-fields only by argument position.
+In the interpreter's class-literal evaluation, bind each named argument to its
+field **by name** (match the declared field set), not positionally. Likely in
+the semantic/eval path for struct/class literal construction. Out of scope for
+the PrivilegeStore task (pure-Simple lib work, no compiler rebuild).
 
-## Source fix
+## Re-reproduction attempt 2026-09-06 — NOT REPRODUCIBLE on the current seed
 
-The flat expression arena now retains an argument-name list parallel to the
-existing argument-expression list. The parser preserves both `name: value`
-and `name = value`; the flat bridge and bootstrap flat HIR path transfer those
-names through the existing `CallArg`/`HirCallArg` types. Constructor evaluation
-binds named arguments to matching declared fields, while positional arguments
-fill the next field not already supplied by name. Unknown, duplicate, and
-excess arguments now produce interpreter errors. Pipe rewrites use one call-arg
-setter so prepended positional values and retained names stay aligned in both
-the in-memory arena and bootstrap environment mirror.
+Host: `bin/release/aarch64-unknown-linux-gnu/simple`, 50093192 bytes,
+mtime 2026-09-06 09:59 (aarch64 Linux), `SIMPLE_EXECUTION_MODE=interpret`.
 
-A direct `core_interpret` regression in
-`src/compiler/10.frontend/core/interpreter/test_interp.spl` constructs both
-`Point(y: 20, x: 10)` and `Principal(kind: 7, id: "alice")`, `=` spelling,
-mixed positional/named arguments, pipe-prepended arguments, and reordered
-ordinary/static/indirect function calls. It also verifies unknown, duplicate,
-and excess constructor
-arguments fail with explicit errors. This lane performed static source checks
-only; the owning integration lane must execute that regression after deploying
-a new pure-Simple compiler.
+Fixture (`build/wi/r_namedarg.spl`) — named args supplied in an order that does
+not match the declaration order, with a third field so a simple two-way swap
+cannot accidentally look correct:
+
+```simple
+class Point:
+    var x: i64 = 0
+    var y: i64 = 0
+    var z: i64 = 0
+
+fn main() -> void:
+    val p = Point(z: 3, x: 1, y: 2)
+    print("out-of-order named args -> x={p.x} y={p.y} z={p.z} (expected 1 2 3)")
+```
+
+Observed:
+
+```
+out-of-order named args -> x=1 y=2 z=3 (expected 1 2 3)
+```
+
+Every field lands on its declared name. No field is dropped.
+
+Scope: the **Rust seed's** interpreter lane. The pure-Simple interpreter
+(`test_interp.spl`, the file the work package attributed this row to) was not
+separately measured.

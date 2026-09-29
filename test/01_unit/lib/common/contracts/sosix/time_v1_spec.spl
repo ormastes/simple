@@ -1,0 +1,55 @@
+"""Shared SOSIX time arithmetic preserves deadlines across provider profiles."""
+
+use std.spec.*
+use std.common.contracts.sosix.time_v1.{
+    SOSIX_TIME_U64_MAX_V1, sosix_time_deadline_reached,
+    sosix_time_deadline_after, sosix_time_ceil_div_u64,
+    sosix_time_ticks_to_ns, sosix_time_deadline_from_ticks,
+    sosix_time_sample_to_ns_v1
+}
+
+describe "SOSIX shared time arithmetic":
+    it "keeps zero as no deadline and treats equality as reached":
+        expect(sosix_time_deadline_reached(0u64, SOSIX_TIME_U64_MAX_V1)).to_be(false)
+        expect(sosix_time_deadline_reached(30u64, 29u64)).to_be(false)
+        expect(sosix_time_deadline_reached(30u64, 30u64)).to_be(true)
+
+    it "saturates relative nanosecond addition":
+        expect(sosix_time_deadline_after(10u64, 20u64)).to_equal(30u64)
+        expect(sosix_time_deadline_after(
+            SOSIX_TIME_U64_MAX_V1 - 5u64, 10u64)).to_equal(SOSIX_TIME_U64_MAX_V1)
+
+    it "rounds duration to ticks without adding before division":
+        expect(sosix_time_ceil_div_u64(0u64, 10u64)).to_equal(0u64)
+        expect(sosix_time_ceil_div_u64(1u64, 10u64)).to_equal(1u64)
+        expect(sosix_time_ceil_div_u64(20u64, 10u64)).to_equal(2u64)
+        expect(sosix_time_ceil_div_u64(21u64, 10u64)).to_equal(3u64)
+        expect(sosix_time_ceil_div_u64(SOSIX_TIME_U64_MAX_V1,
+            1u64)).to_equal(SOSIX_TIME_U64_MAX_V1)
+        expect(sosix_time_ceil_div_u64(1u64,
+            0u64)).to_equal(SOSIX_TIME_U64_MAX_V1)
+
+    it "saturates tick conversion and absolute scheduler deadlines":
+        expect(sosix_time_ticks_to_ns(3u64, 10000000u64)).to_equal(30000000u64)
+        expect(sosix_time_ticks_to_ns(SOSIX_TIME_U64_MAX_V1,
+            10000000u64)).to_equal(SOSIX_TIME_U64_MAX_V1)
+        expect(sosix_time_ticks_to_ns(1u64,
+            0u64)).to_equal(SOSIX_TIME_U64_MAX_V1)
+        expect(sosix_time_deadline_from_ticks(1u64, 2u64,
+            10000000u64)).to_equal(30000000u64)
+        expect(sosix_time_deadline_from_ticks(SOSIX_TIME_U64_MAX_V1 - 1u64,
+            2u64, 10000000u64)).to_equal(SOSIX_TIME_U64_MAX_V1)
+
+    it "normalizes valid clock units and refuses failed samples":
+        match sosix_time_sample_to_ns_v1(1234, 1000u64):
+            case Ok(ns): expect(ns).to_equal(1234000u64)
+            case Err(reason): fail("valid sample refused: {reason}")
+        match sosix_time_sample_to_ns_v1(-1, 1u64):
+            case Ok(_): fail("failed provider sample was accepted")
+            case Err(reason): expect(reason).to_equal("clock-provider-failed")
+        match sosix_time_sample_to_ns_v1(1, 0u64):
+            case Ok(_): fail("zero clock unit was accepted")
+            case Err(reason): expect(reason).to_equal("invalid-clock-unit")
+        match sosix_time_sample_to_ns_v1(9223372036854775807, 1000u64):
+            case Ok(_): fail("unrepresentable clock instant was accepted")
+            case Err(reason): expect(reason).to_equal("clock-sample-overflow")

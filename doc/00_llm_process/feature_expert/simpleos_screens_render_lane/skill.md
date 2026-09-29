@@ -13,6 +13,23 @@ Campaign lane: `.spipe/simpleos-screens-render-lane/` (state, 10 ACs, model
 policy). Status as of 2026-08-06: **PLANNED, all five detail plans complete,
 implementation landing across five workstreams.**
 
+## Mission-capture admission handoff (2026-08-27)
+
+The shared mission boundary is now explicit in
+`scripts/check/check-render-lane-mission-showcase.shs`: it accepts only four
+distinct, non-symlink captures (WM, GUI, Web, Engine2D), the required live
+guest serial markers, and one `backend=vulkan` receipt hash-bound to all four.
+It also binds the serial, QEMU/container producer receipts, admitted compiler,
+guest image, Vulkan submit/fence/readback, and allocation-cap measurement; a
+handwritten receipt or zero-filled non-image fixture is not mission evidence.
+The executable contract is
+`test/03_system/check/render_lane_mission_showcase_spec.spl`; its synthetic
+fixtures validate the gate only and never promote live QEMU/Vulkan evidence.
+The operator plan is
+`doc/03_plan/sys_test/render_lane_mission_showcase.md`, and Todo DB row 277 is
+the active blocked handoff: obtain an admitted self-hosted CLI, retain real
+artifacts, then run the gate once.
+
 ## Pipeline Links
 
 - [research](../../skill_command/skills/pipe/research/skill.md)

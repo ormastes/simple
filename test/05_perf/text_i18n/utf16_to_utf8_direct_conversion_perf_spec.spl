@@ -1,0 +1,140 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-PERF
+# codex-system-test
+# @tag: perf, text, utf16, utf8, i18n
+"""
+# UTF-16 to UTF-8 conversion must not retain a code-point-sized intermediate
+
+**Bug:** doc/08_tracking/bug/utf16_to_utf8_intermediate_array_perf_2026-08-26.md
+
+## Purpose and audience
+
+Fix-test for the open record above. `utf16_to_utf8` materialized a full
+code-point array (`utf16_decode_all`) before producing any UTF-8 byte, and
+`utf16_decode_one` allocated a two-element `[codepoint, consumed]` array for
+every single code unit. Both are O(scalar-count) intermediate allocations that
+REQ-004 / NFR-005 forbid.
+
+This spec pins two things that must hold together:
+
+1. **Differential parity.** The conversion must stay byte-identical to the
+   `utf8_encode_all(utf16_decode_all(units))` oracle the record requires to be
+   retained, across BMP text, surrogate pairs, lone high/low surrogates, a
+   truncated trailing high surrogate, and out-of-range units.
+2. **Cost relative to the oracle.** On the same 32,765-unit corpus the record
+   measured, the production path must be at least twice as fast as the retained
+   two-pass oracle.
+
+   The statistic is chosen for a shared, heavily contended host, where this was
+   measured the hard way. An absolute wall budget is hopeless: identical
+   back-to-back runs of the same binary differed by more than 2x. `min` over
+   independent samples is not much better — it picks each path's luckiest run
+   separately, and across four runs of the FIXED code on the deployed seed it
+   produced ratios of 1.4x, 2.9x, 7.0x and 7.2x, i.e. it would have flaked one
+   time in four against a 2x bound.
+
+   So the two paths are timed back to back inside ONE round, under as close to
+   the same load as this host allows, and the round yields a paired RATIO. The
+   assertion is that a MAJORITY of rounds clear the bound. A single round
+   landing on a scheduler stall moves one ratio, not the verdict.
+"""
+
+use std.spec.step
+
+use std.spec.*
+use std.io_runtime.{time_now_unix_micros}
+use std.common.encoding.utf16.{utf16_to_utf8, utf16_decode_all}
+use std.common.encoding.utf8.{utf8_encode_all}
+
+val CONV_UNITS: i64 = 32765
+val CONV_ROUNDS: i64 = 5
+
+# Paired speedup bound, in hundredths so the ratio stays integral. The two-pass
+# implementation this replaced scores ~100 (it IS the oracle); the fused pass
+# measured 290..720 on the deployed seed and 440 on a freshly built one.
+val CONV_MIN_SPEEDUP_X100: i64 = 200
+
+fn conv_oracle(units: [i64]) -> [i64]:
+    """Retained reference path: decode every code point, then encode."""
+    utf8_encode_all(utf16_decode_all(units))
+
+fn conv_same(a: [i64], b: [i64]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i: i64 = 0
+    while i < a.len():
+        if a[i] != b[i]:
+            return false
+        i = i + 1
+    true
+
+fn conv_corpus() -> [i64]:
+    var units: [i64] = []
+    var i: i64 = 0
+    while i < CONV_UNITS:
+        units.push(65 + (i % 26))
+        i = i + 1
+    units
+
+fn conv_min(samples: [i64]) -> i64:
+    var best = samples[0]
+    var i: i64 = 1
+    while i < samples.len():
+        if samples[i] < best:
+            best = samples[i]
+        i = i + 1
+    best
+
+describe "utf16_to_utf8 direct conversion":
+
+    it "matches the retained decode-then-encode oracle on every partition":
+        # @req REQ-SSPEC-PERF
+        step("matches the retained decode-then-encode oracle on every partition")
+        # BMP ASCII + Hangul, a surrogate pair (U+1F600), a lone high surrogate,
+        # a lone low surrogate, a truncated trailing high surrogate, and two
+        # out-of-range units (negative and > 0xFFFF).
+        val cases: [[i64]] = [
+            [],
+            [0x41, 0x42, 0xAC00],
+            [0xD83D, 0xDE00],
+            [0x41, 0xD83D, 0xDE00, 0x42],
+            [0xD800, 0x41],
+            [0xDC00, 0x41],
+            [0x41, 0xD800],
+            [0xD800, 0xD800, 0xDC00],
+            [-1, 0x41, 0x10000],
+        ]
+        var idx: i64 = 0
+        while idx < cases.len():
+            val got = utf16_to_utf8(cases[idx])
+            val want = conv_oracle(cases[idx])
+            expect(conv_same(got, want)).to_equal(true)
+            idx = idx + 1
+        expect(cases.len()).to_equal(9)
+
+    it "converts 32765 code units faster than the two-pass oracle":
+        # @req REQ-SSPEC-PERF
+        step("converts 32765 code units faster than the two-pass oracle")
+        val units = conv_corpus()
+        var ratios: [i64] = []
+        var cleared: i64 = 0
+        var checksum: i64 = 0
+        var round: i64 = 0
+        while round < CONV_ROUNDS:
+            var started = time_now_unix_micros()
+            val direct = utf16_to_utf8(units)
+            val direct_us = time_now_unix_micros() - started
+            started = time_now_unix_micros()
+            val reference = conv_oracle(units)
+            val oracle_us = time_now_unix_micros() - started
+            checksum = checksum + direct.len() + reference.len()
+            # direct_us cannot be 0: the corpus is 32,765 code units and the
+            # clock is microseconds.
+            val ratio = oracle_us * 100 / direct_us
+            ratios.push(ratio)
+            if ratio >= CONV_MIN_SPEEDUP_X100:
+                cleared = cleared + 1
+            round = round + 1
+        expect(checksum).to_equal(CONV_UNITS * CONV_ROUNDS * 2)
+        print "[perf] utf16_to_utf8 units={CONV_UNITS} rounds={CONV_ROUNDS} speedup_x100={ratios} cleared={cleared} bound_x100={CONV_MIN_SPEEDUP_X100}"
+        expect(cleared * 2).to_be_greater_than(CONV_ROUNDS)

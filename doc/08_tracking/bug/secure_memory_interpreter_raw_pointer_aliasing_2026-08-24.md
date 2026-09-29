@@ -1,4 +1,8 @@
 # Secure-memory interpreter raw-pointer aliasing
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** Open
 **Date:** 2026-08-24
@@ -44,3 +48,4 @@ Add a compiler-owned mutable byte-array operation that:
 
 Until that exists, interpreter secure zeroization is not verified and must not
 be advertised as a safe foreign-pointer wrapper.
+

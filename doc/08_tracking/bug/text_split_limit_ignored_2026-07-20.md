@@ -1,4 +1,8 @@
 # `text.split` limit ignored or mistyped
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 BugDB ID: `text-split-limit-ignored`
 Priority: P2
@@ -79,3 +83,4 @@ Do not mark the BugDB row fixed until both modes pass on that admitted binary.
   authoritative.
 - Workflow/SPipe/manual docs: N/A; no workflow or scenario-manual contract
   changed.
+

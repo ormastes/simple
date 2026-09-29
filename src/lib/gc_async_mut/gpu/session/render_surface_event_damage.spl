@@ -1,0 +1,159 @@
+# codex-impl
+"""Pending event damage that freezes exactly once into a retained frame slot."""
+
+use std.common.ui.gpu_web_event_model.{GpuNormalizedEventBatch}
+use std.common.gpu.render_surface_contract.{
+    GpuRenderSurfaceId, gpu_surface_id_valid
+}
+use std.gc_async_mut.gpu.session.render_surface_state.{
+    GpuRenderSurfaceState, gpu_render_surface_begin
+}
+
+struct GpuPendingEventDamage:
+    # Caller-owned pending work is bound to the exact surface/device snapshot
+    # that created it.  A zero identity is retained only for the legacy
+    # constructor and is rejected at coalesce/freeze boundaries.
+    surface_id: i64
+    device_generation: i64
+    scene_generation: u64
+    event_generation: i64
+    accepted_event_count: i64
+    rejected_event_count: i64
+    left: i64
+    top: i64
+    right: i64
+    bottom: i64
+    has_damage: bool
+
+fn gpu_pending_event_damage(scene_generation: u64) -> GpuPendingEventDamage:
+    GpuPendingEventDamage(surface_id: 0, device_generation: 0,
+        scene_generation: scene_generation,
+        event_generation: 0, accepted_event_count: 0, rejected_event_count: 0,
+        left: 0, top: 0, right: 0, bottom: 0, has_damage: false)
+
+fn gpu_pending_event_damage_for_surface(surface: GpuRenderSurfaceId,
+                                        scene_generation: u64
+                                        ) -> GpuPendingEventDamage:
+    GpuPendingEventDamage(surface_id: surface.surface_id,
+        device_generation: surface.device_generation,
+        scene_generation: scene_generation,
+        event_generation: 0, accepted_event_count: 0, rejected_event_count: 0,
+        left: 0, top: 0, right: 0, bottom: 0, has_damage: false)
+
+fn _gpu_pending_event_damage_identity_valid(pending: GpuPendingEventDamage) -> bool:
+    pending.surface_id > 0 and pending.device_generation > 0
+
+fn gpu_event_damage_accumulate(pending: GpuPendingEventDamage,
+                               batch: GpuNormalizedEventBatch,
+                               event_generation: i64, rects: [i64],
+                               width: i64, height: i64
+                               ) -> (GpuPendingEventDamage, text):
+    if not _gpu_pending_event_damage_identity_valid(pending):
+        return (pending, "surface-identity-required")
+    if batch.scene_generation != pending.scene_generation:
+        return (pending, "stale-scene-generation")
+    if event_generation <= pending.event_generation:
+        return (pending, "stale-event-generation")
+    if width <= 0 or height <= 0 or rects.len() % 4 != 0:
+        return (pending, "invalid-damage")
+    var left = pending.left
+    var top = pending.top
+    var right = pending.right
+    var bottom = pending.bottom
+    var has_damage = pending.has_damage
+    var i: i64 = 0
+    val rect_value_count = rects.len()
+    while i < rect_value_count:
+        var x0 = rects[i]
+        var y0 = rects[i + 1]
+        var x1 = x0 + rects[i + 2]
+        var y1 = y0 + rects[i + 3]
+        if x0 < 0: x0 = 0
+        if y0 < 0: y0 = 0
+        if x1 > width: x1 = width
+        if y1 > height: y1 = height
+        if x1 > x0 and y1 > y0:
+            if not has_damage:
+                left = x0
+                top = y0
+                right = x1
+                bottom = y1
+                has_damage = true
+            else:
+                if x0 < left: left = x0
+                if y0 < top: top = y0
+                if x1 > right: right = x1
+                if y1 > bottom: bottom = y1
+        i = i + 4
+    (GpuPendingEventDamage(surface_id: pending.surface_id,
+        device_generation: pending.device_generation,
+        scene_generation: pending.scene_generation,
+        event_generation: event_generation,
+        accepted_event_count: pending.accepted_event_count + batch.events.len(),
+        rejected_event_count: pending.rejected_event_count + batch.rejects.len(),
+        left: left, top: top, right: right, bottom: bottom,
+        has_damage: has_damage), "accumulated")
+
+fn gpu_event_damage_accumulate_for_surface(
+    pending: GpuPendingEventDamage, surface: GpuRenderSurfaceId,
+    batch: GpuNormalizedEventBatch, event_generation: i64, rects: [i64],
+    width: i64, height: i64
+) -> (GpuPendingEventDamage, text):
+    if not _gpu_pending_event_damage_identity_valid(pending):
+        return (pending, "surface-identity-required")
+    if not gpu_surface_id_valid(surface) or
+       pending.surface_id != surface.surface_id:
+        return (pending, "stale-surface-identity")
+    if pending.device_generation != surface.device_generation:
+        return (pending, "stale-device-generation")
+    gpu_event_damage_accumulate(pending, batch, event_generation,
+        rects, width, height)
+
+fn gpu_event_damage_freeze(state: GpuRenderSurfaceState,
+                           pending: GpuPendingEventDamage,
+                           bytes_per_pixel: i64
+                           ) -> (GpuRenderSurfaceState,
+                                 GpuPendingEventDamage, i64, text):
+    if not _gpu_pending_event_damage_identity_valid(pending):
+        return (state, pending, -1, "surface-identity-required")
+    if pending.surface_id != state.surface.surface_id:
+        return (state, gpu_pending_event_damage_for_surface(
+            state.surface, pending.scene_generation), -1,
+            "stale-surface-identity")
+    if pending.device_generation != state.surface.device_generation:
+        return (state, gpu_pending_event_damage_for_surface(
+            state.surface, pending.scene_generation), -1,
+            "stale-device-generation")
+    if pending.event_generation <= 0:
+        return (state, pending, -1, "no-event-generation")
+    if bytes_per_pixel <= 0:
+        return (state, pending, -1, "invalid-bytes-per-pixel")
+    # An accepted event is not automatically a drawable frame.  Clipping can
+    # remove every rectangle (for example, a pointer move outside the
+    # viewport), and an idle retained surface must not consume a ring slot or
+    # submit a zero-byte GPU operation.  Keep the pending generation so a
+    # replay of the same event remains stale; newer events may still coalesce
+    # into this pending accumulator and produce a real frame.  This marks the
+    # generation seen only in the caller-owned pending value: the authoritative
+    # surface `last_event_generation` does not advance until
+    # `gpu_render_surface_begin` successfully freezes drawable damage.
+    if not pending.has_damage:
+        return (state, pending, -1, "no-damage")
+    var damage_pixels: i64 = 0
+    damage_pixels = (pending.right - pending.left) *
+        (pending.bottom - pending.top)
+    val (recording, slot, reason) = gpu_render_surface_begin(
+        state, pending.event_generation, damage_pixels,
+        damage_pixels * bytes_per_pixel)
+    if slot < 0:
+        return (state, pending, slot, reason)
+    # Resetting the accumulator here is the freeze boundary: later events can
+    # coalesce only into a new generation, never into this recording/in-flight
+    # slot.
+    (recording, gpu_pending_event_damage_for_surface(
+        recording.surface, pending.scene_generation), slot,
+        "damage-frozen")
+
+export GpuPendingEventDamage, gpu_pending_event_damage,
+    gpu_pending_event_damage_for_surface, gpu_event_damage_accumulate,
+    gpu_event_damage_accumulate_for_surface, gpu_event_damage_freeze

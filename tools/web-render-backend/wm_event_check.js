@@ -14,6 +14,25 @@ const FONT_COMPOSITION_ID = 'html-layout';
 const FONT_IDENTITY = 'sha256=2cb2adb378a8f574213e23df697050b83c54c27df465a2015552740b2769a081;axes=wght=400,wdth=100';
 const EXPECTED_RUN_ID = process.env.SIMPLE_WEB_FONT_RUN_ID || '';
 const AETHERIC_PROOF_PATH = process.env.AETHERIC_HOST_WEB_GUI_PROOF || '';
+const ELECTRON_IDENTITY = Object.freeze({
+  electron_launcher_path: process.env.WM_EVENT_ELECTRON_LAUNCHER_PATH || '',
+  electron_launcher_sha256: process.env.WM_EVENT_ELECTRON_LAUNCHER_SHA256 || '',
+  electron_executable_path: process.env.WM_EVENT_ELECTRON_EXECUTABLE_PATH || '',
+  electron_executable_sha256: process.env.WM_EVENT_ELECTRON_EXECUTABLE_SHA256 || '',
+  electron_manifest_path: process.env.WM_EVENT_ELECTRON_MANIFEST_PATH || '',
+  electron_manifest_sha256: process.env.WM_EVENT_ELECTRON_MANIFEST_SHA256 || '',
+  electron_installed_package_path:
+    process.env.WM_EVENT_ELECTRON_INSTALLED_PACKAGE_PATH || '',
+  electron_installed_package_sha256:
+    process.env.WM_EVENT_ELECTRON_INSTALLED_PACKAGE_SHA256 || '',
+  electron_source_lock_path: process.env.WM_EVENT_ELECTRON_SOURCE_LOCK_PATH || '',
+  electron_source_lock_sha256: process.env.WM_EVENT_ELECTRON_SOURCE_LOCK_SHA256 || '',
+  electron_manifest_version: process.env.WM_EVENT_ELECTRON_MANIFEST_VERSION || '',
+  electron_lock_root_version: process.env.WM_EVENT_ELECTRON_LOCK_ROOT_VERSION || '',
+  electron_lock_nested_version: process.env.WM_EVENT_ELECTRON_LOCK_NESTED_VERSION || '',
+  electron_installed_package_version:
+    process.env.WM_EVENT_ELECTRON_INSTALLED_PACKAGE_VERSION || '',
+});
 
 app.commandLine.appendSwitch('force-color-profile', 'srgb');
 
@@ -174,26 +193,13 @@ async function main() {
   const rendererEnvelope = admittedRendererEnvelope(envelope);
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'simple-wm-event-check-'));
   const htmlPath = path.join(tmpDir, 'wm_event_check.html');
-  const preloadPath = path.join(tmpDir, 'wm_event_runtime_preload.js');
-  fs.writeFileSync(preloadPath, [
-    "const { contextBridge } = require('electron');",
-    'contextBridge.exposeInMainWorld("__simpleElectronRuntime", Object.freeze({',
-    '  rendererSandboxed: process.sandboxed === true,',
-    '}));',
-  ].join('\n'));
   fs.writeFileSync(htmlPath, makeHtml(root, receipt, envelope));
 
   await app.whenReady();
   const win = new BrowserWindow({
     width: 800,
     show: false,
-    webPreferences: {
-      offscreen: true,
-      sandbox: true,
-      contextIsolation: true,
-      nodeIntegration: false,
-      preload: preloadPath,
-    },
+    webPreferences: { offscreen: true, sandbox: true, contextIsolation: true, nodeIntegration: false },
     backgroundColor: '#ffffff',
   });
   await win.loadFile(htmlPath);
@@ -221,7 +227,7 @@ async function main() {
       proof_source: 'tools/web-render-backend/wm_event_check.js',
       browser_engine: 'chromium',
       electron_user_agent: navigator.userAgent,
-      renderer_sandboxed: window.__simpleElectronRuntime?.rendererSandboxed === true,
+      renderer_sandboxed: process.sandboxed === true,
       ready: !!window.__wmReady,
       production_envelope_schema: productionEnvelope.schema,
       production_envelope_producer: productionEnvelope.producer,
@@ -250,7 +256,7 @@ async function main() {
       y: 60,
       width: 320,
       height: 220,
-      html: '<div id="font-proof" style="display:inline-block;font-family:SimplePinnedMono,monospace;font-size:16px;line-height:20px;color:#111827">${receipt.text}</div><input id="field" data-canonical-id="win1#field" value=""><button id="ok" data-canonical-id="win1#ok">OK</button>'
+      html: '<div id="font-proof" style="display:inline-block;font-family:SimplePinnedMono,monospace;font-size:16px;line-height:20px;color:#111827">${receipt.text}</div><div id="scroll-panel" data-canonical-id="win1#scroll-panel" style="height:48px;overflow-y:scroll"><div style="height:160px">Scrollable panel</div></div><input id="field" data-canonical-id="win1#field" value=""><button id="ok" data-canonical-id="win1#ok">OK</button>'
     });
     await new Promise((resolve, reject) => {
       const startedAt = Date.now();
@@ -314,13 +320,9 @@ async function main() {
     animationProbe.className = 'simple-wm-proof-animation';
     animationProbe.style.cssText = 'position:fixed;left:-1000px;top:-1000px;width:8px;height:8px;';
     document.body.appendChild(animationProbe);
-    const initialAnimationProbeStyle = getComputedStyle(animationProbe);
-    const probeAnimation = animationProbe.getAnimations()[0] || null;
-    const initialAnimationCurrentTime = probeAnimation &&
-      Number.isFinite(Number(probeAnimation.currentTime))
-      ? Number(probeAnimation.currentTime)
-      : -1;
-    const initialAnimationOpacity = Number.parseFloat(initialAnimationProbeStyle.opacity);
+    const animation = animationProbe.getAnimations()[0] || null;
+    const initialAnimationOpacity = getComputedStyle(animationProbe).opacity;
+    const initialAnimationCurrentTime = animation ? Number(animation.currentTime || 0) : 0;
     if (animationFrameAvailable) {
       await new Promise(resolve => {
         requestAnimationFrame(() => {
@@ -332,6 +334,11 @@ async function main() {
         });
       });
     }
+    const finalAnimationOpacity = getComputedStyle(animationProbe).opacity;
+    const finalAnimationCurrentTime = animation ? Number(animation.currentTime || 0) : 0;
+    const animationMotionObserved =
+      finalAnimationCurrentTime > initialAnimationCurrentTime &&
+      finalAnimationOpacity !== initialAnimationOpacity;
     const titlebarStyle = getComputedStyle(titlebar);
     const titleStyle = getComputedStyle(title);
     const titleInputStyle = getComputedStyle(titleInput);
@@ -339,14 +346,6 @@ async function main() {
     const minimizeStyle = getComputedStyle(minimizeButton);
     const maximizeStyle = getComputedStyle(maximizeButton);
     const animationProbeStyle = getComputedStyle(animationProbe);
-    const finalAnimationCurrentTime = probeAnimation &&
-      Number.isFinite(Number(probeAnimation.currentTime))
-      ? Number(probeAnimation.currentTime)
-      : -1;
-    const finalAnimationOpacity = Number.parseFloat(animationProbeStyle.opacity);
-    const animationMotionObserved =
-      finalAnimationCurrentTime > initialAnimationCurrentTime ||
-      finalAnimationOpacity !== initialAnimationOpacity;
     const productionWindowStyle = getComputedStyle(productionWindow);
     const productionTitlebarStyle = getComputedStyle(productionTitlebar);
     out.performance_now_available = performanceNowAvailable;
@@ -358,9 +357,7 @@ async function main() {
     out.css_animation_initial_current_time_ms = initialAnimationCurrentTime;
     out.css_animation_final_current_time_ms = finalAnimationCurrentTime;
     out.css_animation_motion_observed = animationMotionObserved;
-    out.css_animation_probe =
-      animationProbeStyle.animationName === 'simple-wm-proof-pulse' &&
-      animationMotionObserved;
+    out.css_animation_probe = animationProbeStyle.animationName === 'simple-wm-proof-pulse';
     out.title_text = title.textContent;
     out.title_context_text = eventTarget('.wm-title-context').textContent;
     out.traffic_button_count = document.querySelectorAll('.wm-traffic-lights button').length;
@@ -411,6 +408,19 @@ async function main() {
     const bodyButton = eventTarget('#ok');
     dispatch(bodyButton, 'pointerdown', { clientX: 80, clientY: 122 });
     dispatch(bodyButton, 'pointerup', { clientX: 80, clientY: 122 });
+    const scrollPanel = eventTarget('#scroll-panel');
+    let scrollEventCount = 0;
+    scrollPanel.addEventListener('scroll', () => { scrollEventCount += 1; });
+    const scrollPanelBefore = scrollPanel.scrollTop;
+    scrollPanel.scrollTop = 40;
+    await new Promise(resolve => requestAnimationFrame(resolve));
+    const scrollPanelStyle = getComputedStyle(scrollPanel);
+    out.scroll_panel_overflow_y = scrollPanelStyle.overflowY;
+    out.scroll_panel_client_height = scrollPanel.clientHeight;
+    out.scroll_panel_scroll_height = scrollPanel.scrollHeight;
+    out.scroll_panel_before = scrollPanelBefore;
+    out.scroll_panel_after = scrollPanel.scrollTop;
+    out.scroll_panel_event_count = scrollEventCount;
     if (performanceNowAvailable && animationFrameAvailable) {
       await new Promise(resolve => requestAnimationFrame(resolve));
       inputToPaintMs = Math.max(0, window.performance.now() - interactionStart);
@@ -469,6 +479,11 @@ async function main() {
       out.text_input_count >= 1 &&
       out.pointer_down_count >= 1 &&
       out.pointer_up_count >= 1 &&
+      out.scroll_panel_overflow_y === 'scroll' &&
+      out.scroll_panel_scroll_height > out.scroll_panel_client_height &&
+      out.scroll_panel_before === 0 &&
+      out.scroll_panel_after === 40 &&
+      out.scroll_panel_event_count >= 1 &&
       out.performance_now_available === true &&
       out.performance_now_delta_ms >= 0 &&
       out.input_to_paint_ms > 0 &&
@@ -549,15 +564,7 @@ async function main() {
   result.font_frame_byte_count = frameBitmap.length;
   result.font_frame_pixel_checksum = frameChecksum;
   result.font_frame_nonbackground_pixels = frameNonBackgroundPixels;
-  const gpuFeatureStatus = app.getGPUFeatureStatus();
-  result.gpu_feature_status = {
-    gpu_compositing: gpuFeatureStatus.gpu_compositing || '',
-    webgl: gpuFeatureStatus.webgl || '',
-  };
   result.pass = result.pass &&
-    result.renderer_sandboxed === true &&
-    result.gpu_feature_status.gpu_compositing === 'enabled' &&
-    result.gpu_feature_status.webgl === 'enabled' &&
     frameSize.width > 0 &&
     frameSize.height > 0 &&
     frameBitmap.length === frameSize.width * frameSize.height * 4 &&
@@ -565,6 +572,12 @@ async function main() {
     frameNonBackgroundPixels > 0;
   result.electron_process_version = process.versions.electron || '';
   result.chrome_process_version = process.versions.chrome || '';
+  result.gpu_feature_status = app.getGPUFeatureStatus();
+  result.pass = result.pass &&
+    result.renderer_sandboxed === true &&
+    result.gpu_feature_status.gpu_compositing === 'enabled' &&
+    result.gpu_feature_status.webgl === 'enabled';
+  Object.assign(result, ELECTRON_IDENTITY);
   console.log('WM_EVENT_CHECK ' + JSON.stringify(result));
   win.destroy();
   app.exit(result.pass ? 0 : 1);

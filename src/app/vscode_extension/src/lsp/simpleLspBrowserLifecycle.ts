@@ -7,13 +7,16 @@ import {
     State,
 } from 'vscode-languageclient/browser';
 import { ExtensionHostServices } from '../services/extensionHostServices';
+import { createSimpleLspDocumentSelector } from '../services/simpleLspServerResolver';
 import { createWasmServerOptions, isWasmLspAvailable } from '../wasm/wasmLspBridge';
+import {
+    authoritativeLspReceipt,
+    degradedLspReceipt,
+    publishLspCapabilityReceipt,
+    SimpleLspFallbackControl,
+} from './simpleLspCapabilityReceipt';
 
 const WASM_LSP_PATH = 'wasm/simple-lsp.wasm';
-
-export interface BrowserLspFallbackControl {
-    setEnabled(enabled: boolean): void;
-}
 
 export interface BrowserLspOperationResult {
     ok: boolean;
@@ -24,15 +27,7 @@ export interface BrowserLspOperationResult {
 export interface CreateSimpleBrowserLspControllerOptions {
     context: vscode.ExtensionContext;
     services: ExtensionHostServices;
-    fallbackControls?: BrowserLspFallbackControl[];
-}
-
-function createDocumentSelector(): vscode.DocumentSelector {
-    return [
-        { scheme: 'file', language: 'simple' },
-        { scheme: 'untitled', language: 'simple' },
-        { scheme: 'vscode-vfs', language: 'simple' },
-    ];
+    fallbackControls?: SimpleLspFallbackControl[];
 }
 
 function readConfiguration(): {
@@ -76,8 +71,7 @@ export function createSimpleBrowserLspController(
 
     const syncState = (state: State): void => {
         if (state === State.Running) {
-            options.services.markReady('lsp', 'Simple LSP server running', 'wasm');
-            setFallbackEnabled(false);
+            publishLspCapabilityReceipt(options.services, options.fallbackControls ?? [], authoritativeLspReceipt('wasm'));
             return;
         }
 
@@ -90,29 +84,28 @@ export function createSimpleBrowserLspController(
             return;
         }
 
-        options.services.markDegraded('lsp', 'Simple LSP unavailable; fallback providers active', 'fallback');
-        setFallbackEnabled(true);
+        publishLspCapabilityReceipt(options.services, options.fallbackControls ?? [], degradedLspReceipt('Simple LSP unavailable'));
     };
 
     const bootstrapClient = async (): Promise<BrowserLspOperationResult> => {
         const configuration = readConfiguration();
         if (configuration.mode === 'native') {
-            setFallbackEnabled(true);
-            options.services.markDegraded('lsp', 'Native LSP mode is not supported in browser hosts; fallback providers active', 'fallback');
+            const receipt = degradedLspReceipt('Native LSP mode is not supported in browser hosts');
+            publishLspCapabilityReceipt(options.services, options.fallbackControls ?? [], receipt);
             return {
                 ok: false,
-                message: 'Native LSP mode is not supported in browser hosts; fallback providers active',
+                message: receipt.message,
             };
         }
 
         const wasmAvailable = await isWasmLspAvailable(options.context, WASM_LSP_PATH);
         if (!wasmAvailable) {
-            setFallbackEnabled(true);
-            options.services.markDegraded('lsp', 'Simple LSP WASM artifact is unavailable; fallback providers active', 'fallback', `Expected ${WASM_LSP_PATH}`);
+            const receipt = degradedLspReceipt('Simple LSP WASM artifact is unavailable', `Expected ${WASM_LSP_PATH}`);
+            publishLspCapabilityReceipt(options.services, options.fallbackControls ?? [], receipt);
             return {
                 ok: false,
-                message: 'Simple LSP WASM artifact is unavailable; fallback providers active',
-                detail: `Expected ${WASM_LSP_PATH}`,
+                message: receipt.message,
+                detail: receipt.detail,
             };
         }
 
@@ -122,22 +115,17 @@ export function createSimpleBrowserLspController(
             outputChannel,
         });
         if (!wasmOptions.serverOptions) {
-            setFallbackEnabled(true);
-            options.services.markDegraded(
-                'lsp',
-                'Simple LSP WASM mode is enabled but the WASM runtime is unavailable; fallback providers active',
-                'fallback',
-                wasmOptions.detail,
-            );
+            const receipt = degradedLspReceipt('Simple LSP WASM runtime is unavailable', wasmOptions.detail);
+            publishLspCapabilityReceipt(options.services, options.fallbackControls ?? [], receipt);
             return {
                 ok: false,
-                message: 'Simple LSP WASM mode is enabled but the WASM runtime is unavailable; fallback providers active',
-                detail: wasmOptions.detail,
+                message: receipt.message,
+                detail: receipt.detail,
             };
         }
 
         const clientOptions = {
-            documentSelector: createDocumentSelector() as never,
+            documentSelector: createSimpleLspDocumentSelector() as never,
             synchronize: {
                 fileEvents: watcher,
             },
@@ -178,13 +166,13 @@ export function createSimpleBrowserLspController(
                 message: 'LSP client bootstrap completed.',
             };
         } catch (error) {
-            setFallbackEnabled(true);
             const detail = error instanceof Error ? error.stack ?? error.message : String(error);
-            options.services.markDegraded('lsp', 'Failed to start Simple LSP server; fallback providers active', 'fallback', detail);
+            const receipt = degradedLspReceipt('Failed to start Simple LSP server', detail);
+            publishLspCapabilityReceipt(options.services, options.fallbackControls ?? [], receipt);
             return {
                 ok: false,
-                message: 'Failed to start Simple LSP server; fallback providers active',
-                detail,
+                message: receipt.message,
+                detail: receipt.detail,
             };
         }
     };
@@ -203,12 +191,12 @@ export function createSimpleBrowserLspController(
                 return bootstrapClient();
             } catch (error) {
                 const detail = error instanceof Error ? error.stack ?? error.message : String(error);
-                options.services.markDegraded('lsp', 'Failed to restart attached LSP client.', 'fallback', detail);
-                setFallbackEnabled(true);
+                const receipt = degradedLspReceipt('Failed to restart attached LSP client', detail);
+                publishLspCapabilityReceipt(options.services, options.fallbackControls ?? [], receipt);
                 return {
                     ok: false,
-                    message: 'Failed to restart attached LSP client.',
-                    detail,
+                    message: receipt.message,
+                    detail: receipt.detail,
                 };
             }
         },

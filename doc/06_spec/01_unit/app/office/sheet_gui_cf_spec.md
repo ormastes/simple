@@ -20,7 +20,7 @@ Sheet GUI conditional formatting spec.
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/office/sheet_gui_cf_spec.spl` |
-| Updated | 2026-08-18 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 Sheet GUI conditional formatting spec.
@@ -50,13 +50,19 @@ Hand-computed ground truth used below:
 
 #### the range minimum gets bucket 0 (P = (10-10)/40*100 = 0)
 
+- the range minimum gets bucket 0 (P = (10-10)/40*100 = 0)
+   - Expected: lines[2] equals `1|10!bar0`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("the range minimum gets bucket 0 (P = (10-10)/40*100 = 0)")
 val sheet = _bar_demo_sheet()
 val session = session_new(sheet, "")
 val rules: [CondRule] = [CondRule(range: "A1:A5", kind: "data_bar", criteria: "", n: 0, css: "")]
@@ -69,13 +75,19 @@ expect(lines[2]).to_equal("1|10!bar0")
 
 #### the midpoint gets bucket 5 (P = (30-10)/40*100 = 50)
 
+- the midpoint gets bucket 5 (P = (30-10)/40*100 = 50)
+   - Expected: lines[4] equals `3|30!bar5`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("the midpoint gets bucket 5 (P = (30-10)/40*100 = 50)")
 val sheet = _bar_demo_sheet()
 val session = session_new(sheet, "")
 val rules: [CondRule] = [CondRule(range: "A1:A5", kind: "data_bar", criteria: "", n: 0, css: "")]
@@ -88,13 +100,19 @@ expect(lines[4]).to_equal("3|30!bar5")
 
 #### the range maximum gets bucket 10 (P = (50-10)/40*100 = 100)
 
+- the range maximum gets bucket 10 (P = (50-10)/40*100 = 100)
+   - Expected: lines[6] equals `5|50!bar10`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("the range maximum gets bucket 10 (P = (50-10)/40*100 = 100)")
 val sheet = _bar_demo_sheet()
 val session = session_new(sheet, "")
 val rules: [CondRule] = [CondRule(range: "A1:A5", kind: "data_bar", criteria: "", n: 0, css: "")]
@@ -107,13 +125,20 @@ expect(lines[6]).to_equal("5|50!bar10")
 
 #### quarter stops land on buckets 2 and 7 (P = 25 and 75)
 
+- quarter stops land on buckets 2 and 7 (P = 25 and 75)
+   - Expected: lines[3] equals `2|20!bar2`
+   - Expected: lines[5] equals `4|40!bar7`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("quarter stops land on buckets 2 and 7 (P = 25 and 75)")
 val sheet = _bar_demo_sheet()
 val session = session_new(sheet, "")
 val rules: [CondRule] = [CondRule(range: "A1:A5", kind: "data_bar", criteria: "", n: 0, css: "")]
@@ -127,13 +152,19 @@ expect(lines[5]).to_equal("4|40!bar7")
 
 #### a degenerate single-value range gets the full bar (bucket 10)
 
+- a degenerate single-value range gets the full bar (bucket 10)
+   - Expected: lines[2] equals `1|7!bar10`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("a degenerate single-value range gets the full bar (bucket 10)")
 var sheet = Sheet.new("One")
 sheet.set_value("A1", "7")
 val session = session_new(sheet, "")
@@ -149,13 +180,23 @@ expect(lines[2]).to_equal("1|7!bar10")
 
 #### marks exactly the cells strictly above the hand-computed mean of 5
 
+- marks exactly the cells strictly above the hand-computed mean of 5
+   - Expected: lines[2] equals `1|5`
+   - Expected: lines[3] equals `2|3`
+   - Expected: lines[4] equals `3|8!above`
+   - Expected: lines[5] equals `4|3`
+   - Expected: lines[6] equals `5|6!above`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("marks exactly the cells strictly above the hand-computed mean of 5")
 val sheet = _score_demo_sheet()
 val session = session_new(sheet, "")
 val rules: [CondRule] = [CondRule(range: "A1:A5", kind: "above_average", criteria: "", n: 0, css: "")]
@@ -172,13 +213,23 @@ expect(lines[6]).to_equal("5|6!above")
 
 #### below_average marks the complementary strict side (the two 3s only)
 
+- below_average marks the complementary strict side (the two 3s only)
+   - Expected: lines[2] equals `1|5`
+   - Expected: lines[3] equals `2|3!below`
+   - Expected: lines[4] equals `3|8`
+   - Expected: lines[5] equals `4|3!below`
+   - Expected: lines[6] equals `5|6`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("below_average marks the complementary strict side (the two 3s only)")
 val sheet = _score_demo_sheet()
 val session = session_new(sheet, "")
 val rules: [CondRule] = [CondRule(range: "A1:A5", kind: "below_average", criteria: "", n: 0, css: "")]
@@ -197,13 +248,21 @@ expect(lines[6]).to_equal("5|6")
 
 #### duplicate marks the two 'a' cells only
 
+- duplicate marks the two 'a' cells only
+   - Expected: lines[2] equals `1|a!dup`
+   - Expected: lines[3] equals `2|b`
+   - Expected: lines[4] equals `3|a!dup`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("duplicate marks the two 'a' cells only")
 val sheet = _text_demo_sheet()
 val session = session_new(sheet, "")
 val rules: [CondRule] = [CondRule(range: "A1:A3", kind: "duplicate", criteria: "", n: 0, css: "")]
@@ -218,13 +277,21 @@ expect(lines[4]).to_equal("3|a!dup")
 
 #### unique marks the single 'b' cell only
 
+- unique marks the single 'b' cell only
+   - Expected: lines[2] equals `1|a`
+   - Expected: lines[3] equals `2|b!uniq`
+   - Expected: lines[4] equals `3|a`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("unique marks the single 'b' cell only")
 val sheet = _text_demo_sheet()
 val session = session_new(sheet, "")
 val rules: [CondRule] = [CondRule(range: "A1:A3", kind: "unique", criteria: "", n: 0, css: "")]
@@ -241,13 +308,20 @@ expect(lines[4]).to_equal("3|a")
 
 #### a cell_value '>100' rule marks only the matching cell with !hi
 
+- a cell_value '>100' rule marks only the matching cell with !hi
+   - Expected: lines[2] equals `1|150!hi`
+   - Expected: lines[3] equals `2|50`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("a cell_value '>100' rule marks only the matching cell with !hi")
 var sheet = Sheet.new("Vals")
 sheet.set_value("A1", "150")
 sheet.set_value("A2", "50")
@@ -263,13 +337,19 @@ expect(lines[3]).to_equal("2|50")
 
 #### a selected matched cell shows bracket form plus the marker
 
+- a selected matched cell shows bracket form plus the marker
+   - Expected: lines[2] equals `1|[10]!bar0`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("a selected matched cell shows bracket form plus the marker")
 val sheet = _bar_demo_sheet()
 val session = session_new(sheet, "A1")
 val rules: [CondRule] = [CondRule(range: "A1:A5", kind: "data_bar", criteria: "", n: 0, css: "")]
@@ -284,13 +364,18 @@ expect(lines[2]).to_equal("1|[10]!bar0")
 
 #### matched cells' class attributes carry their cf classes; unmatched cells stay plain
 
+- matched cells' class attributes carry their cf classes; unmatched cells stay plain
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("matched cells' class attributes carry their cf classes; unmatched cells stay plain")
 var sheet = Sheet.new("Html")
 sheet.set_value("A1", "10")
 sheet.set_value("A2", "50")
@@ -311,13 +396,19 @@ expect(html).to_contain(".cf-bar-10{background:#638ec6;}")
 
 #### an empty rule list renders byte-identically to sheet_gui_view_with_selection
 
+- an empty rule list renders byte-identically to sheet_gui_view_with_selection
+   - Expected: cf_view.text_dump equals `plain_view.text_dump`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("an empty rule list renders byte-identically to sheet_gui_view_with_selection")
 var sheet = Sheet.new("Plain")
 sheet.set_value("A1", "1")
 sheet.set_value("B2", "x")
@@ -332,13 +423,19 @@ expect(cf_view.text_dump).to_equal(plain_view.text_dump)
 
 #### rules over an all-empty range fail closed (dump identical to plain view)
 
+- rules over an all-empty range fail closed (dump identical to plain view)
+   - Expected: cf_view.text_dump equals `plain_view.text_dump`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("rules over an all-empty range fail closed (dump identical to plain view)")
 var sheet = Sheet.new("Empty")
 sheet.set_value("A1", "9")
 val session = session_new(sheet, "")
@@ -358,13 +455,19 @@ expect(cf_view.text_dump).to_equal(plain_view.text_dump)
 
 #### a rule with an unparseable range never matches
 
+- a rule with an unparseable range never matches
+   - Expected: lines[2] equals `1|9`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("a rule with an unparseable range never matches")
 var sheet = Sheet.new("Bad")
 sheet.set_value("A1", "9")
 val session = session_new(sheet, "")
@@ -388,3 +491,51 @@ expect(lines[2]).to_equal("1|9")
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `fd04eb9f30148e502932b26ab8854d88d319ce5fae8b677340ebc5054a9c045f`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `fd04eb9f30148e502932b26ab8854d88d319ce5fae8b677340ebc5054a9c045f`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `fd04eb9f30148e502932b26ab8854d88d319ce5fae8b677340ebc5054a9c045f`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/01_unit/app/office/sheet_gui_cf_spec.spl
+mirror: doc/06_spec/01_unit/app/office/sheet_gui_cf_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/app/office/sheet_gui_cf_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/app/office/sheet_gui_cf_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/app/office/sheet_gui_cf_spec.spl:69:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'the range minimum gets bucket 0 (P = (10-10)/40*100 = 0)' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/office/sheet_gui_cf_spec.spl:79:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'the midpoint gets bucket 5 (P = (30-10)/40*100 = 50)' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/office/sheet_gui_cf_spec.spl:89:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'the range maximum gets bucket 10 (P = (50-10)/40*100 = 100)' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

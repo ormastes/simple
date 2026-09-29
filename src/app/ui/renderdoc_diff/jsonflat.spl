@@ -1,0 +1,155 @@
+"""Flat JSON reader for RenderDoc `*.events.json` exports (MDSOC+ data layer).
+
+This is deliberately NOT a general JSON tree: it walks the token stream once and
+emits `(path, value)` pairs such as `events[3].targets[0].width = 1920`. The flat
+shape exists because the bootstrap seed's `std.json` returns null for a plain
+`json_parse` of an object (measured 2026-09-12 on the Sep-5 seed), and because a
+recursion-free scanner has no tagged-union/`any` erasure risk on that binary.
+
+Values are returned as text in every case: strings are unquoted and unescaped,
+numbers/booleans/null keep their literal spelling. Callers convert.
+"""
+
+class JsonPair:
+    path: text
+    value: text
+
+fn _is_ws(c: text) -> bool:
+    c == " " or c == "\n" or c == "\t" or c == "\r"
+
+fn _skip_ws(src: text, start: i64) -> i64:
+    var i = start
+    while i < src.len() and _is_ws(src[i]):
+        i = i + 1
+    i
+
+fn _read_string(src: text, start: i64) -> (text, i64):
+    # start points at the opening quote
+    var i = start + 1
+    var out = ""
+    while i < src.len():
+        val c = src[i]
+        if c == "\\":
+            val nxt = src[i + 1]
+            if nxt == "n":
+                out = out + "\n"
+            else:
+                if nxt == "t":
+                    out = out + "\t"
+                else:
+                    if nxt == "r":
+                        out = out + "\r"
+                    else:
+                        out = out + nxt
+            i = i + 2
+        else:
+            if c == "\"":
+                return (out, i + 1)
+            out = out + c
+            i = i + 1
+    (out, i)
+
+fn _read_scalar(src: text, start: i64) -> (text, i64):
+    var i = start
+    var out = ""
+    while i < src.len():
+        val c = src[i]
+        if c == "," or c == "}" or c == "]" or _is_ws(c):
+            return (out, i)
+        out = out + c
+        i = i + 1
+    (out, i)
+
+fn _join_slot(prefix: text, kind: text, key: text, idx: i64) -> text:
+    if kind == "arr":
+        return prefix + "[" + idx.to_text() + "]"
+    if prefix == "":
+        return key
+    prefix + "." + key
+
+fn json_flatten(src: text) -> [JsonPair]:
+    """Walk `src` once and return every scalar leaf as a `path = value` pair."""
+    var out: [JsonPair] = []
+    var prefixes: [text] = []
+    var kinds: [text] = []
+    var indices: [i64] = []
+    var depth = 0
+    var cur_key = ""
+    var i = 0
+    while i < src.len():
+        val c = src[i]
+        if _is_ws(c) or c == ",":
+            i = i + 1
+            continue
+        if c == ":":
+            i = i + 1
+            continue
+        var slot = ""
+        if depth > 0:
+            slot = _join_slot(prefixes[depth - 1], kinds[depth - 1], cur_key, indices[depth - 1])
+        if c == "{" or c == "[":
+            if depth > 0 and kinds[depth - 1] == "arr":
+                indices[depth - 1] = indices[depth - 1] + 1
+            var kind = "obj"
+            if c == "[":
+                kind = "arr"
+            prefixes.push(slot)
+            kinds.push(kind)
+            indices.push(0)
+            depth = depth + 1
+            cur_key = ""
+            i = i + 1
+            continue
+        if c == "}" or c == "]":
+            if depth > 0:
+                prefixes.pop()
+                kinds.pop()
+                indices.pop()
+                depth = depth - 1
+            cur_key = ""
+            i = i + 1
+            continue
+        if c == "\"":
+            val pair = _read_string(src, i)
+            val sval = pair.0
+            val after = pair.1
+            val nxt = _skip_ws(src, after)
+            val is_key = depth > 0 and kinds[depth - 1] == "obj" and nxt < src.len() and src[nxt] == ":"
+            if is_key:
+                cur_key = sval
+                i = nxt + 1
+                continue
+            if depth > 0 and kinds[depth - 1] == "arr":
+                indices[depth - 1] = indices[depth - 1] + 1
+            out.push(JsonPair(path: slot, value: sval))
+            cur_key = ""
+            i = after
+            continue
+        val raw = _read_scalar(src, i)
+        if raw.0 != "":
+            if depth > 0 and kinds[depth - 1] == "arr":
+                indices[depth - 1] = indices[depth - 1] + 1
+            out.push(JsonPair(path: slot, value: raw.0))
+            cur_key = ""
+            i = raw.1
+        else:
+            i = i + 1
+    out
+
+fn json_pair_lookup(pairs: [JsonPair], path: text) -> text:
+    """Return the value at `path`, or the empty text when the path is absent."""
+    var i = 0
+    while i < pairs.len():
+        if pairs[i].path == path:
+            return pairs[i].value
+        i = i + 1
+    ""
+
+fn json_pair_has_prefix(pairs: [JsonPair], prefix: text) -> bool:
+    """True when any pair's path starts with `prefix`."""
+    var i = 0
+    while i < pairs.len():
+        if pairs[i].path.len() >= prefix.len() and pairs[i].path.substring(0, prefix.len()) == prefix:
+            return true
+        i = i + 1
+    false

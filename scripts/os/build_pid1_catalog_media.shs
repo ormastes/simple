@@ -1,0 +1,87 @@
+#!/bin/sh
+# Produce a dedicated FAT32 medium for the filesystem-backed PID1 catalogue.
+# The catalog producer owns code generation; this script only connects its
+# target ELFs to the strict FAT32 consumer.
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+TARGET="${SIMPLEOS_SERVICE_TARGET:-riscv64-unknown-simpleos}"
+ROOTFS="${SIMPLEOS_SERVICE_CATALOG_ROOTFS:-build/os/rootfs}"
+IMAGE="${SIMPLEOS_PID1_CATALOG_DISK:-build/os/fat32-riscv64-pid1.img}"
+TEST_NET_FAULT_AFTER_READY=false
+
+usage() {
+    echo "Usage: sh scripts/os/build_pid1_catalog_media.shs [--target <triple>] [--rootfs <tree>] [--image <path>] [--test-net-fault-after-ready]" >&2
+}
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --target) shift; [ "$#" -gt 0 ] || { usage; exit 2; }; TARGET="$1" ;;
+        --target=*) TARGET="${1#*=}" ;;
+        --rootfs) shift; [ "$#" -gt 0 ] || { usage; exit 2; }; ROOTFS="$1" ;;
+        --rootfs=*) ROOTFS="${1#*=}" ;;
+        --image) shift; [ "$#" -gt 0 ] || { usage; exit 2; }; IMAGE="$1" ;;
+        --image=*) IMAGE="${1#*=}" ;;
+        --test-net-fault-after-ready) TEST_NET_FAULT_AFTER_READY=true ;;
+        --help|-h) usage; exit 0 ;;
+        *) echo "error: unknown option: $1" >&2; usage; exit 2 ;;
+    esac
+    shift
+done
+
+case "$TARGET" in
+    riscv64-unknown-simpleos|x86_64-unknown-simpleos) ;;
+    *) echo "error: unsupported PID1 catalogue target: $TARGET" >&2; exit 2 ;;
+esac
+
+# The target payload compiler and host FAT baker deliberately have separate
+# contracts.  A fresh staged compiler may support `native-build --target` but
+# not the host-only `run` command required by the disk baker.  Keep
+# SIMPLE_BUILD_COMPILER inherited by build_root_service_catalog.shs; select the
+# historical bin/simple baker unless an operator explicitly overrides it.
+BAKE_COMPILER="${SIMPLE_BAKE_COMPILER:-bin/simple}"
+BAKE_MODE=""
+if [ -n "${SIMPLE_BAKE_COMPILER:-}" ]; then
+    if [ ! -x "$BAKE_COMPILER" ]; then
+        echo "error: SIMPLE_BAKE_COMPILER is not executable: $BAKE_COMPILER" >&2
+        exit 2
+    fi
+fi
+
+# Older hosted Simple runners execute a source path directly, while a newer
+# runner may expose a dedicated `run` command.  The bake program is host-only;
+# accept either documented runner contract, but never silently treat a target
+# compiler (which has neither) as a host baker.
+if "$BAKE_COMPILER" run --help >/dev/null 2>&1; then
+    BAKE_MODE="run"
+elif "$BAKE_COMPILER" --help 2>&1 | grep -q 'simple <file.spl>'; then
+    BAKE_MODE="direct"
+else
+    echo "error: SIMPLE_BAKE_COMPILER cannot run Simple source: $BAKE_COMPILER" >&2
+    exit 2
+fi
+
+if [ "$TEST_NET_FAULT_AFTER_READY" = true ]; then
+    sh scripts/os/build_root_service_catalog.shs --target "$TARGET" --rootfs "$ROOTFS" --test-net-fault-after-ready
+else
+    sh scripts/os/build_root_service_catalog.shs --target "$TARGET" --rootfs "$ROOTFS"
+fi
+
+if [ "$BAKE_MODE" = "run" ]; then
+    SIMPLEOS_SERVICE_CATALOG_ROOTFS="$ROOTFS" \
+    SIMPLEOS_PID1_CATALOG_TARGET="$TARGET" \
+    SIMPLEOS_PID1_CATALOG_DISK="$IMAGE" \
+    SIMPLEOS_PID1_CATALOG_TEST_NET_FAULT_AFTER_READY="$TEST_NET_FAULT_AFTER_READY" \
+    "$BAKE_COMPILER" run src/os/port/pid1_catalog_disk_bake.spl
+else
+    SIMPLEOS_SERVICE_CATALOG_ROOTFS="$ROOTFS" \
+    SIMPLEOS_PID1_CATALOG_TARGET="$TARGET" \
+    SIMPLEOS_PID1_CATALOG_DISK="$IMAGE" \
+    SIMPLEOS_PID1_CATALOG_TEST_NET_FAULT_AFTER_READY="$TEST_NET_FAULT_AFTER_READY" \
+    "$BAKE_COMPILER" src/os/port/pid1_catalog_disk_bake.spl
+fi
+
+[ -s "$IMAGE" ] || { echo "error: PID1 catalogue image not created: $IMAGE" >&2; exit 1; }
+echo "SUCCESS: PID1 catalogue media ready: $IMAGE"

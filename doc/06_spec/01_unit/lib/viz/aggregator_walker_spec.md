@@ -1,4 +1,4 @@
-# Aggregator Walker Specification
+# aggregator_walker_spec
 
 > <details>
 
@@ -32,7 +32,25 @@ aggregator_walker_spec -> std
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Aggregator Walker Specification
+# aggregator_walker_spec
+
+Purpose: Verify the compositor surface-reference walker (walk_referenced_surfaces,
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Standard Library |
+| Status | Active |
+| Source | `test/01_unit/lib/viz/aggregator_walker_spec.spl` |
+| Updated | 2026-08-27 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Purpose and audience
+Purpose: Verify the compositor surface-reference walker (walk_referenced_surfaces,
+find_frame_for, inline_render_pass, drop_missing_surface, placeholder_deferred_surface)
+against cycles, dedup, index remapping and missing surfaces.
+Audience: rendering/compositor engineers who maintain std.viz.feature.aggregator_walker.
 
 ## Scenarios
 
@@ -74,7 +92,7 @@ val result_len = result.len()
 result_len.to_equal(1)
 val found = result[0]
 val eq = found.equals(child_sid)
-eq.to_equal(true)
+expect(eq).to_equal(true)
 ```
 
 </details>

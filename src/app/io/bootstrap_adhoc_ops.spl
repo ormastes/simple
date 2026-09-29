@@ -1,0 +1,90 @@
+# Bootstrap-safe process and file owner for the local ad-hoc compiler capsule.
+# Keeps direct runtime access inside the canonical app.io layer.
+
+extern fn sys_get_args() -> [text]
+extern fn rt_process_run_bounded(
+    command: text,
+    args: [text],
+    timeout_ms: i64,
+    max_output_bytes: i64
+) -> (text, text, i64)
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_file_hash_sha256(path: text) -> text
+extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_getpid() -> i64
+extern fn rt_time_now_unix_micros() -> i64
+
+pub struct BootstrapAdhocProcessResult:
+    stdout: text
+    stderr: text
+    exit_code: i64
+
+pub fn bootstrap_adhoc_runtime_args() -> [text]:
+    val raw = sys_get_args()
+    if raw == nil:
+        []
+    else:
+        raw
+
+pub fn bootstrap_adhoc_file_exists(path: text) -> bool:
+    rt_file_exists(path)
+
+pub fn bootstrap_adhoc_file_delete(path: text) -> bool:
+    rt_file_delete(path)
+
+pub fn bootstrap_adhoc_file_write(path: text, content: text) -> bool:
+    rt_file_write_text(path, content)
+
+pub fn bootstrap_adhoc_file_hash(path: text) -> text:
+    rt_file_hash_sha256(path)
+
+pub fn bootstrap_adhoc_dir_create(path: text) -> bool:
+    rt_dir_create_all(path)
+
+pub fn bootstrap_adhoc_hash_text(root: text, content: text) -> text:
+    if not rt_dir_create_all(root):
+        return ""
+    val temp_path = "{root}/authority-{rt_getpid()}-{rt_time_now_unix_micros()}.tmp"
+    if not rt_file_write_text(temp_path, content):
+        return ""
+    val digest = rt_file_hash_sha256(temp_path)
+    val _removed = rt_file_delete(temp_path)
+    digest
+
+pub fn bootstrap_adhoc_process_run(
+    command: text,
+    args: [text],
+    timeout_ms: i64,
+    max_output_bytes: i64
+) -> BootstrapAdhocProcessResult:
+    val (stdout, stderr, exit_code) = rt_process_run_bounded(
+        command, args, timeout_ms, max_output_bytes
+    )
+    BootstrapAdhocProcessResult(
+        stdout: stdout,
+        stderr: stderr,
+        exit_code: exit_code
+    )
+
+pub fn bootstrap_adhoc_process_run_limited(
+    command: text,
+    args: [text],
+    timeout_ms: i64,
+    memory_bytes: i64,
+    max_output_bytes: i64
+) -> BootstrapAdhocProcessResult:
+    var limited_args = [
+        "--as={memory_bytes}",
+        "--cpu={timeout_ms / 1000}",
+        "--nofile=4096",
+        "--nproc=256",
+        "--",
+        command
+    ]
+    for arg in args:
+        limited_args.push(arg)
+    bootstrap_adhoc_process_run(
+        "prlimit", limited_args, timeout_ms, max_output_bytes
+    )

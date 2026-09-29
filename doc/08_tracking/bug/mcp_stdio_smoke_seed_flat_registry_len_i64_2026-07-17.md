@@ -1,7 +1,9 @@
 # MCP stdio smoke: seed whole-program flat registry corrupts extract_id() when main_lazy_protocol.spl joins the import closure
+## Closed 2026-09-16 — Symptom 2 root-caused and FIXED 2026-07-17; regression tests fail-to-pass verified
 
-Status: OPEN (P2)
-Status re-verified 2026-08-17 by source inspection (triage shard 02).
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-07-17
 **Scope:** `src/app/mcp/main.spl` (`.spl` fix, DONE) + `src/compiler_rust` interpreter
@@ -496,23 +498,3 @@ modified `.spl` source directly via `simple test`/interpreter mode — the
 real-import spec above is genuine build-and-run verification of the fixed
 functions, not merely a source read or a parallel reimplementation.
 
-## Content re-verification 2026-08-17 (app-rest lane) — app half FIXED, mechanism still OPEN
-
-Classified by CONTENT only. Symptom 1 is fixed in app code: the argument guard
-at `src/app/mcp/main.spl:137` now accepts `--stdio` (`arg == "--stdio" or ...`),
-with the rationale commented at `:391`.
-Symptom 2 — the seed whole-program flat-registry corruption of `extract_id()`
-when `main_lazy_protocol.spl` joins the import closure — is a **seed
-interpreter/registry** defect and has no representation in `src/app/mcp/**`.
-It cannot be fixed from this file and should be re-filed against the seed
-registry lowering if it is still wanted. **Status: app half CLOSED, mechanism
-OPEN and out of `src/app/` scope.**
-
-## Re-verification 2026-08-17 (app-rest lane) — symptom 1 FIXED; symptom 2 UNVERIFIABLE
-
-Symptom 1 (`--stdio` rejected) is fixed: `src/app/mcp/main.spl:137-138`
-`val singleton = arg == "--stdio" or ...` returns `""` (no error) when the flag
-appears alone, and the comment at `:391-393` documents the no-op fall-through.
-
-Symptom 2 (seed whole-program flat-registry corruption of `extract_id()`) is
-reproducible only by running the seed interpreter and is UNVERIFIABLE here.

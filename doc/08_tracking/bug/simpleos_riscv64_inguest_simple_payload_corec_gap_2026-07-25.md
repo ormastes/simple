@@ -5,6 +5,65 @@
 - **Severity:** medium (blocks in-guest self-host lane; does NOT block fs-exec ls+launch)
 - **Status:** open
 
+## 2026-09-22 implementation update
+
+The original seven-symbol census was stale. `rt_get_args`,
+`rt_string_new_literal`, and `sigpending` had already gained target owners. The
+remaining four pure-Simple owners are now implemented in this lane:
+
+- `core_env.spl`: `rt_env_get_i64`
+- `core_array.spl`: `rt_bytes_to_text`
+- `core_string.spl`: `rt_text_cmp_any` (and the duplicate, weaker
+  `rt_native_cmp` definition was removed)
+- `core_values.spl`: `rt_value_as_float`, guarded by an open-addressed owner
+  registry before any heap-tagged pointer dereference
+
+`simpleos_math.c` now supplies the freestanding, bit-preserving
+`spl_bits_to_f64` primitive required for exact finite, negative-zero, infinity,
+and NaN reconstruction. The RV64 archive and payload scripts pass
+`--threads 12` by default, configurable through
+`SIMPLE_NATIVE_BUILD_THREADS`.
+
+The executable probe also passes as a lightweight hosted semantic oracle:
+
+```text
+simple run test/02_integration/compiler/simple_core_payload_runtime_probe.spl --mode=interpreter
+SIMPLE_CORE_PAYLOAD_RUNTIME_OK
+elapsed=0.05s max_rss=23,412 KiB
+```
+
+This does not claim target-provider admission; it checks the externally visible
+conversion, ordering, invalid-handle, and registry-growth behavior without a
+cross-compile or guest boot.
+
+Focused RV64 Cranelift archive compilation succeeded for all four changed
+parts. The complete simple-core archive built 20/20 parts in 4.91 seconds with
+196,164 KiB maximum RSS, and `llvm-nm` found each new strong owner. The final
+sysroot/payload link remains unverified: the third and final verification cycle
+stopped while cross-compiling the pre-existing `runtime_native.c` supplement
+because the SimpleOS libc surface lacks `MADV_*`, `madvise`, and `glob.h`.
+Under the repository three-cycle rule this lane did not retry. The guest probe
+`test/02_integration/compiler/simple_core_payload_runtime_probe.spl` remains the
+required executable closure evidence; keep this bug OPEN until the sysroot
+blocker is fixed and that probe plus the real payload run in an RV64 guest.
+
+## TODO: deferred RV64 admission
+
+When the RV64 sysroot/phase environment is ready, build the payload with
+`SIMPLE_NATIVE_BUILD_THREADS=12`, boot it in the canonical SimpleOS RV64 QEMU
+guest, and run `simple_core_payload_runtime_probe.spl` through the emitted
+`simple-core` provider. Record the payload hash, QEMU command, exit status,
+elapsed build/probe time, and maximum RSS. Compare archive construction only
+against the last identical archive baseline (4.91 seconds, 196,164 KiB maximum
+RSS); establish a separate payload-build baseline using the same sources,
+compiler, cache state, and thread count. For runtime memory, execute at least
+1,000 begin/allocate/pause/promote/end scope cycles in one guest process and
+record steady-state RSS before and after the loop. Investigate rather than
+admit any unexplained slowdown above 10%, build-RSS growth above 10%, or
+positive steady-state RSS trend across completed unpromoted scopes. Remove
+this TODO and close the bug only after the guest prints
+`SIMPLE_CORE_PAYLOAD_RUNTIME_OK`.
+
 ## Summary
 Cross-building the in-guest Simple toolchain payload
 `bin/release/riscv64-unknown-simpleos/simple`

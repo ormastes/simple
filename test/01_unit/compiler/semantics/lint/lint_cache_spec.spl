@@ -1,10 +1,3 @@
-"""
-## Purpose and audience
-Purpose: Prove that lint cache — store and lookup.
-Audience: compiler and tooling engineers who maintain this spec.
-"""
-# @req: REQ-COMPILER-SEMANTICS-001 — stable requirement identity for this spec.
-
 # @cover src/compiler/35.semantics/lint/lint_cache.spl
 """
 # Lint Cache Specification
@@ -41,21 +34,11 @@ enclosing scope hash is unchanged.
 | invalidate_file | Recomputes per-decl hashes and invalidates changed entries + their deps |
 """
 
-use std.common.crypto.types.{crypto_text_to_bytes as text_to_bytes}
+use std.common.crypto.types.{text_to_bytes}
 
 # ============================================================================
 # Helpers — self-contained cache implementation for testing
 # ============================================================================
-
-fn hash_string_fnv(s: text) -> i64:
-    var hash: i64 = 1469598103934665603
-    for byte in text_to_bytes(s):
-        hash = hash xor byte.to_i64()
-        hash = hash * 1099511628211
-    hash
-
-fn hash_combine(a: i64, b: i64) -> i64:
-    (a * 1099511628211) xor b
 
 class LintCacheEntryTest:
     scope_hash: i64
@@ -144,8 +127,6 @@ fn make_scope_hash(content: text) -> i64:
 # Test Group 1: Basic cache store and lookup — AC-5
 # ============================================================================
 
-use std.spec.step
-
 describe "lint cache — store and lookup":
     """
     ## Cache Store and Lookup
@@ -156,43 +137,38 @@ describe "lint cache — store and lookup":
 
     context "when a result is stored and the hash is unchanged":
         it "cache lookup returns the stored warnings (cache hit)":
-            step("Verify: cache lookup returns the stored warnings (cache hit)")
-            # @req: REQ-COMPILER-SEMANTICS-001
             var cache = make_empty_cache()
             val key = "src/foo.spl::my_fn"
             val h = make_scope_hash("pass_" + "todo body content")
             cache_store_test(cache, key, h, ["REQC001"], [])
             val result = cache_lookup_test(cache, key, h)
-            expect(result != nil).to_equal(true)
+            expect(result.?).to_equal(true)
 
         it "cache hit returns the exact stored warning codes":
-            step("Verify: cache hit returns the exact stored warning codes")
             var cache = make_empty_cache()
             val key = "src/foo.spl::check_fn"
             val h = make_scope_hash("pass_do_" + "nothing no comment")
             cache_store_test(cache, key, h, ["REQC001"], [])
             val result = cache_lookup_test(cache, key, h)
             match result:
-                Some(ws): expect(ws.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
+                Some(ws): expect(ws.len()).to_equal(1)
                 nil: fail("cache hit should return stored warning codes")
 
         it "cache hit can return an empty warning list (clean scope)":
-            step("Verify: cache hit can return an empty warning list (clean scope)")
             var cache = make_empty_cache()
             val key = "src/bar.spl::clean_fn"
             val h = make_scope_hash("pass_" + "todo(\"reason\") with comment")
             cache_store_test(cache, key, h, [], [])
             val result = cache_lookup_test(cache, key, h)
             match result:
-                Some(ws): expect(ws.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
+                Some(ws): expect(ws.len()).to_equal(0)
                 nil: fail("cache hit should return empty clean warning list")
 
     context "when the cache is empty":
         it "lookup returns nil for an unknown key":
-            step("Verify: lookup returns nil for an unknown key")
             var cache = make_empty_cache()
             val result = cache_lookup_test(cache, "src/unknown.spl::fn", 12345)
-            expect(result != nil).to_equal(false)
+            expect(result.?).to_equal(false)
 
 
 # ============================================================================
@@ -209,28 +185,26 @@ describe "lint cache — cache miss on hash change":
 
     context "when the scope hash has changed":
         it "cache lookup returns nil (cache miss)":
-            step("Verify: cache lookup returns nil (cache miss)")
             var cache = make_empty_cache()
             val key = "src/mod.spl::changed_fn"
             val old_hash = make_scope_hash("old body")
             val new_hash = make_scope_hash("new body with extra statement")
             cache_store_test(cache, key, old_hash, ["REQC001"], [])
             val result = cache_lookup_test(cache, key, new_hash)
-            expect(result != nil).to_equal(false)
+            expect(result.?).to_equal(false)
 
         it "after a miss the caller re-runs lint and can store a fresh result":
-            step("Verify: after a miss the caller re-runs lint and can store a fresh result")
             var cache = make_empty_cache()
             val key = "src/mod.spl::evolving_fn"
             val old_hash = make_scope_hash("original")
             val new_hash = make_scope_hash("modified")
             cache_store_test(cache, key, old_hash, ["REQC001"], [])
             val miss = cache_lookup_test(cache, key, new_hash)
-            expect(miss != nil).to_equal(false)
+            expect(miss.?).to_equal(false)
             # Caller re-runs lint, gets empty result, stores fresh
             cache_store_test(cache, key, new_hash, [], [])
             val hit = cache_lookup_test(cache, key, new_hash)
-            expect(hit != nil).to_equal(true)
+            expect(hit.?).to_equal(true)
 
 
 # ============================================================================
@@ -248,7 +222,6 @@ describe "lint cache — symbol dependency tracking":
 
     context "when an entry is stored with symbol deps":
         it "symbol_index maps each dep to the cache key":
-            step("Verify: symbol_index maps each dep to the cache key")
             var cache = make_empty_cache()
             val key = "src/ml.spl::train"
             val h = make_scope_hash("loss() body")
@@ -257,7 +230,6 @@ describe "lint cache — symbol dependency tracking":
             expect(cache.symbol_index.has("LossConfig")).to_equal(true)
 
         it "symbol_index entry contains the cache key":
-            step("Verify: symbol_index entry contains the cache key")
             var cache = make_empty_cache()
             val key = "src/ml.spl::backward"
             val h = make_scope_hash("dangerous call")
@@ -267,7 +239,6 @@ describe "lint cache — symbol dependency tracking":
 
     context "when multiple scopes depend on the same symbol":
         it "symbol_index lists all dependent cache keys":
-            step("Verify: symbol_index lists all dependent cache keys")
             var cache = make_empty_cache()
             val key_a = "src/a.spl::fn_a"
             val key_b = "src/b.spl::fn_b"
@@ -276,7 +247,7 @@ describe "lint cache — symbol dependency tracking":
             cache_store_test(cache, key_a, ha, [], ["SharedSymbol"])
             cache_store_test(cache, key_b, hb, [], ["SharedSymbol"])
             val deps = cache.symbol_index["SharedSymbol"]
-            expect(deps.len()).to_equal(2)  # oracle: 2 — named expected value from the requirement
+            expect(deps.len()).to_equal(2)
 
 
 # ============================================================================
@@ -293,7 +264,6 @@ describe "lint cache — symbol reference invalidation":
 
     context "when a depended-on symbol changes":
         it "invalidates the cache entry for the dependent scope":
-            step("Verify: invalidates the cache entry for the dependent scope")
             var cache = make_empty_cache()
             val key = "src/risk.spl::risky"
             val h = make_scope_hash("stable body")
@@ -301,10 +271,9 @@ describe "lint cache — symbol reference invalidation":
             # Simulate symbol change
             cache_invalidate_symbol_test(cache, "DangerousHelper")
             val result = cache_lookup_test(cache, key, h)
-            expect(result != nil).to_equal(false)
+            expect(result.?).to_equal(false)
 
         it "symbol_index entry is removed after invalidation":
-            step("Verify: symbol_index entry is removed after invalidation")
             var cache = make_empty_cache()
             val key = "src/risk.spl::risky"
             val h = make_scope_hash("body")
@@ -313,7 +282,6 @@ describe "lint cache — symbol reference invalidation":
             expect(cache.symbol_index.has("TargetSymbol")).to_equal(false)
 
         it "unrelated entries are NOT removed":
-            step("Verify: unrelated entries are NOT removed")
             var cache = make_empty_cache()
             val key_a = "src/a.spl::fn_a"
             val key_b = "src/b.spl::fn_b"
@@ -323,11 +291,10 @@ describe "lint cache — symbol reference invalidation":
             cache_store_test(cache, key_b, hb, [], ["SymB"])
             cache_invalidate_symbol_test(cache, "SymA")
             val result_b = cache_lookup_test(cache, key_b, hb)
-            expect(result_b != nil).to_equal(true)
+            expect(result_b.?).to_equal(true)
 
     context "when invalidating a symbol not in the index":
         it "does not crash and cache is unchanged":
-            step("Verify: does not crash and cache is unchanged")
             var cache = make_empty_cache()
             val key = "src/stable.spl::fn"
             val h = make_scope_hash("unchanged")
@@ -335,7 +302,7 @@ describe "lint cache — symbol reference invalidation":
             # This must not crash
             cache_invalidate_symbol_test(cache, "NonExistentSymbol")
             val result = cache_lookup_test(cache, key, h)
-            expect(result != nil).to_equal(true)
+            expect(result.?).to_equal(true)
 
 
 # ============================================================================
@@ -352,7 +319,6 @@ describe "lint cache — file-level invalidation":
 
     context "when a file is re-parsed with one changed declaration":
         it "removes the cache entry for the changed declaration":
-            step("Verify: removes the cache entry for the changed declaration")
             var cache = make_empty_cache()
             val file = "src/changed.spl"
             val key = "src/changed.spl::modified_fn"
@@ -362,10 +328,9 @@ describe "lint cache — file-level invalidation":
             new_hashes["modified_fn"] = make_scope_hash("new")
             cache_invalidate_file_test(cache, file, new_hashes)
             val result = cache_lookup_test(cache, key, make_scope_hash("new"))
-            expect(result != nil).to_equal(false)
+            expect(result.?).to_equal(false)
 
         it "leaves unchanged declarations in the cache":
-            step("Verify: leaves unchanged declarations in the cache")
             var cache = make_empty_cache()
             val file = "src/partial.spl"
             val key_changed = "src/partial.spl::changed_fn"
@@ -379,11 +344,10 @@ describe "lint cache — file-level invalidation":
             new_hashes["stable_fn"] = stable_hash
             cache_invalidate_file_test(cache, file, new_hashes)
             val result = cache_lookup_test(cache, key_stable, stable_hash)
-            expect(result != nil).to_equal(true)
+            expect(result.?).to_equal(true)
 
     context "when a changed declaration has symbol deps":
         it "cascades to invalidate symbol-dependent entries in other files":
-            step("Verify: cascades to invalidate symbol-dependent entries in other files")
             var cache = make_empty_cache()
             val file_a = "src/a.spl"
             val key_a = "src/a.spl::fn_a"
@@ -399,7 +363,7 @@ describe "lint cache — file-level invalidation":
             cache_invalidate_file_test(cache, file_a, new_hashes_a)
             # fn_b should also be invalidated via symbol cascade
             val result_b = cache_lookup_test(cache, key_b, hash_b)
-            expect(result_b != nil).to_equal(false)
+            expect(result_b.?).to_equal(false)
 
 
 # ============================================================================
@@ -415,30 +379,26 @@ describe "lint cache — scope hash properties":
     """
 
     it "same content produces the same hash":
-        step("Verify: same content produces the same hash")
         val h1 = make_scope_hash("fn body: pass_" + "todo no comment")
         val h2 = make_scope_hash("fn body: pass_" + "todo no comment")
         expect(h1).to_equal(h2)
 
     it "different content produces different hashes":
-        step("Verify: different content produces different hashes")
         val h1 = make_scope_hash("original body")
         val h2 = make_scope_hash("modified body with extra statement")
-        expect(h1).to_not_equal(h2)
+        expect(h1 == h2).to_equal(false)
 
     it "empty content has a stable hash":
-        step("Verify: empty content has a stable hash")
         val h1 = make_scope_hash("")
         val h2 = make_scope_hash("")
         expect(h1).to_equal(h2)
 
     it "hash combine produces different results for different orderings":
-        step("Verify: hash combine produces different results for different orderings")
         val ha = hash_string_fnv("alpha")
         val hb = hash_string_fnv("beta")
         val combined_ab = hash_combine(ha, hb)
         val combined_ba = hash_combine(hb, ha)
-        expect(combined_ab).to_not_equal(combined_ba)
+        expect(combined_ab == combined_ba).to_equal(false)
 
 
 # ============================================================================

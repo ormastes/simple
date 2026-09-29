@@ -1,7 +1,9 @@
 # Bootstrap diagnostic sweep missing-child preflight
+## Closed 2026-09-16 — ...e` before launching parallel work. ## Fix and evidence The harness now rejects a missing o
 
-Status: OPEN (P3)
-Status re-verified 2026-08-17 by source inspection (triage shard 00).
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Reproduction
 
@@ -20,3 +22,4 @@ pure-Simple child at `bin/simple` before launching parallel work.
 The harness now rejects a missing or non-executable `bin/simple` with exit 2
 before creating worker state. The integration test covers that exact fail-fast
 case and the adjacent admitted-child aggregation/cache-preservation path.
+

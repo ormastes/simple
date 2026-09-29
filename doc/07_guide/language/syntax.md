@@ -254,6 +254,23 @@ print "Hello, {name}!"               # Default: interpolated
 print r"raw: \d+"                     # Raw string (no interpolation)
 ```
 
+System path variables are a separate deferred template domain, not ordinary
+string interpolation. The current shared API is:
+
+```simple
+use std.nogc_sync_mut.env.system_location.{LazyPathTemplate}
+
+var location = LazyPathTemplate.new(r"{sys:user_cache}/my-app")
+val path = location.resolve()?
+```
+
+Raw input preserves `{sys:...}` until resolution. Construction is inert and
+the first resolution applies application override, `SIMPLE_SYS_*`, OS-standard
+variable, then platform fallback precedence. See
+`doc/04_architecture/lazy_system_path_variables.md`. The future `_path` suffix
+and contextual `Path` conversion must lower to this same representation; they
+must not first create an eagerly interpolated `text`.
+
 ---
 
 ## Pattern Matching

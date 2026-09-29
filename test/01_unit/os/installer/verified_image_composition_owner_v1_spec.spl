@@ -1,0 +1,172 @@
+# Real verified SimpleOS image composition owner coverage.
+# @codex-impl
+# @req REQ-SIMPLEOS-VERIFIED-IMAGE-OWNER-V1
+
+use std.spec.*
+use std.spec.step
+use std.io_runtime.{mkdir_p, file_write_bytes, file_read_bytes, file_exists, getpid}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.contracts.execution.simpleos_image_manifest_v1.{
+    SimpleOsImageManifestV1, simpleos_image_manifest_digest_v1
+}
+use os.installer.verified_image_composition_owner_v1.*
+
+fn fixture_root() -> text:
+    "/tmp/simple_verified_image_owner_v1_" + getpid().to_text()
+
+fn put_u16(data: [u8], offset: i64, value: i64) -> [u8]:
+    data[offset] = (value & 0xff).to_u8()
+    data[offset + 1] = ((value >> 8) & 0xff).to_u8()
+    data
+
+fn put_u32(data: [u8], offset: i64, value: i64) -> [u8]:
+    var i = 0
+    while i < 4:
+        data[offset + i] = ((value >> (i * 8)) & 0xff).to_u8()
+        i = i + 1
+    data
+
+fn put_u64(data: [u8], offset: i64, value: i64) -> [u8]:
+    var i = 0
+    while i < 8:
+        data[offset + i] = ((value >> (i * 8)) & 0xff).to_u8()
+        i = i + 1
+    data
+
+fn x86_64_elf() -> [u8]:
+    var data: [u8] = [0u8; 121]
+    data[0] = 0x7fu8
+    data[1] = 0x45u8
+    data[2] = 0x4cu8
+    data[3] = 0x46u8
+    data[4] = 2u8
+    data[5] = 1u8
+    data[6] = 1u8
+    data = put_u16(data, 16, 2)
+    data = put_u16(data, 18, 62)
+    data = put_u32(data, 20, 1)
+    data = put_u64(data, 24, 0x400000)
+    data = put_u64(data, 32, 64)
+    data = put_u16(data, 52, 64)
+    data = put_u16(data, 54, 56)
+    data = put_u16(data, 56, 1)
+    data = put_u32(data, 64, 1)
+    data = put_u32(data, 68, 5)
+    data = put_u64(data, 72, 120)
+    data = put_u64(data, 80, 0x400000)
+    data = put_u64(data, 96, 1)
+    data = put_u64(data, 104, 1)
+    data = put_u64(data, 112, 1)
+    data[120] = 0xc3u8
+    data
+
+fn x86_64_smf() -> [u8]:
+    var data = x86_64_elf()
+    val offset = data.len()
+    var i = 0
+    while i < 128:
+        data.push(0u8)
+        i = i + 1
+    data[offset] = 83u8
+    data[offset + 1] = 77u8
+    data[offset + 2] = 70u8
+    data[offset + 4] = 1u8
+    data[offset + 5] = 1u8
+    data = put_u32(data, offset + 52, offset)
+    data = put_u32(data, offset + 56, offset)
+    data[offset + 60] = 1u8
+    data[offset + 61] = 1u8
+    data[offset + 62] = 1u8
+    data
+
+fn install_inputs(root: text):
+    expect(mkdir_p(root)).to_equal(true)
+    expect(file_write_bytes(root + "/kernel.elf", x86_64_elf())).to_equal(true)
+    expect(file_write_bytes(root + "/init.smf", x86_64_smf())).to_equal(true)
+    expect(file_write_bytes(root + "/loader.smf", x86_64_smf())).to_equal(true)
+    expect(file_write_bytes(root + "/selector.smf", x86_64_smf())).to_equal(true)
+
+fn request(root: text, output: text) -> SimpleOsVerifiedImageRequestV1:
+    SimpleOsVerifiedImageRequestV1(
+        trusted_absolute_root: root, output_relative_path: output,
+        size_sectors: 256u64, profile_id: "runtime",
+        build_id: "verified-owner-build-v1",
+        source_id: "verified-owner-source-v1", sosix_version: "sosix-v1",
+        kernel_relative_path: "kernel.elf", init_relative_path: "init.smf",
+        loader_relative_path: "loader.smf",
+        selector_relative_path: "selector.smf", compiler_relative_path: "")
+
+describe "verified SimpleOS image composition owner v1":
+    it "publishes exact NVFS bytes and returns the admitted manifest only afterward":
+        val root = fixture_root()
+        install_inputs(root)
+        var manifests: [SimpleOsImageManifestV1] = []
+        step("compose through retained no-follow inputs and an exclusive output leaf")
+        val result = simpleos_verified_image_compose_v1(
+            request(root, "verified.img"), manifests)
+        expect(result.is_ok()).to_equal(true)
+        expect(manifests.len()).to_equal(1)
+        step("bind the receipt to the exact bytes materialized on the host")
+        val receipt = result.unwrap()
+        val bytes = file_read_bytes(root + "/verified.img")
+        expect(file_exists(root + "/verified.img")).to_equal(true)
+        expect(receipt.carrier_byte_length).to_equal(bytes.len() as u64)
+        expect(receipt.carrier_digest).to_equal(sha256_u8_hex(bytes))
+        expect(receipt.artifact_count).to_equal(4)
+        expect(receipt.manifest_digest).to_equal(
+            simpleos_image_manifest_digest_v1(manifests[0]).unwrap())
+        expect(manifests[0].carrier.digest).to_equal(receipt.carrier_digest)
+        expect(manifests[0].volumes[0].digest).to_equal(receipt.carrier_digest)
+
+    it "does not overwrite an existing output or accept caller-shaped unsafe paths":
+        val root = fixture_root() + "_reject"
+        install_inputs(root)
+        expect(file_write_bytes(root + "/existing.img", "keep".bytes())).to_equal(true)
+        var manifests: [SimpleOsImageManifestV1] = []
+        step("require exclusive publication instead of overwriting")
+        val existing = simpleos_verified_image_compose_v1(
+            request(root, "existing.img"), manifests)
+        expect(existing.is_err()).to_equal(true)
+        expect(file_read_bytes(root + "/existing.img")).to_equal("keep".bytes())
+        expect(manifests.len()).to_equal(0)
+        step("reject traversal and source/output aliasing before materialization")
+        expect(simpleos_verified_image_compose_v1(
+            request(root, "../escape.img"), manifests).is_err()).to_equal(true)
+        expect(simpleos_verified_image_compose_v1(
+            request(root, "kernel.elf"), manifests).is_err()).to_equal(true)
+
+    it "rejects placeholder kernel bytes before creating an output":
+        val root = fixture_root() + "_placeholder"
+        install_inputs(root)
+        expect(file_write_bytes(
+            root + "/kernel.elf", "not-an-elf".bytes())).to_equal(true)
+        var manifests: [SimpleOsImageManifestV1] = []
+        val result = simpleos_verified_image_compose_v1(
+            request(root, "placeholder.img"), manifests)
+        expect(result.is_err()).to_equal(true)
+        expect(file_exists(root + "/placeholder.img")).to_equal(false)
+        expect(manifests.len()).to_equal(0)
+
+    it "keeps compiler payloads profile-bound and output buffers one-shot":
+        val root = fixture_root() + "_profile"
+        install_inputs(root)
+        expect(file_write_bytes(root + "/simple.smf", x86_64_smf())).to_equal(true)
+        var manifests: [SimpleOsImageManifestV1] = []
+        var invalid = request(root, "invalid.img")
+        invalid.compiler_relative_path = "simple.smf"
+        expect(simpleos_verified_image_compose_v1(
+            invalid, manifests).is_err()).to_equal(true)
+        step("admit the same exact compiler bytes only in a dev image")
+        var dev = request(root, "dev.img")
+        dev.profile_id = "dev"
+        dev.compiler_relative_path = "simple.smf"
+        val built = simpleos_verified_image_compose_v1(dev, manifests)
+        expect(built.is_ok()).to_equal(true)
+        expect(manifests[0].compiler.len()).to_equal(1)
+        expect(built.unwrap().artifact_count).to_equal(5)
+        step("refuse reuse of a populated manifest output buffer")
+        expect(simpleos_verified_image_compose_v1(
+            request(root, "second.img"), manifests).is_err()).to_equal(true)
+
+fn main():
+    return ()

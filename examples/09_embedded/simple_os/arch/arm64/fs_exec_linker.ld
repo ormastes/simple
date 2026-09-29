@@ -10,9 +10,13 @@ OUTPUT_FORMAT("elf64-littleaarch64")
 ENTRY(_start)
 
 MEMORY {
-    /* The canonical fs-exec descriptor provisions 384 MiB from 0x40000000.
-     * The first 2 MiB remain reserved for QEMU's generated DTB/firmware data. */
-    RAM (rwx) : ORIGIN = 0x40200000, LENGTH = 382M
+    /* 768 MiB: the entry-closure image is ~236 MiB of text/rodata/data plus a
+     * 512 MiB C heap (see baremetal_stubs.c _heap) and the 8 MiB stack — the
+     * old 254 MiB cap overflowed the moment the heap grew (linker would place
+     * sections past the region end and ld.lld rejects the overflow). QEMU
+     * gives this guest 2 GiB, so 0x40200000+768 MiB = 0x70200000 stays well
+     * inside RAM. */
+    RAM (rwx) : ORIGIN = 0x40200000, LENGTH = 768M
 }
 
 SECTIONS {
@@ -38,6 +42,8 @@ SECTIONS {
         *(.data*)
     } > RAM
 
+    /* End of the LOADED image: crt0.S's self-relocation stub moves exactly
+     * [_start, _kernel_load_end). Everything below is NOLOAD. */
     _kernel_load_end = .;
 
     .bss (NOLOAD) : ALIGN(4K) {
@@ -60,5 +66,8 @@ SECTIONS {
     } > RAM
 
 INCLUDE "examples/09_embedded/simple_os/arch/common/linker_arm_common.ld"
-    _image_size = _kernel_end - _start;
+
+/* Total in-memory footprint (text..heap), declared in the arm64 Linux Image
+ * header in crt0.S so a real bootloader reserves the full span. */
+_image_size = _kernel_end - _start;
 }

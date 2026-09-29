@@ -1,16 +1,20 @@
 # Bug: C backend dead in interpreter — 4th split-impl file unmerged
 
+## Closed 2026-09-13 — both fixes are present in the tree
+- **measured**: `find src/compiler -name 'c_backend_translate*'` returns nothing named `_ops` — `c_backend_translate_ops.spl` was merged away as fix 1 describes, so the interpreter's 3-file impl-merge cap is no longer exceeded.
+- **measured**: `static fn named(name: text) -> HirType` exists at `src/compiler/20.hir/hir_types.spl:610` — fix 2 (the previously nonexistent `HirType.named`) is in place.
+- **inferred**: `c_backend_bulk_hint_spec` was not re-run; `bin/simple test` is broken on this Windows host. The entry's status was already "ROOT CAUSE FIXED" with only a harness residual.
+
 - **ID:** c_backend_export_wrapper_blockless_fn
 - **Found:** 2026-06-25
 - **First observed red:** 2026-05-19 (`c_backend_export_spec`, 100% failure rate)
 - **Severity:** P2 — whole C++ backend silently dead under the interpreter
 - **Category:** Compiler / Backend / C / interpreter module loading
-- Status: FIXED
-- Status re-verified 2026-08-17 by source inspection (triage shard 00).
+- **Status:** CLOSED 2026-09-13 (see Closed section above)
 
 ## Real root cause (the original "block-less" guess was wrong)
 
-`MirToC`'s `impl` is split across four files: `_CBackendTranslate/{class_core,instruction_lowering,export_wrappers}.spl`
+`MirToC`'s `impl` is split across four files: `c_backend_translate_part1/2/3.spl`
 and `c_backend_translate_ops.spl`. The interpreter merged the `impl MirToC`
 blocks from parts 1/2/3 but **silently dropped the 4th file (`_ops`)** — every
 method defined there (`get_local_type`, `get_local_type_from_body`,
@@ -32,7 +36,7 @@ bitfield layout path.
 
 ## Fix
 
-1. Merged `c_backend_translate_ops.spl` into `_CBackendTranslate/class_core.spl`
+1. Merged `c_backend_translate_ops.spl` into `c_backend_translate_part1.spl`
    (245 → 664 lines, under the 800-line limit); deleted `_ops`; removed its
    `use`/`export use` references. Now 3 impl files → all merge.
 2. Added `static fn named(name) -> HirType` to `hir_types.spl` (the API both

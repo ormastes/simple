@@ -1,4 +1,8 @@
 # V3 virtio-gpu QEMU capset smoke needs a guest probe image (2026-08-08)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Summary
 
@@ -96,3 +100,4 @@ unchanged in scope; no code defect to grep for, since the gap is a missing
 *artifact* (bootable guest image), not a defective code pattern. Status:
 BLOCKED on guest-kernel engineering, unchanged from doc. Not upgraded to
 resolved.
+

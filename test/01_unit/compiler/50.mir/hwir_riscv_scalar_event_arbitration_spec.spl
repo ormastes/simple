@@ -1,0 +1,96 @@
+use std.spec.*
+use compiler.mir.hwir.types.{CoreConfig}
+use compiler.mir.hwir.host_evaluator.{HwHostInput, prepare_strict_comb_hwir}
+use compiler.mir.hwir.riscv_scalar_event_arbitration.{strict_riscv_scalar_event_arbitration_hwir}
+
+fn arbitration_inputs(provider_valid: i64, provider_selected: i64, provider_is_lsu: i64,
+    provider_id: i64, decode_valid: i64, decode_id: i64, illegal: i64,
+    interrupt: i64, interrupt_id: i64, interrupt_held: i64,
+    between_events: i64, ready: i64) -> [HwHostInput]:
+    [HwHostInput.bits("provider_valid", provider_valid),
+        HwHostInput.bits("provider_selected", provider_selected),
+        HwHostInput.bits("provider_is_lsu", provider_is_lsu),
+        HwHostInput.bits("provider_event_id", provider_id),
+        HwHostInput.bits("decode_valid", decode_valid),
+        HwHostInput.bits("decode_event_id", decode_id),
+        HwHostInput.bits("illegal_valid", illegal),
+        HwHostInput.bits("interrupt_valid", interrupt),
+        HwHostInput.bits("interrupt_event_id", interrupt_id),
+        HwHostInput.bits("interrupt_held", interrupt_held),
+        HwHostInput.bits("between_events", between_events),
+        HwHostInput.bits("normalized_ready", ready)]
+
+describe "atomic scalar provider and trap arbitration":
+    it "monomorphizes one strict contract for RV32 and RV64":
+        val rv32 = strict_riscv_scalar_event_arbitration_hwir("event_arb_32", CoreConfig.rv32()).ok().unwrap()
+        val rv64 = strict_riscv_scalar_event_arbitration_hwir("event_arb_64", CoreConfig.rv64()).ok().unwrap()
+        expect(rv32.shape_diagnostic()).to_equal("")
+        expect(rv64.shape_diagnostic()).to_equal("")
+        expect(rv32.port_width("provider_event_id")).to_equal(64)
+        expect(rv64.port_width("normalized_event_id")).to_equal(64)
+
+    it "accepts a selected provider iff its normalized event is accepted":
+        val prepared = prepare_strict_comb_hwir(strict_riscv_scalar_event_arbitration_hwir(
+            "event_arb_accept", CoreConfig.rv64()).ok().unwrap()).unwrap()
+        val stalled = prepared.evaluate(arbitration_inputs(1, 1, 0, 9, 1, 9, 0, 0, 0, 0, 0, 0)).unwrap()
+        expect(stalled.value_of("normalized_valid").unwrap()).to_equal(1)
+        expect(stalled.value_of("normalized_accept").unwrap()).to_equal(0)
+        expect(stalled.value_of("provider_accept").unwrap()).to_equal(0)
+        val accepted = prepared.evaluate(arbitration_inputs(1, 1, 0, 9, 1, 9, 0, 0, 0, 0, 0, 1)).unwrap()
+        expect(accepted.value_of("provider_accept").unwrap()).to_equal(1)
+        expect(accepted.value_of("normalized_accept").unwrap()).to_equal(1)
+        expect(accepted.value_of("normalized_event_id").unwrap()).to_equal(9)
+
+    it "ties illegal status to the exact selected decode event":
+        val prepared = prepare_strict_comb_hwir(strict_riscv_scalar_event_arbitration_hwir(
+            "event_arb_illegal", CoreConfig.rv32()).ok().unwrap()).unwrap()
+        val matching = prepared.evaluate(arbitration_inputs(1, 1, 0, 17, 1, 17, 1, 0, 0, 0, 0, 1)).unwrap()
+        expect(matching.value_of("normalized_illegal").unwrap()).to_equal(1)
+        expect(matching.value_of("provider_accept").unwrap()).to_equal(1)
+        expect(matching.value_of("arbitration_fault").unwrap()).to_equal(0)
+        val mismatched = prepared.evaluate(arbitration_inputs(1, 1, 0, 17, 1, 18, 1, 0, 0, 0, 0, 1)).unwrap()
+        expect(mismatched.value_of("normalized_valid").unwrap()).to_equal(0)
+        expect(mismatched.value_of("provider_accept").unwrap()).to_equal(0)
+        expect(mismatched.value_of("arbitration_fault").unwrap()).to_equal(1)
+
+    it "samples interrupts only between events or from a held envelope":
+        val prepared = prepare_strict_comb_hwir(strict_riscv_scalar_event_arbitration_hwir(
+            "event_arb_interrupt", CoreConfig.rv64()).ok().unwrap()).unwrap()
+        val unsafe = prepared.evaluate(arbitration_inputs(0, 0, 0, 0, 0, 0, 0, 1, 41, 0, 0, 1)).unwrap()
+        expect(unsafe.value_of("normalized_interrupt").unwrap()).to_equal(0)
+        expect(unsafe.value_of("normalized_event_id").unwrap()).to_equal(0)
+        val between = prepared.evaluate(arbitration_inputs(0, 0, 0, 0, 0, 0, 0, 1, 41, 0, 1, 1)).unwrap()
+        expect(between.value_of("interrupt_accept").unwrap()).to_equal(1)
+        expect(between.value_of("normalized_event_id").unwrap()).to_equal(41)
+        val held = prepared.evaluate(arbitration_inputs(0, 0, 0, 0, 0, 0, 0, 1, 42, 1, 0, 1)).unwrap()
+        expect(held.value_of("interrupt_accept").unwrap()).to_equal(1)
+        expect(held.value_of("normalized_event_id").unwrap()).to_equal(42)
+        val held_during_decode = prepared.evaluate(arbitration_inputs(0, 0, 0, 0, 1, 42, 0, 1, 42, 1, 0, 1)).unwrap()
+        expect(held_during_decode.value_of("interrupt_accept").unwrap()).to_equal(0)
+        expect(held_during_decode.value_of("normalized_valid").unwrap()).to_equal(0)
+
+    it "never consumes an LSU completion through a substituted interrupt":
+        val prepared = prepare_strict_comb_hwir(strict_riscv_scalar_event_arbitration_hwir(
+            "event_arb_lsu", CoreConfig.rv64()).ok().unwrap()).unwrap()
+        val simultaneous = prepared.evaluate(arbitration_inputs(1, 1, 1, 55, 1, 55, 0, 1, 99, 1, 0, 1)).unwrap()
+        expect(simultaneous.value_of("normalized_interrupt").unwrap()).to_equal(0)
+        expect(simultaneous.value_of("normalized_event_id").unwrap()).to_equal(55)
+        expect(simultaneous.value_of("provider_accept").unwrap()).to_equal(1)
+        expect(simultaneous.value_of("lsu_accept").unwrap()).to_equal(1)
+        expect(simultaneous.value_of("interrupt_accept").unwrap()).to_equal(0)
+
+    it "fails closed for an unselected provider or false between-events claim":
+        val prepared = prepare_strict_comb_hwir(strict_riscv_scalar_event_arbitration_hwir(
+            "event_arb_fault", CoreConfig.rv32()).ok().unwrap()).unwrap()
+        val unselected = prepared.evaluate(arbitration_inputs(1, 0, 1, 2, 1, 2, 0, 1, 3, 1, 0, 1)).unwrap()
+        expect(unselected.value_of("provider_accept").unwrap()).to_equal(0)
+        expect(unselected.value_of("interrupt_accept").unwrap()).to_equal(0)
+        expect(unselected.value_of("arbitration_fault").unwrap()).to_equal(1)
+        val conflict = prepared.evaluate(arbitration_inputs(1, 1, 0, 2, 1, 2, 0, 0, 0, 0, 1, 1)).unwrap()
+        expect(conflict.value_of("arbitration_fault").unwrap()).to_equal(1)
+        expect(conflict.value_of("normalized_valid").unwrap()).to_equal(0)
+        expect(conflict.value_of("provider_accept").unwrap()).to_equal(0)
+
+    it "rejects an empty stable identity":
+        val result = strict_riscv_scalar_event_arbitration_hwir("", CoreConfig.rv32())
+        expect(result.err().unwrap()).to_contain("HWIR-E-RISCV-EVENT-ARBITRATION-ID")

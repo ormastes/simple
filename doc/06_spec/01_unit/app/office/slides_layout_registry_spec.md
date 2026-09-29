@@ -20,7 +20,7 @@ Slide layout + element-kind registry (lane L4).
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/office/slides_layout_registry_spec.spl` |
-| Updated | 2026-08-18 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 Slide layout + element-kind registry (lane L4).
@@ -44,13 +44,22 @@ from the closed SlideLayout/SlideElementKind enums (slide.spl:9-20):
 
 #### lists the five builtin layouts before any extension registers
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- lists the five builtin layouts before any extension registers
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("lists the five builtin layouts before any extension registers")
 slide_layout_registry_reset()
 val ids = slide_layout_registry_ids()
 assert_equal(ids.len(), 5)
@@ -65,13 +74,18 @@ assert_true(slide_layout_registry_has("section_header"))
 
 #### gains a sixth layout once the demo extension registers (title_diagram)
 
+- gains a sixth layout once the demo extension registers (title_diagram)
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("gains a sixth layout once the demo extension registers (title_diagram)")
 slide_layout_registry_reset()
 assert_true(slides_ext_register_builtins())
 val ids = slide_layout_registry_ids()
@@ -83,13 +97,18 @@ assert_true(slide_layout_registry_has("title_diagram"))
 
 #### creates a slide from the demo layout id with its typed placeholders
 
+- creates a slide from the demo layout id with its typed placeholders
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 30 lines folded for reproduction.
+Runnable source: 32 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creates a slide from the demo layout id with its typed placeholders")
 slide_layout_registry_reset()
 assert_true(slides_ext_register_builtins())
 
@@ -126,13 +145,18 @@ match create_slide_from_layout_id("title_diagram", "demo1"):
 
 #### creating by the title_slide id yields geometry identical to the legacy constructor
 
+- creating by the title_slide id yields geometry identical to the legacy constructor
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creating by the title_slide id yields geometry identical to the legacy constructor")
 slide_layout_registry_reset()
 val legacy = title_slide("golden1", "My Title", "My Subtitle")
 match create_slide_from_layout_id("title_slide", "golden2"):
@@ -160,13 +184,18 @@ match create_slide_from_layout_id("title_slide", "golden2"):
 
 #### creating by the title_content id yields geometry identical to the legacy constructor
 
+- creating by the title_content id yields geometry identical to the legacy constructor
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creating by the title_content id yields geometry identical to the legacy constructor")
 slide_layout_registry_reset()
 val legacy = content_slide("golden3", "T", "B")
 match create_slide_from_layout_id("title_content", "golden4"):
@@ -192,13 +221,18 @@ match create_slide_from_layout_id("title_content", "golden4"):
 
 #### creating by the blank id yields an empty slide identical to blank_slide
 
+- creating by the blank id yields an empty slide identical to blank_slide
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creating by the blank id yields an empty slide identical to blank_slide")
 slide_layout_registry_reset()
 val legacy = blank_slide("golden5")
 match create_slide_from_layout_id("blank", "golden6"):
@@ -213,13 +247,18 @@ match create_slide_from_layout_id("blank", "golden6"):
 
 #### errors cleanly on an unknown layout id
 
+- errors cleanly on an unknown layout id
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("errors cleanly on an unknown layout id")
 slide_layout_registry_reset()
 match create_slide_from_layout_id("no-such-layout", "x"):
     Ok(_):
@@ -234,13 +273,18 @@ match create_slide_from_layout_id("no-such-layout", "x"):
 
 #### lists the four builtin element kinds
 
+- lists the four builtin element kinds
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("lists the four builtin element kinds")
 val ids = element_kind_registry_ids()
 assert_equal(ids.len(), 4)
 assert_true(element_kind_registry_has("text_box"))
@@ -253,13 +297,18 @@ assert_true(element_kind_registry_has("table"))
 
 #### creates a text_box element by kind id
 
+- creates a text_box element by kind id
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creates a text_box element by kind id")
 match create_slide_element_by_kind("text_box", "el1", 10, 20, 30, 40):
     Ok(el):
         assert_equal(el.id, "el1")
@@ -280,13 +329,18 @@ match create_slide_element_by_kind("text_box", "el1", 10, 20, 30, 40):
 
 #### creates a shape element by kind id
 
+- creates a shape element by kind id
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creates a shape element by kind id")
 match create_slide_element_by_kind("shape", "el2", 1, 2, 3, 4):
     Ok(el):
         match el.kind:
@@ -303,13 +357,18 @@ match create_slide_element_by_kind("shape", "el2", 1, 2, 3, 4):
 
 #### errors cleanly on an unknown element kind id
 
+- errors cleanly on an unknown element kind id
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("errors cleanly on an unknown element kind id")
 match create_slide_element_by_kind("no-such-kind", "elx", 0, 0, 0, 0):
     Ok(_):
         assert_true(false)
@@ -331,3 +390,51 @@ match create_slide_element_by_kind("no-such-kind", "elx", 0, 0, 0, 0):
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `4930ecd9b130ec7e5178a6dfa1e1b5daa3090e09b4e49b7da54a4cda603a9f0b`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `4930ecd9b130ec7e5178a6dfa1e1b5daa3090e09b4e49b7da54a4cda603a9f0b`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `4930ecd9b130ec7e5178a6dfa1e1b5daa3090e09b4e49b7da54a4cda603a9f0b`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/01_unit/app/office/slides_layout_registry_spec.spl
+mirror: doc/06_spec/01_unit/app/office/slides_layout_registry_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/app/office/slides_layout_registry_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/app/office/slides_layout_registry_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/app/office/slides_layout_registry_spec.spl:36:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'lists the five builtin layouts before any extension registers' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/office/slides_layout_registry_spec.spl:48:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'gains a sixth layout once the demo extension registers (title_diagram)' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/office/slides_layout_registry_spec.spl:57:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates a slide from the demo layout id with its typed placeholders' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

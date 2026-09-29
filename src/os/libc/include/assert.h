@@ -6,7 +6,6 @@
  */
 
 #undef assert
-#undef static_assert
 
 #ifdef __cplusplus
 extern "C" {
@@ -26,8 +25,4 @@ void __assert_fail(const char *expr, const char *file,
 #define assert(expr) \
     ((expr) ? ((void)0) : \
      __assert_fail(#expr, __FILE__, __LINE__, __func__))
-#endif
-
-#ifndef __cplusplus
-#define static_assert _Static_assert
 #endif

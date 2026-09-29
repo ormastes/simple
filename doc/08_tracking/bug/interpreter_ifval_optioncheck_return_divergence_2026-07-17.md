@@ -1,9 +1,12 @@
 # Seed interpreter diverges from native on `if val v = x.?:` and `return`-inside-value-match-arm
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Lane:** S35 (parallel bug-fix campaign, tasks #182/#183)
 **Date:** 2026-07-17
-Status: OPEN (P2)
-Status re-verified 2026-08-17 by source inspection (triage shard 02).
+**Status:** notable finding, not itself fixed — documents a pre-existing, already-known
 class of interpreter bug that the S35 task brief unknowingly relied on as "ground truth".
 
 **Identity note:** `env -u SIMPLE_BOOTSTRAP bin/simple run <file>.spl` (the task
@@ -163,3 +166,4 @@ sh scripts/check/native-smoke-matrix.shs   # total=17 pass=17 fail=0 codegen_fal
 No native-compiler code changes were made — both #182 and #183 were already
 fixed. Only `scripts/check/native-smoke-matrix.shs` was extended (cases
 16/17) to guard the #182 fix going forward, plus this doc.
+

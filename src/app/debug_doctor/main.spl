@@ -21,25 +21,53 @@
 # capability that nothing implements.
 
 use std.debug_doctor.matrix.{
-    CapabilityRegistry, doctor_rows, render_doctor_matrix, doctor_detail_lines,
-    row_is_attachable, row_can_debug
+    RegisteredCapability, CapabilityRegistry, doctor_rows, render_doctor_matrix, doctor_detail_lines,
+    row_is_attachable, row_can_debug, doctor_capabilities_v1, render_doctor_capabilities_v1
 }
 use std.notebook.gpu_mode_probe_live.{LiveGpuBackendProbe}
 use std.notebook.gpu_config.{load_project_gpu_config}
 use std.notebook.gpu_mode_resolver.{resolve_gpu_mode_spec}
 use std.cli.cli_util (get_cli_args)
+use app.dap.host_debug_target.{HostDebugTarget}
+use std.common.debug.capability.{CapLevel}
+use std.nogc_sync_mut.io.file_ops.{file_exists}
+use app.cli.bootstrap_identity.{bootstrap_version}
+use app.debug_doctor.profile_v1.{
+    DebugDoctorProfileV1, load_debug_doctor_profile_v1, evaluate_debug_doctor_profile_v1
+}
 
-fn debug_doctor_main(program: text):
+pub fn debug_doctor_registry(program: text) -> CapabilityRegistry:
+    var registry = CapabilityRegistry.create()
+    if program != "" and file_exists(program):
+        var target = HostDebugTarget.launch(program)
+        val state = target.state()
+        if target.kind() == "host" and target.debug_level() == CapLevel.Native and state.pc_kind == "line":
+            registry.register(RegisteredCapability(
+                target: "host",
+                debug_level: "native",
+                debug_detail: "line",
+                # This live check constructs only DebugTarget. Do not infer a
+                # ProfileTarget merely because host debugging is reachable.
+                profile_level: "unavailable",
+                profile_detail: "no live ProfileTarget probe performed",
+            ))
+        target.detach()
+    registry
+
+fn _run_debug_doctor_v1(program: text, profile: DebugDoctorProfileV1?) -> i64:
     print("simple debug-doctor — debug/profile capability matrix")
     print("")
 
     # The registry starts empty; P3/P6/P8 register their targets as they land.
     # An empty registry is not an error, it is the truthful state of the tree.
-    var registry = CapabilityRegistry.create()
+    var registry = debug_doctor_registry(program)
     var probe = LiveGpuBackendProbe.create()
 
     val rows = doctor_rows(registry, probe, program)
     print(render_doctor_matrix(rows))
+    print("")
+    val reports = doctor_capabilities_v1(rows, bootstrap_version())
+    print(render_doctor_capabilities_v1(reports))
     print("")
     val details = doctor_detail_lines(rows)
     if details != "":
@@ -70,15 +98,40 @@ fn debug_doctor_main(program: text):
         print("bare `gpu` tag resolves to: {resolved.spec}  (target {resolved.target})")
     val host = resolve_gpu_mode_spec("", config, probe)
     print("no tag resolves to: host lane (spec \"{host.spec}\")")
+    if val required = profile:
+        val health = evaluate_debug_doctor_profile_v1(required, reports)
+        val status = if health.healthy: "healthy" else: "unhealthy"
+        print("")
+        print("DebugDoctorHealthV1: status={status} checked={health.checked} failures={health.failures.len()}")
+        for failure in health.failures:
+            print("  failure={failure}")
+        if not health.healthy:
+            return 3
+    0
+
+pub fn debug_doctor_main(program: text) -> i64:
+    _run_debug_doctor_v1(program, nil)
+
+pub fn debug_doctor_profile_main(profile_path: text) -> i64:
+    val loaded = load_debug_doctor_profile_v1(profile_path)
+    if not loaded.ok:
+        print("DebugDoctorHealthV1: status=invalid checked=0 failures=1")
+        print("  failure=" + loaded.error)
+        return 2
+    _run_debug_doctor_v1(loaded.profile.program, Some(loaded.profile))
 
 fn _doctor_program_arg() -> text:
     val args = get_cli_args()
     var i = 0
     while i < args.len():
         val arg = args[i]
-        if arg.ends_with(".spl") and not arg.contains("debug_doctor/main.spl"):
+        if (arg.ends_with(".spl") or arg.ends_with(".sdn")) and not arg.contains("debug_doctor/main.spl"):
             return arg
         i = i + 1
     ""
 
-debug_doctor_main(_doctor_program_arg())
+fn main() -> i64:
+    val argument = _doctor_program_arg()
+    if argument.ends_with(".sdn"):
+        return debug_doctor_profile_main(argument)
+    debug_doctor_main(argument)

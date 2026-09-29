@@ -1,4 +1,8 @@
 # Stale-spec hunt wave 5 (2026-07-11) — seam exhausted; real bugs found (report-only)
+## Obsolete 2026-09-16 — referenced path(s) gone, e.g. examples/09_embedded/simple_os/src/drivers/null_block.spl
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass. Kept for history;
+the subject is removed, superseded, or duplicated elsewhere in the ledger.
 
 Wave 5 scanned 27 failing specs after waves 1-4 de-staled 13 spec families. **Zero retargeting
 wins remain** — everything left is a real bug, an unimplemented placeholder, or out-of-scope
@@ -36,3 +40,4 @@ infrastructure. The stale-assertion seam from the self-hosting transition is clo
 Previously filed (waves 2-4, unchanged): multi_mode_test_runner (removed API),
 net_connect_completion (`expect(x.?)` compares receiver not bool), http_baremetal (stale doc
 assertion in riscv64 FPGA plan).
+

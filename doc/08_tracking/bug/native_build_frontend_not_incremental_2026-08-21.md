@@ -1,4 +1,8 @@
 # native-build front end is neither incremental nor parallel (2026-08-21)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Symptom
 A self-hosted `native-build --entry-closure` stage build spends the bulk of its
@@ -535,4 +539,5 @@ cache should come FIRST, ahead of moving the object-cache lookup earlier:
    with dependency-aware invalidation, per the prerequisite above. It is the
    riskiest of the three and, now that parse can be made ~25x cheaper, no longer
    the biggest win.
+
 

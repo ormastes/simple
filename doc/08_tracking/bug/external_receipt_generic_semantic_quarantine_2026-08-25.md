@@ -1,4 +1,8 @@
 # Generic external receipt semantic quarantine
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -63,3 +67,4 @@ fixture policy, missing/duplicate mapping role, signed-path mismatch, unsafe
 inner and outer paths, aliasing, every false semantic field, generic-label-only
 admission, and legacy v1 acceptance. Remove this row from quarantine only after
 the exact valid three-architecture bundle passes that suite.
+

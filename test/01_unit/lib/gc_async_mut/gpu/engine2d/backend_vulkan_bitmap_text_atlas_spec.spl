@@ -1,0 +1,251 @@
+"""
+## Purpose and audience
+For the Engine2D Vulkan maintainer who needs to know whether `draw_text` and
+`draw_text_bg` actually reach the GPU font-atlas pipeline, and — when they
+cannot — that the backend says so honestly instead of implying a GPU text path
+it never took.
+## Operator workflow
+Run `src/compiler_rust/target/bootstrap/simple run
+test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_vulkan_bitmap_text_atlas_spec.spl`
+(or `bin/simple test` on a host with a deployed full CLI). No GPU is required.
+## Compatibility and limitations
+Every scenario here is device-free: it checks that the atlas lane is SELECTED
+and that the batch it forms is pixel-equivalent to the CPU raster it replaces,
+by evaluating the same subrect helper the SPIR-V kernel implements. It does not
+and cannot prove what a real device draws — that needs a host with a Vulkan
+device, and the `promoted` evidence chain in `composite_font_batch` covers it.
+## Verification guidance and troubleshooting
+A failure in the pixel-equivalence scenario names how many composited pixels
+differ from the CPU reference; re-derive the offending quad from
+`vulkan_bitmap_text_quads` and check its `dst_x`/`atlas_x` against
+`glyph_advance(scale)`. A failure in the gate scenario names the reason string
+the gate returned, which is also what the backend records in
+`last_text_fallback_reason`.
+"""
+# Lifecycle: doc/01_research/domain/shared_multilingual_gpu_fonts.md ;
+# doc/03_plan/ui/engine2d_vulkan_showcase_parity_plan.md ;
+# doc/04_architecture/shared_multilingual_gpu_fonts.md ;
+# doc/05_design/ui/rendering/cpu_gpu_dual_algorithm_design.md
+# @manual_section: vulkan_bitmap_text_atlas
+# @cover src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_font.spl 40%
+# @cover src/lib/gc_async_mut/gpu/engine2d/backend_vulkan.spl 20%
+# @tag: unit, gpu, engine2d, vulkan, text, font
+
+use std.spec.*
+use std.gpu.engine2d.backend_vulkan.{VulkanBackend}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan_font.{
+    VULKAN_BITMAP_FONT_FIRST_CODE, VULKAN_BITMAP_FONT_LAST_CODE,
+    VULKAN_BITMAP_FONT_CELL_COUNT, VULKAN_TEXT_PATH_CPU_RASTER,
+    vulkan_bitmap_font_atlas_width, vulkan_bitmap_font_atlas_height,
+    vulkan_bitmap_font_atlas_pixels, vulkan_bitmap_font_identity,
+    vulkan_bitmap_text_atlas_eligible, vulkan_bitmap_text_quads,
+    vulkan_bitmap_text_atlas_block_reason, vulkan_font_batch_composited,
+    vulkan_text_atlas_fallback_safe
+}
+use std.gc_async_mut.gpu.engine2d.engine.{engine2d_vulkan_font_batch_admits}
+use std.common.gpu.font_atlas_composite.{font_atlas_subrect_pixels}
+use std.gpu.engine2d.helpers_text.{text_blit_buffer, text_metrics}
+
+val READY = "ready"
+val OPAQUE_BLUE: u32 = 0xFF3366CCu32
+
+fn cpu_subrect(pixels: [u32], buf_width: i32, dst_x: i32, dst_y: i32,
+               w: i32, h: i32) -> [u32]:
+    """Slice the CPU-rasterised text buffer the way a quad addresses it."""
+    var out: [u32] = []
+    var row: i64 = 0
+    while row < h.to_i64():
+        var col: i64 = 0
+        while col < w.to_i64():
+            val index = (dst_y.to_i64() + row) * buf_width.to_i64() + dst_x.to_i64() + col
+            if index < 0 or index >= pixels.len():
+                var bad: [u32] = []
+                return bad
+            out.push(pixels[index])
+            col = col + 1
+        row = row + 1
+    out
+
+fn atlas_vs_cpu_mismatches(sample: text, color: u32, font_size: i32) -> i64:
+    """Composited pixels that differ from the CPU raster; -1 if shapes disagree."""
+    val metrics = text_metrics(sample, font_size)
+    val quads = vulkan_bitmap_text_quads(
+        sample, color, metrics.scale, metrics.advance, metrics.glyph_height_px)
+    val atlas_w = vulkan_bitmap_font_atlas_width(metrics.scale)
+    val atlas_h = vulkan_bitmap_font_atlas_height(metrics.scale, metrics.glyph_height_px)
+    val atlas = vulkan_bitmap_font_atlas_pixels(metrics.scale, metrics.glyph_height_px)
+    val cpu = text_blit_buffer(sample, color, 0x00000000u32, font_size)
+    if quads.len() == 0 or cpu.is_empty():
+        return -1
+    var mismatches: i64 = 0
+    var qi: i64 = 0
+    while qi < quads.len():
+        val q = quads[qi]
+        val composited = font_atlas_subrect_pixels(
+            atlas, atlas_w, atlas_h, q.atlas_x, q.atlas_y, q.width, q.height, q.color)
+        val reference = cpu_subrect(cpu.pixels, cpu.width, q.dst_x, q.dst_y, q.width, q.height)
+        if composited.len() == 0 or composited.len() != reference.len():
+            return -1
+        var i: i64 = 0
+        while i < composited.len():
+            if composited[i] != reference[i]:
+                mismatches = mismatches + 1
+            i = i + 1
+        qi = qi + 1
+    mismatches
+
+fn atlas_painted_pixels(sample: text, color: u32, font_size: i32) -> i64:
+    """Non-transparent pixels the composited quads would write."""
+    val metrics = text_metrics(sample, font_size)
+    val quads = vulkan_bitmap_text_quads(
+        sample, color, metrics.scale, metrics.advance, metrics.glyph_height_px)
+    val atlas_w = vulkan_bitmap_font_atlas_width(metrics.scale)
+    val atlas_h = vulkan_bitmap_font_atlas_height(metrics.scale, metrics.glyph_height_px)
+    val atlas = vulkan_bitmap_font_atlas_pixels(metrics.scale, metrics.glyph_height_px)
+    var painted: i64 = 0
+    var qi: i64 = 0
+    while qi < quads.len():
+        val q = quads[qi]
+        val composited = font_atlas_subrect_pixels(
+            atlas, atlas_w, atlas_h, q.atlas_x, q.atlas_y, q.width, q.height, q.color)
+        var i: i64 = 0
+        while i < composited.len():
+            if ((composited[i] >> 24) & 0xFFu32) > 0u32:
+                painted = painted + 1
+            i = i + 1
+        qi = qi + 1
+    painted
+
+fn ready_block_reason(color: u32, sample: text, clip_enabled: bool, mask_bytes: i64) -> text:
+    """Gate verdict for a live, pipeline-ready surface with the given draw state."""
+    val metrics = text_metrics(sample, 7)
+    vulkan_bitmap_text_atlas_block_reason(
+        true, clip_enabled, mask_bytes, READY, 11, 12, color, sample.len(),
+        vulkan_bitmap_text_atlas_eligible(sample), metrics.scale, metrics.glyph_height_px)
+
+describe "Engine2D Vulkan bitmap text reaches the font-atlas pipeline":
+
+    it "composites the same pixels the CPU rasteriser would have written":
+        # @req REQ-VK-TEXT-ATLAS-001
+        # @capture(bit_table): per-quad composited subrect vs the CPU text buffer
+        step("Build the atlas batch for a mixed-case string and composite every quad")
+        val mismatches = atlas_vs_cpu_mismatches("Vulkan Text 42", OPAQUE_BLUE, 14)
+
+        step("Confirm the composited result is byte-identical to the CPU raster")
+        expect(mismatches).to_equal(0)  # oracle: 0 = the atlas lane draws exactly what the CPU lane drew
+
+        step("Confirm the comparison was not vacuous — real glyph pixels were painted")
+        val painted = atlas_painted_pixels("Vulkan Text 42", OPAQUE_BLUE, 14)
+        expect(painted).to_be_greater_than(100)  # oracle: 14 glyphs of a 5x7 face at scale 2 paint far more than 100 opaque pixels
+
+    it "tiles the glyph cells with no gap and no overlap":
+        # @req REQ-VK-TEXT-ATLAS-002
+        # @capture(bit_table): quad geometry against the text metrics
+        step("Derive the quad list and the metrics the CPU rasteriser uses")
+        val metrics = text_metrics("ABC", 21)
+        val quads = vulkan_bitmap_text_quads(
+            "ABC", OPAQUE_BLUE, metrics.scale, metrics.advance, metrics.glyph_height_px)
+
+        step("Check one quad per character, each one advance apart and one cell wide")
+        expect(quads.len()).to_equal(3)  # oracle: "ABC" is three characters, so three quads
+        expect(quads[0].dst_x).to_equal(0)  # oracle: the first glyph starts at the buffer origin
+        expect(quads[1].dst_x).to_equal(metrics.advance)
+        expect(quads[2].dst_x).to_equal(metrics.advance * 2)
+        expect(quads[0].width).to_equal(metrics.advance)
+        expect(quads[0].height).to_equal(metrics.height)
+
+        step("Check the atlas cells are addressed by codepoint offset")
+        expect(quads[0].atlas_x).to_equal((quads[0].codepoint.to_i64() - VULKAN_BITMAP_FONT_FIRST_CODE) as i32 * metrics.advance)
+
+    it "keeps one atlas per size so repeated draws reuse the uploaded pixels":
+        # @req REQ-VK-TEXT-ATLAS-003
+        # @capture(statistics): atlas identity and dimensions per integer scale
+        step("Derive the atlas identity for two strings drawn at the same size")
+        val small = text_metrics("one", 7)
+        val large = text_metrics("two", 21)
+        val small_identity = vulkan_bitmap_font_identity(small.scale, small.glyph_height_px)
+        val large_identity = vulkan_bitmap_font_identity(large.scale, large.glyph_height_px)
+
+        step("Confirm the identity is keyed by scale, not by the string drawn")
+        expect(small.scale).to_equal(1)  # oracle: font_size 7 over a 7px face is integer scale 1
+        expect(large.scale).to_equal(3)  # oracle: font_size 21 over a 7px face is integer scale 3
+        expect(small_identity).to_end_with("-scale1")
+        expect(large_identity).to_end_with("-scale3")
+
+        step("Confirm the atlas holds every printable-ASCII cell at that scale")
+        val width = vulkan_bitmap_font_atlas_width(small.scale)
+        val cells = VULKAN_BITMAP_FONT_LAST_CODE - VULKAN_BITMAP_FONT_FIRST_CODE + 1
+        expect(cells).to_equal(VULKAN_BITMAP_FONT_CELL_COUNT)
+        expect(width.to_i64()).to_equal(cells * small.advance.to_i64())
+        expect(vulkan_bitmap_font_atlas_pixels(small.scale, small.glyph_height_px).len()).to_equal(
+            width.to_i64() * vulkan_bitmap_font_atlas_height(small.scale, small.glyph_height_px).to_i64())
+
+    it "rejects every draw state the font composite cannot reproduce":
+        # @req REQ-VK-TEXT-ATLAS-004
+        # @capture(protocol_json): gate reason per rejected draw state
+        step("Admit the ordinary opaque, unclipped, printable-ASCII draw")
+        expect(ready_block_reason(OPAQUE_BLUE, "ok", false, 0)).to_equal("")
+
+        step("Reject the states whose pixels would diverge from the CPU raster")
+        expect(ready_block_reason(0x80336699u32, "ok", false, 0)).to_equal("non-opaque-text-color")
+        expect(ready_block_reason(OPAQUE_BLUE, "ok", true, 0)).to_equal("clip-unsupported-by-font-composite")
+        expect(ready_block_reason(OPAQUE_BLUE, "ok", false, 64)).to_equal("mask-unsupported-by-font-composite")
+        expect(ready_block_reason(OPAQUE_BLUE, "café", false, 0)).to_equal("glyph-outside-atlas-charset")
+        expect(ready_block_reason(OPAQUE_BLUE, "", false, 0)).to_equal("glyph-outside-atlas-charset")
+
+        step("Reject a surface whose font pipeline is not installed")
+        val metrics = text_metrics("ok", 7)
+        expect(vulkan_bitmap_text_atlas_block_reason(
+            true, false, 0, "unavailable", 0, 0, OPAQUE_BLUE, 2, true,
+            metrics.scale, metrics.glyph_height_px)).to_equal("font-pipeline-not-ready")
+
+        step("Produce no quads at all for a rejected string, never a partial batch")
+        expect(vulkan_bitmap_text_quads("café", OPAQUE_BLUE, 1, 5, 7).len()).to_equal(0)  # oracle: 0 = the whole string is refused, so nothing half-composites
+
+    it "never redraws on the CPU after a composite that may already have run":
+        # @req REQ-VK-TEXT-ATLAS-005
+        # @capture(protocol_json): admission and fallback verdict per composite status
+        step("Admit only a composite that recorded a dispatch covering every quad")
+        expect(vulkan_font_batch_composited("executed", 3, 1, 3)).to_equal(true)
+        expect(vulkan_font_batch_composited("recorded", 3, 1, 3)).to_equal(true)
+        expect(vulkan_font_batch_composited("executed", 2, 1, 3)).to_equal(false)
+        expect(vulkan_font_batch_composited("executed", 3, 0, 3)).to_equal(false)
+        expect(vulkan_font_batch_composited("failed", 3, 1, 3)).to_equal(false)
+
+        step("Pin the backend predicate against its engine twin over the same table")
+        val statuses = ["executed", "recorded", "failed", "unavailable", "rejected",
+                        "promoted", "executed-unpromoted"]
+        var disagreements: i64 = 0
+        for status in statuses:
+            if vulkan_font_batch_composited(status, 3, 1, 3) != engine2d_vulkan_font_batch_admits(status, 3, 1, 3):
+                disagreements = disagreements + 1
+            if vulkan_font_batch_composited(status, 1, 1, 3) != engine2d_vulkan_font_batch_admits(status, 1, 1, 3):
+                disagreements = disagreements + 1
+            if vulkan_font_batch_composited(status, 3, 0, 3) != engine2d_vulkan_font_batch_admits(status, 3, 0, 3):
+                disagreements = disagreements + 1
+        expect(disagreements).to_equal(0)  # oracle: 0 = the duplicated predicate still matches engine.spl:92 on all 21 cases
+
+        step("Allow a CPU redraw only for statuses raised before anything was recorded")
+        expect(vulkan_text_atlas_fallback_safe("unavailable")).to_equal(true)
+        expect(vulkan_text_atlas_fallback_safe("rejected")).to_equal(true)
+        expect(vulkan_text_atlas_fallback_safe("failed")).to_equal(false)
+        expect(vulkan_text_atlas_fallback_safe("executed")).to_equal(false)
+
+    it "records the CPU lane honestly when no Vulkan surface exists":
+        # @req REQ-VK-TEXT-ATLAS-006
+        # @capture(protocol_json): text-lane provenance recorded by a device-free backend
+        step("Draw foreground text on a backend that was never initialized")
+        var backend = VulkanBackend.create()
+        backend.draw_text(0, 0, "A", OPAQUE_BLUE, 7)
+
+        step("Confirm the backend claims the CPU lane, not the atlas lane")
+        expect(backend.last_text_path).to_equal(VULKAN_TEXT_PATH_CPU_RASTER)
+        expect(backend.last_text_fallback_reason).to_equal("backend-uninitialized")
+        expect(backend.dirty).to_equal(true)
+
+        step("Draw background text and confirm the same honest provenance")
+        backend.draw_text_bg(0, 0, "A", OPAQUE_BLUE, 0xFF000000u32, 7)
+        expect(backend.last_text_path).to_equal(VULKAN_TEXT_PATH_CPU_RASTER)
+        expect(backend.last_text_fallback_reason).to_equal("backend-uninitialized")
+
+        backend.shutdown()

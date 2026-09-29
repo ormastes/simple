@@ -1,0 +1,105 @@
+# Publication lifecycle decisions: refusal, reset, stale, cross-owner, replay.
+# Decision map (11):
+# 1 active refusal; 2 quiescing refusal; 3 callback count; 4 continuation
+# count; 5 fence count; 6 retirement; 7 reset; 8 fresh lease id; 9 stale
+# replay; 10 cross-owner unchanged; 11 double publication refusal.
+use std.spec.{describe, it, expect}
+use std.common.aspect_dynload_lifecycle_v1
+
+fn lifecycle() -> AspectDynloadLifecycleHandleV1:
+    aspect_dynload_lifecycle_create_v1("trace/Publication", 7, 8, false).unwrap()
+
+describe "aspect dynload publication lifecycle":
+    it "refuses publication before the old generation is retired":
+        val owner = lifecycle()
+        expect(aspect_dynload_publish_next_generation_v1(owner).is_err()).to_equal(true)
+        expect(aspect_dynload_lifecycle_snapshot_v1(owner).unwrap().generation).to_equal(7)
+
+    it "refuses publication while quiescing work is still live":
+        val owner = lifecycle()
+        val lease = aspect_dynload_callback_begin_v1(owner).unwrap()
+        expect(aspect_dynload_unload_v1(owner).unwrap().state).to_equal(ASPECT_DYNLOAD_QUIESCING_V1)
+        expect(aspect_dynload_publish_next_generation_v1(owner).is_err()).to_equal(true)
+        expect(aspect_dynload_lifecycle_snapshot_v1(owner).unwrap().callback_count).to_equal(1)
+        expect(aspect_dynload_lease_complete_v1(owner, lease).unwrap().state).to_equal(ASPECT_DYNLOAD_RETIRED_V1)
+
+    it "tracks callback continuation and fence liveness independently":
+        val owner = aspect_dynload_lifecycle_create_v1("trace/PublicationFence", 7, 8, true).unwrap()
+        val callback = aspect_dynload_callback_begin_v1(owner).unwrap()
+        val continuation = aspect_dynload_around_suspend_v1(owner, callback).unwrap()
+        val fence = aspect_dynload_device_fence_begin_v1(owner, continuation).unwrap()
+        val held = aspect_dynload_lifecycle_snapshot_v1(owner).unwrap()
+        expect(held.callback_count).to_equal(0)
+        expect(held.around_continuation_count).to_equal(1)
+        expect(held.device_fence_count).to_equal(1)
+        expect(held.outstanding_count).to_equal(2)
+        expect(aspect_dynload_unload_v1(owner).unwrap().state).to_equal(ASPECT_DYNLOAD_QUIESCING_V1)
+        expect(aspect_dynload_lease_complete_v1(owner, continuation).unwrap().state).to_equal(ASPECT_DYNLOAD_QUIESCING_V1)
+        expect(aspect_dynload_lease_complete_v1(owner, fence).unwrap().state).to_equal(ASPECT_DYNLOAD_RETIRED_V1)
+
+    it "resets lease counters and admits one fresh generation after retirement":
+        val owner = lifecycle()
+        val lease = aspect_dynload_callback_begin_v1(owner).unwrap()
+        aspect_dynload_unload_v1(owner).unwrap()
+        expect(aspect_dynload_lease_complete_v1(owner, lease).unwrap().state).to_equal(ASPECT_DYNLOAD_RETIRED_V1)
+        expect(aspect_dynload_publish_next_generation_v1(owner).unwrap()).to_equal(8)
+        val snapshot = aspect_dynload_lifecycle_snapshot_v1(owner).unwrap()
+        expect(snapshot.state).to_equal(ASPECT_DYNLOAD_ACTIVE_V1)
+        expect(snapshot.outstanding_count).to_equal(0)
+        expect(snapshot.callback_count).to_equal(0)
+
+    it "rejects a stale lease after publication of the next generation":
+        val owner = lifecycle()
+        val old = aspect_dynload_callback_begin_v1(owner).unwrap()
+        aspect_dynload_unload_v1(owner).unwrap()
+        aspect_dynload_lease_complete_v1(owner, old).unwrap()
+        aspect_dynload_publish_next_generation_v1(owner).unwrap()
+        expect(aspect_dynload_lease_complete_v1(owner, old).is_err()).to_equal(true)
+        expect(aspect_dynload_lifecycle_snapshot_v1(owner).unwrap().generation).to_equal(8)
+
+    it "issues a fresh lease with reset id after publishing the next generation":
+        val owner = lifecycle()
+        val old = aspect_dynload_callback_begin_v1(owner).unwrap()
+        aspect_dynload_unload_v1(owner).unwrap()
+        aspect_dynload_lease_complete_v1(owner, old).unwrap()
+        expect(aspect_dynload_publish_next_generation_v1(owner).unwrap()).to_equal(8)
+        val fresh = aspect_dynload_callback_begin_v1(owner).unwrap()
+        expect(fresh.generation).to_equal(8)
+        expect(fresh.lease_id).to_equal(1)
+        expect(fresh.kind).to_equal(old.kind)
+        expect(aspect_dynload_lease_complete_v1(owner, fresh).is_ok()).to_equal(true)
+
+    it "rejects an old same-owner lease replay against the fresh generation":
+        val owner = lifecycle()
+        val old = aspect_dynload_callback_begin_v1(owner).unwrap()
+        aspect_dynload_unload_v1(owner).unwrap()
+        aspect_dynload_lease_complete_v1(owner, old).unwrap()
+        aspect_dynload_publish_next_generation_v1(owner).unwrap()
+        val fresh = aspect_dynload_callback_begin_v1(owner).unwrap()
+        expect(old.lifecycle_id).to_equal(fresh.lifecycle_id)
+        expect(old.facet_key).to_equal(fresh.facet_key)
+        expect(old.kind).to_equal(fresh.kind)
+        expect(old.lease_id).to_equal(fresh.lease_id)
+        expect(old.generation).to_equal(7)
+        expect(aspect_dynload_lease_complete_v1(owner, old).is_err()).to_equal(true)
+        expect(aspect_dynload_lifecycle_snapshot_v1(owner).unwrap().callback_count).to_equal(1)
+        expect(aspect_dynload_lease_complete_v1(owner, fresh).is_ok()).to_equal(true)
+
+    it "rejects a lease presented through a different owner":
+        val first = lifecycle()
+        val second = lifecycle()
+        val lease = aspect_dynload_callback_begin_v1(first).unwrap()
+        expect(aspect_dynload_lease_complete_v1(second, lease).is_err()).to_equal(true)
+        expect(aspect_dynload_lifecycle_snapshot_v1(first).unwrap().callback_count).to_equal(1)
+        expect(aspect_dynload_lease_complete_v1(first, lease).is_ok()).to_equal(true)
+
+    it "rejects double publication without changing the active generation":
+        val owner = lifecycle()
+        val lease = aspect_dynload_callback_begin_v1(owner).unwrap()
+        aspect_dynload_unload_v1(owner).unwrap()
+        aspect_dynload_lease_complete_v1(owner, lease).unwrap()
+        expect(aspect_dynload_publish_next_generation_v1(owner).unwrap()).to_equal(8)
+        expect(aspect_dynload_publish_next_generation_v1(owner).is_err()).to_equal(true)
+        val snapshot = aspect_dynload_lifecycle_snapshot_v1(owner).unwrap()
+        expect(snapshot.generation).to_equal(8)
+        expect(snapshot.state).to_equal(ASPECT_DYNLOAD_ACTIVE_V1)

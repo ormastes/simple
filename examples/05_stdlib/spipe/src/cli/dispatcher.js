@@ -1,6 +1,7 @@
 import { printUsage } from "./usage.js";
 import { releaseCapabilities, releaseContractHash, releaseSchemas } from "../release/contract.js";
 import { runReleaseCommand } from "./release_commands.js";
+import { runReverseReferenceCommand } from "./reverse_reference_commands.js";
 
 export async function runCli(argv = process.argv.slice(2)) {
   const [command, ...args] = argv;
@@ -27,6 +28,8 @@ export async function runCli(argv = process.argv.slice(2)) {
     return;
   }
   try {
+    const reverseReferenceResult = runReverseReferenceCommand(command, args);
+    if (reverseReferenceResult.handled) return reverseReferenceResult;
     const releaseResult = runReleaseCommand(command, args);
     if (releaseResult.handled) return releaseResult;
   } catch (error) {

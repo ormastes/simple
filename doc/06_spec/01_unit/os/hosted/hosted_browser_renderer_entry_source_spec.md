@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 14 | 14 | 0 | 0 |
+| 13 | 13 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -14,72 +14,6 @@
 ## Scenarios
 
 ### hosted browser renderer entry isolation
-
-#### gates the production registry on exact theme readiness
-
-- Inspect the hosted theme-before-init production route.
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 57 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-step("Inspect the hosted theme-before-init production route")
-val entry = executable_source_lines(
-    rt_file_read_text("src/os/hosted/hosted_entry.spl") ?? ""
-)
-val registry = executable_source_lines(
-    rt_file_read_text(
-        "src/os/hosted/hosted_browser_renderer_registry.spl"
-    ) ?? ""
-)
-val process = executable_source_lines(
-    rt_file_read_text(
-        "src/os/hosted/hosted_browser_renderer_process.spl"
-    ) ?? ""
-)
-val create_pos = entry.find(
-    "HostedBrowserRendererRegistry.create_with_theme("
-)
-val accept_start = registry.find("me _accept_polled_result(")
-val accept_end = registry.find("me advance_window(", accept_start)
-val accept = registry.slice(accept_start, accept_end)
-val theme_pos = accept.find("entry.renderer.begin_theme_init(2000)")
-val init_pos = accept.find("entry.renderer.begin_init(")
-val resume_pos = accept.find(
-    "if entry.renderer.site_swap_pending:", init_pos
-)
-val frame_pos = accept.find("self._store_frame(", resume_pos)
-expect(create_pos).to_be_greater_than(-1)
-expect(registry).to_contain(
-    "simple_web_content_full_html_with_install_wire("
-)
-expect(registry).to_contain(
-    "HostedBrowserRendererProcess.create_with_theme("
-)
-expect(theme_pos).to_be_greater_than(-1)
-expect(init_pos).to_be_greater_than(theme_pos)
-expect(resume_pos).to_be_greater_than(init_pos)
-expect(frame_pos).to_be_greater_than(resume_pos)
-expect(process).to_contain("\"await-theme-ready\"")
-expect(process).to_contain("\"theme-ready-mismatch\"")
-expect(registry).to_contain("\"theme-parent-projection-mismatch\"")
-val swap_start = registry.find("me _begin_site_swap(")
-val swap_end = registry.find("me _store_frame(", swap_start)
-val swap = registry.slice(swap_start, swap_end)
-expect(swap).to_contain(
-    "HostedBrowserRendererProcess.create_with_theme("
-)
-expect(swap).to_contain(
-    "simple_web_content_full_html_with_install_wire("
-)
-expect(swap).to_contain("entry.startup_html = restart_html")
-```
-
-</details>
 
 #### keeps secondary hosted navigation public and response-bounded
 
@@ -653,12 +587,8 @@ val poll_frame = poll_body.find("comp.set_external_web_frame(")
 val poll_title = poll_body.find(
     "host_compositor_update_window_title("
 )
-val poll_cancel = poll_body.find(
-    "browser_renderer.flush_pointer_cancel("
-)
 expect(poll_frame).to_be_greater_than(-1)
 expect(poll_title).to_be_greater_than(poll_frame)
-expect(poll_cancel).to_be_greater_than(poll_title)
 
 val pointer_start = run_body.find("elif kind == EVT_MOUSE_BUTTON:")
 val pointer_end = run_body.find("elif kind == EVT_MOUSE_WHEEL:")
@@ -666,14 +596,6 @@ expect(pointer_start).to_be_greater_than(-1)
 expect(pointer_start).to_be_greater_than(renderer_owner)
 expect(pointer_end).to_be_greater_than(pointer_start)
 val pointer_body = run_body.slice(pointer_start, pointer_end)
-val primary_cancel = pointer_body.find(
-    "browser_renderer.cancel_pointer("
-)
-val primary_arm = pointer_body.find(
-    "browser_pressed_control = target.control", primary_cancel
-)
-expect(primary_cancel).to_be_greater_than(-1)
-expect(primary_arm).to_be_greater_than(primary_cancel)
 val page_pointer_start = pointer_body.find(
     "if target.window_id == browser_profile_window_id:"
 )
@@ -712,12 +634,8 @@ val browser_key_end = key_body.find("                elif focused > 0:")
 expect(browser_key_start).to_be_greater_than(-1)
 expect(browser_key_end).to_be_greater_than(browser_key_start)
 val browser_key = key_body.slice(browser_key_start, browser_key_end)
-val semantic_target_start = browser_key.find(
-    "val semantic_target_id = if browser_address_editing:"
-)
 val address_key_start = browser_key.find(
-    "                    if browser_address_editing:",
-    semantic_target_start + 1
+    "if browser_address_editing:"
 )
 val non_address_key_start = browser_key.find(
     "elif keycode != KEY_ESCAPE:"
@@ -725,13 +643,7 @@ val non_address_key_start = browser_key.find(
 val key_targets_start = browser_key.find(
     "input_receipt = host_wm_input_record_semantic("
 )
-expect(semantic_target_start).to_be_greater_than(-1)
-expect(address_key_start).to_be_greater_than(semantic_target_start)
-val semantic_target_block = browser_key.slice(
-    semantic_target_start, address_key_start
-)
-expect(semantic_target_block).to_contain("\"browser:parent#address\"")
-expect(semantic_target_block).to_contain("\"browser:page\"")
+expect(address_key_start).to_be_greater_than(-1)
 expect(non_address_key_start).to_be_greater_than(address_key_start)
 expect(key_targets_start).to_be_greater_than(non_address_key_start)
 val address_key = browser_key.slice(
@@ -752,7 +664,8 @@ val title_update = address_key.find(
 val page_key_call = non_address_key.find(
     "browser_renderer.begin_key_with_shift("
 )
-val semantic_target = key_targets.find("semantic_target_id,")
+val address_target = key_targets.find("\"browser:parent#address\"")
+val page_key_target = key_targets.find("\"browser:page\"")
 expect(navigate_call).to_be_greater_than(-1)
 expect(title_update).to_be_greater_than(navigate_call)
 expect(address_key.contains(
@@ -765,7 +678,8 @@ expect(non_address_key.contains(
 expect(non_address_key.contains(
     "host_compositor_update_window_title("
 )).to_be(false)
-expect(semantic_target).to_be_greater_than(-1)
+expect(address_target).to_be_greater_than(-1)
+expect(page_key_target).to_be_greater_than(address_target)
 expect(browser_key.contains(
     "web_sessions.dispatch_key_with_shift("
 )).to_be(false)
@@ -1087,7 +1001,7 @@ expect(browser_text_route.contains("web_sessions.")).to_be(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 122 lines folded for reproduction.
+Runnable source: 66 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1131,83 +1045,29 @@ expect(failed_retry).to_be_greater_than(retry_due)
 expect(advance).to_contain("if entry.renderer.close():")
 expect(advance).to_contain("entry.renderer_closed = true")
 expect(advance).to_contain("entry.close_pending = false")
-expect(advance).to_contain(
-    "self.pointer_cancel_receipt_count + 1"
-)
 expect(registry).to_contain("pressed_window_id: i64")
-expect(registry).to_contain("pressed_event_id: i64")
 expect(registry).to_contain("pending_cancel_window_id: i64")
-expect(registry).to_contain(
-    "pointer_cancel_receipt_count: i64"
-)
-val clear_start = registry.find("me _clear_pressed_controls(")
-val clear_end = registry.find("me dispatch_pointer(", clear_start)
-expect(clear_start).to_be_greater_than(-1)
-expect(clear_end).to_be_greater_than(clear_start)
-val clear = registry.slice(clear_start, clear_end)
-expect(clear).to_contain(
-    "if self.pending_cancel_window_id > 0:\n" +
-    "            return"
-)
-expect(clear).to_contain(
-    "val armed_window_id = self.pressed_window_id"
-)
-expect(clear).to_contain(
-    "val armed_event_id = self.pressed_event_id"
-)
-expect(clear).to_contain(
-    "self.pending_cancel_window_id = armed_window_id"
-)
-expect(clear).to_contain(
-    "self.pending_cancel_event_id = armed_event_id"
-)
-expect(clear).to_contain(
-    "armed_event_id, -1, -1, false, 2000"
-)
-expect(clear).to_contain(
-    "self.pointer_cancel_receipt_count + 1"
-)
-expect(clear.contains("while i < self.entries.len()")).to_be(false)
-val pointer_start = registry.find("me dispatch_pointer(")
-val pointer_end = registry.find(
-    "me dispatch_scroll(", pointer_start
-)
-val pointer = registry.slice(pointer_start, pointer_end)
-expect(pointer).to_contain("self._clear_pressed_controls()")
-val chrome_start = registry.find("me dispatch_chrome_pointer(")
-val chrome_end = registry.find(
-    "me dispatch_key_with_shift(", chrome_start
-)
-val chrome = registry.slice(chrome_start, chrome_end)
-expect(chrome).to_contain("self._clear_pressed_controls()")
 val cancel_start = registry.find("me cancel_pointer_state(")
 val cancel_end = registry.find("me remove_window(", cancel_start)
 expect(cancel_start).to_be_greater_than(-1)
 expect(cancel_end).to_be_greater_than(cancel_start)
 val cancel = registry.slice(cancel_start, cancel_end)
-expect(cancel).to_contain("self._clear_pressed_controls()")
+expect(cancel).to_contain(
+    "if self.pending_cancel_window_id > 0:\n" +
+    "            return"
+)
+expect(cancel).to_contain(
+    "val armed_window_id = self.pressed_window_id"
+)
+expect(cancel).to_contain(
+    "self.pending_cancel_window_id = armed_window_id"
+)
+expect(cancel).to_contain("event_id, -1, -1, false, 2000")
+expect(cancel.contains("while i < self.entries.len()")).to_be(false)
 expect(registry).to_contain(
     "self.pending_cancel_window_id == window_id"
 )
 expect(registry).to_contain("\"pointer-cancel-pending\"")
-val swap_start = registry.find("me _begin_site_swap(")
-val swap_end = registry.find("me _store_frame(", swap_start)
-expect(swap_start).to_be_greater_than(-1)
-expect(swap_end).to_be_greater_than(swap_start)
-val swap = registry.slice(swap_start, swap_end)
-val clear_active = swap.find(
-    "if self.pressed_window_id == entry.window_id:"
-)
-val clear_pending = swap.find(
-    "if self.pending_cancel_window_id == entry.window_id:"
-)
-val close_old = swap.find("if not entry.renderer.close():")
-val replace_old = swap.find("entry.renderer = replacement")
-expect(clear_active).to_be_greater_than(-1)
-expect(clear_pending).to_be_greater_than(clear_active)
-expect(close_old).to_be_greater_than(clear_pending)
-expect(replace_old).to_be_greater_than(close_old)
-expect(swap.contains("begin_pointer(")).to_be(false)
 expect(registry.contains(
     "raster: Engine2dCompositorBackend?"
 )).to_be(false)

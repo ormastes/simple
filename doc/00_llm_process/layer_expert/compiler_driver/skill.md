@@ -16,8 +16,24 @@ selection, and compiler-driver performance under `src/compiler/80.driver/`.
   module loader resolve imports lazily.
 - Native entry-closure mode loads the transitive closure selected by
   `SIMPLE_NATIVE_BUILD_ENTRY` and suppresses whole-project bulk loading.
+- The entry-closure collector excludes documentation fixtures beneath `/doc/`,
+  but must retain explicitly imported executable modules under `src/app/doc/`.
+  The regression is `driver_source_loading_spec.spl`'s application-doc closure
+  case; do not broaden the exception to arbitrary documentation trees.
 - Other project compilation modes may bulk-load the self-hosted compiler roots
   where their global compilation model requires it.
+
+## Formal Verification 2.0 invariant
+
+`CompileContext` retains `AssuranceStrictnessV2.Verified` while frozen V1
+consumers conservatively project it to `critical`. A `verified` compilation
+must not lower string-only direct calls and then claim a closed MIR/VIR path.
+Until the frontend captures resolver `SymbolId` decisions and finalizes
+`ResolvedDirectCallManifestV1` after complete MIR construction,
+`CompilerDriver.lower_to_mir` must fail with
+`FV2-E-CALL-MANIFEST-PRODUCER`. Do not weaken this to a name lookup or bypass
+it with a bootstrap/entry-closure path; runtime and generated calls require an
+explicit external-boundary model.
 
 Do not reuse the native-only entry-closure environment flag as a shortcut for
 interpretation: downstream HIR/MIR branches attach native/bootstrap semantics
@@ -81,78 +97,43 @@ or release admission. Current owner and resume condition:
 `doc/08_tracking/bug/stage3_post_file_copy_exit139_2026-08-14.md` and the
 canonical deployment plan.
 
-## Supervised / crash-safe build (80.driver, 2026-08-17)
+Phase-1 source loading owns closure COMPLETENESS, and its line cursor mixes
+units: `text.len()`/`text[a:b]` are byte-indexed, `char_code_at` is
+char-indexed. `_driver_line_end` now returns a `(byte, char)` pair and both of
+its callers advance both cursors together; do not reintroduce a single cursor.
+A truncated closure does not fail here — it fails much later in HIR as
+`unresolved type`, attributed to the wrong file. Verify closure size at
+`[build] source_closure N/N` before believing any HIR error attribution.
+See `doc/08_tracking/bug/simpleos_wm_vulkan_cross_arch_rows_blocked_2026-08-31.md`.
 
-New layer contract in `src/compiler/80.driver/driver_build/`. A native build must
-reach the END of the source list even when a unit DIES, classifying each unit as
-`OK / ERROR / CRASHED / TERMINATED / TIMEOUT / NOT_RUN`.
+- 2026-09-05 gpu_frontend_offload: default-off frontend offload switch (`structural_contracts/frontend_offload_switch.spl`, driver gate in `80.driver/driver_source_pipeline_parsing.spl`) — see `doc/00_llm_process/feature_expert/gpu_frontend_offload/skill.md`.
 
-**Landed public surface** — `src/compiler/80.driver/driver_build/build_outcome.spl`
-(`e89f0c6f94a`, 307 lines, unit-verified): `enum BuildOutcomeKind` (six disjoint
-variants), `BuildUnitOutcome`, `class BuildOutcomeSet` (`count_of` / `paths_in` /
-`all_ok` / `verdict` / `summary`), `build_outcome_classify_status(status,
-timed_out)` decoding the `128+N` signal convention, plus
-`build_outcome_is_unverified` / `build_outcome_is_failure` /
-`build_outcome_signal_of_status` / `build_outcome_kind_label` /
-`build_outcome_kind_order` / `build_outcome_sort_text` /
-`build_outcome_text_list`. Spec:
-`test/01_unit/compiler/driver/build_outcome_classification_spec.spl`.
+## 2026-09-26 — `native-build` restored: backend table in the interpreted worker, entry-file hashing, module-init reads
 
-**`failure_count()` deliberately EXCLUDES `TERMINATED` and `TIMEOUT`.** Do not
-"fix" this. `earlyoom` on this host runs `--prefer ^(simple|...)` and actively
-SIGTERMs `simple`; the host is at ~103/125 GB with zero swap. rc 143 and a
-timeout are statements about the host, never verdicts about the unit — treat both
-as UNVERIFIED.
-
-**Extension points, in flight and separately owned** (re-grep before assuming any
-of it landed — as of this writing both files contain zero `BuildOutcome`
-references): outcome accumulation in `driver_aot_native_output.spl`, and
-separate-process "unstable mode" in `driver_build/parallel.spl`. `ParallelBuilder`
-already fans out uncached modules via `ParallelBuildConfig` (`num_threads` /
-`parallel_threshold` / `deterministic` / `verbose`); what the layer lacks is
-process isolation and outcome classification — today a worker's death is the
-parent's death.
-
-Layer rules this introduces:
-- Read a child's wait status **directly**; never through a pipe (`cmd | tail`
-  yields `tail`'s status — a documented false-green source here).
-- Fail closed at the build boundary, not at the first dead unit.
-- One supervisor, two front ends: bootstrap and ad-hoc share it. Unstable mode is
-  the DEFAULT on the bootstrap path only, and an explicit flag on both.
-- The session daemon is out of scope and stays for interactive use.
-
-Requirements: `doc/02_requirements/compiler/supervised_builder.md`.
-Feature expert: `../../feature_expert/supervised_build/skill.md`.
-Lane state: `.spipe/supervised-crash-safe-build/state.md`.
-
-## interface_digest_of has first callers (2026-08-18)
-
-As of commit 1310d8790466, `interface_digest_of`
-(`src/compiler/80.driver/cache/action_key.spl`) is no longer caller-less: it is
-now invoked for manifest recording plus a level-gated verify diagnostic. The
-long-standing "zero callers — never computed" status quoted elsewhere (e.g.
-`.claude/rules/commands.md`) is stale as of that commit; dependency-aware
-partial rebuild is still NOT wired.
-
----
-
-## 2026-08-21 — hardening gates wired around the driver
-
-New fail-closed gates the driver must keep green (all `--selftest` fatal, verdict on the last
-stdout line, 0 items checked ⇒ `ERROR` exit 2):
-`check-critical-wildcard-ban.shs`, `check-compiler-transition-coverage.shs`,
-`check-compiler-schema-fresh.shs`, `check-post-mono-invariants.shs`,
-`check-any-escape-census.shs`, `check-duplicate-pub-fn-names.shs`,
-`check-hardening-mutation.shs` (meta-gate: mutating the hardening code must kill a guard).
-
-New driver-adjacent modules: `src/compiler/00.common/transition/**` (`transition_table`,
-`validator`, `coverage_state`, `check_main`), `00.common/dynamic_identity/**`,
-`99.loader/completeness_seal/**`, and the `src/app/compiler_schema/` CLI
-(`main/registry/extract/coverage.spl`, tests in `test/01_unit/app/compiler_schema/`).
-
-`driver_hir_pipeline_passes.spl` stays **integrator-only** — the wave plan forbids feature agents
-editing it. See `feature_expert/compiler_hardening/skill.md` and
-`doc/03_plan/compiler/hardening/critical_hardening_plan_2026-08-21.md`.
-
-**Open 2026-08-21:** `standalone_hir_lowering_aborts_on_real_compiler_files_2026-08-21.md`,
-`declare_globals_fallback_debug_print_ungated_2026-08-21.md`.
+- **The interpreted native-build worker never installed the static backend
+  table.** Since the K1 migration only the compiled CLI entries install it, and
+  the worker cannot `use compiler.driver.bootstrap_k1_selected` — under the
+  interpreter that module path resolves to the fail-closed stub
+  (`src/compiler/80.driver/bootstrap_k1_selected.spl`), so every build died
+  with SIGILL (`ud2`) at codegen entry. The worker now imports the committed
+  composition by path,
+  `use compositions.kernel_llvm_cranelift.compiler.driver.bootstrap_k1_selected.{...}`
+  ([native_build_worker.spl](../../../../src/app/cli/native_build_worker.spl) :10-13, `a5158762598`).
+  Record: [native_build_worker_sigill_ud2_at_codegen_entry_2026-09-26](../../../08_tracking/bug/native_build_worker_sigill_ud2_at_codegen_entry_2026-09-26.md).
+- **`--output-format both` hashed the `--source` DIRECTORY, not the entry
+  file.** `dynload` (the default mode) selects `Both`, so every default
+  native-build hit it the moment `file_read_result` became fail-closed.
+  `_driver_entry_source_input`
+  ([driver_aot_pipeline.spl](../../../../src/compiler/80.driver/driver_aot_pipeline.spl) :65)
+  now picks the first `is_file` input for the SMF manifest hash (:193-198).
+- **Module-level values land in `.bss` and are filled by a generated
+  `__module_init_*` that freestanding consumers never call**, so an unguarded
+  `slot[0]` on a module-level array can index an EMPTY array in natively
+  compiled code. Every `lex_env_save_enabled[0]` read in `lexer.spl` now goes
+  through the length-checked `bool_slot0_or` / `lex_env_save_on`
+  ([lexer.spl](../../../../src/compiler/10.frontend/core/lexer.spl) :93 / :105,
+  `a6aea23798f`). Same defect class as
+  [simple_module_const_scalars_need_runtime_init_on_baremetal_2026-09-19](../../../08_tracking/bug/simple_module_const_scalars_need_runtime_init_on_baremetal_2026-09-19.md);
+  record [stage2_candidate_env_lexer_array_oob_sigill_2026-09-26](../../../08_tracking/bug/stage2_candidate_env_lexer_array_oob_sigill_2026-09-26.md).
+  Until the driver guarantees `__module_init_*` runs for every consumer, treat
+  every module-level container read in compiler code as possibly-empty.

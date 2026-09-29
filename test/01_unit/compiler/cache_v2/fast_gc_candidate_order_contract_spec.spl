@@ -1,0 +1,39 @@
+"""
+# Fast GC Candidate Ordering Contract
+
+Pins the cache eviction sweep to one metadata snapshot and one O(n log n)
+ordering pass, preventing the former selection-sort and shrinking-array
+rebuild from returning to this startup/build-maintenance path.
+"""
+
+use std.spec.step
+use std.io_runtime.{read_file_text}
+
+describe "fast GC candidate ordering":
+    it "sorts snapshotted metadata once and consumes it linearly":
+        step("Load the production fast-GC source")
+        val source = read_file_text("src/compiler/80.driver/cache/gc/fast_gc.spl")
+        expect(source).to_contain("reader_pin_gc_authoritative_delete_available()")
+
+        step("Require one candidate record with cached filesystem metadata")
+        expect(source).to_contain("struct GcCandidate:")
+        expect(source).to_contain("modified_time: gc_file_modified_time_raw(path)")
+        expect(source).to_contain("size: if size < 0: 0 else: size")
+
+        step("Require a single sort followed by indexed linear consumption")
+        expect(source).to_contain("val ordered = array_sort_by(candidates")
+        expect(source).to_contain("val victim = ordered[candidate_index]")
+        expect(source).to_contain("candidate_index = candidate_index + 1")
+
+        step("Reject the quadratic selection and array-rebuild implementation")
+        expect(source).to_not_contain("var oldest_idx")
+        expect(source).to_not_contain("var remaining = candidates")
+        expect(source).to_not_contain("var next: [text]")
+        expect(source).to_contain("var protected_paths: Dict<text, bool> = {}")
+        expect(source).to_contain("if not protected_paths.contains_key(path):")
+        expect(source).to_not_contain("for d in protected:")
+        expect(source).to_contain("file_move_cross_device(old_path, new_path)")
+        expect(source).to_not_contain("use std.file_system")
+        expect(source).to_not_contain("extern fn rt_file_size")
+        expect(source).to_not_contain("extern fn rt_dir_walk")
+        expect(source).to_not_contain("extern fn rt_file_modified_time")

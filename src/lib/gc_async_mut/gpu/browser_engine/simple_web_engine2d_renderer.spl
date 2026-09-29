@@ -7,6 +7,7 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
     simple_web_layout_render_html_pixels_engine2d_at_time_with_animations,
     simple_web_layout_render_html_readback_engine2d_result
 }
+use std.gc_async_mut.gpu.browser_engine.dom_color.{parse_color_value_checked}
 use std.gc_async_mut.gpu.browser_engine.style.animation.{
     BrowserCssAnimationInstance
 }
@@ -236,9 +237,6 @@ fn _hex_digit_value(c: text) -> u32:
 fn _is_hex_digit(c: text) -> bool:
     (c >= "0" and c <= "9") or (c >= "a" and c <= "f") or (c >= "A" and c <= "F")
 
-fn _decimal_digit_value(c: text) -> i64:
-    _hex_digit_value(c).to_i64()
-
 fn _hex_pair_value(s: text, offset: i64) -> u32:
     (_hex_digit_value(s.char_at(offset)) << 4) | _hex_digit_value(s.char_at(offset + 1))
 
@@ -308,15 +306,6 @@ fn _range_contains_char(s: text, start: i64, end: i64, marker: text) -> bool:
     val sub = s.substring(st, en)
     sub.index_of(marker) >= 0
 
-fn _first_hex_color_after(html: text, marker: text, fallback: u32) -> u32:
-    val start = html.index_of(marker)
-    if start < 0:
-        return fallback
-    val hash = _find_char_from(html, "#", start + marker.len())
-    if hash < 0:
-        return fallback
-    _hex_color_at(html, hash, fallback)
-
 fn _second_hex_color_after_from(html: text, marker: text, start: i64, fallback: u32) -> u32:
     val first = _find_text_from(html, marker, start)
     if first < 0:
@@ -346,95 +335,258 @@ fn _last_hex_color_after(html: text, marker: text, fallback: u32) -> u32:
         pos = found + marker.len()
     color
 
-fn _first_color_token_after(s: text, start: i64, fallback: u32) -> u32:
-    val hash = _find_char_from(s, "#", start)
-    if hash >= 0:
-        return _hex_color_at(s, hash, fallback)
-    fallback
+# --- Real CSS background resolution --------------------------------------
+#
+# There is deliberately NO fixture table here. The declaration list is split
+# on top-level `;`, the LAST `background-color` / `background` declaration
+# wins (CSS last-wins within one origin), and the winning value's first color
+# token is handed to the browser engine's own CSS color parser
+# (`dom_color.parse_color_value_checked`: #RGB/#RGBA/#RRGGBB/#RRGGBBAA,
+# rgb()/rgba(), hsl()/hsla(), named colors, `transparent`). `currentColor`
+# resolves from the same declaration list's `color`, `var(--x)` from the
+# document's custom properties, and a non-opaque result is composited over
+# the UA default white page.
 
-# Resolve a currentColor reference by finding the color: property in declarations.
-fn _resolve_current_color(declarations: text, fallback: u32) -> u32:
-    val lo = declarations.lower()
-    val color_key = "color:"
-    var search: i64 = 0
-    var resolved = fallback
+fn _cut_at_quote(v: text) -> text:
+    var i: i64 = 0
+    val n = v.len()
+    while i < n:
+        val ch = v.char_at(i)
+        if ch == "\"" or ch == "'":
+            return (v.substring(0, i) ?? "").trim()
+        i = i + 1
+    v.trim()
+
+fn _is_ident_char(c: text) -> bool:
+    (c >= "a" and c <= "z") or (c >= "0" and c <= "9") or c == "-" or c == "_"
+
+# Value of `prop` inside ONE declaration segment, "" when the segment does not
+# declare it. Scans for the property token itself (rather than assuming the
+# segment starts with it) so a raw `<div style="...">` tag text works too.
+fn _decl_prop_value(seg: text, prop: text) -> text:
+    val lo = seg.lower()
     val lo_len = lo.len()
-    while search < lo_len:
-        val abs_pos = _find_text_from(lo, color_key, search)
-        if abs_pos < 0:
-            return resolved
-        # Skip if this is "background-color:" — look for standalone "color:"
-        val is_standalone = (abs_pos == 0) or (lo.char_at(abs_pos - 1) != "-")
-        if is_standalone:
-            val hash = _find_char_from(declarations, "#", abs_pos + color_key.len())
-            if hash >= 0:
-                val candidate = _hex_color_at(declarations, hash, fallback)
-                if candidate != fallback:
-                    resolved = candidate
-        search = abs_pos + color_key.len()
-    resolved
+    val prop_len = prop.len()
+    var pos: i64 = 0
+    var found: i64 = -1
+    while pos < lo_len:
+        val at = _find_text_from(lo, prop, pos)
+        if at < 0:
+            pos = lo_len
+        else:
+            var ok = true
+            if at > 0 and _is_ident_char(lo.char_at(at - 1)):
+                ok = false
+            var j = at + prop_len
+            while j < lo_len and (lo.char_at(j) == " " or lo.char_at(j) == "\t"):
+                j = j + 1
+            if j >= lo_len or lo.char_at(j) != ":":
+                ok = false
+            if ok:
+                found = j
+            pos = at + prop_len
+    if found < 0:
+        return ""
+    _cut_at_quote(seg.substring(found + 1, seg.len()) ?? "")
 
-fn _char_eq_ci(ch: text, lower: text, upper: text) -> bool:
-    ch == lower or ch == upper
+# Raw value of the LAST declaration in `decls` naming `prop_a` or `prop_b`.
+fn _decl_value_last(decls: text, prop_a: text, prop_b: text) -> text:
+    var best = ""
+    var seg_start: i64 = 0
+    var depth: i64 = 0
+    var i: i64 = 0
+    val n = decls.len()
+    while i <= n:
+        val at_end = i >= n
+        val ch = if at_end: ";" else: decls.char_at(i)
+        if ch == "(":
+            depth = depth + 1
+        elif ch == ")" and depth > 0:
+            depth = depth - 1
+        if depth == 0 and ch == ";":
+            val seg = decls.substring(seg_start, i) ?? ""
+            var value = _decl_prop_value(seg, prop_a)
+            if value.len() == 0 and prop_b != prop_a:
+                value = _decl_prop_value(seg, prop_b)
+            if value.len() > 0:
+                best = value
+            seg_start = i + 1
+        i = i + 1
+    best
 
-fn _matches_current_color_at(s: text, start: i64) -> bool:
-    if start + 12 > s.len():
-        return false
-    _char_eq_ci(s.char_at(start), "c", "C") and
-    _char_eq_ci(s.char_at(start + 1), "u", "U") and
-    _char_eq_ci(s.char_at(start + 2), "r", "R") and
-    _char_eq_ci(s.char_at(start + 3), "r", "R") and
-    _char_eq_ci(s.char_at(start + 4), "e", "E") and
-    _char_eq_ci(s.char_at(start + 5), "n", "N") and
-    _char_eq_ci(s.char_at(start + 6), "t", "T") and
-    _char_eq_ci(s.char_at(start + 7), "c", "C") and
-    _char_eq_ci(s.char_at(start + 8), "o", "O") and
-    _char_eq_ci(s.char_at(start + 9), "l", "L") and
-    _char_eq_ci(s.char_at(start + 10), "o", "O") and
-    _char_eq_ci(s.char_at(start + 11), "r", "R")
+# Value of a custom property (`--name`) declared anywhere in the document.
+fn _custom_property_value(html: text, name: text) -> text:
+    if name.len() == 0:
+        return ""
+    val marker = name + ":"
+    val pos = html.index_of(marker)
+    if pos < 0:
+        return ""
+    val start = pos + marker.len()
+    val n = html.len()
+    # index_of on one substring, not a char_at walk: char_at is O(i) in the
+    # interpreter, so scanning a 900x760 catalog document character by
+    # character here would be O(n^2) per var() reference.
+    val rest = html.substring(start, n) ?? ""
+    var end = rest.len()
+    val semi = rest.index_of(";")
+    if semi >= 0 and semi < end:
+        end = semi
+    val brace = rest.index_of("}")
+    if brace >= 0 and brace < end:
+        end = brace
+    val dq = rest.index_of("\"")
+    if dq >= 0 and dq < end:
+        end = dq
+    val sq = rest.index_of("'")
+    if sq >= 0 and sq < end:
+        end = sq
+    (rest.substring(0, end) ?? "").trim()
 
-# Check if the value after a background-color/background: token is currentColor.
-# prop_end is the position right after the property token (including colon if present).
-fn _is_current_color_after(s: text, prop_end: i64) -> bool:
-    # Skip optional colon and whitespace
-    val colon = _find_char_from(s, ":", prop_end)
-    var value_start = prop_end
-    if colon >= 0:
-        value_start = colon + 1
-    val s_len = s.len()
-    while value_start < s_len:
-        val ch = s.char_at(value_start)
-        if ch != " " and ch != "\t" and ch != "\n" and ch != "\r":
-            break
-        value_start = value_start + 1
-    _matches_current_color_at(s, value_start)
+fn _skip_numeric_token(tok: text) -> bool:
+    if tok.len() == 0:
+        return true
+    val c = tok.char_at(0)
+    (c >= "0" and c <= "9") or c == "." or (c == "-" and tok.len() > 1 and not tok.starts_with("--"))
+
+# First color token of a CSS value, as RGBA (dom_color's convention).
+fn _value_first_color(value: text, decls: text, html: text, depth: i64) -> u32?:
+    var i: i64 = 0
+    val n = value.len()
+    var tok_start: i64 = 0
+    var paren: i64 = 0
+    while i <= n:
+        val at_end = i >= n
+        val ch = if at_end: " " else: value.char_at(i)
+        if ch == "(":
+            paren = paren + 1
+        elif ch == ")" and paren > 0:
+            paren = paren - 1
+        val is_sep = paren == 0 and (ch == " " or ch == "\t" or ch == "\n" or ch == "\r" or ch == ",")
+        if is_sep or at_end:
+            if i > tok_start:
+                val tok = (value.substring(tok_start, i) ?? "").trim()
+                val lower = tok.lower()
+                if tok.len() == 0 or lower.starts_with("url(") or _skip_numeric_token(tok):
+                    tok_start = i + 1
+                elif lower == "currentcolor":
+                    if depth < 3:
+                        val color_value = _decl_value_last(decls, "color", "color")
+                        if color_value.len() > 0:
+                            val resolved = _value_first_color(color_value, decls, html, depth + 1)
+                            if resolved != nil:
+                                return resolved
+                    tok_start = i + 1
+                elif lower.starts_with("var("):
+                    if depth < 3:
+                        val close = _find_char_from(tok, ")", 4)
+                        val raw = if close > 4: (tok.substring(4, close) ?? "") else: ""
+                        val referenced = _custom_property_value(html, raw.trim())
+                        if referenced.len() > 0:
+                            val resolved_var = _value_first_color(referenced, decls, html, depth + 1)
+                            if resolved_var != nil:
+                                return resolved_var
+                    tok_start = i + 1
+                else:
+                    val parsed = parse_color_value_checked(tok)
+                    if parsed != nil:
+                        return parsed
+                    tok_start = i + 1
+            else:
+                tok_start = i + 1
+        i = i + 1
+    nil
+
+# Alpha of an rgba()/hsla() value as the author wrote it, or -1.0 when the
+# value carries no explicit alpha component. CSS alpha is a NUMBER, not a byte:
+# `rgba(0, 0, 0, 0.5)` over white is 127.5 -> 128, while the byte the color
+# parser quantizes 0.5 to (128) would composite to 127. Compositing from the
+# unrounded author value is what a browser does and is a 1-LSB difference on
+# exactly the fractional cases.
+fn _explicit_alpha_f(value: text) -> f64:
+    val lo = value.lower()
+    var open_at = lo.index_of("rgba(")
+    val skip = 5
+    if open_at < 0:
+        open_at = lo.index_of("hsla(")
+    if open_at < 0:
+        return -1.0
+    val close = _find_char_from(value, ")", open_at + skip)
+    if close < 0:
+        return -1.0
+    val inner = value.substring(open_at + skip, close) ?? ""
+    var cut = -1
+    val slash = inner.index_of("/")
+    if slash >= 0:
+        cut = slash
+    else:
+        var i: i64 = 0
+        while i < inner.len():
+            if inner.char_at(i) == ",":
+                cut = i
+            i = i + 1
+    if cut < 0:
+        return -1.0
+    val tail = (inner.substring(cut + 1, inner.len()) ?? "").trim()
+    if tail.len() == 0:
+        return -1.0
+    val is_pct = tail.ends_with("%")
+    val number = if is_pct: (tail.substring(0, tail.len() - 1) ?? "") else: tail
+    val parsed = number.parse_f64()
+    if parsed == nil:
+        return -1.0
+    var a = parsed ?? 0.0
+    if is_pct:
+        a = a / 100.0
+    if a < 0.0 or a > 1.0:
+        return -1.0
+    a
+
+# Porter-Duff `over` against the UA default white page, in ARGB.
+# `alpha_f` is the author's unrounded alpha when the value carried one, else
+# -1.0 and the color's own alpha byte is used.
+fn _composite_over_white(rgba: u32, alpha_f: f64) -> u32:
+    val r = (rgba >> 24) & 0xFFu32
+    val g = (rgba >> 16) & 0xFFu32
+    val b = (rgba >> 8) & 0xFFu32
+    val a_byte = rgba & 0xFFu32
+    if a_byte >= 255u32 and alpha_f < 0.0:
+        return 0xFF000000u32 | (r << 16) | (g << 8) | b
+    val a = if alpha_f >= 0.0: alpha_f else: a_byte.to_f64() / 255.0
+    val cr = _composite_channel(r, a)
+    val cg = _composite_channel(g, a)
+    val cb = _composite_channel(b, a)
+    0xFF000000u32 | (cr << 16) | (cg << 8) | cb
+
+fn _composite_channel(channel: u32, alpha: f64) -> u32:
+    val blended = channel.to_f64() * alpha + 255.0 * (1.0 - alpha) + 0.5
+    if blended <= 0.0:
+        return 0u32
+    if blended >= 255.0:
+        return 255u32
+    blended.to_i64().to_u32()
+
+# Computed background color of a declaration list, as ARGB. `fallback` is
+# returned when the list declares no background, when the value carries no
+# color token, and when the resolved color is fully transparent (the caller
+# owns what shows through).
+fn _declaration_background_color_in(declarations: text, html: text, fallback: u32) -> u32:
+    val value = _decl_value_last(declarations, "background-color", "background")
+    if value.len() == 0:
+        return fallback
+    val parsed = _value_first_color(value, declarations, html, 0)
+    if parsed == nil:
+        return fallback
+    val rgba = parsed ?? 0u32
+    val alpha_f = _explicit_alpha_f(value)
+    if (rgba & 0xFFu32) == 0u32 and alpha_f < 0.0:
+        return fallback
+    if alpha_f == 0.0:
+        return fallback
+    _composite_over_white(rgba, alpha_f)
 
 fn _declaration_background_color(declarations: text, fallback: u32) -> u32:
-    var color = fallback
-    var pos: i64 = 0
-    val declarations_len = declarations.len()
-    while pos < declarations_len:
-        val bgc_pos = _find_text_from(declarations, "background-color", pos)
-        val bg_pos = _find_text_from(declarations, "background:", pos)
-        if bgc_pos < 0 and bg_pos < 0:
-            return color
-        if bgc_pos >= 0 and (bg_pos < 0 or bgc_pos < bg_pos):
-            if _is_current_color_after(declarations, bgc_pos + "background-color".len()):
-                val resolved = _resolve_current_color(declarations, color)
-                color = resolved
-            else:
-                val next = _first_color_token_after(declarations, bgc_pos, color)
-                color = next
-            pos = bgc_pos + "background-color".len()
-        else:
-            if _is_current_color_after(declarations, bg_pos + "background:".len()):
-                val resolved = _resolve_current_color(declarations, color)
-                color = resolved
-            else:
-                val next2 = _first_color_token_after(declarations, bg_pos, color)
-                color = next2
-            pos = bg_pos + "background:".len()
-    color
+    _declaration_background_color_in(declarations, declarations, fallback)
 
 fn _custom_property_color(html: text, property_name: text, fallback: u32) -> u32:
     if property_name == "":
@@ -462,78 +614,6 @@ fn _first_var_color_after_from(html: text, marker: text, search_start: i64, fall
     val property_name = raw_property.trim()
     _custom_property_color(html, property_name, fallback)
 
-fn _first_var_color_after(html: text, marker: text, fallback: u32) -> u32:
-    _first_var_color_after_from(html, marker, 0, fallback)
-
-fn _css_rgb_color(html: text, marker: text, fallback: u32) -> u32:
-    val start = html.index_of(marker)
-    if start < 0:
-        return fallback
-    val open = _find_char_from(html, "(", start)
-    if open < 0:
-        return fallback
-    val close = _find_char_from(html, ")", open + 1)
-    if close < 0:
-        return fallback
-    var r_val: i64 = 0
-    var g_val: i64 = 0
-    var b_val: i64 = 0
-    var num_count = 0
-    var token_value: i64 = 0
-    var token_sign: i64 = 1
-    var token_has_digit = false
-    var token_valid = true
-    var token_started = false
-    var i = open + 1
-    while i < close:
-        val ch = html.char_at(i)
-        if ch == "," or ch == " " or ch == "\t" or ch == "\n" or ch == "\r":
-            if token_started:
-                var parsed: i64 = 0
-                if token_valid and token_has_digit:
-                    parsed = token_sign * token_value
-                if num_count == 0:
-                    r_val = parsed
-                elif num_count == 1:
-                    g_val = parsed
-                elif num_count == 2:
-                    b_val = parsed
-                num_count = num_count + 1
-            token_value = 0
-            token_sign = 1
-            token_has_digit = false
-            token_valid = true
-            token_started = false
-        elif ch == "-" and not token_started:
-            token_sign = -1
-            token_started = true
-        elif _is_hex_digit(ch) and ch <= "9":
-            val digit = _decimal_digit_value(ch)
-            token_value = token_value * 10 + digit
-            token_has_digit = true
-            token_started = true
-        else:
-            token_valid = false
-            token_started = true
-        i = i + 1
-    if token_started:
-        var parsed: i64 = 0
-        if token_valid and token_has_digit:
-            parsed = token_sign * token_value
-        if num_count == 0:
-            r_val = parsed
-        elif num_count == 1:
-            g_val = parsed
-        elif num_count == 2:
-            b_val = parsed
-        num_count = num_count + 1
-    if num_count < 3:
-        return fallback
-    val r = r_val.to_u32()
-    val g = g_val.to_u32()
-    val b = b_val.to_u32()
-    0xFF000000u32 | (r << 16) | (g << 8) | b
-
 fn _html_accent_color(html: text) -> u32:
     if html.contains("simple-web-success"):
         return 0xFF22C55Eu32
@@ -545,42 +625,16 @@ fn _html_accent_color(html: text) -> u32:
 
 fn _html_background_color(html: text) -> u32:
     val body_start = html.index_of("<body")
-    val has_body = body_start >= 0
-    if html.contains("background-color: rebeccapurple; background: #0f8"):
-        return 0xFF00FF88u32
-    if html.contains("background: #0f8; background-color: rebeccapurple"):
-        return 0xFF663399u32
-    if html.contains("background-color: rgba(0, 0, 0, 0.5)"):
-        return 0xFF808080u32
-    if html.contains("background-color: #0008"):
-        return 0xFF777777u32
-    if html.contains("background-color: transparent"):
+    if body_start < 0:
         return 0xFFFFFFFFu32
-    if html.contains("background-color: hsl(120, 100%, 25%)"):
-        return 0xFF008000u32
-    if html.contains("background-color: currentColor; color: #456789"):
-        return 0xFF456789u32
-    if html.contains("background: currentColor no-repeat; color: #345678"):
-        return 0xFF345678u32
-    if has_body and html.contains("background-color: rgb("):
-        return _css_rgb_color(html, "background-color: rgb", 0xFFFFFFFFu32)
-    if has_body and html.contains("background: rgb("):
-        return _css_rgb_color(html, "background: rgb", 0xFFFFFFFFu32)
-    if has_body and (html.contains("background-color: rebeccapurple") or html.contains("background: rebeccapurple")):
-        return 0xFF663399u32
-    if has_body and html.contains("style="):
-        # Extract only the body opening tag to avoid matching child-element colors
-        val body_tag_end = _find_char_from(html, ">", body_start)
-        val body_tag = if body_tag_end >= 0: (html.substring(body_start, body_tag_end + 1) ?? "") else: ""
-        if body_tag.contains("background-color") or body_tag.contains("background:"):
-            val bg_hex = _first_hex_color_after(body_tag, "background-color", 0xFFFFFFFFu32)
-            if bg_hex != 0xFFFFFFFFu32:
-                return bg_hex
-            val bg_var = _first_var_color_after(body_tag, "background-color", 0xFFFFFFFFu32)
-            if bg_var != 0xFFFFFFFFu32:
-                return bg_var
-            return _first_hex_color_after(body_tag, "background:", 0xFFFFFFFFu32)
-    0xFFFFFFFFu32
+    val body_tag_end = _find_char_from(html, ">", body_start)
+    if body_tag_end < 0:
+        return 0xFFFFFFFFu32
+    val body_tag = html.substring(body_start, body_tag_end + 1) ?? ""
+    val inline_style = _attr_value(body_tag, "style")
+    if inline_style.len() == 0:
+        return 0xFFFFFFFFu32
+    _declaration_background_color_in(inline_style, html, 0xFFFFFFFFu32)
 
 fn _find_next_visual_tag(html: text, start: i64) -> i64:
     if start >= html.len():
@@ -1068,34 +1122,6 @@ pub fn simple_web_html_background_color(html: text) -> u32:
 fn _solid_fill_pixels(width: i32, height: i32, color: u32) -> [u32]:
     [color; width * height]
 
-fn _toolbar_modal_grid_pixels(width: i32, height: i32) -> [u32]:
-    var engine = SimpleWebHeuristicSurface.create(width, height)
-    engine.clear(0xFF0E1116u32)
-    engine.draw_rect_filled(0, 0, width, 12, 0xFF243447u32)
-    engine.draw_rect_filled(4, 2, 22, 8, 0xFF22C55Eu32)
-    engine.draw_rect_filled(30, 2, 18, 8, 0xFF3B82F6u32)
-    engine.draw_rect_filled(0, 12, 14, height - 20, 0xFF111827u32)
-    engine.draw_rect_filled(18, 16, 26, 20, 0xFFF59E0Bu32)
-    engine.draw_rect_filled(20, 18, 6, 6, 0xFFEF4444u32)
-    engine.draw_rect_filled(28, 18, 6, 6, 0xFF22C55Eu32)
-    engine.draw_rect_filled(36, 18, 6, 6, 0xFF3B82F6u32)
-    engine.draw_rect_filled(20, 26, 22, 6, 0xFFE5E7EBu32)
-    engine.draw_rect_filled(50, 14, 38, 34, 0xFFF8FAFCu32)
-    engine.draw_rect_filled(50, 14, 38, 8, 0xFF64748Bu32)
-    engine.draw_rect_filled(54, 26, 30, 4, 0xFFCBD5E1u32)
-    engine.draw_rect_filled(54, 36, 20, 4, 0xFF94A3B8u32)
-    engine.draw_rect_filled(0, height - 8, width, 8, 0xFF1F2937u32)
-    engine.draw_rect_filled(6, height - 6, 18, 4, 0xFF8B5CF6u32)
-    engine.draw_rect_filled(28, height - 6, 18, 4, 0xFF06B6D4u32)
-    val pixels = engine.read_pixels()
-    engine.shutdown()
-    pixels
-
-# First `prop: <N>px` declaration in the document, or `fallback` when absent,
-# non-px, or only present as a hyphenated property (max-width/border-width...).
-# The heuristic fast path below previously honored only a whitelist of sizes
-# (width 12/80/120, height 4/8/40/60) and silently painted 24x16 for every
-# other declared size; this parses the declared value instead.
 fn _first_px_dimension(html: text, prop: text, fallback: i32) -> i32:
     val lo = html.lower()
     val key = prop + ":"
@@ -1131,14 +1157,13 @@ fn _first_px_dimension(html: text, prop: text, fallback: i32) -> i32:
 # background color, a single first-block color, or the wm-app
 # titlebar/content chrome and the "Simple Web"/about:network mark drawn by
 # this module's own callers) — anything requiring CSS selector matching or
-# real box layout routes straight to the real renderer. The toolbar modal grid
-# fixture marker is the one exact-pixel browser parity fixture handled here.
+# real box layout routes straight to the real renderer. No fixture marker is
+# handled here: the class-name-keyed toolbar-modal-grid painter that used to
+# sit at the top of this function was a canned pixel grid, not a rendering.
 pub fn simple_web_engine2d_render_html_pixels(html: text, width: i32, height: i32, backend_name: text) -> [u32]:
     if width <= 0 or height <= 0:
         return []
     val resolved_backend = _resolved_render_backend(width, height, backend_name)
-    if html.contains("simple-web-engine2d-toolbar-modal-grid"):
-        return _toolbar_modal_grid_pixels(width, height)
     val lower = html.lower()
     if lower.contains("<p") or lower.contains("<h1") or lower.contains("<h2") or lower.contains("<h3") or lower.contains("<button") or lower.contains("<span") or lower.contains("<small") or lower.contains("<code") or lower.contains("<label") or lower.contains("<a "):
         return simple_web_layout_render_html_pixels_engine2d(html, width, height, resolved_backend)
@@ -1232,6 +1257,14 @@ pub fn simple_web_engine2d_render_html_readback(html: text, width: i32, height: 
     engine2d_readback(pixels, "cpu_mirror")
 
 pub fn simple_web_engine2d_resolved_backend_name(width: i32, height: i32, backend_name: text) -> text:
+    val (resolved, _reason) = simple_web_engine2d_resolved_backend_name_with_reason(width, height, backend_name)
+    resolved
+
+# Same resolution as simple_web_engine2d_resolved_backend_name, but also
+# returns the probe-failure reason (empty when no fallback occurred) so
+# callers can surface WHY a requested backend was downgraded to "software"
+# instead of silently swallowing the probe result.
+pub fn simple_web_engine2d_resolved_backend_name_with_reason(width: i32, height: i32, backend_name: text) -> (text, text):
     val canonical = backend_canonical_name(backend_name)
     # An empty/unset backend_name (e.g. a struct field that was never
     # populated, or SIMPLE_2D_BACKEND read as "" on baremetal where there is
@@ -1244,13 +1277,14 @@ pub fn simple_web_engine2d_resolved_backend_name(width: i32, height: i32, backen
         # render (e.g. CUDA headless) is rejected with a logged reason and the
         # next GPU candidate (cuda -> vulkan -> ...) is tried before CPU lanes.
         # Memoized in Engine2D, so this costs one probe pass per process.
-        return Engine2D.detect_best_backend_viable()
+        return (Engine2D.detect_best_backend_viable(), "")
     if canonical == "cpu" or canonical == "software":
-        return canonical
+        return (canonical, "")
     val probe = Engine2D.probe_backend(width, height, canonical)
     if probe.status == BackendStatus.Initialized:
-        return canonical
-    "software"
+        return (canonical, "")
+    val reason = if probe.reason != "": probe.reason else: "backend '" + canonical + "' probe did not initialize"
+    ("software", reason)
 
 pub fn simple_web_render_html_to_pixels_with_engine2d_backend(html: text, width: i32, height: i32, backend_name: text) -> [u32]:
     simple_web_engine2d_render_html_pixels(html, width, height, backend_name)

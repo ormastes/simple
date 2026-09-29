@@ -24,7 +24,7 @@ Exercise the public native-build CLI boundary for the ten compiler artifact stag
 | Design | doc/05_design/backend_layer_artifact_matrix.md |
 | Research | N/A |
 | Source | `test/02_integration/compiler/backend_debug_dump_driver_spec.spl` |
-| Updated | 2026-08-03 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -77,6 +77,11 @@ but it must never publish the failed checkpoint or any downstream checkpoint.
 
 #### accounts for Source through Optimized MIR without false artifact passes
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- accounts for Source through Optimized MIR without false artifact passes
 - compile the layered backend fixture
    - Expected: dir_create_all(root) is true
    - Expected: file_write(source, fixture_source()) is true
@@ -84,20 +89,17 @@ but it must never publish the failed checkpoint or any downstream checkpoint.
    - Expected: file_exists(output) is true
    - Expected: option_error equals `unknown option: --debug-dump={SHARED_STAGES}`
    - Expected: result equals `2`
-   - Expected: file_exists(output) is false
-- expect all statuses
-- expect all statuses
-   - Expected: MIR contains `"If":` and `select_value`
-   - Expected: optimized MIR contains `"If":` and `select_value`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 32 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("accounts for Source through Optimized MIR without false artifact passes")
 step("compile the layered backend fixture")
 val run_id = getpid()
 val root = "build/backend_debug_dump_driver_{run_id}/shared"
@@ -134,12 +136,12 @@ if option_error == "":
 
 #### stops a parse error before AST HIR and every downstream checkpoint
 
+- stops a parse error before AST HIR and every downstream checkpoint
 - fail the fixture at the parser boundary
-   - Expected: the supported debug-dump path exits nonzero
-   - Expected: the current unsupported path rejects the exact stage option with exit `2`
-   - Expected: no output binary exists
-   - Expected: AST through Optimized MIR paths are absent
-   - Expected: all backend artifact statuses are `FAIL`
+   - Expected: dir_create_all(root) is true
+   - Expected: file_write(source, invalid_source) is true
+   - Expected: option_error equals `unknown option: --debug-dump={SHARED_STAGES}`
+   - Expected: result equals `2`
 
 
 <details>
@@ -149,6 +151,8 @@ Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("stops a parse error before AST HIR and every downstream checkpoint")
 step("fail the fixture at the parser boundary")
 val run_id = getpid()
 val root = "build/backend_debug_dump_driver_{run_id}/parse_failure"
@@ -177,21 +181,25 @@ expect_all_statuses(backend_artifact_statuses(dump, run_id, "parse_failure"), "F
 
 #### stops a HIR type error before monomorphized HIR MIR optimization and backend checkpoints
 
+- stops a HIR type error before monomorphized HIR MIR optimization and backend checkpoints
 - fail the fixture at the HIR boundary
-   - Expected: the supported debug-dump path exits nonzero
-   - Expected: Source and AST checkpoints contain `MissingLayerType`
-   - Expected: Monomorphized HIR through Optimized MIR paths are absent
-   - Expected: no output binary exists and all backend artifact statuses are `FAIL`
-   - Expected: the current unsupported path rejects the exact stage option with exit `2`
+   - Expected: dir_create_all(root) is true
+   - Expected: file_write(source, invalid_source) is true
+   - Expected: artifact_status(paths[0], "fn main", "MissingLayerType") equals `PASS`
+   - Expected: artifact_status(paths[1], "\"stage\":\"ast\"", "MissingLayerType") equals `PASS`
+   - Expected: option_error equals `unknown option: --debug-dump={SHARED_STAGES}`
+   - Expected: result equals `2`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 29 lines folded for reproduction.
+Runnable source: 26 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("stops a HIR type error before monomorphized HIR MIR optimization and backend checkpoints")
 step("fail the fixture at the HIR boundary")
 val run_id = getpid()
 val root = "build/backend_debug_dump_driver_{run_id}/hir_failure"
@@ -222,27 +230,24 @@ expect_all_statuses(backend_artifact_statuses(dump, run_id, "hir_failure"), "FAI
 
 #### fails closed and accounts for four requested backend layers without hooks
 
+- fails closed and accounts for four requested backend layers without hooks
 - validate every emitted compiler layer
    - Expected: dir_create_all(root) is true
    - Expected: file_write(source, fixture_source()) is true
    - Expected: option_error equals ``
-   - Expected: result == 0 is false
-   - Expected: file_exists(output) is false
-- expect all statuses
    - Expected: option_error equals `unknown option: --debug-dump={ALL_STAGES}`
    - Expected: result equals `2`
-   - Expected: file_exists(output) is false
-- expect all statuses
-- expect all statuses
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 27 lines folded for reproduction.
+Runnable source: 29 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("fails closed and accounts for four requested backend layers without hooks")
 step("validate every emitted compiler layer")
 val run_id = getpid()
 val root = "build/backend_debug_dump_driver_{run_id}/all"
@@ -276,23 +281,23 @@ expect_all_statuses(backend_artifact_statuses(dump, run_id, "probe"), "FAIL")
 
 #### rejects an adjacent empty stage instead of starting a partial build
 
+- rejects an adjacent empty stage instead of starting a partial build
 - select all compiler artifact stages
    - Expected: dir_create_all(root) is true
    - Expected: file_write(source, fixture_source()) is true
-   - Expected: result == 0 is false
    - Expected: option_error equals `unknown option: --debug-dump={malformed}`
    - Expected: result equals `2`
-   - Expected: file_exists(output) is false
-- expect all statuses
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("rejects an adjacent empty stage instead of starting a partial build")
 step("select all compiler artifact stages")
 val run_id = getpid()
 val root = "build/backend_debug_dump_driver_{run_id}/malformed"
@@ -336,3 +341,54 @@ expect_all_statuses(shared_artifact_statuses(dump, run_id, "probe"), "FAIL")
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-INTEGRATION`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `17072cd0e38dd780aa7fb05aaad26cb51844df722a02e9f386c26ebab4475cb4`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `17072cd0e38dd780aa7fb05aaad26cb51844df722a02e9f386c26ebab4475cb4`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `17072cd0e38dd780aa7fb05aaad26cb51844df722a02e9f386c26ebab4475cb4`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
+
+SSpec documentization score: 86/100
+source: test/02_integration/compiler/backend_debug_dump_driver_spec.spl
+mirror: doc/06_spec/02_integration/compiler/backend_debug_dump_driver_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/02_integration/compiler/backend_debug_dump_driver_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/02_integration/compiler/backend_debug_dump_driver_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: scope, primary workflow, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/02_integration/compiler/backend_debug_dump_driver_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 6 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/02_integration/compiler/backend_debug_dump_driver_spec.spl:161:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'accounts for Source through Optimized MIR without false artifact passes' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/02_integration/compiler/backend_debug_dump_driver_spec.spl:195:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'stops a parse error before AST HIR and every downstream checkpoint' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/02_integration/compiler/backend_debug_dump_driver_spec.spl:221:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'stops a HIR type error before monomorphized HIR MIR optimization and backend checkpoints' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

@@ -56,6 +56,8 @@
 
 // Phase 1: Core value operations
 pub mod equality;
+pub mod ordered_key;
+pub mod capture_text;
 pub mod memory;
 pub mod value_ops;
 
@@ -136,6 +138,8 @@ pub mod dh;
 // Re-export all public SFFI functions for backward compatibility
 // Phase 1
 pub use equality::*;
+pub use ordered_key::*;
+pub use capture_text::*;
 pub use memory::*;
 pub use value_ops::*;
 

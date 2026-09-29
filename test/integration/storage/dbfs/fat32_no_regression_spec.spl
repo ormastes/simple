@@ -1,3 +1,7 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-INTEGRATION
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
 # Maps to: AC-7, AC-9
 # Run: bin/simple test test/integration/storage/dbfs/fat32_no_regression_spec.spl
 
@@ -51,15 +55,20 @@ impl MockFat32BlockDevice:
 
 impl BlockDevice for MockFat32BlockDevice:
     fn read_sector(lba: u64) -> Result<[u8], text>:
-        var buffer: [u8] = []
-        var i = 0
-        while i < self.sector.len():
-            if lba == 0:
-                buffer.push(self.sector[i])
-            else:
-                buffer.push(0)
-            i = i + 1
-        Result.Ok(buffer)
+        # Matches the BlockDevice trait's declared 1-arg, return-the-bytes
+        # convention (src/lib/nogc_sync_mut/fs_driver/block_device.spl:12) --
+        # not the earlier 2-arg buffer-mutation shape, which the trait never
+        # declared and which no real caller ever invoked with two arguments
+        # (bug: trait_conformance_check_ignores_arity_2026-08-04).
+        if lba == 0:
+            Result.Ok(self.sector)
+        else:
+            var zeros: [u8] = []
+            var i = 0
+            while i < self.sector.len():
+                zeros.push(0)
+                i = i + 1
+            Result.Ok(zeros)
 
     fn write_sector(lba: u64, data: [u8]) -> Result<bool, text>:
         Result.Ok(true)
@@ -78,21 +87,32 @@ fn make_fat32_mounted() -> MountTable:
 
 describe "FAT32 hosted seam — mount table registration":
     it "shared FAT32 driver registers without error":
+        # @req REQ-SSPEC-INTEGRATION
+        step("shared FAT32 driver registers without error")
         val mt = make_fat32_mounted()
         val boot_driver = mt.resolve_driver("/boot").unwrap()
         expect(boot_driver.driver_name()).to_equal("Fat32Driver")
 
     it "stays on the shared FsFat32Driver surface":
+        # @req REQ-SSPEC-INTEGRATION
+        step("stays on the shared FsFat32Driver surface")
         val source = read_file("test/integration/storage/dbfs/fat32_no_regression_spec.spl")
         val legacy_type = "Fat32" + "Driver"
-        expect(source.contains("use os.services.fat32.fat32")).to_equal(false)
-        expect(source.contains(" " + legacy_type + ".new(")).to_equal(false)
-        expect(source.contains("=" + legacy_type + ".new(")).to_equal(false)
-        expect(source.contains("(" + legacy_type + ".new(")).to_equal(false)
-        expect(source.contains("FsFat32Driver.new(")).to_equal(true)
+        # Built by concatenation, not one literal: this file scans its OWN source,
+        # so a single unsplit string naming the forbidden import would always be
+        # found (inside this very check), making the assertion unsatisfiable by
+        # construction. See .claude/rules/testing.md, section F3.
+        val legacy_module_import = "use os.services" + ".fat32" + ".fat32"
+        assert_equal(source.contains(legacy_module_import), false)
+        assert_equal(source.contains(" " + legacy_type + ".new("), false)
+        assert_equal(source.contains("=" + legacy_type + ".new("), false)
+        assert_equal(source.contains("(" + legacy_type + ".new("), false)
+        assert_equal(source.contains("FsFat32Driver.new("), true)
 
 describe "FAT32 hosted seam — DBFS co-existence":
     it "FAT32 and DBFS can both be mounted simultaneously":
+        # @req REQ-SSPEC-INTEGRATION
+        step("FAT32 and DBFS can both be mounted simultaneously")
         val mt = MountTable.new()
         val fat32 = make_fat32_driver()
         mt.mount("/boot", DriverInstance.Fat32(fat32), MountOptions.read_only()).unwrap()

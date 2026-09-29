@@ -1,4 +1,8 @@
 # Prevention-mock deferred arming is impossible under this interpreter; `std.spec.*` also can't reach it
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-07
 **Area:** `src/lib/nogc_sync_mut/spec.spl` (Unit U2, `sspec_prevention_mock_plan_2026-08-07.md`)
@@ -142,3 +146,14 @@ documented here remains correct and current. No code change made: a genuine
 fix requires interpreter-level semantic changes (mutable-reference storage
 semantics and/or persistent per-file spec state) that are out of scope for a
 local patch, exactly as the original report concluded.
+
+## Re-check 2026-09-13 (BUGFIX-7 lane)
+
+Spot-checked Defect 3 (wildcard `use std.spec.*` not resolving
+`get_test_count`) since it looked cheapest to verify: still reproduces
+identically (`semantic: function 'get_test_count' not found` via
+`use std.spec.*`, on a6450c9d6f5). All three defects are interpreter-level
+(cross-scope class-instance value semantics, no persistent module state
+across `it` examples, wildcard-import symbol resolution) and out of scope for
+a local .spl patch, exactly as already concluded. No change made.
+

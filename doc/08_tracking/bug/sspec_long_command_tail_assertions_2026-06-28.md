@@ -1,7 +1,14 @@
 # SSpec Long Command Tail Assertions May Be Skipped
 
+## Closed 2026-09-13 — root cause (matcher clearing a prior failure) is fixed; tail assertions are now observed
+
+- **measured** Binary: Rust seed `bin/simple` v1.0.0-rc.1 (16,347,136 bytes, 2026-09-02), Windows host.
+- **measured** The minimized repro of the shared root cause (`sspec_matcher_success_clears_prior_failure_2026-06-28`) — a failing `expect` followed by a passing one in the same `it` — now reports `1 example, 1 failure` / `outcome=ERROR`, i.e. the later assertion no longer erases the earlier failure.
+- **measured** A single example containing a passing assertion followed by a genuinely failing one prints `1 example, 1 failure`, so a trailing assertion is still evaluated and counted.
+- **inferred** The original GUI RenderDoc autodiscovery symptom was attributed in the sibling entry to that same matcher-clear defect, not to command length.
+
 Date: 2026-06-28
-Status: open
+Status: closed (fixed) 2026-09-13
 Owner: test-runner
 
 ## Summary

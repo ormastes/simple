@@ -7,8 +7,8 @@ use std::collections::HashSet;
 use std::sync::{Mutex, OnceLock};
 
 use super::byte_kernels::{
-    avx2_byte_find, avx2_byte_rfind, byte_split_ranges_for_tier, neon_byte_find, neon_byte_rfind, scalar_byte_find,
-    scalar_byte_rfind, scalar_byte_split_ranges,
+    avx2_byte_find, avx2_byte_rfind, avx512_byte_find, avx512_byte_rfind, byte_split_ranges_for_tier, neon_byte_find,
+    neon_byte_rfind, scalar_byte_find, scalar_byte_rfind, scalar_byte_split_ranges,
 };
 use super::core::RuntimeValue;
 use super::dict::RuntimeDict;
@@ -76,8 +76,7 @@ fn normalize_index(index: i64, len: i64) -> i64 {
 /// Number of times [`fnv1a_hash`] actually walked bytes. Test-only instrumentation
 /// used to pin the lazy-hash mechanism (see `lazy_string_hash_tests`).
 #[cfg(test)]
-pub(crate) static FNV1A_HASH_CALLS: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
+pub(crate) static FNV1A_HASH_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// FNV-1a hash for strings (64-bit)
 /// This is a simple, fast hash suitable for hash tables.
@@ -180,12 +179,28 @@ fn providers_for_tier(tier: SimdTier) -> CollectionProviders {
             byte_split: scalar_byte_split_ranges,
             simd_tier: SimdTier::X86_64Sse2,
         },
-        SimdTier::X86_64Avx2 | SimdTier::X86_64Avx512 => CollectionProviders {
+        SimdTier::X86_64Avx2 => CollectionProviders {
             array_sort: scalar_array_sort,
             byte_find: avx2_byte_find,
             byte_rfind: avx2_byte_rfind,
             byte_split: avx2_byte_split_ranges,
             simd_tier: SimdTier::X86_64Avx2,
+        },
+        // byte_find/byte_rfind/byte_split are all straight linear scans
+        // (find-first / find-last / delimiter-split built on find), so
+        // widening them to 64-byte AVX-512 lanes is a clear, contained win —
+        // see `byte_kernels.rs` for the actual kernels and their
+        // scalar-equivalence tests. `array_sort` stays on `scalar_array_sort`
+        // for every tier here: this generic comparator sorts heterogeneous
+        // tagged `RuntimeValue`s (see `rt_sorted_value_cmp`), not a
+        // homogeneous primitive buffer, so it was never SIMD-accelerated to
+        // begin with — nothing to widen.
+        SimdTier::X86_64Avx512 => CollectionProviders {
+            array_sort: scalar_array_sort,
+            byte_find: avx512_byte_find,
+            byte_rfind: avx512_byte_rfind,
+            byte_split: avx512_byte_split_ranges,
+            simd_tier: SimdTier::X86_64Avx512,
         },
         SimdTier::Aarch64Neon | SimdTier::Aarch64Sve | SimdTier::Aarch64Sve2 => CollectionProviders {
             array_sort: scalar_array_sort,
@@ -273,8 +288,14 @@ pub(crate) fn collection_provider_resolution_count_for_tests() -> usize {
         .resolutions
 }
 
+/// Rust-lane twin of the C runtime's `rt_sorted_value_cmp` static comparator
+/// (`src/runtime/runtime_native.c`): identical precedence — unsigned-boxed
+/// values compare as u64 (including against tagged ints, with a negative int
+/// always losing to any unsigned box), tagged ints precede floats, and every
+/// other mixed-type pair compares Equal. Used by `scalar_array_sort` below,
+/// exactly as the C static helper is used by `rt_array_sort`/`rt_array_sorted`.
 #[inline]
-fn compare_runtime_values(a: &RuntimeValue, b: &RuntimeValue) -> Ordering {
+fn rt_sorted_value_cmp(a: &RuntimeValue, b: &RuntimeValue) -> Ordering {
     match (a.as_heap_u64(), b.as_heap_u64()) {
         (Some(left), Some(right)) => return left.cmp(&right),
         (Some(_), None) if b.is_int() && b.as_int() < 0 => return Ordering::Greater,
@@ -293,11 +314,33 @@ fn compare_runtime_values(a: &RuntimeValue, b: &RuntimeValue) -> Ordering {
 }
 
 fn scalar_array_sort(values: &mut [RuntimeValue]) {
-    values.sort_by(compare_runtime_values);
+    values.sort_by(rt_sorted_value_cmp);
+}
+
+/// Rust-lane twin of the C runtime's `rt_sorted_byte_cmp` static comparator
+/// (`src/runtime/runtime_native.c`): plain ascending `u8` order. Used by
+/// `rt_array_sort`'s byte-packed branch below, matching C's `qsort` over the
+/// same buffer.
+#[inline]
+fn rt_sorted_byte_cmp(a: &u8, b: &u8) -> Ordering {
+    a.cmp(b)
+}
+
+/// Rust-lane twin of the C runtime's `rt_sorted_u64_cmp` static comparator
+/// (`src/runtime/runtime_native.c`): plain ascending `u64` order. Used by
+/// `rt_array_sort`'s u64-packed branch below, matching C's `qsort` over the
+/// same buffer.
+#[inline]
+fn rt_sorted_u64_cmp(a: &u64, b: &u64) -> Ordering {
+    a.cmp(b)
 }
 
 fn avx2_byte_split_ranges(haystack: &str, delimiter: &str) -> Vec<(usize, usize)> {
     byte_split_ranges_for_tier(SimdTier::X86_64Avx2, haystack, delimiter)
+}
+
+fn avx512_byte_split_ranges(haystack: &str, delimiter: &str) -> Vec<(usize, usize)> {
+    byte_split_ranges_for_tier(SimdTier::X86_64Avx512, haystack, delimiter)
 }
 
 fn neon_byte_split_ranges(haystack: &str, delimiter: &str) -> Vec<(usize, usize)> {
@@ -494,6 +537,45 @@ impl RuntimeArray {
     }
 }
 
+/// Widen a Simple `[u32]`/`[i64]` word array into little-endian bytes, four per
+/// element.
+///
+/// The counterpart of `byte_array_bytes` for payloads that are words rather
+/// than bytes. `byte_array_bytes` masks every element with `0xff`, so a caller
+/// holding `u32` data has to explode each word into four array stores on the
+/// Simple side before it can hand the payload over; this reads the words
+/// directly. A byte-packed array is rejected (`None`) rather than reinterpreted
+/// -- its elements are bytes, and silently regrouping them four at a time would
+/// be a different payload, not a widening.
+///
+/// Signed elements are taken as their two's-complement `u32`; anything outside
+/// `-2^31 ..= u32::MAX` is rejected rather than truncated.
+pub(crate) fn word_array_le_bytes(value: RuntimeValue) -> Option<Vec<u8>> {
+    let array = get_typed_ptr::<RuntimeArray>(value, HeapObjectType::Array)?;
+    let array = unsafe { &*array };
+    if array.len > array.capacity || array.data.is_null() || array.is_byte_packed() {
+        return None;
+    }
+    let len = usize::try_from(array.len).ok()?;
+    let mut bytes = Vec::with_capacity(len * 4);
+    for element in unsafe { array.as_slice() } {
+        if !element.is_int() {
+            return None;
+        }
+        let raw = element.as_int();
+        let widened = if raw < 0 {
+            if raw < i64::from(i32::MIN) {
+                return None;
+            }
+            (raw as i32) as u32
+        } else {
+            u32::try_from(raw).ok()?
+        };
+        bytes.extend_from_slice(&widened.to_le_bytes());
+    }
+    Some(bytes)
+}
+
 /// Copy bytes from either native representation of Simple `[u8]`.
 pub(crate) fn byte_array_bytes(value: RuntimeValue) -> Option<Vec<u8>> {
     let array = get_typed_ptr::<RuntimeArray>(value, HeapObjectType::Array)?;
@@ -509,6 +591,26 @@ pub(crate) fn byte_array_bytes(value: RuntimeValue) -> Option<Vec<u8>> {
         .iter()
         .map(|value| value.is_int().then(|| (value.as_int() & 0xff) as u8))
         .collect()
+}
+
+/// Raw bytes of a `[u8]` that is stored in the PACKED representation, or
+/// `None` for any other array (boxed-element arrays, non-arrays, corrupt
+/// headers).
+///
+/// Unlike `byte_array_bytes` this never touches the boxed-element path, so it
+/// cannot mask an out-of-range element into a byte: a packed array's elements
+/// are `u8` by construction. That makes it usable as a fast path by callers
+/// whose contract REJECTS out-of-range elements (`rt_bytes_to_text`) — for a
+/// packed array the rejection can never fire, so skipping the per-element
+/// check is behaviour-preserving rather than a relaxation.
+pub(crate) fn packed_byte_array_bytes(value: RuntimeValue) -> Option<Vec<u8>> {
+    let array = get_typed_ptr::<RuntimeArray>(value, HeapObjectType::Array)?;
+    let array = unsafe { &*array };
+    if array.len > array.capacity || array.data.is_null() || !array.is_byte_packed() {
+        return None;
+    }
+    let len = usize::try_from(array.len).ok()?;
+    Some(unsafe { std::slice::from_raw_parts(array.data.cast::<u8>(), len) }.to_vec())
 }
 
 /// Write bytes into either native representation of Simple `[u8]`.
@@ -528,6 +630,56 @@ pub(crate) fn byte_array_write(value: RuntimeValue, bytes: &[u8]) -> bool {
         }
     }
     true
+}
+
+/// Validate either runtime representation of `[u8]` and return its length.
+/// This is the Rust-owned provider used by the C owned-process adapter when
+/// runtime_native.c is deliberately absent from the Rust seed composition.
+#[no_mangle]
+pub extern "C" fn rt_array_bytes_validate(raw: i64) -> i64 {
+    let value = RuntimeValue(raw as u64);
+    let Some(array) = get_typed_ptr::<RuntimeArray>(value, HeapObjectType::Array) else {
+        return -22;
+    };
+    let array = unsafe { &*array };
+    if array.len > array.capacity
+        || array.len > i64::MAX as u64
+        || array.is_u64_packed()
+        || (array.len > 0 && array.data.is_null())
+    {
+        return -22;
+    }
+    if !array.is_byte_packed() {
+        for item in unsafe { array.as_slice() } {
+            if !item.is_int() {
+                return -22;
+            }
+            let byte = item.as_int();
+            if !(0..=255).contains(&byte) {
+                return -22;
+            }
+        }
+    }
+    array.len as i64
+}
+
+/// Copy a validated `[u8]` into caller-owned storage without truncation.
+#[no_mangle]
+pub unsafe extern "C" fn rt_array_bytes_copy_checked(raw: i64, out: *mut u8, capacity: i64) -> i64 {
+    let length = rt_array_bytes_validate(raw);
+    if length < 0 || capacity < length || (length > 0 && out.is_null()) {
+        return -22;
+    }
+    let value = RuntimeValue(raw as u64);
+    let array = &*get_typed_ptr::<RuntimeArray>(value, HeapObjectType::Array).expect("validated array");
+    if array.is_byte_packed() {
+        std::ptr::copy_nonoverlapping(array.data.cast::<u8>(), out, length as usize);
+    } else {
+        for (index, item) in array.as_slice().iter().enumerate() {
+            *out.add(index) = item.as_int() as u8;
+        }
+    }
+    length
 }
 
 /// Layout used for the element storage of a `RuntimeArray` with the given
@@ -702,6 +854,47 @@ pub extern "C" fn rt_byte_array_new_len(len: u64) -> RuntimeValue {
         (*ptr).len = len;
     }
     array
+}
+
+/// Second lane (rt-dual-implementation ratchet) of the C `rt_core_zero_array_alloc`
+/// static helper in `src/runtime/runtime_native.c`: allocate a typed Simple
+/// array and fill every slot with numeric zero (float zero when `floating`,
+/// int zero otherwise), mirroring the tagged-slot array ABI the C lane fills.
+fn rt_core_zero_array_alloc(len: i64, floating: bool) -> RuntimeValue {
+    let capacity = if len < 0 { 0 } else { len as u64 };
+    let array = rt_array_new(capacity);
+    if array.is_nil() {
+        return array;
+    }
+    for _ in 0..capacity {
+        let zero = if floating {
+            RuntimeValue::from_float(0.0)
+        } else {
+            RuntimeValue::from_int(0)
+        };
+        if !rt_array_push(array, zero) {
+            return RuntimeValue::NIL;
+        }
+    }
+    array
+}
+
+/// Second lane of the C `rt_f64_array_alloc` in `src/runtime/runtime_native.c`.
+#[no_mangle]
+pub extern "C" fn rt_f64_array_alloc(len: i64) -> RuntimeValue {
+    rt_core_zero_array_alloc(len, true)
+}
+
+/// Second lane of the C `rt_f32_array_alloc` in `src/runtime/runtime_native.c`.
+#[no_mangle]
+pub extern "C" fn rt_f32_array_alloc(len: i64) -> RuntimeValue {
+    rt_core_zero_array_alloc(len, true)
+}
+
+/// Second lane of the C `rt_i64_array_alloc` in `src/runtime/runtime_native.c`.
+#[no_mangle]
+pub extern "C" fn rt_i64_array_alloc(len: i64) -> RuntimeValue {
+    rt_core_zero_array_alloc(len, false)
 }
 
 /// Get the length of an array
@@ -1761,6 +1954,93 @@ pub extern "C" fn rt_collection_remove(receiver: RuntimeValue, key: RuntimeValue
         return rt_array_remove(receiver, index);
     }
     crate::value::dict::rt_dict_remove(receiver, key)
+}
+
+/// `set`: receiver-dispatched for erased collection receivers.
+///
+/// Only Dict owns this method in the language. An erased Dict retains the
+/// fluent result of `Dict.set`, while Array and Tuple take the same loud
+/// method-not-found path as statically typed receivers. Do not route this
+/// through `rt_index_set` or `rt_tuple_set`: those implement index assignment
+/// and tuple construction, not the `.set()` method.
+#[no_mangle]
+pub extern "C" fn rt_collection_set(receiver: RuntimeValue, key: RuntimeValue, value: RuntimeValue) -> RuntimeValue {
+    if get_typed_ptr::<crate::value::dict::RuntimeDict>(receiver, HeapObjectType::Dict).is_some() {
+        let _ = crate::value::dict::rt_dict_set(receiver, key, value);
+        return receiver;
+    }
+
+    let type_name = collection_set_missing_type(receiver);
+    unsafe { crate::value::rt_method_not_found(type_name.as_ptr(), type_name.len() as u64, b"set".as_ptr(), 3) }
+}
+
+fn collection_set_missing_type(receiver: RuntimeValue) -> &'static [u8] {
+    match receiver.heap_type() {
+        Some(HeapObjectType::Array) => b"Array",
+        Some(HeapObjectType::Tuple) => b"Tuple",
+        _ => b"<unknown type>",
+    }
+}
+
+#[cfg(test)]
+mod collection_set_tests {
+    use super::{collection_set_missing_type, rt_array_new, rt_collection_set, rt_tuple_new};
+    use crate::value::dict::{rt_dict_get, rt_dict_new};
+    use crate::value::RuntimeValue;
+
+    #[test]
+    fn erased_dict_set_mutates_and_returns_the_receiver() {
+        let dict = rt_dict_new(0);
+        let key = RuntimeValue::from_int(7);
+        let value = RuntimeValue::from_int(99);
+        assert_eq!(rt_collection_set(dict, key, value), dict);
+        assert_eq!(rt_dict_get(dict, key), value);
+    }
+
+    #[test]
+    fn array_and_tuple_set_keep_their_method_not_found_identity() {
+        assert_eq!(collection_set_missing_type(rt_array_new(3)), b"Array");
+        assert_eq!(collection_set_missing_type(rt_tuple_new(3)), b"Tuple");
+    }
+
+    fn assert_rejected_child(kind: &str) {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg(format!("value::collections::collection_set_tests::{kind}_set_rejection_child"))
+            .arg("--nocapture")
+            .env("SIMPLE_COLLECTION_SET_REJECTION_CHILD", "1")
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(70), "{kind}.set must fail loudly");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let type_name = if kind == "array" { "Array" } else { "Tuple" };
+        assert!(stderr.contains(type_name), "missing receiver type in diagnostic: {stderr}");
+        assert!(stderr.contains("set"), "missing method in diagnostic: {stderr}");
+    }
+
+    #[test]
+    fn array_set_rejection_is_loud() {
+        assert_rejected_child("array");
+    }
+
+    #[test]
+    fn array_set_rejection_child() {
+        if std::env::var_os("SIMPLE_COLLECTION_SET_REJECTION_CHILD").is_some() {
+            rt_collection_set(rt_array_new(0), RuntimeValue::from_int(1), RuntimeValue::from_int(2));
+        }
+    }
+
+    #[test]
+    fn tuple_set_rejection_is_loud() {
+        assert_rejected_child("tuple");
+    }
+
+    #[test]
+    fn tuple_set_rejection_child() {
+        if std::env::var_os("SIMPLE_COLLECTION_SET_REJECTION_CHILD").is_some() {
+            rt_collection_set(rt_tuple_new(0), RuntimeValue::from_int(1), RuntimeValue::from_int(2));
+        }
+    }
 }
 
 /// Clear all elements from an array
@@ -3759,6 +4039,14 @@ pub extern "C" fn text_dot_from_char_code(code: i64) -> RuntimeValue {
     unsafe { rt_string_new(s.as_ptr(), s.len() as u64) }
 }
 
+/// Canonical raw-i64 ABI used by integer `.chr()`/`.to_char()` MIR lowering.
+/// Keep it on the same scalar-validation and UTF-8 allocation path as the
+/// legacy Text method symbol so the seed JIT can retain compiled execution.
+#[no_mangle]
+pub extern "C" fn rt_char_from_code(code: i64) -> RuntimeValue {
+    text_dot_from_char_code(code)
+}
+
 #[no_mangle]
 pub extern "C" fn rt_text_find(haystack: RuntimeValue, needle: RuntimeValue, start: i64) -> i64 {
     // Negative start clamps to 0 (the two-arg index_of contract; matches the
@@ -4131,7 +4419,38 @@ pub extern "C" fn rt_string_join(array: RuntimeValue, separator: RuntimeValue) -
         // the same display formatter the print path uses (rt_value_to_string
         // wraps value_to_display_string) before reading it as UTF-8, so
         // `[1,2,3].join(",")` renders bare ints instead of empty strings.
+        //
+        // PERF (2026-09-06): an element that is ALREADY a heap String needs no
+        // rendering at all — its UTF-8 bytes are exactly what we append. The
+        // unconditional `rt_value_to_string` below cost TWO allocations per
+        // element (a Rust `String` inside `value_to_display_string`, then a
+        // fresh interned `RuntimeValue` string via `rt_string_new`) purely to
+        // read back bytes the element already owned. Measured on the codegen
+        // (Cranelift JIT) lane, `[text].join("")` cost ~237 ns PER ELEMENT
+        // regardless of element length, which made every accumulate-into-
+        // `[text]`-then-join loop in the stdlib (base64's `_bytes_to_text`,
+        // among others) two orders of magnitude slower than the equivalent
+        // `[u8]` loop at ~2 ns/element. Reading an already-String element
+        // directly removes both allocations and is byte-for-byte identical:
+        // `value_to_display_string` on a String value returns that string's
+        // own contents unchanged. Non-String elements keep the old path
+        // exactly, so `[1,2,3].join(",")` is unaffected.
+        // See doc/08_tracking/bug/codegen_lane_still_slow_base64url_utf8_time_utils_2026-08-18.md
         let elem = rt_array_get(array, i);
+        if elem.heap_type() == Some(HeapObjectType::String) {
+            let elem_len = rt_string_len(elem);
+            if elem_len > 0 {
+                let elem_data = rt_string_data(elem);
+                unsafe {
+                    let s = std::str::from_utf8_unchecked(std::slice::from_raw_parts(
+                        elem_data,
+                        elem_len as usize,
+                    ));
+                    result.push_str(s);
+                }
+            }
+            continue;
+        }
         let elem_str = rt_value_to_string(elem);
         let elem_len = rt_string_len(elem_str);
         if elem_len > 0 {
@@ -4186,6 +4505,34 @@ pub extern "C" fn rt_string_to_int(string: RuntimeValue) -> i64 {
     unsafe {
         let s = std::str::from_utf8_unchecked(std::slice::from_raw_parts(data, len as usize));
         s.trim().parse::<i64>().unwrap_or(0)
+    }
+}
+
+/// Receiver-dispatched `.to_i64()` / `.to_int()` for the native lanes when the
+/// receiver TYPE WAS ERASED. Twin of the C runtime's `rt_to_int_dynamic`
+/// (`src/runtime/runtime_native.c`); both must exist, because a natively built
+/// program links exactly one of the two runtimes and the compiler emits this
+/// call without knowing which.
+///
+/// The LLVM codegen used to match `to_i64`/`to_int` in an unconditional
+/// integer-cast block and emit a coercion to i64. A `text` handle IS an i64 in
+/// this ABI, so that coercion was the IDENTITY and `text.to_i64()` evaluated to
+/// the handle's own word. Measured 2026-09-07 on the aarch64 Stage 2 candidate:
+/// `native_build_shard_threads` compiled all three of its
+/// `args[i].to_i64() ?? 0` sites to no call at all, so `--threads 1` became a
+/// heap address and the build fanned out to 79 shard workers for a single unit.
+///
+/// Routing bare `to_i64` unconditionally to `rt_string_to_int` is NOT the fix:
+/// that returns 0 for a non-string, which would silently zero every erased
+/// NUMERIC `.to_i64()`. Dispatch on the receiver instead, with an IDENTITY
+/// fallback that is byte-identical to the cast block's previous behaviour for
+/// everything that is not a heap string — so the genuinely-i64 case is
+/// bit-for-bit unchanged.
+#[no_mangle]
+pub extern "C" fn rt_to_int_dynamic(value: RuntimeValue) -> i64 {
+    match value.heap_type() {
+        Some(HeapObjectType::String) => rt_string_to_int(value),
+        _ => value.to_raw() as i64,
     }
 }
 
@@ -4501,7 +4848,14 @@ pub extern "C" fn rt_string_index_of(string: RuntimeValue, needle: RuntimeValue)
 
 /// Hash a text string and return as i64
 ///
-/// Uses the same compact byte hash as the pure collection benchmark/reference.
+/// Canonical algorithm: FNV-1a 64-bit (offset basis `14695981039346656037`,
+/// prime `1099511628211`) — MUST match the C runtime
+/// (`src/runtime/runtime_native.c` `rt_hash_text`), the interpreter extern
+/// (`src/compiler_rust/compiler/src/interpreter_extern/conversion.rs`
+/// `rt_hash_text`), and the pure-Simple twin
+/// (`src/runtime/simple_core/core_string.spl` `rt_hash_text`). Previously
+/// DJB2, which silently diverged from the C oracle — see
+/// doc/08_tracking/bug/rt_hash_text_cross_lane_disagreement_2026-09-07.md.
 #[no_mangle]
 pub extern "C" fn rt_hash_text(string: RuntimeValue) -> i64 {
     let len = rt_string_len(string);
@@ -4512,10 +4866,11 @@ pub extern "C" fn rt_hash_text(string: RuntimeValue) -> i64 {
     if data.is_null() {
         return 0;
     }
-    let mut hash = 5381u64;
+    let mut hash = 14695981039346656037u64;
     unsafe {
         for byte in std::slice::from_raw_parts(data, len as usize) {
-            hash = hash.wrapping_mul(33).wrapping_add(*byte as u64);
+            hash ^= *byte as u64;
+            hash = hash.wrapping_mul(1099511628211u64);
         }
     }
     hash as i64
@@ -4556,31 +4911,19 @@ pub extern "C" fn rt_for_iterable(collection: RuntimeValue) -> RuntimeValue {
 #[no_mangle]
 pub extern "C" fn rt_index_get(collection: RuntimeValue, index: RuntimeValue) -> RuntimeValue {
     match collection.heap_type() {
-        Some(HeapObjectType::Array) => {
-            if index.is_int() {
-                rt_array_get(collection, index.as_int())
-            } else {
-                RuntimeValue::NIL
-            }
-        }
-        Some(HeapObjectType::Tuple) => {
-            if index.is_int() {
-                let idx = index.as_int();
-                if idx < 0 {
-                    RuntimeValue::NIL
-                } else {
-                    rt_tuple_get(collection, idx as u64)
-                }
-            } else {
-                RuntimeValue::NIL
-            }
-        }
+        Some(HeapObjectType::Array) => match index.as_index_i64() {
+            Some(idx) => rt_array_get(collection, idx),
+            None => RuntimeValue::NIL,
+        },
+        Some(HeapObjectType::Tuple) => match index.as_index_i64() {
+            Some(idx) if idx >= 0 => rt_tuple_get(collection, idx as u64),
+            _ => RuntimeValue::NIL,
+        },
         Some(HeapObjectType::String) => {
             // String indexing returns a single-char string (consistent with char_at)
-            if index.is_int() {
-                rt_string_char_at(collection, index.as_int())
-            } else {
-                RuntimeValue::NIL
+            match index.as_index_i64() {
+                Some(idx) => rt_string_char_at(collection, idx),
+                None => RuntimeValue::NIL,
             }
         }
         Some(HeapObjectType::Dict) => super::dict::rt_dict_get(collection, index),
@@ -4593,13 +4936,10 @@ pub extern "C" fn rt_index_get(collection: RuntimeValue, index: RuntimeValue) ->
 #[no_mangle]
 pub extern "C" fn rt_index_set(collection: RuntimeValue, index: RuntimeValue, value: RuntimeValue) -> bool {
     match collection.heap_type() {
-        Some(HeapObjectType::Array) => {
-            if index.is_int() {
-                rt_array_set(collection, index.as_int(), value)
-            } else {
-                false
-            }
-        }
+        Some(HeapObjectType::Array) => match index.as_index_i64() {
+            Some(idx) => rt_array_set(collection, idx, value),
+            None => false,
+        },
         Some(HeapObjectType::Dict) => super::dict::rt_dict_set(collection, index, value),
         _ => false,
     }
@@ -4765,10 +5105,39 @@ pub extern "C" fn rt_array_reversed(array: RuntimeValue) -> RuntimeValue {
 
 /// Sort an array in place (ascending order)
 /// Works with integers and floats. Mixed types are sorted with ints first.
+///
+/// Byte-packed and u64-packed arrays store raw, untagged elements (see
+/// `rt_array_get`/`rt_array_set` above), so they cannot go through the
+/// tagged-`RuntimeValue` comparator path below — that would misinterpret the
+/// raw bits as a boxed/tagged value, exactly the divergence the C runtime's
+/// `rt_array_sort` avoids by branching on `RT_CORE_ARRAY_FLAG_BYTES` /
+/// `RT_CORE_ARRAY_FLAG_U64_PACKED` before calling `qsort` with
+/// `rt_sorted_byte_cmp`/`rt_sorted_u64_cmp`. These two branches are the
+/// Rust-lane twin of that: same ascending order, built on the existing
+/// per-element accessors so no new unsafe raw-buffer reinterpretation is
+/// introduced.
 #[no_mangle]
 pub extern "C" fn rt_array_sort(array: RuntimeValue) -> bool {
     let arr = as_typed_ptr!(mut array, HeapObjectType::Array, RuntimeArray, false);
     unsafe {
+        if (*arr).is_byte_packed() {
+            let len = (*arr).len as usize;
+            let mut bytes: Vec<u8> = (0..len).map(|i| rt_array_get(array, i as i64).as_int() as u8).collect();
+            bytes.sort_by(rt_sorted_byte_cmp);
+            for (i, b) in bytes.into_iter().enumerate() {
+                rt_array_set(array, i as i64, RuntimeValue::from_int(b as i64));
+            }
+            return true;
+        }
+        if (*arr).is_u64_packed() {
+            let len = (*arr).len as usize;
+            let mut words: Vec<u64> = (0..len).map(|i| rt_array_get(array, i as i64).as_int() as u64).collect();
+            words.sort_by(rt_sorted_u64_cmp);
+            for (i, w) in words.into_iter().enumerate() {
+                rt_array_set(array, i as i64, RuntimeValue::from_int(w as i64));
+            }
+            return true;
+        }
         let slice = (*arr).as_mut_slice();
         let providers = collection_providers();
         let report = primitive_sort::sort_runtime_values(slice, providers.simd_tier);
@@ -5199,14 +5568,9 @@ pub extern "C" fn rt_array_copy(array: RuntimeValue) -> RuntimeValue {
             if result.is_nil() {
                 return result;
             }
-            let dst =
-                as_typed_ptr!(mut result, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
+            let dst = as_typed_ptr!(mut result, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
             if len > 0 && !(*arr).data.is_null() && !(*dst).data.is_null() {
-                std::ptr::copy_nonoverlapping(
-                    (*arr).data as *const u64,
-                    (*dst).data as *mut u64,
-                    len as usize,
-                );
+                std::ptr::copy_nonoverlapping((*arr).data as *const u64, (*dst).data as *mut u64, len as usize);
             }
             (*dst).len = len;
             return result;
@@ -5217,25 +5581,44 @@ pub extern "C" fn rt_array_copy(array: RuntimeValue) -> RuntimeValue {
             if result.is_nil() {
                 return result;
             }
-            let dst =
-                as_typed_ptr!(mut result, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
+            let dst = as_typed_ptr!(mut result, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
             if len > 0 && !(*arr).data.is_null() && !(*dst).data.is_null() {
-                std::ptr::copy_nonoverlapping(
-                    (*arr).data as *const u8,
-                    (*dst).data as *mut u8,
-                    len as usize,
-                );
+                std::ptr::copy_nonoverlapping((*arr).data as *const u8, (*dst).data as *mut u8, len as usize);
             }
             (*dst).len = len;
             return result;
         }
 
+        // GENERIC (tagged) layout. This is NOT a rare path: `[0u32; n]` lowers
+        // to rt_array_repeat -> rt_array_new, which sets neither U64_PACKED nor
+        // BYTE_PACKED, so every `[u32]`/`[i64]`/`[f64]`/class array binding
+        // reaches here -- the two packed branches above are near-dead for
+        // source-level `val b = a`.
+        //
+        // The old body pushed element-by-element through `rt_array_push`. That
+        // is one non-inlined extern call, one heap-handle untag, one capacity
+        // compare and one length store PER ELEMENT: measured 12.8 ms for a
+        // 480,000-element `[u32]` versus 3.9 ms for a hand-written Simple
+        // `while` loop, i.e. the runtime's own copy was 3.2x SLOWER than
+        // interpreted/JIT-ed source (engine2d perf register defect #7, which is
+        // why `backend_vulkan.spl:1504` still carries a hand loop).
+        //
+        // Bulk-copy the tagged words instead. This is semantics-preserving:
+        // `rt_array_push`'s generic branch is exactly `*data.add(len) = value;
+        // len += 1` after a capacity check (see rt_array_push_grow) -- no
+        // retain, no write barrier, no GC bookkeeping -- and `rt_array_new(len)`
+        // pre-allocates capacity `len`, so the growth branch could never fire
+        // for this loop anyway. Heap-pointer elements stay shared, which is what
+        // "shallow copy" already meant.
         let result = rt_array_new(len);
         if result.is_nil() {
             return result;
         }
-        for item in (*arr).as_slice() {
-            rt_array_push(result, *item);
+        let dst = as_typed_ptr!(mut result, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
+        if len > 0 && !(*arr).data.is_null() && !(*dst).data.is_null() {
+            debug_assert!((*dst).capacity >= len);
+            std::ptr::copy_nonoverlapping((*arr).data, (*dst).data, len as usize);
+            (*dst).len = len;
         }
         result
     }
@@ -5761,15 +6144,26 @@ pub extern "C" fn rt_array_repeat(value: RuntimeValue, count: i64) -> RuntimeVal
         return rt_array_new(0);
     }
 
-    let result = rt_array_new(count as u64);
+    // Uninitialized, NOT alloc_zeroed: every slot is overwritten by the fill
+    // below, so zeroing first is a second full pass over the buffer. That is
+    // free for small arrays and very much not for large ones — a
+    // `[0u32; 7680*4320]` framebuffer is 265 MB of RuntimeValue slots
+    // (537 MB at 8192x8192), and the redundant pass was measured at ~150 ms
+    // and ~282 ms respectively.
+    let result = rt_array_new_uninit(count as u64);
     if result.is_nil() {
         return result;
     }
 
     let arr = as_typed_ptr!(mut result, HeapObjectType::Array, RuntimeArray, result);
     unsafe {
+        // Fill BEFORE publishing `len`. With an uninitialized buffer a GC scan
+        // that observed len = count would walk arbitrary words as tagged
+        // values; with the old alloc_zeroed they were harmlessly nil. Ordering
+        // is what keeps this safe, so do not hoist the length store.
+        let data = (*arr).data;
+        std::slice::from_raw_parts_mut(data, count as usize).fill(value);
         (*arr).len = count as u64;
-        (*arr).as_mut_slice().fill(value);
     }
     result
 }
@@ -5882,6 +6276,124 @@ pub extern "C" fn __simple_intrinsic_bounds_check(index: i64, len: i64) -> i64 {
     0
 }
 
+// AVX-512 provider dispatch tests. Kept as a dedicated module in this file
+// (rather than in `collection_tests.rs`) so the AVX-512 `byte_find`/
+// `byte_rfind`/`byte_split` provider wiring added to `providers_for_tier`
+// above has direct, close-by coverage. Modelled on the AVX-512 tests in
+// `byte_kernels.rs`: compare the AVX-512 provider's answer against the
+// SCALAR provider's answer (never a hardcoded expected value) across sizes
+// straddling the 64-byte lane boundary, and stay correct on a host without
+// AVX-512 because every kernel here falls back through AVX2 to scalar.
+#[cfg(test)]
+mod avx512_provider_dispatch_tests {
+    use super::{
+        avx512_byte_split_ranges, byte_split_ranges_for_tier, providers_for_tier, scalar_byte_find,
+        scalar_byte_rfind, scalar_byte_split_ranges,
+    };
+    use simple_simd::SimdTier;
+
+    #[cfg(target_arch = "x86_64")]
+    fn avx512_available() -> bool {
+        std::arch::is_x86_feature_detected!("avx512f") && std::arch::is_x86_feature_detected!("avx512bw")
+    }
+
+    #[cfg(not(target_arch = "x86_64"))]
+    fn avx512_available() -> bool {
+        false
+    }
+
+    #[test]
+    fn avx512_provider_reports_its_own_tier() {
+        let providers = providers_for_tier(SimdTier::X86_64Avx512);
+        assert_eq!(providers.simd_tier, SimdTier::X86_64Avx512);
+    }
+
+    #[test]
+    fn avx512_provider_find_and_rfind_match_scalar_across_lane_boundaries() {
+        if !avx512_available() {
+            return;
+        }
+        let providers = providers_for_tier(SimdTier::X86_64Avx512);
+
+        for filler in [0usize, 1, 63, 64, 65, 127, 128, 200] {
+            let mut haystack = vec![b'a'; filler];
+            haystack.extend_from_slice(b"needle");
+            haystack.extend_from_slice(&vec![b'b'; 17]);
+            haystack.extend_from_slice(b"needle");
+            haystack.extend_from_slice(&vec![b'c'; 5]);
+            let needle = b"needle";
+
+            for start in [0usize, 1, filler] {
+                assert_eq!(
+                    (providers.byte_find)(&haystack, needle, start),
+                    scalar_byte_find(&haystack, needle, start),
+                    "find mismatch: filler={filler} start={start}"
+                );
+            }
+            assert_eq!(
+                (providers.byte_rfind)(&haystack, needle),
+                scalar_byte_rfind(&haystack, needle),
+                "rfind mismatch: filler={filler}"
+            );
+        }
+
+        // Degenerate inputs: empty haystack, needle absent, needle longer
+        // than haystack, empty needle.
+        let empty: Vec<u8> = Vec::new();
+        assert_eq!(
+            (providers.byte_find)(&empty, b"x", 0),
+            scalar_byte_find(&empty, b"x", 0)
+        );
+        let haystack = vec![b'z'; 300];
+        assert_eq!(
+            (providers.byte_find)(&haystack, b"absent", 0),
+            scalar_byte_find(&haystack, b"absent", 0)
+        );
+        assert_eq!(
+            (providers.byte_find)(b"ab", b"abcdef", 0),
+            scalar_byte_find(b"ab", b"abcdef", 0)
+        );
+        assert_eq!(
+            (providers.byte_find)(&haystack, b"", 5),
+            scalar_byte_find(&haystack, b"", 5)
+        );
+    }
+
+    #[test]
+    fn avx512_provider_split_matches_scalar_across_lane_boundaries() {
+        if !avx512_available() {
+            return;
+        }
+        let providers = providers_for_tier(SimdTier::X86_64Avx512);
+
+        for filler in [0usize, 1, 63, 64, 65, 127, 128, 200] {
+            let mut haystack = "a".repeat(filler);
+            haystack.push_str("--seg--");
+            haystack.push_str(&"b".repeat(23));
+            haystack.push_str("--");
+
+            let expected = scalar_byte_split_ranges(&haystack, "--");
+            assert_eq!((providers.byte_split)(&haystack, "--"), expected, "filler={filler}");
+            assert_eq!(
+                avx512_byte_split_ranges(&haystack, "--"),
+                expected,
+                "helper mismatch filler={filler}"
+            );
+            assert_eq!(
+                byte_split_ranges_for_tier(SimdTier::X86_64Avx512, &haystack, "--"),
+                expected,
+                "tier-fn mismatch filler={filler}"
+            );
+        }
+
+        // Degenerate: no delimiter present, and an empty haystack.
+        let expected = scalar_byte_split_ranges("no-delimiter-here", "::");
+        assert_eq!((providers.byte_split)("no-delimiter-here", "::"), expected);
+        let expected = scalar_byte_split_ranges("", "--");
+        assert_eq!((providers.byte_split)("", "--"), expected);
+    }
+}
+
 #[cfg(test)]
 #[path = "collection_tests.rs"]
 mod tests;
@@ -5900,7 +6412,8 @@ mod tests;
 #[cfg(test)]
 mod string_free_contract_tests {
     use super::{
-        rt_array_new, rt_array_push, rt_string_free, rt_string_len, rt_string_new, rt_string_new_literal,
+        byte_array_write, rt_array_bytes_copy_checked, rt_array_bytes_validate, rt_array_free, rt_array_new,
+        rt_array_push, rt_byte_array_new_len, rt_string_free, rt_string_len, rt_string_new, rt_string_new_literal,
         rt_transient_array_scope_begin, rt_transient_array_scope_end, rt_transient_array_scope_pause,
         rt_transient_heap_promote,
     };
@@ -5925,6 +6438,48 @@ mod string_free_contract_tests {
         assert_eq!(rt_heap_registry_count(), before + 1, "new string registers");
         assert_eq!(rt_string_free(s), 1, "ordinary string is freed");
         assert_eq!(rt_heap_registry_count(), before, "registry returns to baseline");
+    }
+
+    #[test]
+    fn owned_process_byte_array_provider_validates_both_representations() {
+        let _g = GUARD.lock().unwrap();
+        let boxed = rt_array_new(3);
+        assert!(rt_array_push(boxed, crate::value::RuntimeValue::from_int(0)));
+        assert!(rt_array_push(boxed, crate::value::RuntimeValue::from_int(127)));
+        assert!(rt_array_push(boxed, crate::value::RuntimeValue::from_int(255)));
+        let mut boxed_out = [0u8; 3];
+        assert_eq!(rt_array_bytes_validate(boxed.0 as i64), 3);
+        assert_eq!(
+            unsafe { rt_array_bytes_copy_checked(boxed.0 as i64, boxed_out.as_mut_ptr(), boxed_out.len() as i64) },
+            3
+        );
+        assert_eq!(boxed_out, [0, 127, 255]);
+
+        let packed = rt_byte_array_new_len(3);
+        assert!(byte_array_write(packed, &[1, 2, 3]));
+        let mut packed_out = [0u8; 3];
+        assert_eq!(rt_array_bytes_validate(packed.0 as i64), 3);
+        assert_eq!(
+            unsafe { rt_array_bytes_copy_checked(packed.0 as i64, packed_out.as_mut_ptr(), packed_out.len() as i64) },
+            3
+        );
+        assert_eq!(packed_out, [1, 2, 3]);
+
+        let invalid = rt_array_new(1);
+        assert!(rt_array_push(invalid, crate::value::RuntimeValue::from_int(256)));
+        assert_eq!(rt_array_bytes_validate(invalid.0 as i64), -22);
+        assert_eq!(
+            unsafe { rt_array_bytes_copy_checked(boxed.0 as i64, std::ptr::null_mut(), 3) },
+            -22
+        );
+        assert_eq!(
+            unsafe { rt_array_bytes_copy_checked(boxed.0 as i64, boxed_out.as_mut_ptr(), 2) },
+            -22
+        );
+
+        rt_array_free(boxed);
+        rt_array_free(packed);
+        rt_array_free(invalid);
     }
 
     #[test]
@@ -6066,6 +6621,33 @@ mod string_free_contract_tests {
         assert_eq!(rt_string_free(literal), 0, "interned literal remains protected");
         assert_eq!(rt_string_free(direct), 1);
         assert_eq!(rt_string_free(post_pause), 1);
+    }
+
+    #[test]
+    fn persistent_native_struct_root_promotes_transient_children() {
+        unsafe extern "C" {
+            fn rt_struct_alloc(size: i64) -> *mut u8;
+            fn rt_free(ptr: *mut u8);
+        }
+
+        let _g = GUARD.lock().unwrap();
+        let root_ptr = unsafe { rt_struct_alloc(16) };
+        assert!(!root_ptr.is_null(), "persistent native owner allocated");
+        let root = crate::value::RuntimeValue((root_ptr as u64) | crate::value::tags::TAG_HEAP);
+
+        assert!(rt_transient_array_scope_begin());
+        let child = mkstr("transient child reached through persistent native owner");
+        unsafe {
+            (root_ptr as *mut u64).write(child.0);
+            (root_ptr as *mut u64).add(1).write(0);
+        }
+        assert!(rt_transient_array_scope_pause());
+        assert!(rt_transient_heap_promote(root));
+        assert!(rt_transient_array_scope_end());
+        assert_eq!(rt_string_len(child), 55, "reachable transient child survives");
+
+        assert_eq!(rt_string_free(child), 1);
+        unsafe { rt_free(root_ptr) };
     }
 
     #[test]
@@ -6311,10 +6893,7 @@ mod array_free_deep_contract_tests {
 
 #[cfg(test)]
 mod lazy_string_hash_tests {
-    use super::{
-        rt_string_concat, rt_string_len, rt_string_new, RuntimeString, FNV1A_HASH_CALLS,
-        STRING_HASH_UNCOMPUTED,
-    };
+    use super::{rt_string_concat, rt_string_len, rt_string_new, RuntimeString, FNV1A_HASH_CALLS, STRING_HASH_UNCOMPUTED};
     use crate::value::{HeapObjectType, RuntimeValue};
     use std::sync::atomic::Ordering;
 
@@ -6327,8 +6906,7 @@ mod lazy_string_hash_tests {
     }
 
     fn raw_hash_field(v: RuntimeValue) -> u64 {
-        let p = crate::value::heap::get_typed_ptr::<RuntimeString>(v, HeapObjectType::String)
-            .expect("string");
+        let p = crate::value::heap::get_typed_ptr::<RuntimeString>(v, HeapObjectType::String).expect("string");
         unsafe { (*p).hash }
     }
 

@@ -1,0 +1,77 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-LIB
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-LIB
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+"""Verify the shared data-bearing DB filter IR and independent CPU oracle."""
+
+use std.spec.step
+
+use std.spec.*
+use std.common.processing.db_filter_u32_ir.*
+
+describe "DB scan/filter ProcessingIR":
+    # @manual scenario evidence
+    it "should preserve unsigned boundary semantics":
+        # @req REQ-SSPEC-LIB
+        step("should preserve unsigned boundary semantics")
+        val ir = processing_ir_db_filter_u32(
+            [0u32, 1u32, 0xfffffffeu32, 0xffffffffu32],
+            0u32, 0xffffffffu32)
+        expect(processing_db_filter_u32_cpu_mask(ir)).to_equal(
+            [1u32, 1u32, 1u32, 1u32])
+        expect(processing_db_filter_u32_cpu_row_ids(ir)).to_equal([0, 1, 2, 3])
+
+    it "should filter four thousand patterned rows exactly":
+        # @req REQ-SSPEC-LIB
+        step("should filter four thousand patterned rows exactly")
+        var values: [u32] = []
+        var index: i64 = 0
+        while index < 4096:
+            values.push((index % 256).to_u32())
+            index = index + 1
+        val ir = processing_ir_db_filter_u32(values, 64u32, 191u32)
+        val mask = processing_db_filter_u32_cpu_mask(ir)
+        val rows = processing_db_filter_u32_row_ids(ir, mask)
+        expect(mask.len()).to_equal(4096)
+        expect(rows.len()).to_equal(2048)
+        expect(rows[0]).to_equal(64)
+        expect(rows[2047]).to_equal(4031)
+        expect(mask[63]).to_equal(0u32)
+        expect(mask[64]).to_equal(1u32)
+        expect(mask[191]).to_equal(1u32)
+        expect(mask[192]).to_equal(0u32)
+        expect(processing_db_filter_u32_mismatch_count(mask, mask)).to_equal(0)
+
+    it "should produce an exact inclusive filter mask and projected row IDs":
+        # @req REQ-SSPEC-LIB
+        step("should produce an exact inclusive filter mask and projected row IDs")
+        step("Build a data-bearing DB filter batch")
+        val ir = processing_ir_db_filter_u32(
+            [2u32, 7u32, 9u32, 10u32, 15u32], 7u32, 10u32)
+
+        step("Execute the independent CPU oracle")
+        val mask = processing_db_filter_u32_cpu_mask(ir)
+        expect(mask).to_equal([0u32, 1u32, 1u32, 1u32, 0u32])
+        expect(processing_db_filter_u32_cpu_row_ids(ir)).to_equal([1, 2, 3])
+        expect(processing_db_filter_u32_mask_checksum(mask)).to_equal(25)
+
+    it "should reject empty input inverted ranges and malformed device masks":
+        # @req REQ-SSPEC-LIB
+        step("should reject empty input inverted ranges and malformed device masks")
+        step("Construct invalid filter batches")
+        val empty = processing_ir_db_filter_u32([], 1u32, 2u32)
+        val inverted = processing_ir_db_filter_u32([1u32], 2u32, 1u32)
+
+        step("Require typed validation failures")
+        expect(processing_db_filter_u32_validate(empty).reason).to_equal("db-filter-input-empty")
+        expect(processing_db_filter_u32_validate(inverted).reason).to_equal("db-filter-range-invalid")
+
+        step("Reject device masks with the wrong length or non-binary values")
+        val valid = processing_ir_db_filter_u32([1u32, 2u32], 1u32, 2u32)
+        expect(processing_db_filter_u32_row_ids(valid, [1u32])).to_equal([])
+        expect(processing_db_filter_u32_row_ids(valid, [1u32, 2u32])).to_equal([])
+        expect(processing_db_filter_u32_mismatch_count([1u32, 0u32], [1u32])).to_equal(2)

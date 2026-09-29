@@ -1,0 +1,92 @@
+"""
+nvme_emu_read_disturb_probe_check — read-disturb FEASIBILITY probe (a measurement,
+not a passing recovery scenario).
+
+A read-disturb recovery scenario belongs beside the retention and wear scenarios
+in nvme_emu_recovery_check.spl: hammer a neighbour page with host reads until the
+victim degrades, then require the firmware to still return correct data. It is
+NOT there, and this file is the evidence for why.
+
+  bin/simple run examples/09_embedded/simpleos_nvme_fw/fw/nvme_emu_read_disturb_probe_check.spl
+
+The typed emu_* test-control seam exposes emu_set_block_wear, emu_advance_time_s,
+emu_set_vref_offset, emu_vt_histogram and emu_read_margin. There is NO disturb
+injector — no emu_set_read_disturb / emu_bump_rd_count — so the only way to raise
+a page's rd_count is to actually issue reads. The physics
+(src/lib/hardware/nand_emu/physics.spl ne_disturb_delta, profile S1 rd_coef = 1.0)
+gives +1 Vt code per 10,000 neighbour reads, and an erased cell sits at code 88
+against a default reference of 128, so ~400,000 neighbour senses are needed
+before one bit flips.
+
+This probe hammers a real neighbour LBA over the ordinary NVMe path and reports
+whether the victim moved at all. It prints an explicit verdict token either way
+and NEVER asserts that the victim degraded — an assertion that cannot fail is
+worse than no assertion (.claude/rules/testing.md). Finding filed at
+doc/08_tracking/bug/nvme_emu_typed_seam_has_no_read_disturb_injector_2026-09-01.md
+
+Submission is firmware-level, not host-equivalent — see the same note in
+nvme_emu_recovery_check.spl.
+"""
+
+use nvme_types.*
+use nvme_controller.*
+use ftl.*
+use fil.*
+
+# 500 keeps the whole probe well inside the 10s example cap on a loaded box. The
+# original measurement was 2000 reads in ~9s (recorded in the bug doc above); at
+# either count the disturb delta is ~0.05-0.2 of the ~40 Vt codes a flip needs,
+# so the verdict is identical and the margin is not.
+val HAMMER_READS: i64 = 500
+
+fn submit_io(c: NvmeController, cid: i64, op: i64, lba: i64, nblocks: i64, data: i64) -> (NvmeController, NvmeCpl):
+    var dev = c
+    val cpl: NvmeCpl = dev.process_one_io(cmd_make(cid, op, lba, nblocks, data))
+    (dev, cpl)
+
+fn main():
+    var c: NvmeController = nvme_controller_new_emu()
+
+    # Victim carries 0xFF: every cell erased. Read disturb pushes Vt UP, so an
+    # erased cell is the only one a disturb fault can flip (retention pushes
+    # programmed cells DOWN — the two faults have opposite polarity and cannot
+    # be stacked to shorten this loop).
+    val (c1, wv) = submit_io(c, 1, OP_WRITE, 8, 1, 0xFF)
+    c = c1
+    print("  victim WRITE lba8 status=" + wv.status.to_text())
+    val (c2, wh) = submit_io(c, 2, OP_WRITE, 9, 1, 0x0F)
+    c = c2
+    print("  hammer WRITE lba9 status=" + wh.status.to_text())
+
+    val vppn: i64 = c.ftl.lba_ppn(8)
+    val hppn: i64 = c.ftl.lba_ppn(9)
+    print("  victim ppn=" + vppn.to_text() + " blk=" + ppn_block(vppn).to_text() + " page=" + ppn_page(vppn).to_text())
+    print("  hammer ppn=" + hppn.to_text() + " blk=" + ppn_block(hppn).to_text() + " page=" + ppn_page(hppn).to_text())
+
+    # Adjacency is a precondition, not a hope: disturb only reaches the two page
+    # neighbours WITHIN the same block. If these are not adjacent the hammering
+    # is vacuous, and the probe says so instead of running a pointless loop.
+    if ppn_block(vppn) != ppn_block(hppn):
+        print("  NOTE: victim and hammer are in different blocks — no disturb coupling")
+        print("READ DISTURB PROBE INCONCLUSIVE: pages not adjacent")
+        return ()
+
+    val before: i64 = c.ftl.fil.read(vppn).data
+    print("  victim raw byte before hammering = " + before.to_text())
+
+    var i: i64 = 0
+    while i < HAMMER_READS:
+        val (cn, _r) = submit_io(c, 100, OP_READ, 9, 1, 0)
+        c = cn
+        i = i + 1
+    print("  issued " + HAMMER_READS.to_text() + " host reads of the neighbour")
+
+    val after: i64 = c.ftl.fil.read(vppn).data
+    print("  victim raw byte after hammering  = " + after.to_text())
+
+    if after != before:
+        print("READ DISTURB PROBE MOVED: victim degraded after " + HAMMER_READS.to_text() + " neighbour reads")
+    else:
+        # Expected outcome given the physics above. Reported, never asserted away.
+        print("READ DISTURB PROBE DID NOT MOVE: " + HAMMER_READS.to_text() + " neighbour reads left the victim unchanged; the typed seam has no disturb injector and the physics needs ~400000 senses")
+    return ()

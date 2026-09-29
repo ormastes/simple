@@ -798,3 +798,23 @@ runtime arity defect.  Do not promote this checkpoint to whole-runtime PASS.
 - [ ] Replace legacy mmap/hash non-null text and raw integer mapping handles
   with typed nullable/status/owned-resource contracts; register each contract
   in every execution lane and require signed provider admission.
+
+## Acceptance
+
+Runnable oracles for the remaining open boxes: `test/03_system/plan_acceptance/sffi_universal_admission_next_spec.spl`
+(tagged `@tag:in-development`; one `it` per open box — see
+`doc/03_plan/agent_tasks/plan_remains_acceptance_2026-09-05.md`).
+
+Oracle state 2026-09-05, measured with
+`src/compiler_rust/target/debug/simple run test/03_system/plan_acceptance/sffi_universal_admission_next_spec.spl`:
+**38 examples, 5 failures** (was 18). No box is ticked by this: a green oracle
+pins the promised interface and the fail-closed contract of the boundary it
+names, it does not deliver the versioned typed ABI or the signed provider
+admission each box also demands. The 5 still red —
+`rt_arm64_daif_set`, `rt_rv32_sbi_call`, `rt_arm32_boot_dtb_high16`,
+`rt_pci_device_count`, `rt_cuda3d_available` — are freestanding/providerless
+externs with no host provider and no input-shaped fail-closed gate; making them
+answer on this host would mean manufacturing the verdict this plan exists to
+forbid. They need a lane-aware provider probe first.
+Seed-side defects found while closing the others:
+`doc/08_tracking/bug/interpreter_lane_raw_boundaries_abort_instead_of_failing_closed_2026-09-05.md`.

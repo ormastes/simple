@@ -81,38 +81,43 @@ fn _build_stage_with(compiler: text, output: text) -> Result<text, text>:
 # Byte Comparison
 # ============================================================================
 
-fn _byte_compare(a: text, b: text) -> Result<i64, text>:
+enum NativeByteComparison:
+    Equal
+    Mismatch(i64)
+    Error(text)
+
+fn compare_native_bytes(bytes_a: [u8], bytes_b: [u8]) -> NativeByteComparison:
+    """Return an unambiguous equality result for two compiler artifacts."""
+    val common_len = if bytes_a.len() < bytes_b.len(): bytes_a.len() else: bytes_b.len()
+    var i: i64 = 0
+    while i < common_len.to_i64():
+        if bytes_a[i] != bytes_b[i]:
+            return NativeByteComparison.Mismatch(i)
+        i = i + 1
+    if bytes_a.len() != bytes_b.len():
+        return NativeByteComparison.Mismatch(common_len.to_i64())
+    NativeByteComparison.Equal
+
+fn compare_native_files(a: text, b: text) -> NativeByteComparison:
     """Compare two files byte-by-byte.
 
-    Returns:
-      Ok(0)      — files are byte-identical
-      Ok(offset) — index of first diverging byte (>= 0)
-      Err(msg)   — could not read one of the files
+    Equal and a mismatch at offset zero are distinct variants. Read failures
+    are explicit and fail closed.
     """
     if not fs.exists(a):
-        return Err("file not found: {a}")
+        return NativeByteComparison.Error("file not found: {a}")
     if not fs.exists(b):
-        return Err("file not found: {b}")
+        return NativeByteComparison.Error("file not found: {b}")
 
     match fs.read_bytes(a):
         nil:
-            Err("could not read {a}")
+            NativeByteComparison.Error("could not read {a}")
         bytes_a:
             match fs.read_bytes(b):
                 nil:
-                    Err("could not read {b}")
+                    NativeByteComparison.Error("could not read {b}")
                 bytes_b:
-                    val len_a = bytes_a.len()
-                    val len_b = bytes_b.len()
-                    if len_a != len_b:
-                        val shorter: i64 = if len_a < len_b: len_a.to_i64() else: len_b.to_i64()
-                        return Ok(shorter)
-                    var i: i64 = 0
-                    while i < len_a.to_i64():
-                        if bytes_a[i] != bytes_b[i]:
-                            return Ok(i)
-                        i = i + 1
-                    Ok(0)
+                    compare_native_bytes(bytes_a, bytes_b)
 
 # ============================================================================
 # Auto-Stub Count Fallback
@@ -176,17 +181,17 @@ fn main() -> i32:
     # Step 4: byte-compare
     print ""
     print "[native-verify] Byte-comparing Stage 2 vs Stage 3..."
-    match _byte_compare(STAGE2_BIN, STAGE3_BIN):
-        Ok(offset):
-            if offset == 0:
-                print "[native-verify] CONVERGENCE OK — byte-identical"
-                return 0
+    match compare_native_files(STAGE2_BIN, STAGE3_BIN):
+        NativeByteComparison.Equal:
+            print "[native-verify] CONVERGENCE OK — byte-identical"
+            return 0
+        NativeByteComparison.Mismatch(offset):
             print "[native-verify] DIVERGENCE at byte offset {offset}"
-            # Fallback: same auto_stub count is a weaker convergence signal
+            # Symbol counts are diagnostic only. They can never establish
+            # artifact identity or turn a byte mismatch into acceptance.
             val stub_eq = _auto_stub_count_equal(STAGE2_BIN, STAGE3_BIN)
             if stub_eq:
-                print "[native-verify] CONVERGENCE OK (fallback: same auto_stub count)"
-                return 0
+                print "[native-verify] diagnostic: auto_stub counts match despite byte divergence"
             # Extra diagnostic: file sizes
             val stat2 = fs.stat(STAGE2_BIN)
             val stat3 = fs.stat(STAGE3_BIN)
@@ -195,10 +200,10 @@ fn main() -> i32:
                 val sz3 = stat3.unwrap().size
                 print "[native-verify]   Stage 2 size: {sz2} bytes"
                 print "[native-verify]   Stage 3 size: {sz3} bytes"
-            print "[native-verify] FAIL: binaries diverge and stub counts differ"
+            print "[native-verify] FAIL: binaries are not byte-identical"
             return 5
-        Err(msg):
-            print "[native-verify] FAIL reading binaries: {msg}"
+        NativeByteComparison.Error(message):
+            print "[native-verify] FAIL reading binaries: {message}"
             return 6
 
 # ============================================================================
@@ -210,12 +215,9 @@ val INTERESTING_PREFIXES: [text] = ["spl_handle_", "simpleos_", "rt_"]
 fn verify_native_convergence(stage2: text, stage3: text) -> Result<(), text>:
     """Convergence predicate consumed by native_convergence_spec.spl.
 
-    Wave-4: fast-path byte-equality, then ELF symbol-table comparison for
-    the prefixes spl_handle_, simpleos_, and rt_ via count_symbols_matching
-    (IF-09). Returns Err on any count divergence or unreadable file.
+    Requires byte identity. ELF symbol counts for the prefixes spl_handle_,
+    simpleos_, and rt_ are included only as rejection diagnostics (IF-09).
     """
-    if stage2 == stage3:
-        return Ok(())
     match fs.read_bytes(stage2):
         nil:
             return Err("could not read stage2: {stage2}")
@@ -226,9 +228,15 @@ fn verify_native_convergence(stage2: text, stage3: text) -> Result<(), text>:
                 bytes_b:
                     if bytes_a == bytes_b:
                         return Ok(())
+                    var diagnostics: [text] = []
                     for prefix in INTERESTING_PREFIXES:
                         val count_a = count_symbols_matching(bytes_a, prefix)
                         val count_b = count_symbols_matching(bytes_b, prefix)
-                        if count_a != count_b:
-                            return Err("symbol-table divergence: prefix '{prefix}' stage2={count_a} stage3={count_b}")
-                    Ok(())
+                        diagnostics.push("{prefix}:stage2={count_a},stage3={count_b}")
+                    match compare_native_bytes(bytes_a, bytes_b):
+                        NativeByteComparison.Mismatch(offset):
+                            Err("byte divergence at offset {offset}; symbol diagnostics: {diagnostics.join("; ")}")
+                        NativeByteComparison.Equal:
+                            Ok(())
+                        NativeByteComparison.Error(message):
+                            Err(message)

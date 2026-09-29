@@ -1,0 +1,110 @@
+# @cover src/lib/nogc_async_mut/database/postgres_mimic/__init__.spl 0%
+# @req REQ-002 REQ-005 REQ-008 REQ-012 NFR-001 NFR-002 NFR-007 NFR-010 NFR-011
+
+"""Live bounded PostgreSQL-v3-subset service acceptance."""
+
+use std.spec.*
+use std.database.postgres_mimic.{
+    PostgresMimicServer, PgResponseKind,
+    PgDispatchOperation, PgDispatchSubmitResult, PgDispatchTakeResult,
+    PgDatabaseOwner
+}
+
+fn accepted_job_id(result: PgDispatchSubmitResult) -> i64:
+    match result:
+        PgDispatchSubmitResult.Accepted(job_id): job_id
+        PgDispatchSubmitResult.Rejected: 0
+
+# @inline
+fn setup_linux_fixture():
+    fail("UNRESOLVED ORACLE: Linux database server fixture")
+
+# @inline
+fn send_pgwire_exchange():
+    fail("UNRESOLVED ORACLE: live PostgreSQL v3 socket exchange")
+
+fn check_protocol_transcript():
+    fail("UNRESOLVED ORACLE: PostgreSQL framing authentication session transaction and cancellation transcript")
+
+fn check_fail_closed():
+    fail("UNRESOLVED ORACLE: malformed unauthenticated overloaded and capability-denied pgwire input")
+
+fn check_persistence():
+    fail("UNRESOLVED ORACLE: durability-before-ACK and restart persistence")
+
+fn check_interop_oracle():
+    fail("UNRESOLVED ORACLE: independent PostgreSQL client and pgbench interoperability")
+
+fn check_resource_counters():
+    fail("UNRESOLVED ORACLE: DB connection parser transaction commit and cancellation counters")
+
+describe "secure PostgreSQL subset server":
+    describe "REQ-005 NFR-002: bounded single-owner command execution":
+        it "should preserve startup query and terminate ordering without sharing mutable database state":
+            step("Validate bounded database-owner dispatch")
+            val database = PostgresMimicServer.memory().unwrap()
+            var owner = PgDatabaseOwner.create(database, 3)
+
+            val startup_id = accepted_job_id(owner.dispatch.submit_startup(
+                41, "simple", "simple", "secure-system-spec", 0, 100))
+            expect(startup_id).to_be_greater_than(0)
+            expect(owner.process_one(1)).to_equal(true)
+            val startup = owner.dispatch.take(startup_id)
+            val session_id = match startup:
+                PgDispatchTakeResult.Ready(completion): completion.session_id
+                _: 0
+            expect(session_id).to_be_greater_than(0)
+
+            val query_id = accepted_job_id(owner.dispatch.submit(
+                41, session_id, PgDispatchOperation.Query,
+                "VALUES (1)", 2, 100))
+            expect(owner.process_one(3)).to_equal(true)
+            val query_kind = match owner.dispatch.take(query_id):
+                PgDispatchTakeResult.Ready(completion): completion.responses[0].kind
+                _: PgResponseKind.ErrorResponse
+            expect(query_kind).to_equal(PgResponseKind.RowSet)
+
+            val terminate_id = accepted_job_id(owner.dispatch.submit(
+                41, session_id, PgDispatchOperation.Terminate, "", 4, 100))
+            expect(owner.process_one(5)).to_equal(true)
+            val closed = match owner.dispatch.take(terminate_id):
+                PgDispatchTakeResult.Ready(completion): completion.close_connection
+                _: false
+            expect(closed).to_equal(true)
+            expect(owner.commands_completed).to_equal(3)
+
+        it "should reject overload and finish accepted work during drain":
+            step("Reject bounded database-owner overload")
+            val database = PostgresMimicServer.memory().unwrap()
+            var owner = PgDatabaseOwner.create(database, 1)
+            val first = owner.dispatch.submit_startup(
+                51, "simple", "simple", "overload-system-spec", 0, 100)
+            expect(accepted_job_id(first)).to_be_greater_than(0)
+            expect(owner.dispatch.submit_startup(
+                52, "simple", "simple", "overload-system-spec", 0, 100)
+            ).to_equal(PgDispatchSubmitResult.Rejected)
+            expect(owner.begin_drain()).to_equal(1)
+            expect(owner.dispatch.submit_startup(
+                53, "simple", "simple", "overload-system-spec", 0, 100)
+            ).to_equal(PgDispatchSubmitResult.Rejected)
+            expect(owner.process_one(1)).to_equal(true)
+            expect(owner.commands_started).to_equal(1)
+            expect(owner.commands_completed).to_equal(1)
+
+    describe "REQ-005 REQ-008: live fail-closed database protocol":
+        it "should serve the declared PostgreSQL v3 subset over a bounded TCP listener":
+            setup_linux_fixture()
+            step("exchange over bound socket")
+            send_pgwire_exchange()
+            check_protocol_transcript()
+            check_interop_oracle()
+
+        it "should reject malformed unauthenticated and unauthorized requests":
+            step("reject malformed/unauthenticated/downgraded/replayed input")
+            check_fail_closed()
+            check_resource_counters()
+
+    describe "REQ-002 REQ-012: durable database lifecycle":
+        it "should acknowledge commits only after durable storage and preserve them across restart":
+            step("restart and verify data")
+            check_persistence()

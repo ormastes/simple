@@ -1,4 +1,8 @@
 # Native Entry-Closure Common Import Type Loss
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN
 
@@ -71,3 +75,4 @@ this pass — the required repair (tracing the entry-closure loader's fallback
 exhaustion and the empty-module-name collision, per "Required Repair" above)
 needs a dedicated session with the daemon build budget this task does not
 have. Left OPEN, characterization otherwise unchanged.
+

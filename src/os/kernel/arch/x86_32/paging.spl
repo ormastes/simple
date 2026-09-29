@@ -22,7 +22,7 @@
 
 use os.kernel.types.memory_types.{PhysAddr, VirtAddr, PageFrame, VmFlags}
 use os.kernel.boot.mmio.{mmio_read32, mmio_write32}
-use os.kernel.memory.pmm.{PhysMemManager, pmm_alloc_page, pmm_free_page}
+use os.kernel.memory.pmm.{PhysMemManager}
 
 # ============================================================================
 # Constants
@@ -119,9 +119,16 @@ fn _pte_phys_addr(entry: u32) -> u32:
 # Global VMM Instance
 # ============================================================================
 
-var g_vmm: VirtMemManager32 = VirtMemManager32(
+var g_vmm32: VirtMemManager32 = VirtMemManager32(
     pd_phys: 0
 )
+
+# ============================================================================
+# PMM Interface (forward declarations)
+# ============================================================================
+
+extern fn pmm_alloc_page() -> PageFrame?
+extern fn pmm_free_page(frame: PageFrame)
 
 fn _alloc_table_page() -> u32:
     """Allocate a zeroed page for a new page table.
@@ -193,7 +200,7 @@ fn vmm_init(pmm_manager: PhysMemManager):
         log_raw_println("[VMM] FATAL: Could not allocate Page Directory")
         return
 
-    g_vmm.pd_phys = pd_phys
+    g_vmm32.pd_phys = pd_phys
 
     log_raw_println("[VMM] Page Directory at physical 0x{pd_phys}")
 
@@ -210,7 +217,7 @@ fn _identity_map_low_memory():
     Uses a single PD entry with the Page Size (PS) bit set for a
     4MB superpage, avoiding the need for a page table.
     """
-    val pd_addr = g_vmm.pd_phys
+    val pd_addr = g_vmm32.pd_phys
 
     # PD entry 0: 4MB superpage at physical 0x0
     # Present + Writable + Page Size (4MB)
@@ -223,7 +230,7 @@ fn _identity_map_low_memory():
 # Page Mapping (4KB pages)
 # ============================================================================
 
-fn x86_32_vmm_map_page(virt: VirtAddr, phys: PhysAddr, flags: VmFlags) -> bool:
+fn vmm_map_page(virt: VirtAddr, phys: PhysAddr, flags: VmFlags) -> bool:
     """Map a single 4KB virtual page to a physical frame.
 
     Walks the 2-level page table, creating the page table as needed.
@@ -232,7 +239,7 @@ fn x86_32_vmm_map_page(virt: VirtAddr, phys: PhysAddr, flags: VmFlags) -> bool:
     val vaddr = virt.addr as u32
     val paddr = phys.addr as u32
 
-    val pd_addr = g_vmm.pd_phys
+    val pd_addr = g_vmm32.pd_phys
 
     # Ensure page table exists for this PD entry
     val pt_addr = _ensure_table_entry(pd_addr, _pd_index(vaddr))
@@ -249,7 +256,7 @@ fn x86_32_vmm_map_page(virt: VirtAddr, phys: PhysAddr, flags: VmFlags) -> bool:
 
     true
 
-fn x86_32_vmm_unmap_page(virt: VirtAddr) -> bool:
+fn vmm_unmap_page(virt: VirtAddr) -> bool:
     """Unmap a single 4KB virtual page.
 
     Clears the page table entry and invalidates the TLB.
@@ -258,7 +265,7 @@ fn x86_32_vmm_unmap_page(virt: VirtAddr) -> bool:
     Returns true if the page was mapped, false if it was not.
     """
     val vaddr = virt.addr as u32
-    val pd_addr = g_vmm.pd_phys
+    val pd_addr = g_vmm32.pd_phys
 
     # Check PD entry
     val pd_entry = _read_pte(pd_addr, _pd_index(vaddr))
@@ -293,7 +300,7 @@ fn vmm_create_address_space() -> u32:
     if new_pd_phys == 0:
         return 0
 
-    val kernel_pd = g_vmm.pd_phys
+    val kernel_pd = g_vmm32.pd_phys
 
     # Copy kernel-space entries (upper quarter: indices 768..1023)
     # This maps the 3GB..4GB kernel region in every address space
@@ -315,15 +322,15 @@ fn vmm_switch_address_space(pd_phys: u32):
 
 fn vmm_get_manager() -> VirtMemManager32:
     """Get reference to the global VMM."""
-    g_vmm
+    g_vmm32
 
-fn x86_32_vmm_translate(virt: VirtAddr) -> PhysAddr?:
+fn vmm_translate(virt: VirtAddr) -> PhysAddr?:
     """Translate virtual address to physical by walking page tables.
 
     Returns nil if the address is not mapped.
     """
     val vaddr = virt.addr as u32
-    val pd_addr = g_vmm.pd_phys
+    val pd_addr = g_vmm32.pd_phys
 
     val pd_entry = _read_pte(pd_addr, _pd_index(vaddr))
     if not _pte_is_present(pd_entry):
@@ -391,15 +398,15 @@ impl X86_32Paging:
 
     fn map_page(virt: VirtAddr, phys: PhysAddr, flags: VmFlags) -> bool:
         """Map a 4KB virtual page to a physical frame."""
-        x86_32_vmm_map_page(virt, phys, flags)
+        vmm_map_page(virt, phys, flags)
 
     fn unmap_page(virt: VirtAddr) -> bool:
         """Unmap a 4KB virtual page."""
-        x86_32_vmm_unmap_page(virt)
+        vmm_unmap_page(virt)
 
     fn translate(virt: VirtAddr) -> PhysAddr?:
         """Translate virtual to physical address."""
-        x86_32_vmm_translate(virt)
+        vmm_translate(virt)
 
     fn create_address_space() -> u32:
         """Create a new Page Directory for a process."""

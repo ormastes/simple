@@ -170,57 +170,11 @@ backend measurement export, or Simple Web layout evidence paths:
 sh scripts/check/check-generated-2d-backend-readback-matrix-evidence.shs
 ```
 
-The wrapper runs CUDA, OpenCL, Vulkan, Metal, and ROCm lanes. By default,
-Linux requires CUDA/OpenCL/Vulkan and macOS also requires Metal; override with
-`GENERATED_2D_REQUIRED_BACKENDS` for host-specific probes. Required lanes
-auto-prepare missing portable CUDA/Metal/ROCm toolchain artifacts through
-`scripts/check/check-portable-compute-toolchains.shs`, then must pass exact
-checksum/readback proof with a zero child exit code and must expose normalized device proof:
-`submit_attempted=true`, `readback_available=true`, positive matching aggregate checksums,
-positive matching per-op checksums for CUDA/OpenCL/Metal/ROCm,
-exercised ops, `backend_name=<backend>`, and `clear`/`rect` status, checksum, and
-zero-mismatch proof for the Vulkan lane, and the backend proof path. Unavailable optional lanes are recorded as explicit
-host-unavailable evidence instead of hidden success. The companion report is
-written under `doc/09_report/`, and per-backend logs/evidence files are written
-under `build/generated_2d_backend_readback_matrix/`.
-
-The portable toolchain wrapper executes the Simple emitter through a delimited
-SPipe payload and validates that every required entry symbol is present before
-invoking a native compiler. It must not substitute shell-authored CUDA, OpenCL,
-or Metal source. On Metal, scalar arguments use `constant T& [[buffer(n)]]`
-bindings after the storage buffers. Metal validation deliberately records two
-separate proofs: native `metal`/`metallib` tools build and inspect a metallib,
-while the runtime harness independently compiles the current generated Simple
-source through the stdlib Metal SFFI facade (it does not load that metallib).
-The harness uploads a non-uniform host buffer plus scalar parameters, submits
-and waits for fill/copy/alpha/scroll kernels, then downloads device buffers and
-compares position-sensitive hashes. It checks every bind, dispatch, encoder,
-commit, wait, upload, and download result; `submit_attempted=true` is emitted
-only after a command buffer commit succeeds. Empty
-source, missing tools, compiler failure, invalid artifact magic, missing entry
-symbols, absent submission, or unavailable readback are all fail-closed.
-
-Use `sh scripts/check/check-generated-2d-backend-readback-matrix-evidence.shs
---self-test` after changing the wrapper. It uses fake child lanes to prove a
-backend cannot report `pass` unless submit/readback provenance, positive
-matching aggregate and per-op checksums, exercised ops, zero mismatches, and a zero child exit code are present.
-For Vulkan, the aggregate also rejects evidence whose backend name is not exactly
-`vulkan` or whose `clear`/`rect` per-op proof is incomplete. For CUDA, OpenCL,
-Metal, and ROCm, the aggregate rejects evidence whose `backend_name` is missing
-or names a different backend.
-For Metal-specific parser changes, also run
-`sh scripts/check/check-metal-generated-2d-readback.shs --self-test`.
-For CUDA-specific parser changes, also run
-`sh scripts/check/check-cuda-generated-2d-readback.shs --self-test`. CUDA PASS
-evidence also requires a positive stable UUID-derived device identity.
-The aggregate matrix additionally requires the CUDA backend report to exist and
-be nonempty; source tokens alone are not PASS evidence.
-For OpenCL-specific parser changes, also run
-`sh scripts/check/check-opencl-generated-2d-readback.shs --self-test`.
-For ROCm-specific parser changes, also run
-`sh scripts/check/check-rocm-generated-2d-readback.shs --self-test`.
-For Vulkan-specific parser changes, also run
-`sh scripts/check/check-vulkan-engine2d-readback.shs --self-test`.
+The wrapper runs CUDA, OpenCL, Vulkan, Metal, and ROCm lanes. Required lanes
+must pass exact checksum/readback proof; unavailable optional lanes are recorded
+as explicit host-unavailable evidence instead of hidden success. The companion
+report is written under `doc/09_report/`, and per-backend logs/evidence files
+are written under `build/generated_2d_backend_readback_matrix/`.
 
 For Simple Web layout benchmark scenes, the Node bitmap fixture can consume a
 Simple-produced ARGB transport baseline with

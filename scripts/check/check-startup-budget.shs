@@ -1,0 +1,27 @@
+#!/bin/sh
+set -eu
+
+baseline_ms=${SIMPLE_STARTUP_BASELINE_MS:-}
+allowed_delta_ms=${SIMPLE_PLUGIN_STARTUP_DELTA_MS:-}
+samples_file=${SIMPLE_STARTUP_SAMPLES_FILE:-}
+
+[ -n "$baseline_ms" ] || { echo "ERROR — SIMPLE_STARTUP_BASELINE_MS is required; no baseline is selected by default"; exit 2; }
+[ -n "$allowed_delta_ms" ] || { echo "ERROR — SIMPLE_PLUGIN_STARTUP_DELTA_MS is required; no threshold is selected by default"; exit 2; }
+case "$baseline_ms:$allowed_delta_ms" in
+  *[!0-9:]*|:*|*:) echo "ERROR — startup budget values must be non-negative integers"; exit 2 ;;
+esac
+[ "$allowed_delta_ms" -eq 2 ] || { echo "ERROR — KPM-NFR-001 requires an explicit less-than-2ms threshold"; exit 2; }
+[ -n "$samples_file" ] || { echo "ERROR — SIMPLE_STARTUP_SAMPLES_FILE is required"; exit 2; }
+[ -f "$samples_file" ] || { echo "ERROR — startup samples file is missing"; exit 2; }
+
+samples=$(awk '/^[0-9]+$/ {print}' "$samples_file" | LC_ALL=C sort -n)
+count=$(printf '%s\n' "$samples" | awk 'NF {n++} END {print n+0}')
+[ "$count" -ge 5 ] || { echo "ERROR — at least 5 integer millisecond samples are required"; exit 2; }
+middle=$(( (count + 1) / 2 ))
+p50=$(printf '%s\n' "$samples" | sed -n "${middle}p")
+delta=$((p50 - baseline_ms))
+[ "$delta" -lt "$allowed_delta_ms" ] || {
+  echo "FAIL — startup delta ${delta}ms is not below ${allowed_delta_ms}ms"
+  exit 1
+}
+echo "PASS — startup delta ${delta}ms is below ${allowed_delta_ms}ms (${count} samples)"

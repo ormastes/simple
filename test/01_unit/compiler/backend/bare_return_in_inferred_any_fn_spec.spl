@@ -1,0 +1,79 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+#
+# Reproducing spec for
+# doc/08_tracking/bug/seed_cranelift_bare_return_in_inferred_any_fn_traps_2026-09-26.md
+#
+# A function with NO declared return type whose body ends in a value-producing
+# expression is inferred `ANY` by the seed
+# (hir/lower/module_lowering/function.rs `body_produces_value`). A bare
+# `return` inside it lowers to `Terminator::Return(None)`, and the cranelift
+# backend (codegen/instr/body.rs) only lowered `Return(None)` for a VOID
+# function -- every other return type fell into the fail-fast `ud2` arm.
+#
+# That is exactly the shape of `current_core_lexer_save` in
+# src/compiler/10.frontend/core/lexer.spl (`if not <flag>: return`, then an
+# `env_set(...) -> bool` tail call), so every stage-2 candidate SIGILL'd
+# (rc=132) on the FIRST token of the first file it parsed. The 4 GB "memory
+# growth" attributed to that failure was the Rust seed interpreting the
+# compiler from source, not the candidate (peak RSS 47 MB at the trap).
+#
+# The defect lives in NATIVE codegen, and the sspec runner interprets spec
+# modules, so an in-spec function cannot reproduce it (measured: such a spec
+# passes on the unfixed seed). This spec therefore native-builds a fixture
+# through the compiler binary and asserts the produced executable's exit
+# status: on the unfixed seed the executable dies with SIGILL (non-zero rc),
+# with the fix it prints `ok` and exits 0.
+
+use std.spec.step
+
+use std.io_runtime.{process_run, file_write, dir_create_all, env_get, env_set}
+
+# Mirrors the lexer's `current_core_lexer_save`: no declared return type,
+# bare `return` on the guard, `-> bool` tail call.
+val FIXTURE = """use std.io_runtime.{env_set}
+fn save_when_enabled(enabled: bool, key: text):
+    if not enabled:
+        return
+    env_set(key, "1")
+fn main():
+    save_when_enabled(false, "SIMPLE_SPEC_BARE_RETURN")
+    print("ok")
+"""
+
+fn work_dir() -> text:
+    val base = env_get("TMPDIR")
+    val root = if base == "": "/tmp" else: base
+    val dir = root + "/simple-spec-bare-return-lexer-shape"
+    dir_create_all(dir)
+    dir
+
+# Native-build `source` into `exe` with the seed's native pipeline (the
+# pure-Simple driver interprets the whole compiler from source: 4 GB, minutes).
+fn native_build(source_path: text, cache: text, exe: text) -> (text, text, i64):
+    env_set("SIMPLE_NATIVE_BUILD_RUST", "1")
+    env_set("SIMPLE_RUST_SEED_WARNING", "0")
+    process_run(env_get("SIMPLE_BINARY") ?? "bin/simple", ["native-build", "--backend", "cranelift", "--cache-dir", cache, source_path, "-o", exe])
+
+describe "bare return inside an inferred-ANY function returns instead of trapping":
+
+    """The stage-2 candidate died with SIGILL on its first token because the
+    lexer's `current_core_lexer_save` takes an early bare `return` inside a
+    function whose tail is a `-> bool` call. Natively compiled, taking that
+    early return must simply leave the function."""
+
+    it "natively compiles the lexer-shaped fixture and runs it to completion":
+        step("write the fixture")
+        val dir = work_dir()
+        val source_path = dir + "/lexer_shape.spl"
+        val exe = dir + "/lexer_shape.bin"
+        assert_true(file_write(source_path, FIXTURE))
+
+        step("native-build it through the compiler binary")
+        val built = native_build(source_path, dir + "/cache", exe)
+        assert_equal(built[2], 0)
+
+        step("the executable takes the early return and exits 0")
+        val ran = process_run(exe, [])
+        assert_equal(ran[2], 0)
+        assert_equal(ran[0].trim(), "ok")

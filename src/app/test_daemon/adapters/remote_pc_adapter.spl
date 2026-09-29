@@ -16,9 +16,16 @@ use app.test_daemon.{
 use app.test_daemon.session_adapter.{SessionAdapter, session_adapter_new}
 use app.test_daemon.types.{TestResult}
 use std.terminal.types.{TerminalConfig, TerminalConnection, TerminalExecResult}
-use std.terminal.connection.{terminal_connect, terminal_execute, terminal_close, terminal_is_connected}
+use std.terminal.connection.{terminal_connect, terminal_execute, terminal_close, terminal_is_connected, terminal_upload}
+use app.remote_test.binary_placement.{
+    remote_simple_binary_path, remote_simple_test_command,
+    remote_simple_stage_guard_command, remote_simple_stage_verify_command,
+    remote_simple_installed_verify_command,
+    remote_simple_stage_cleanup_command,
+    remote_simple_publication_cleanup_command, remote_simple_install_command}
 
 use std.io_runtime.{time_now_unix_micros}
+use app.io.mod.{file_hash_sha256, file_is_regular_no_follow}
 
 # ============================================================================
 # Remote PC Adapter
@@ -28,6 +35,8 @@ class RemotePcAdapter:
     base: SessionAdapter
     terminal_config: TerminalConfig
     connection: TerminalConnection?
+    remote_os: text
+    simple_binary: text
 
 fn remote_pc_adapter_new(config: TerminalConfig) -> RemotePcAdapter:
     """Create a new RemotePcAdapter with the given terminal configuration.
@@ -41,10 +50,87 @@ fn remote_pc_adapter_new(config: TerminalConfig) -> RemotePcAdapter:
     RemotePcAdapter(
         base: session_adapter_new(SESSION_KIND_REMOTE_PC, "remote_pc"),
         terminal_config: config,
-        connection: nil
+        connection: nil,
+        remote_os: "linux",
+        simple_binary: remote_simple_binary_path("linux", "auto").unwrap()
     )
 
+fn remote_pc_adapter_new_for_target(config: TerminalConfig, remote_os: text,
+        configured_binary: text) -> Result<RemotePcAdapter, text>:
+    """Create a remote adapter whose binary path belongs to the target OS."""
+    val binary = remote_simple_binary_path(remote_os, configured_binary)
+    if binary.is_err(): return Err(binary.unwrap_err())
+    Ok(RemotePcAdapter(base: session_adapter_new(SESSION_KIND_REMOTE_PC, "remote_pc"),
+        terminal_config: config, connection: nil,
+        remote_os: remote_os, simple_binary: binary.unwrap()))
+
 impl RemotePcAdapter:
+    me place_simple_binary(local_path: text, staged_path: text,
+            timeout_ms: i64) -> Result<text, text>:
+        """Upload and atomically publish the interpreter in the target filesystem."""
+        if not self.connection.?: return Err("no active terminal connection")
+        if local_path.trim() == "": return Err("local Simple binary path is empty")
+        if staged_path.trim() == "": return Err("remote Simple staging path is empty")
+        if not file_is_regular_no_follow(local_path):
+            return Err("local Simple binary must be a regular non-link file: '{local_path}'")
+        # Validate and render before transfer: a staging path that aliases the
+        # installed interpreter must never reach terminal_upload.
+        val guard_command = remote_simple_stage_guard_command(
+            self.remote_os, self.simple_binary, staged_path)?
+        val local_digest = file_hash_sha256(local_path)
+        val command = remote_simple_install_command(
+            self.remote_os, self.simple_binary, staged_path, local_digest)?
+        val verify_command = remote_simple_stage_verify_command(
+            self.remote_os, staged_path, local_digest)?
+        val installed_verify_command = remote_simple_installed_verify_command(
+            self.remote_os, self.simple_binary, local_digest)?
+        val cleanup_command = remote_simple_stage_cleanup_command(
+            self.remote_os, staged_path)?
+        val publication_cleanup_command = remote_simple_publication_cleanup_command(
+            self.remote_os, self.simple_binary)?
+        val guard = terminal_execute(self.connection, guard_command, timeout_ms)
+        if guard.exit_code != 0:
+            return Err("remote Simple staging preflight failed for '{staged_path}': {guard.stderr}")
+        if not terminal_upload(self.connection, local_path, staged_path):
+            val upload_cleanup = terminal_execute(
+                self.connection, cleanup_command, timeout_ms)
+            val upload_cleanup_detail = if upload_cleanup.exit_code == 0:
+                ""
+            else:
+                "; staging cleanup failed: {upload_cleanup.stderr}"
+            return Err("failed to upload Simple binary to remote staging path '{staged_path}'{upload_cleanup_detail}")
+        val verified = terminal_execute(self.connection, verify_command, timeout_ms)
+        if verified.exit_code != 0:
+            val verify_cleanup = terminal_execute(
+                self.connection, cleanup_command, timeout_ms)
+            val verify_cleanup_detail = if verify_cleanup.exit_code == 0:
+                ""
+            else:
+                "; staging cleanup failed: {verify_cleanup.stderr}"
+            return Err("remote Simple upload verification failed for '{staged_path}': {verified.stderr}{verify_cleanup_detail}")
+        val result = terminal_execute(self.connection, command, timeout_ms)
+        if result.exit_code != 0:
+            val publication_cleanup = terminal_execute(
+                self.connection, publication_cleanup_command, timeout_ms)
+            val staging_cleanup = terminal_execute(
+                self.connection, cleanup_command, timeout_ms)
+            val staging_cleanup_detail = if staging_cleanup.exit_code == 0:
+                ""
+            else:
+                "; staging cleanup failed: {staging_cleanup.stderr}"
+            val publication_cleanup_detail = if publication_cleanup.exit_code == 0:
+                ""
+            else:
+                "; publication cleanup failed: {publication_cleanup.stderr}"
+            return Err("failed to publish remote Simple binary at '{self.simple_binary}': " +
+                result.stderr + staging_cleanup_detail + publication_cleanup_detail)
+        val installed_verified = terminal_execute(
+            self.connection, installed_verify_command, timeout_ms)
+        if installed_verified.exit_code != 0:
+            return Err("remote Simple installed verification failed for '{self.simple_binary}': " +
+                installed_verified.stderr)
+        Ok(self.simple_binary)
+
     fn can_handle(meta: TestSessionMeta) -> bool:
         """Returns true if this adapter handles the given test metadata.
 
@@ -152,7 +238,7 @@ impl RemotePcAdapter:
     me execute(lease: SessionLease, test_path: text, timeout_ms: i64) -> TestResult:
         """Executes a test on the remote PC via terminal.
 
-        Runs `bin/simple test <test_path>` on the remote host and parses
+        Runs the target-placed Simple binary against `<test_path>` and parses
         the exit code and output to produce a TestResult.
 
         Args:
@@ -175,7 +261,12 @@ impl RemotePcAdapter:
                 cached: false
             )
 
-        val cmd = "bin/simple test {test_path} --no-session-daemon --sequential 2>&1"
+        val command = remote_simple_test_command(self.remote_os, self.simple_binary, test_path)
+        if command.is_err():
+            return TestResult(test_path: test_path, status: TRESP_FAILED,
+                passed: 0, failed: 1, skipped: 0, duration_ms: 0,
+                output: "error: {command.unwrap_err()}", cached: false)
+        val cmd = command.unwrap()
         val start = time_now_unix_micros()
         val result = terminal_execute(self.connection, cmd, timeout_ms)
         val duration_ms = (time_now_unix_micros() - start) / 1000
@@ -208,3 +299,5 @@ impl RemotePcAdapter:
             terminal_close(self.connection)
             self.connection = nil
         true
+
+export RemotePcAdapter, remote_pc_adapter_new, remote_pc_adapter_new_for_target

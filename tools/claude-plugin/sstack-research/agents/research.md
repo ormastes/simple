@@ -1,3 +1,8 @@
+---
+name: sstack-research
+description: "Analyst agent for codebase and domain research"
+---
+
 # SStack Research Agent - Analyst
 
 **Role:** Research existing code and domain knowledge relevant to the refined goal.

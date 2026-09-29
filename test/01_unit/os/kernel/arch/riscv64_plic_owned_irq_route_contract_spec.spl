@@ -1,0 +1,78 @@
+use std.spec
+use std.fs.{read_file}
+
+describe "RV64 PLIC owned IRQ route source contract":
+    it "delivers claimed PLIC IRQs only through a live owned notification route":
+        val source = read_file("src/os/kernel/arch/riscv64/interrupt.spl")
+        val start = source.index_of("pub fn rv64_route_claimed_irq_to_owned_notification")
+        val finish = source.index_of("fn rv64_handle_external_interrupt")
+        expect(start).to_be_greater_than(-1)
+        expect(finish).to_be_greater_than(start)
+        val route = source.substring(start, finish)
+        expect(route).to_contain("irq > RV64_OWNED_IRQ_ROUTE_MAX_SOURCE")
+        expect(route).to_contain("val vector = VEC_IRQ_BASE + irq")
+        expect(route).to_contain("if not irq_route_is_active(vector)")
+        expect(route).to_contain("irq_route_notification_id(vector)")
+        expect(route).to_contain("device_grant_notification_has_live_owner(notification_id)")
+        expect(route).to_contain("irq_dispatch_routed(vector)")
+
+    it "completes every non-spurious PLIC claim after an owned-route decision":
+        val source = read_file("src/os/kernel/arch/riscv64/interrupt.spl")
+        val start = source.index_of("fn rv64_handle_external_interrupt")
+        val finish = source.index_of("fn rv64_dispatch_trap")
+        expect(start).to_be_greater_than(-1)
+        expect(finish).to_be_greater_than(start)
+        val handler = source.substring(start, finish)
+        expect(handler).to_contain("rv64_route_claimed_irq_to_owned_notification(irq)")
+        expect(handler).to_contain("_plic_complete(g_plic_context, irq)")
+
+    it "keeps route lookup read-only and ties it to an active entry":
+        val routing = read_file("src/os/kernel/interrupts/irq_routing.spl")
+        val owner = read_file("src/os/kernel/ipc/syscall_device.spl")
+        expect(routing).to_contain("fn irq_route_notification_id(vector: u32) -> u64")
+        expect(routing).to_contain("if idx >= MAX_IRQ_ROUTES or not route_active[idx]")
+        expect(owner).to_contain("pub fn device_grant_notification_has_live_owner(notification_id: u64) -> bool")
+        expect(owner).to_contain("device_grant_notification_owner[notification_id - 1u64] != 0u64")
+
+    it "enables a PLIC source only after its exact live DeviceGrant route exists":
+        val source = read_file("src/os/kernel/arch/riscv64/interrupt.spl")
+        val start = source.index_of("pub fn rv64_activate_owned_plic_source")
+        val finish = source.index_of("pub fn rv64_deactivate_owned_plic_source")
+        expect(start).to_be_greater_than(-1)
+        expect(finish).to_be_greater_than(start)
+        val activation = source.substring(start, finish)
+        expect(activation).to_contain("vector <= VEC_IRQ_BASE")
+        expect(activation).to_contain("vector > VEC_IRQ_BASE + RV64_OWNED_IRQ_ROUTE_MAX_SOURCE")
+        expect(activation).to_contain("irq_route_is_active(vector)")
+        expect(activation).to_contain("irq_route_notification_id(vector) != notification_id")
+        expect(activation).to_contain("device_grant_notification_has_live_owner(notification_id)")
+        expect(activation).to_contain("_plic_set_priority(source, 1u32)")
+        expect(activation).to_contain("_plic_enable_irq(g_plic_context, source)")
+
+    it "makes route activation and teardown transactional with the PLIC lifecycle":
+        val routing = read_file("src/os/kernel/interrupts/irq_routing.spl")
+        expect(routing).to_contain("pub fn irq_route_install_platform_lifecycle")
+        expect(routing).to_contain("if not g_irq_route_activate(vector, notif_id, notif_bit)")
+        expect(routing).to_contain("g_irq_route_deactivate(vector, notif_id, notif_bit)")
+        expect(routing).to_contain("if vector < VEC_IRQ_BASE or notif_id == 0u64 or notif_bit == 0u64")
+        val source = read_file("src/os/kernel/arch/riscv64/interrupt.spl")
+        expect(source).to_contain("irq_route_install_platform_lifecycle(")
+        expect(source).to_contain("rv64_activate_owned_plic_source")
+        expect(source).to_contain("rv64_deactivate_owned_plic_source")
+
+    it "publishes provenance before source activation and rolls all state back on failure":
+        val owner = read_file("src/os/kernel/ipc/syscall_device.spl")
+        val start = owner.index_of("fn _handle_device_grant")
+        val finish = owner.index_of("fn _capability_set_exact_device_grant_bdf")
+        expect(start).to_be_greater_than(-1)
+        expect(finish).to_be_greater_than(start)
+        val grant = owner.substring(start, finish)
+        val ledger = grant.index_of("device_grant_notification_owner[notif_id - 1u64] = caller.id")
+        val register = grant.index_of("if not irq_route_register(irq_vector, notif_id, notif_bit)")
+        expect(ledger).to_be_greater_than(-1)
+        expect(register).to_be_greater_than(ledger)
+        expect(grant).to_contain("irq_route_unregister(irq_vector)")
+        expect(grant).to_contain("notification_destroy(g_notification_table, notif_id)")
+        expect(grant).to_contain("task_register_resource(caller.id, RES_IRQ_ROUTE, irq_vector as u64, 0u64)")
+        expect(grant).to_contain("task_register_resource(caller.id, RES_NOTIFICATION, notif_id, 0u64)")
+        expect(grant).to_contain("task_unregister_resource(caller.id, RES_IRQ_ROUTE, irq_vector as u64)")

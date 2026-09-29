@@ -1,0 +1,64 @@
+# Per-task mapped-page budget ledger for anonymous memory syscalls.
+#
+# VMM ownership records validate individual map/unmap ranges. This ledger
+# provides the complementary aggregate admission decision required by a task's
+# immutable isolation memory ceiling.
+
+use os.kernel.types.task_types.{TaskId}
+
+var _task_memory_budget_owner: [u64] = []
+var _task_memory_budget_pages: [u64] = []
+
+fn _task_memory_budget_slot(owner: TaskId) -> i64:
+    var index = 0
+    while index < _task_memory_budget_owner.len():
+        if _task_memory_budget_owner[index] == owner.id:
+            return index
+        index = index + 1
+    -1
+
+pub fn task_memory_budget_pages(owner: TaskId) -> u64:
+    val slot = _task_memory_budget_slot(owner)
+    if slot < 0:
+        return 0u64
+    _task_memory_budget_pages[slot]
+
+pub fn task_memory_budget_reserve(
+    owner: TaskId,
+    limit_pages: u64,
+    pages: u64
+) -> bool:
+    """Reserve mapped pages before allocation, respecting a nonzero ceiling."""
+    if pages == 0u64:
+        return false
+    val used = task_memory_budget_pages(owner)
+    if limit_pages > 0u64:
+        if used > limit_pages or pages > limit_pages - used:
+            return false
+    val slot = _task_memory_budget_slot(owner)
+    if slot < 0:
+        _task_memory_budget_owner.push(owner.id)
+        _task_memory_budget_pages.push(pages)
+        return true
+    _task_memory_budget_pages[slot] = used + pages
+    true
+
+pub fn task_memory_budget_release(owner: TaskId, pages: u64) -> bool:
+    """Release only pages previously charged to this task."""
+    if pages == 0u64:
+        return false
+    val slot = _task_memory_budget_slot(owner)
+    if slot < 0:
+        return false
+    val used = _task_memory_budget_pages[slot]
+    if pages > used:
+        return false
+    _task_memory_budget_pages[slot] = used - pages
+    true
+
+pub fn task_memory_budget_clear(owner: TaskId):
+    """Forget a terminating task's charge after its lifetime teardown."""
+    val slot = _task_memory_budget_slot(owner)
+    if slot < 0:
+        return
+    _task_memory_budget_pages[slot] = 0u64

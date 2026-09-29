@@ -2,8 +2,7 @@
 
 - **Date:** 2026-07-24
 - **Severity:** P0 wrong-code — silent, type-checked, affects every suffixed numeric literal on the flat-AST lane
-- Status: FIXED
-- Status re-verified 2026-08-17 by source inspection (triage shard 01).
+- **Status:** FIXED in `src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl` (new EXPR_SUFFIXED_LIT arm)
 
 ## Symptom
 

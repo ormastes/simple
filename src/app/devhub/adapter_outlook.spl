@@ -21,6 +21,7 @@ use std.nogc_sync_mut.http_client.{
     create_request,
     request_add_header,
     request_set_body,
+    send_request,
     response_get_status_code,
     response_get_body,
     response_get_header,
@@ -129,13 +130,10 @@ fn _outlook_attach_auth(req: (text, text, list, text), client: OutlookClient) ->
     r
 
 
-# Throttle handling and retry loop are scaffolded below. The codebase's
-# http_client currently lacks an execute/send path (the http_* constructors
-# return a request tuple, mirrored here for parity with adapter_confluence);
-# until that wiring lands, _outlook_throttle_decision is a one-shot that
-# returns the response tuple as-is. The 429 + Retry-After + exponential
-# backoff policy is captured in _outlook_compute_backoff so it is ready
-# to drop into the loop once http_client gains a real send.
+# Throttle handling and retry loop are scaffolded below. The http_* constructors
+# only build a request tuple; _outlook_send sends it once via send_request. The
+# 429 + Retry-After + exponential backoff policy is captured in
+# _outlook_compute_backoff so it is ready to drop into a retry loop.
 fn _outlook_compute_backoff(attempt: i64, retry_after_header: text) -> i64:
     """Decide how many seconds to sleep before retry `attempt` (zero-based).
 
@@ -160,11 +158,12 @@ fn _outlook_throttle_should_retry(status: i64, attempt: i64) -> bool:
 
 
 fn _outlook_send(req: (text, text, list, text)) -> (i64, text, list, text):
-    """Send a request once. Retry/backoff is a follow-up that depends on
-    http_client gaining an execute path; see _outlook_compute_backoff and
-    _outlook_throttle_should_retry for the policy that will drive it."""
+    """Send a request once over http_client.send_request (headers attached by
+    _outlook_attach_auth go on the wire). Transport failure is status -1 with
+    the error text. Retry/backoff is a follow-up; see _outlook_compute_backoff
+    and _outlook_throttle_should_retry for the policy that will drive it."""
     val _ = sleep_secs  # keep import live until the retry loop is wired
-    req
+    send_request(req)
 
 
 fn _outlook_get(client: OutlookClient, url: text) -> (i64, text):

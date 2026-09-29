@@ -1,0 +1,38 @@
+#!/bin/sh
+# ctx_common.shs — shared helpers for the project-level PreToolUse hooks.
+# Sourced (`. "$dir/ctx_common.shs"`) by every hook under .claude/hooks/.
+# POSIX sh only (dash-clean): no arrays, no [[ ]], no local-scoped regex.
+#
+# Hook protocol (Claude Code PreToolUse): JSON on stdin with tool_name and
+# tool_input; a JSON object on stdout carrying hookSpecificOutput decides.
+#   deny  -> {"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"..."}}
+#   hint  -> {"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"..."}}
+
+# Read all of stdin into HOOK_INPUT (single line; embedded newlines are JSON \n).
+ctx_read_input() {
+    HOOK_INPUT=$(cat 2>/dev/null)
+}
+
+# Extract the string value of a JSON key from HOOK_INPUT (first occurrence).
+# Handles backslash escapes inside the value; prints the still-escaped text.
+ctx_json_str() {
+    # NOTE: uses ERE (-E) deliberately. The BRE form of this expression needs
+    # `\|` alternation, which is a GNU sed extension — BSD/macOS sed treats it
+    # as a literal `|`, so the pattern never matched and every hook that calls
+    # this saw an empty value. bash_net_blocker.shs is fail-closed, so on macOS
+    # that silently denied EVERY Bash command. -E is portable across BSD + GNU.
+    printf '%s' "$HOOK_INPUT" | tr '\n' ' ' | sed -n -E "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"(([^\"\\\\]|\\\\.)*)\".*/\1/p" | head -n 1
+}
+
+# Make text safe to embed inside a JSON string literal.
+ctx_json_escape() {
+    printf '%s' "$1" | tr '\n\r\t' '   ' | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+ctx_emit_deny() {
+    printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"%s"}}\n' "$(ctx_json_escape "$1")"
+}
+
+ctx_emit_hint() {
+    printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"%s"}}\n' "$(ctx_json_escape "$1")"
+}

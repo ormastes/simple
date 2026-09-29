@@ -1,0 +1,66 @@
+# Monospace inline boxes: the content area is the MONO font's, not the sans one.
+#
+# CSS 2.1 SS10.6.1: an inline non-replaced box is its font's content area
+# (ascent+descent), centred in the line box by half-leading. This renderer
+# approximated the content area as 9/8 of the font size for EVERY family, which
+# is the sans number. `inline_content_area_height`'s own comment already said
+# "Chrome measures 18 px for the UI sans stack and 19 px for the monospace
+# `<code>` stack" — the second half of that sentence was never implemented.
+#
+# Measured against headless Chrome at font-size 16 / line-height 24
+# (round 10; fixture recorded in the metrics doc below):
+#
+#   <span>  content 18   (unchanged)
+#   <code>  content 19   (was 18)
+#
+# On examples/06_io/ui/web_catalog/html.html this moves the differ from 356 to
+# 342 mismatched of 431 compared. See
+# doc/10_metrics/ui/web_chrome_parity_round10_2026-09-13.md.
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_element_geometry_lines
+}
+
+val _MONO_CSS = "body{font-family:-apple-system,system-ui,sans-serif;" +
+    "font-size:16px;line-height:24px;margin:8px}" +
+    "code{font-family:monospace;font-size:16px}" +
+    "small{font-family:monospace;font-size:32px}"
+
+fn _page(body: text) -> text:
+    "<!doctype html><html><head><style>" + _MONO_CSS +
+        "</style></head><body>" + body + "</body></html>"
+
+fn _field(html: text, key: text, index: i32) -> i32:
+    val lines = simple_web_layout_element_geometry_lines(html, 900, 20000)
+    var i = 0
+    while i < lines.len():
+        val parts = lines[i].split("|")
+        if parts.len() > 6 and parts[1] == key:
+            return parts[index].trim().to_int()
+        i = i + 1
+    -1
+
+fn _h(html: text, key: text) -> i32: _field(html, key, 6)
+
+describe "monospace inline content area":
+    it "gives a <code> inline box a 19 px content area at font-size 16":
+        # Sabotaged back to the sans-only 9/8 this reads 18.
+        expect(_h(_page("<p><code>abcd</code></p>"), "path:0/0")).to_equal(19)
+
+    it "keeps a sans inline box at 18 px, the number it always had":
+        expect(_h(_page("<p><span>abcd</span></p>"), "path:0/0")).to_equal(18)
+
+    it "scales the mono content area with the font size, 19/16 not 9/8":
+        # 32 px mono -> 38, where the sans ratio would give 36.
+        expect(_h(_page("<p><small>abcd</small></p>"), "path:0/0")).to_equal(38)
+
+    it "classifies a family by name, so <kbd> and <samp> are mono too":
+        expect(_h(_page("<p><kbd>abcd</kbd></p>"), "path:0/0")).to_equal(19)
+        expect(_h(_page("<p><samp>abcd</samp></p>"), "path:0/0")).to_equal(19)
+
+    it "reads the element's own resolved family, inheritance included":
+        # An <em> nested in a <code> INHERITS monospace and gets 19; the same
+        # <em> directly in a sans <p> stays 18.
+        expect(_h(_page("<p><code><em>abcd</em></code></p>"), "path:0/0/0"))
+            .to_equal(19)
+        expect(_h(_page("<p><em>abcd</em></p>"), "path:0/0")).to_equal(18)

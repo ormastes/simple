@@ -1,0 +1,119 @@
+use std.spec.*
+use compiler.mir.hwir.types.{CoreConfig}
+use compiler.mir.hwir.host_evaluator.{HwHostInput, evaluate_strict_comb_hwir}
+use compiler.mir.hwir.riscv_scalar_runtime_div_provider.{strict_riscv_scalar_runtime_div_provider}
+use compiler.backend.backend.hwir_to_vhdl.{render_strict_sequential_hwir}
+use lib.hardware.riscv_common.isa.scalar_database.{RiscvScalarDecoderPlan,
+    riscv_scalar_decoder_plan, riscv_scalar_semantic_opcode}
+
+fn im32() -> CoreConfig:
+    CoreConfig(xlen: 32, physical_address_bits: 32, register_count: 32,
+        profile: "rv32-im", isa_profile: "rv32im", compressed_decode_profile: "none")
+
+fn im64() -> CoreConfig:
+    CoreConfig(xlen: 64, physical_address_bits: 56, register_count: 32,
+        profile: "rv64-im", isa_profile: "rv64im", compressed_decode_profile: "none")
+
+fn div_row(plan: RiscvScalarDecoderPlan, instruction: i64) -> i64:
+    var index = 0
+    for entry in plan.entries:
+        if entry.matches(instruction as u32, plan.xlen): return index + 1
+        index = index + 1
+    0
+
+fn div_inputs(plan: RiscvScalarDecoderPlan, instruction: i64) -> [HwHostInput]:
+    val entry = plan.lookup(instruction as u32).unwrap()
+    [HwHostInput.bits("clk", 0), HwHostInput.bits("rst", 0),
+        HwHostInput.bits("request_valid", 1), HwHostInput.bits("request_provider_tag", 2),
+        HwHostInput.bits("decode_legal", 1), HwHostInput.bits("decoded_row_index", div_row(plan, instruction)),
+        HwHostInput.bits("decoded_execution_class", 4), HwHostInput.bits("decoded_memory_effect", 0),
+        HwHostInput.bits("decoded_semantic_opcode", riscv_scalar_semantic_opcode(entry.semantic_operation)),
+        HwHostInput.bits("decoded_declared_operand_width_is_32", 0),
+        HwHostInput.bits("canonical_instruction", instruction), HwHostInput.bits("original_instruction", instruction),
+        HwHostInput.bits("instruction_length_bytes", 4),
+        HwHostInput.bits("instruction_rd_field", (instruction >> 7) & 31),
+        HwHostInput.bits("instruction_rs1_field", (instruction >> 15) & 31),
+        HwHostInput.bits("instruction_rs2_field", (instruction >> 20) & 31),
+        HwHostInput.bits("rs1_value", 9), HwHostInput.bits("rs2_value", 2),
+        HwHostInput.bits("pc_before", 0x100), HwHostInput.bits("fallthrough_pc", 0x104),
+        HwHostInput.bits("privilege", 3), HwHostInput.bits("provider_event_id", 17),
+        HwHostInput.bits("decode_event_id", 17), HwHostInput.bits("lineage_valid", 1),
+        HwHostInput.bits("illegal_valid", 0), HwHostInput.bits("completion_ready", 0)]
+
+describe "flat plan-bound runtime DIV/REM provider precursor":
+    it "builds a standalone RV32 restoring owner with every base DIV/REM row":
+        val owner = strict_riscv_scalar_runtime_div_provider("runtime_div32", im32(), riscv_scalar_decoder_plan("rv32im").unwrap()).unwrap()
+        expect(owner.diagnostic()).to_equal("")
+        expect(owner.child_entity).to_equal("")
+        expect(owner.origins.any(_.source_name == "rv.m.div")).to_equal(true)
+        expect(owner.origins.any(_.source_name == "rv.m.divu")).to_equal(true)
+        expect(owner.origins.any(_.source_name == "rv.m.rem")).to_equal(true)
+        expect(owner.origins.any(_.source_name == "rv.m.remu")).to_equal(true)
+        expect(owner.plan.registers.any(_.name == "d32_remainder_reg" and _.bit_width == 33)).to_equal(true)
+        expect(owner.plan.registers.any(_.name == "d32_count_reg" and _.bit_width == 6)).to_equal(true)
+        expect(owner.datapath_comb_ops.any(_.result == "d32_remainder_next" and _.op == "sub")).to_equal(true)
+        expect(owner.datapath_select_ops.any(_.result == "effective_rs1" and _.when_false == "zero_xlen")).to_equal(true)
+        expect(owner.datapath_select_ops.any(_.result == "effective_rs2" and _.when_false == "zero_xlen")).to_equal(true)
+        expect(owner.plan.named_width(owner.ports, "completion_provider_event_id")).to_equal(64)
+        expect(owner.plan.named_width(owner.ports, "completion_decode_event_id")).to_equal(64)
+        expect(owner.plan.rules[2].name).to_equal("finish")
+        expect(owner.plan.rules[3].name).to_equal("iterate")
+
+    it "adds independent d64 and d32 restoring geometries for RV64 W semantics":
+        val owner = strict_riscv_scalar_runtime_div_provider("runtime_div64", im64(), riscv_scalar_decoder_plan("rv64im").unwrap()).unwrap()
+        expect(owner.diagnostic()).to_equal("")
+        expect(owner.origins.any(_.source_name == "rv64.m.divw")).to_equal(true)
+        expect(owner.origins.any(_.source_name == "rv64.m.divuw")).to_equal(true)
+        expect(owner.origins.any(_.source_name == "rv64.m.remw")).to_equal(true)
+        expect(owner.origins.any(_.source_name == "rv64.m.remuw")).to_equal(true)
+        expect(owner.plan.registers.any(_.name == "d64_remainder_reg" and _.bit_width == 65)).to_equal(true)
+        expect(owner.plan.registers.any(_.name == "d64_count_reg" and _.bit_width == 7)).to_equal(true)
+        expect(owner.plan.registers.any(_.name == "d32_count_reg" and _.bit_width == 6)).to_equal(true)
+        expect(owner.datapath_width("d64_architectural_result")).to_equal(64)
+        expect(owner.datapath_width("d32_architectural_result")).to_equal(64)
+        expect(owner.datapath_select_ops.any(_.result == "architectural_result" and _.condition == "word_reg")).to_equal(true)
+        expect(owner.plan.registers.any(_.name == "d32_word_result_mode_reg" and _.bit_width == 1)).to_equal(true)
+        expect(owner.plan.registers.any(_.name == "d64_word_result_mode_reg" and _.bit_width == 1)).to_equal(true)
+        expect(owner.datapath_comb_ops.any(_.result == "admission_ok" and _.op == "and")).to_equal(true)
+
+    it "fails closed outside exact IM DIV/REM plans":
+        expect(strict_riscv_scalar_runtime_div_provider("runtime_div_bad", CoreConfig.rv32(), riscv_scalar_decoder_plan("rv32i").unwrap()).is_err()).to_equal(true)
+        expect(strict_riscv_scalar_runtime_div_provider("", im32(), riscv_scalar_decoder_plan("rv32im").unwrap()).is_err()).to_equal(true)
+
+    it "faults malformed canonical operand fields and fallthrough before capture":
+        val plan = riscv_scalar_decoder_plan("rv32im").unwrap()
+        val owner = strict_riscv_scalar_runtime_div_provider("runtime_div_contract", im32(), plan).unwrap()
+        val instruction = 0x02004033
+        var bad_fields = div_inputs(plan, instruction)
+        bad_fields[13] = HwHostInput.bits("instruction_rd_field", 1)
+        val fields_result = evaluate_strict_comb_hwir(owner, bad_fields).unwrap()
+        expect(fields_result.value_of("request_accept").unwrap()).to_equal(1)
+        expect(fields_result.value_of("provider_protocol_fault").unwrap()).to_equal(1)
+        var bad_fallthrough = div_inputs(plan, instruction)
+        bad_fallthrough[19] = HwHostInput.bits("fallthrough_pc", 0x108)
+        val fallthrough_result = evaluate_strict_comb_hwir(owner, bad_fallthrough).unwrap()
+        expect(fallthrough_result.value_of("request_accept").unwrap()).to_equal(1)
+        expect(fallthrough_result.value_of("provider_protocol_fault").unwrap()).to_equal(1)
+
+    it "derives RV64 divider geometry from the admitted row and resets all state":
+        val plan = riscv_scalar_decoder_plan("rv64im").unwrap()
+        val owner = strict_riscv_scalar_runtime_div_provider("runtime_div_hardening", im64(), plan).unwrap()
+        # DIVW with a false raw width claim cannot select either exact row:
+        # the tag-2 handshake acknowledges it and the sticky fault rule wins.
+        val divw = 0x0200403b
+        var mismatched = div_inputs(plan, divw)
+        mismatched[9] = HwHostInput.bits("decoded_declared_operand_width_is_32", 0)
+        val mismatch_result = evaluate_strict_comb_hwir(owner, mismatched).unwrap()
+        expect(mismatch_result.value_of("request_accept").unwrap()).to_equal(1)
+        expect(mismatch_result.value_of("provider_protocol_fault").unwrap()).to_equal(1)
+        expect(owner.datapath_comb_ops.any(_.result == "selected_d32" and _.lhs == "d32_row_matched")).to_equal(true)
+        expect(owner.plan.rules.any(_.name == "request_capture" and
+            _.assignments.any(_.destination == "word_reg" and _.value.value == "selected_d32"))).to_equal(true)
+        # Sequential HWIR emits one synchronous reset branch which clears every
+        # registered protocol, completion, and geometry value before any rule.
+        expect(owner.plan.registers.all(_.reset_value == 0)).to_equal(true)
+        val emitted = render_strict_sequential_hwir(owner, "hwir-gen2-runtime-div-hardening-v1")
+        expect(emitted.success).to_equal(true)
+        expect(emitted.vhdl).to_contain("if rst='1' then")
+        expect(emitted.vhdl).to_contain("word_reg <= '0';")
+        expect(emitted.vhdl).to_contain("fault_reg <= '0';")

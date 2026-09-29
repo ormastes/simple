@@ -15,6 +15,7 @@ the regression gate); this controller is the admin-driven, many-IO-queue layer.
 """
 
 use nvme_types.*
+use nvme_payload.*
 use nvme_admin_types.*
 use nvme_admin.*
 use nvme_qset.*
@@ -68,6 +69,24 @@ fn nvme_controller_new() -> NvmeController:
 
 fn nvme_controller_new_for_target(target_id: i64) -> NvmeController:
     NvmeController(aq: admin_queue_new(), qset: queue_set_new(), target: nvme_fw_target_config(target_id), features: feature_store_new(), ftl: ftl_new(), pool: task_pool_new(), last_id: identify_empty(), smart: smart_empty(), reads: 0, writes: 0, power_cycles: 0, abort_count: 0, format_count: 0, aer_held_cid: NULL_IDX, aer_event: 0, fw_revision: 1, fw_dl_bytes: 0, media_errors: 0, unsafe_shutdowns: 0, error_count: 0, last_error: 0, dirty_since_checkpoint: false, fw_slot: 0, last_abort_sqid: NULL_IDX, last_abort_cid: NULL_IDX, pt: power_thermal_new(), wb: dram_write_buffer_new())
+
+# Opt-in: the whole NVMe controller (admin + IO queues, task pool, SMART,
+# power/thermal, DRAM write buffer) running on the Vt-physics NeChip emulator
+# instead of the behavioural NAND, by building its FTL through ftl_new_emu().
+#
+# This is the seam that lets host-level NVMe traffic — not just direct FTL
+# calls — reach media that actually decays, so retention/read-disturb drift can
+# surface as a genuine ECC failure on an ordinary nvme read path.
+#
+# nvme_controller_new() / nvme_controller_new_for_target() are UNCHANGED and
+# still build the behavioural NandDevice; production composition is untouched.
+# Selected explicitly by a test that wants the physics.
+# See fw/nvme_emu_media_check.spl and fw/fil_nand_emu_e2e_check.spl.
+fn nvme_controller_new_emu() -> NvmeController:
+    nvme_controller_new_emu_for_target(TARGET_SIMPLE_SIM)
+
+fn nvme_controller_new_emu_for_target(target_id: i64) -> NvmeController:
+    NvmeController(aq: admin_queue_new(), qset: queue_set_new(), target: nvme_fw_target_config(target_id), features: feature_store_new(), ftl: ftl_new_emu(), pool: task_pool_new(), last_id: identify_empty(), smart: smart_empty(), reads: 0, writes: 0, power_cycles: 0, abort_count: 0, format_count: 0, aer_held_cid: NULL_IDX, aer_event: 0, fw_revision: 1, fw_dl_bytes: 0, media_errors: 0, unsafe_shutdowns: 0, error_count: 0, last_error: 0, dirty_since_checkpoint: false, fw_slot: 0, last_abort_sqid: NULL_IDX, last_abort_cid: NULL_IDX, pt: power_thermal_new(), wb: dram_write_buffer_new())
 
 fn aer_event_valid(evt: i64) -> bool:
     evt == AER_SMART_HEALTH
@@ -391,9 +410,25 @@ impl NvmeController:
         me.qset.cq_reap(qid)
 
     # Run one command end-to-end through the translation/flash stack.
+    # PARTIAL-FAILURE SEMANTICS (multi-block reads and writes)
+    #
+    # A multi-block command is NOT atomic on this device and does not pretend to
+    # be. Blocks are transferred in ascending LBA order; the first block that
+    # fails STOPS the transfer, and its status code becomes the command's
+    # status. The completion therefore reports the real error rather than
+    # SC_SUCCESS, and `cpl.pages` carries exactly the blocks that DID transfer
+    # — shorter than `nblocks` on a partial failure, so a host can tell how far
+    # the command got instead of having to guess. If block 3 of 5 fails, the
+    # completion says "3 blocks transferred, status = <block 3's error>".
+    #
+    # This matches NVMe Base 2.3's treatment of a failed command: the data
+    # transferred by a command completing with an error status is undefined and
+    # the host must not assume the whole range moved. Claiming success for a
+    # partially-transferred range would be the one thing that is definitely
+    # wrong, and is what this path deliberately does not do.
     me process_one_io(cmd: NvmeCmd) -> NvmeCpl:
         var status: i64 = cmd_validate(cmd)
-        var rdata: i64 = 0
+        var rpages: [PageData] = []
         if status == SC_SUCCESS:
             if me.target.lbas <= 0 or cmd.lba > me.target.lbas - cmd.nblocks:
                 status = SC_LBA_RANGE
@@ -412,11 +447,11 @@ impl NvmeController:
                 if status == SC_SUCCESS and not me.ftl.can_write_blocks(cmd.nblocks):
                     status = SC_NS_NOT_READY
                 while i < cmd.nblocks and status == SC_SUCCESS:
-                    status = me.wb.stage(span, i, host_write_byte(cmd, i))
+                    status = me.wb.stage_page(span, i, host_write_page(cmd, i))
                     i = i + 1
                 i = 0
                 while i < cmd.nblocks and status == SC_SUCCESS:
-                    status = me.ftl.write(cmd.lba + i, me.wb.byte(span, i))
+                    status = me.ftl.write_page(cmd.lba + i, me.wb.page(span, i))
                     i = i + 1
                 me.wb.release(span)
                 me.pool.set_status(h, status)
@@ -432,9 +467,15 @@ impl NvmeController:
                 me.pt.tick(2)   # a program burns more energy than a read
             else:
                 if cmd_is_read(cmd):
-                    status = me.ftl.read_range_status(cmd.lba, cmd.nblocks)
-                    if status == SC_SUCCESS:
-                        rdata = me.ftl.read(cmd.lba)
+                    # MULTI-BLOCK READ: N blocks, N pages, each from its OWN LBA.
+                    # Stops at the first failing block; `rpages` then holds only
+                    # the blocks that really transferred (see the note above).
+                    var i: i64 = 0
+                    while i < cmd.nblocks and status == SC_SUCCESS:
+                        status = me.ftl.read_range_status(cmd.lba + i, 1)
+                        if status == SC_SUCCESS:
+                            rpages.push(me.ftl.read_page(cmd.lba + i))
+                        i = i + 1
                     me.reads = smart_counter_next(me.reads)
                     me.pt.tick(1)
                 else:
@@ -458,7 +499,11 @@ impl NvmeController:
             me.last_error = status
             if status == SC_MEDIA_ERR:
                 me.media_errors = smart_counter_next(me.media_errors)
-        cpl_make(cmd.cid, status, rdata)
+        # A non-read command carries no data back; give it the one zero page the
+        # single-page completion always had, so `cpl.page` keeps its old shape.
+        if rpages.len() == 0 and not cmd_is_read(cmd):
+            rpages.push(page_zero())
+        cpl_make_pages(cmd.cid, status, rpages)
 
     # Round-robin across all active IO submission queues; post each completion
     # to that SQ's bound completion queue. Bounded -> always terminates.
@@ -585,7 +630,7 @@ fn nvme_controller_selftest() -> i64:
     hw.io_process()
     val hwoob: NvmeCpl = hw.io_reap(1)
     fail = fail + expect_eq(hwoob.status, SC_LBA_RANGE, "IO beyond target namespace is rejected")
-    hw.io_submit(1, cmd_make(66, OP_WRITE, 1, MDTS_BLOCKS + 1, prp_pack(0x44, 0x55)))
+    hw.io_submit(1, cmd_make_prp(66, OP_WRITE, 1, MDTS_BLOCKS + 1, 0x44, 0x55))
     hw.io_process()
     val hwmdts: NvmeCpl = hw.io_reap(1)
     fail = fail + expect_eq(hwmdts.status, SC_INVALID_FIELD, "IO above advertised MDTS is rejected")
@@ -668,7 +713,7 @@ fn nvme_controller_selftest() -> i64:
     val r: NvmeCpl = c.io_reap(1)
     fail = fail + expect_eq(r.data, 0x55, "IO read returns written byte")
 
-    c.io_submit(1, cmd_make(102, OP_WRITE, 20, 3, prp_pack(0x60, 0xA0)))
+    c.io_submit(1, cmd_make_prp(102, OP_WRITE, 20, 3, 0x60, 0xA0))
     c.io_process()
     val wm: NvmeCpl = c.io_reap(1)
     fail = fail + expect_eq(wm.status, SC_SUCCESS, "multi-block IO write completed")
@@ -692,7 +737,7 @@ fn nvme_controller_selftest() -> i64:
     val wzr: NvmeCpl = c.io_reap(1)
     fail = fail + expect_eq(wzr.data, 0, "write-zero IO clears written LBA")
 
-    c.io_submit(1, cmd_make(110, OP_WRITE, 24, 2, prp_pack(0x71, 0x81)))
+    c.io_submit(1, cmd_make_prp(110, OP_WRITE, 24, 2, 0x71, 0x81))
     c.io_process()
     c.io_reap(1)
     c.io_submit(1, cmd_make(111, OP_DSM_TRIM, 24, 2, 0))
@@ -705,7 +750,7 @@ fn nvme_controller_selftest() -> i64:
     fail = fail + expect_eq(trr.data, 0, "multi-block trim IO clears second LBA")
 
     c.wb.cap = 1
-    c.io_submit(1, cmd_make(106, OP_WRITE, 30, 2, prp_pack(0x70, 0x71)))
+    c.io_submit(1, cmd_make_prp(106, OP_WRITE, 30, 2, 0x70, 0x71))
     c.io_process()
     val wob: NvmeCpl = c.io_reap(1)
     fail = fail + expect_eq(wob.status, SC_NS_NOT_READY, "write buffer capacity rejection happens below MDTS")
@@ -719,7 +764,7 @@ fn nvme_controller_selftest() -> i64:
     c.ftl.band.blk_state[0] = BLK_OPEN
     c.ftl.band.active_wp = PAGES_PER_BLOCK - 1
     c.ftl.band.free_count = GC_RESERVE
-    c.io_submit(1, cmd_make(73, OP_WRITE, 72, 2, prp_pack(0x21, 0x31)))
+    c.io_submit(1, cmd_make_prp(73, OP_WRITE, 72, 2, 0x21, 0x31))
     c.io_process()
     val mr: NvmeCpl = c.io_reap(1)
     fail = fail + expect_eq(mr.status, SC_NS_NOT_READY, "media-capacity IO write rejected before partial program")
@@ -1047,7 +1092,7 @@ fn nvme_controller_selftest() -> i64:
     val mederr: NvmeCpl = c.io_reap(1)
     fail = fail + expect_eq(mederr.status, SC_MEDIA_ERR, "uncorrectable read -> SC_MEDIA_ERR")
     fail = fail + expect_eq(mederr.data, 0, "uncorrectable read does not return corrupted data")
-    c.io_submit(1, cmd_make(124, OP_WRITE, 13, 2, prp_pack(0x5C, 0x6C)))
+    c.io_submit(1, cmd_make_prp(124, OP_WRITE, 13, 2, 0x5C, 0x6C))
     c.io_process()
     c.io_reap(1)
     val pp2: i64 = c.physical_ppn(14)

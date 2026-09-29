@@ -1,8 +1,11 @@
 # Interpreter: CompositorBackend.put_pixel clones the whole framebuffer per pixel
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - id: interp_compositor_backend_put_pixel_clones_framebuffer_2026-07-03
-- Status: OPEN (P2)
-- Status re-verified 2026-08-17 by source inspection (triage shard 01).
+- status: worked around in the compositor (interpreter root cause still open)
 - workaround (2026-07-04): `HeadlessHostCompositorBackend.fill_rect` and
   `.blit_pixels` now write `self.pixels` inline in their own loops with
   once-up-front clamping (no per-pixel `me`->`me` delegation). Measured:
@@ -73,3 +76,4 @@ Arc reference is only the transient inner-`me` `self` borrow of the SAME object
 whose field is being mutated — i.e. recognize self-aliasing so a `me`-in-`me`
 per-element write stays in-place. Until then, the interpreter cannot support
 per-pixel CPU rasterization at interactive sizes.
+

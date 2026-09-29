@@ -1,32 +1,47 @@
-# Container-held class instances keep reference identity — regression +
-# similar-problem detection spec.
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+# Container-held class instances have VALUE semantics — regression spec.
 #
-# Gates doc/08_tracking/bug/interp_dict_class_value_copy_on_get_mutation_loss_2026-07-06.md,
-# which reported that `Dict<K, ClassInstance>.get()` handed back a COPY: a field
-# written through the fetched instance was silently discarded, and the next
-# `.get()` returned the pre-mutation state. The real-world casualty was a
-# per-frame cache in `HostCompositor.content_caches` whose hit counters reset
-# every frame, worked around by an explicit `caches.set(id, cache)` write-back.
+# Gates doc/08_tracking/bug/interp_dict_class_value_copy_on_get_mutation_loss_2026-07-06.md.
+# That record reported `Dict<K, ClassInstance>.get()` handing back a COPY and
+# asked whether the interpreter should share references instead. Owner ruling
+# 2026-09-27: classes are value types
+# (doc/07_guide/language/capability_library_authoring.md:33 — "`val b = a`
+# copies"), so the copy is the specified behaviour and a mutation persists only
+# through an explicit write-back (`d.set(k, c)`). This spec was retargeted from
+# its earlier reference-identity oracle accordingly.
 #
-# The defect CLASS is broader than `Dict.get`: it is "a class instance reached
-# through a container loses its identity". The probe therefore also covers an
-# array element, two live handles on the same key, and — the shape that made
-# this family silent — a dict held as a FIELD and mutated inside a CALLEE, the
-# copy-on-write frame boundary now handled by `merge_shared_collection_fields`
-# (src/compiler_rust/compiler/src/interpreter_call/core/function_exec.rs:975).
+# The property is broader than `Dict.get`: every way of reaching an instance —
+# a dict read, a dict held as a FIELD and read inside a CALLEE, an array
+# element, two reads of one key, and plain `val b = a` — yields an independent
+# copy. The probe pins both halves of each case (the copy changed, the original
+# did not), so a probe that mutates nothing cannot pass.
 #
-# WHY A SUBPROCESS. A spec body runs interpreted, so it cannot discriminate the
-# run path from the test path. The oracle is the sibling run-path probe
-# `probe_dict_class_value_identity.spl`, run under BOTH engines; it checks
-# absolute literals and prints one verdict line.
+# ENGINE SCOPE. The oracle runs on the interpreter engine, which implements the
+# ruling. The seed's JIT engine still ALIASES class instances in all of these
+# shapes (8 of 16 probe checks fail under SIMPLE_EXECUTION_MODE=jit, including
+# plain `val b = a`); that divergence is filed as
+# doc/08_tracking/bug/jit_class_instances_alias_instead_of_copy_2026-09-27.md
+# and is not asserted here until it is fixed.
+#
+# WHY A SUBPROCESS. A spec body runs interpreted, so it cannot select an engine.
+# The oracle is the sibling run-path probe `probe_dict_class_value_identity.spl`,
+# which checks absolute literals and prints one verdict line.
+
+use std.spec.step
 
 use std.spec.*
 use std.io_runtime.{process_run, env_get}
 
+
 val PROBE_PATH: text = "test/01_unit/compiler/interpreter/probe_dict_class_value_identity.spl"
 
 fn run_probe_in_mode(mode: text) -> text:
-    var bin = env_get("SIMPLE_BIN")
+    var bin = env_get("SIMPLE_TEST_BINARY")
+    if bin == "":
+        bin = env_get("SIMPLE_BIN")
     if bin == "":
         bin = "bin/simple"
     val cmd = "SIMPLE_RUST_SEED_WARNING=0 SIMPLE_EXECUTION_MODE=" + mode + " " +
@@ -34,41 +49,52 @@ fn run_probe_in_mode(mode: text) -> text:
     val out = process_run("sh", ["-c", cmd])
     out.0
 
-describe "class instances reached through a container keep their identity":
-    it "persists a mutation made through Dict.get without a manual write-back":
-        step("Run the run-path probe under the default engine")
-        val jit = run_probe_in_mode("jit")
+describe "class instances reached through a container are copies":
+    # @manual scenario evidence
+    it "copies on Dict.get and persists only through an explicit write-back":
+        # @req REQ-SSPEC-COMPILER
+        step("Run the run-path probe under the interpreter engine")
+        val out = run_probe_in_mode("interpreter")
 
-        step("The report's own repro sketch: set, get, mutate, get again")
-        expect(jit).to_contain("PASS dict_get_mutate_int")
-        expect(jit).to_contain("PASS dict_get_mutate_text")
+        step("The report's repro sketch: the fetched copy changes, the entry does not")
+        expect(out).to_contain("PASS dict_get_copy_mutated")
+        expect(out).to_contain("PASS dict_get_original_unchanged")
+        expect(out).to_contain("PASS dict_get_original_text_unchanged")
+
+        step("The documented write-back idiom is how a mutation persists")
+        expect(out).to_contain("PASS dict_write_back_persists")
 
         step("Key type must not change value semantics")
-        expect(jit).to_contain("PASS dict_text_key")
+        expect(out).to_contain("PASS dict_text_key_copy_mutated")
+        expect(out).to_contain("PASS dict_text_key_original_unchanged")
 
-    it "persists a mutation made inside a callee through a dict-valued field":
-        step("This is the shape the filed cache actually had, and the frame boundary the copy-on-write family died at")
-        val jit = run_probe_in_mode("jit")
-        expect(jit).to_contain("PASS callee_field_dict_hits")
-        expect(jit).to_contain("PASS callee_field_dict_last")
+    it "gives a callee a copy of an instance held in a dict-valued field":
+        # @req REQ-SSPEC-COMPILER
+        step("The filed cache shape: dict held as a FIELD, mutated inside a CALLEE")
+        val out = run_probe_in_mode("interpreter")
+        expect(out).to_contain("PASS callee_copy_mutated")
+        expect(out).to_contain("PASS callee_copy_mutated_again")
+        expect(out).to_contain("PASS callee_field_dict_hits_unchanged")
+        expect(out).to_contain("PASS callee_field_dict_last_unchanged")
 
-    it "keeps identity through other container kinds, not just Dict.get":
-        step("An array element is the same reference-identity question")
-        val jit = run_probe_in_mode("jit")
-        expect(jit).to_contain("PASS array_elem_identity")
+    it "copies through array elements, repeated reads and plain val assignment":
+        # @req REQ-SSPEC-COMPILER
+        val out = run_probe_in_mode("interpreter")
+        step("An array element read is a copy")
+        expect(out).to_contain("PASS array_elem_copy_mutated")
+        expect(out).to_contain("PASS array_elem_original_unchanged")
 
-        step("Two reads of one key must alias the same object, not yield two copies")
-        expect(jit).to_contain("PASS two_handles_alias")
+        step("Two reads of one key are two independent copies")
+        expect(out).to_contain("PASS two_handles_first_mutated")
+        expect(out).to_contain("PASS two_handles_second_independent")
 
-    it "behaves identically on both engines and reports no failure":
-        step("Collect both engines' output")
-        val interp = run_probe_in_mode("interpreter")
-        val jit = run_probe_in_mode("jit")
+        step("`val b = a` copies (capability_library_authoring.md:33)")
+        expect(out).to_contain("PASS val_assign_copy_mutated")
+        expect(out).to_contain("PASS val_assign_original_unchanged")
 
-        step("Both must reach the aggregate verdict")
-        expect(interp).to_contain("DICT_CLASS_IDENTITY PROBE: ALL PASS")
-        expect(jit).to_contain("DICT_CLASS_IDENTITY PROBE: ALL PASS")
-
-        step("No individual check may have failed under either engine")
-        expect(jit.contains("FAIL ")).to_equal(false)
-        expect(interp.contains("FAIL ")).to_equal(false)
+    it "reports an unambiguous all-pass verdict":
+        # @req REQ-SSPEC-COMPILER
+        val out = run_probe_in_mode("interpreter")
+        step("The aggregate verdict line is the authoritative result")
+        expect(out).to_contain("DICT_CLASS_VALUE PROBE: ALL PASS")
+        expect(out.contains("FAIL ")).to_equal(false)

@@ -1,0 +1,69 @@
+use std.spec.{describe, it, expect}
+use compiler.common.diagnostics.span.{Span}
+use compiler.frontend.parser_types.{ParserImport, ImportItem}
+use compiler.hir.hir_lowering.module_surface.{
+    ModuleSurface, ModuleSurfaceBuilder
+}
+
+fn traced_registry(import_id: text, dependency_id: text):
+    var consumer = ModuleSurface.empty("app.consumer")
+    consumer.imports = [ParserImport(
+        module: import_id, items: [], is_lazy: false, span: Span.empty())]
+    consumer.import_item_offsets = [0, 0]
+    var builder = ModuleSurfaceBuilder.new()
+    expect(builder.add_surface_canonical_identity(
+        consumer, "app.consumer", "src/app/consumer.spl").is_ok())\
+        .to_equal(true)
+    expect(builder.add_surface_canonical_identity(
+        ModuleSurface.empty(dependency_id), dependency_id,
+        "src/lib/dependency.spl").is_ok()).to_equal(true)
+    builder.finish().unwrap()
+
+describe "frozen module surfaces retain actual import resolution probes":
+    it "records the selected direct import with resolver generation and version":
+        val registry = traced_registry("lib.dep", "lib.dep")
+        val consumer = registry.surfaces[
+            registry.index_by_name["app.consumer"]]
+        expect(consumer.import_resolution_traces.len()).to_equal(1)
+        val trace = consumer.import_resolution_traces[0]
+        expect(trace.selected).to_equal("lib.dep")
+        expect(trace.selected_count).to_equal(1)
+        expect(trace.dir_generation).to_equal(
+            "module-surfaces-{registry.generation}")
+        expect(trace.resolver_version).to_equal(
+            "hir-module-surface-resolver-v2")
+
+    it "retains unsuccessful higher-precedence candidates before a fallback hit":
+        val registry = traced_registry("std.path", "lib.std.path")
+        val consumer = registry.surfaces[
+            registry.index_by_name["app.consumer"]]
+        val trace = consumer.import_resolution_traces[0]
+        expect(trace.selected).to_equal("lib.std.path")
+        expect(trace.probes[0].path).to_equal("std.path")
+        expect(trace.probes[0].found).to_equal(false)
+        expect(trace.probes[1].path).to_equal("std.path.__init__")
+        expect(trace.probes[1].found).to_equal(false)
+        expect(trace.probes[2].path).to_equal("lib.std.path")
+        expect(trace.probes[2].found).to_equal(true)
+
+    it "resolves an item directly from the relative package surface":
+        var consumer = ModuleSurface.empty("app.pkg.facade")
+        consumer.imports = [ParserImport(
+            module: ".orig",
+            items: [ImportItem(name: ".orig", has_alias: true, alias: "local")],
+            is_lazy: false, span: Span.empty())]
+        consumer.import_item_offsets = [0, 1]
+        consumer.import_item_names = [".orig"]
+        consumer.import_item_aliases = ["local"]
+        consumer.import_item_has_alias = [true]
+        var builder = ModuleSurfaceBuilder.new()
+        expect(builder.add_surface_canonical_identity(
+            consumer, "app.pkg.facade", "src/app/pkg/facade.spl").is_ok()).to_equal(true)
+        expect(builder.add_surface_canonical_identity(
+            ModuleSurface.empty("app.pkg"), "app.pkg",
+            "src/app/pkg/__init__.spl").is_ok()).to_equal(true)
+        val registry = builder.finish().unwrap()
+        val frozen = registry.surfaces[registry.index_by_name["app.pkg.facade"]]
+        expect(frozen.import_target_names[0]).to_equal("app.pkg")
+        expect(frozen.import_item_names[0]).to_equal("orig")
+        expect(frozen.import_resolution_traces[0].import_id).to_equal(".orig")

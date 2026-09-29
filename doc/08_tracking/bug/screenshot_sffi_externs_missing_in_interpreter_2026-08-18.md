@@ -1,4 +1,9 @@
 # `rt_screenshot_*` externs unimplemented in the seed interpreter (2026-08-18)
+## Closed 2026-09-16 — Resolution 2026-08-18: FIXED in source; RED->GREEN evidence (10/11, 5/5)
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
 OPEN — seed-resident, cannot be deployed from this lane.
@@ -74,3 +79,4 @@ The one remaining failure is an UNRELATED parser defect, not a screenshot gap:
 `expect exists == false` fails with ``semantic: variable `expect` not found``
 whenever the local is named `exists`. Tracked in
 `doc/08_tracking/bug/expect_before_identifier_named_exists_2026-08-18.md`.
+

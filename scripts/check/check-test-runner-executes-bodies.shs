@@ -1,0 +1,371 @@
+#!/bin/sh
+# check-test-runner-executes-bodies.shs
+#
+# Calibration gate: prove that the test runner under test actually EXECUTES `it`
+# bodies and reports an authoritative result summary — instead of verifying that a
+# spec file merely LOADS and printing "All tests passed".
+#
+# Why this exists (2026-09-12, macOS arm64). Every structural guard in this repo
+# checks trees, ranges or source. None of them runs the test runner and asks
+# whether its verdict discriminates. On this host `bin/release/macos-arm64/simple
+# test <deliberately-red-spec>` exits 0 and prints:
+#
+#     Running: red_spec.spl
+#       PASSED (0ms)
+#     Files: 1 / Passed: 1 / Failed: 0
+#     ✓ All tests passed!
+#
+# on a spec whose only example is `expect(1).to_equal(2)`. That is a LOAD-ONLY
+# runner: file-level accounting ("Files: 1, Passed: 1"), no `Results: N total`
+# line, 0ms, and a green exit code. A suite driven by such a binary is green by
+# construction, so "simple test passed" is not evidence of anything.
+#
+# The gate is deliberately NOT a spec. A spec would be run BY the runner under
+# test, so a load-only runner would greenwash its own calibration. This script
+# spawns the binary as a child, reads its exit status directly into a variable
+# (never through a pipe — a pipeline's $? is the last command's status and has
+# produced false greens in this repo before) and inspects its stdout.
+#
+# Three probes, all of which must hold:
+#   green : rc == 0, summary says 1 total / 1 passed / 0 failed
+#   red   : rc != 0, summary says 1 total / 0 passed / 1 failed, and the output
+#           does NOT claim "All tests passed"
+#   zero  : rc != 0 and the file-level verdict says outcome=ERROR — a spec that
+#           executed no example is an ERROR, not a pass
+#
+# Verdict is always the LAST line of stdout, per this repo's convention:
+#   PASS  — <n> probe(s) executed against <binary>, runner discriminates   exit 0
+#   FAIL  — <n> probe(s) executed, <k> failed: <names>                     exit 1
+#   ERROR — nothing was checked (<reason>)                                 exit 2
+# A run that executed 0 probes is ERROR, never a pass. A missing or
+# non-executable binary is ERROR: absence of a runner is absence of evidence.
+#
+# Usage:
+#   sh scripts/check/check-test-runner-executes-bodies.shs [--binary PATH]
+#   sh scripts/check/check-test-runner-executes-bodies.shs --from-source SEED
+#   sh scripts/check/check-test-runner-executes-bodies.shs --selftest
+#
+# --binary PATH       a full-CLI `simple` supporting `test` (default: $SIMPLE_TEST_RUNNER_BINARY,
+#                     else bin/simple)
+# --from-source SEED  run the pure-Simple runner straight from src/ using SEED as the
+#                     interpreter: `SEED run src/app/test_runner_new/main.spl <fixture>`.
+#                     This is the lane that proves the SOURCE is correct when the
+#                     deployed binary is stale.
+# --selftest          run the fixture self-checks only (also run before every scan).
+
+set -u
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+FIXDIR="$repo_root/scripts/check/fixtures"
+GREEN_FIX="$FIXDIR/test_runner_calibration_green_spec.spl"
+RED_FIX="$FIXDIR/test_runner_calibration_red_spec.spl"
+ZERO_FIX="$FIXDIR/test_runner_calibration_zero_spec.spl"
+
+TIMEOUT_S="${SIMPLE_CALIBRATION_TIMEOUT_S:-900}"
+
+mode="binary"
+binary="${SIMPLE_TEST_RUNNER_BINARY:-$repo_root/bin/simple}"
+seed=""
+selftest_only=0
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --binary) binary="${2:-}"; mode="binary"; shift 2 ;;
+        --from-source) seed="${2:-}"; mode="source"; shift 2 ;;
+        --selftest) selftest_only=1; shift ;;
+        -h|--help) sed -n '2,50p' "$0"; exit 0 ;;
+        *) echo "ERROR — nothing was checked (unknown argument: $1)"; exit 2 ;;
+    esac
+done
+
+work=$(mktemp -d 2>/dev/null) || {
+    echo "ERROR — nothing was checked (cannot create a temp dir)"; exit 2
+}
+cleanup() { [ -n "${KEEP_WORK:-}" ] || rm -rf "$work"; }
+trap cleanup EXIT INT TERM
+
+# ---------------------------------------------------------------------------
+# run_probe <label> <fixture> -> writes rc to PROBE_RC, output file to PROBE_OUT
+# ---------------------------------------------------------------------------
+PROBE_RC=0
+PROBE_OUT=""
+run_probe() {
+    _label="$1"
+    _fixture="$2"
+    PROBE_OUT="$work/$_label.out"
+    if [ "$mode" = "source" ]; then
+        # The runner resolves the child binary itself; the seed is both
+        # interpreter and child here.
+        SIMPLE_BINARY="$seed" timeout "$TIMEOUT_S" "$seed" run \
+            "$repo_root/src/app/test_runner_new/main.spl" "$_fixture" \
+            >"$PROBE_OUT" 2>&1
+        PROBE_RC=$?
+    else
+        timeout "$TIMEOUT_S" "$binary" test "$_fixture" >"$PROBE_OUT" 2>&1
+        PROBE_RC=$?
+    fi
+    # NOTE: PROBE_RC is assigned on the line immediately after the invocation and
+    # never read out of a pipeline. Do not "simplify" this into `cmd | tee`.
+    return 0
+}
+
+# strip ANSI so `grep` sees plain text regardless of colour support.
+# BSD sed does not interpret \033, so build the ESC byte with printf.
+ESC=$(printf '\033')
+plain() { sed "s/${ESC}\[[0-9;]*m//g" "$1"; }
+
+# A child that never ran is not evidence about the runner's verdict logic. If the
+# spawn itself failed (missing child binary, unbuildable source), the probe is
+# inconclusive: the red probe would otherwise be "satisfied" by an infrastructure
+# failure that happens to exit non-zero.
+probe_is_inconclusive() {
+    [ -f "$PROBE_OUT" ] || return 0
+    plain "$PROBE_OUT" | grep -q 'Compilation failed'
+}
+
+# ---------------------------------------------------------------------------
+# Assertions. Each sets CHECK_FAIL_REASON and returns non-zero on failure.
+# ---------------------------------------------------------------------------
+CHECK_FAIL_REASON=""
+
+assert_green() {
+    if [ "$PROBE_RC" -ne 0 ]; then
+        CHECK_FAIL_REASON="green fixture exited $PROBE_RC, expected 0"
+        return 1
+    fi
+    if ! plain "$PROBE_OUT" | grep -q 'Results: *1 total, *1 passed, *0 failed'; then
+        CHECK_FAIL_REASON="green fixture printed no authoritative 'Results: 1 total, 1 passed, 0 failed' summary"
+        return 1
+    fi
+    return 0
+}
+
+assert_red() {
+    if [ "$PROBE_RC" -eq 0 ]; then
+        CHECK_FAIL_REASON="red fixture exited 0 — the runner did not execute the failing it body (load-only)"
+        return 1
+    fi
+    if plain "$PROBE_OUT" | grep -q 'All tests passed'; then
+        CHECK_FAIL_REASON="red fixture output claims 'All tests passed' on a deliberately failing spec"
+        return 1
+    fi
+    if ! plain "$PROBE_OUT" | grep -q 'Results: *1 total, *0 passed, *1 failed'; then
+        CHECK_FAIL_REASON="red fixture printed no authoritative 'Results: 1 total, 0 passed, 1 failed' summary"
+        return 1
+    fi
+    return 0
+}
+
+assert_zero() {
+    if [ "$PROBE_RC" -eq 0 ]; then
+        CHECK_FAIL_REASON="zero-example fixture exited 0 — executed=0 was treated as a pass"
+        return 1
+    fi
+    if ! plain "$PROBE_OUT" | grep -q 'outcome=ERROR'; then
+        CHECK_FAIL_REASON="zero-example fixture was not reported as outcome=ERROR"
+        return 1
+    fi
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# Selftest — fatal, runs before every scan. Uses fake `simple` binaries so the
+# real assertions are exercised without needing a working compiler.
+# ---------------------------------------------------------------------------
+make_fake() {
+    # $1 = path, $2 = behaviour
+    _p="$1"
+    mkdir -p "$(dirname "$_p")"
+    cat >"$_p" <<FAKEEOF
+#!/bin/sh
+# fake simple: behaviour=$2
+case "\$2" in
+    *green_spec.spl) beh_file=green ;;
+    *red_spec.spl) beh_file=red ;;
+    *zero_spec.spl) beh_file=zero ;;
+    *) beh_file=other ;;
+esac
+case "$2" in
+  loadonly)
+    echo "Running: \$2"
+    echo "  PASSED (0ms)"
+    echo "Files: 1"
+    echo "Passed: 1"
+    echo "All tests passed!"
+    exit 0
+    ;;
+  honest)
+    if [ "\$beh_file" = green ]; then
+        echo "SPEC FILE VERDICT: \$2 outcome=OK declared>=1 executed=1 passed=1 failed=0"
+        echo "Results: 1 total, 1 passed, 0 failed"
+        exit 0
+    elif [ "\$beh_file" = red ]; then
+        echo "SPEC FILE VERDICT: \$2 outcome=ERROR declared>=1 executed=1 passed=0 failed=1"
+        echo "Results: 1 total, 0 passed, 1 failed"
+        exit 1
+    else
+        echo "SPEC FILE VERDICT: \$2 outcome=ERROR declared>=1 executed=0 passed=0 failed=1"
+        echo "Results: 1 total, 0 passed, 1 failed"
+        exit 1
+    fi
+    ;;
+  silent)
+    exit 0
+    ;;
+  brokenchild)
+    # Spawn failure: exits non-zero and even prints a plausible red summary, but
+    # the child never ran. Must be ERROR (inconclusive), never a satisfied red.
+    echo "  FAIL  \$2 (0 passed, 1 failed, 3ms)"
+    echo "        Error: Compilation failed: /bin/bash: bin/simple: No such file or directory"
+    echo "Results: 1 total, 0 passed, 1 failed"
+    exit 1
+    ;;
+esac
+FAKEEOF
+    chmod +x "$_p"
+}
+
+run_selftest() {
+    st_dir="$work/selftest"
+    mkdir -p "$st_dir"
+    st_fail=""
+
+    saved_mode="$mode"; saved_binary="$binary"
+    mode="binary"
+
+    # fixture 1: an honest runner must satisfy all three assertions
+    make_fake "$st_dir/honest" honest
+    binary="$st_dir/honest"
+    run_probe st_g "$GREEN_FIX"; assert_green || st_fail="$st_fail honest-green($CHECK_FAIL_REASON)"
+    run_probe st_r "$RED_FIX";   assert_red   || st_fail="$st_fail honest-red($CHECK_FAIL_REASON)"
+    run_probe st_z "$ZERO_FIX";  assert_zero  || st_fail="$st_fail honest-zero($CHECK_FAIL_REASON)"
+
+    # fixture 2: the real incident shape — load-only runner says "All tests passed"
+    # on the red fixture. assert_red MUST reject it.
+    make_fake "$st_dir/loadonly" loadonly
+    binary="$st_dir/loadonly"
+    run_probe st_lr "$RED_FIX"
+    if assert_red; then st_fail="$st_fail loadonly-red-not-detected"; fi
+
+    # fixture 3: load-only also fakes green — no Results line means not a pass.
+    run_probe st_lg "$GREEN_FIX"
+    if assert_green; then st_fail="$st_fail loadonly-green-accepted-without-summary"; fi
+
+    # fixture 4: a summary-less exit 0 is not evidence (silent greenwash).
+    make_fake "$st_dir/silent" silent
+    binary="$st_dir/silent"
+    run_probe st_sg "$GREEN_FIX"
+    if assert_green; then st_fail="$st_fail silent-exit0-accepted"; fi
+    run_probe st_sz "$ZERO_FIX"
+    if assert_zero; then st_fail="$st_fail silent-zero-accepted"; fi
+
+    # fixture 5: a spawn failure must be recognised as INCONCLUSIVE, not as a
+    # satisfied red probe. assert_red would accept it (rc!=0 + the right summary
+    # text), so probe_is_inconclusive is what has to catch it.
+    make_fake "$st_dir/brokenchild" brokenchild
+    binary="$st_dir/brokenchild"
+    run_probe st_br "$RED_FIX"
+    if ! probe_is_inconclusive; then
+        st_fail="$st_fail spawn-failure-not-detected-as-inconclusive"
+    fi
+    if ! assert_red; then
+        st_fail="$st_fail brokenchild-fixture-no-longer-looks-red(guard is vacuous)"
+    fi
+
+    # fixture 6: every calibration fixture must exist on disk.
+    for f in "$GREEN_FIX" "$RED_FIX" "$ZERO_FIX"; do
+        [ -f "$f" ] || st_fail="$st_fail missing-fixture($f)"
+    done
+
+    # fixture 7: the red fixture must actually assert something false, and the
+    # zero fixture must declare no `it` — otherwise the calibration is vacuous.
+    grep -q 'to_equal(2)' "$RED_FIX" || st_fail="$st_fail red-fixture-not-red"
+    if grep -qE '^[[:space:]]*it ' "$ZERO_FIX"; then
+        st_fail="$st_fail zero-fixture-declares-an-it"
+    fi
+
+    mode="$saved_mode"; binary="$saved_binary"
+
+    if [ -n "$st_fail" ]; then
+        echo "selftest FAILED:$st_fail" >&2
+        return 1
+    fi
+    return 0
+}
+
+if ! run_selftest; then
+    echo "ERROR — nothing was checked (selftest failed; see stderr)"
+    exit 2
+fi
+
+if [ "$selftest_only" -eq 1 ]; then
+    echo "PASS — 7 selftest fixture(s) checked, calibration harness is sound"
+    exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Real scan
+# ---------------------------------------------------------------------------
+if [ "$mode" = "source" ]; then
+    if [ -z "$seed" ] || [ ! -x "$seed" ]; then
+        echo "ERROR — nothing was checked (--from-source seed '$seed' is missing or not executable)"
+        exit 2
+    fi
+    subject="source via $seed"
+    if [ ! -f "$repo_root/src/app/test_runner_new/main.spl" ]; then
+        echo "ERROR — nothing was checked (src/app/test_runner_new/main.spl is missing)"
+        exit 2
+    fi
+    # The runner resolves the CHILD binary itself and overwrites SIMPLE_BINARY
+    # on the way (test_runner_single.spl:1063), so the value exported in
+    # run_probe is advisory at best; in practice resolution lands on
+    # <repo_root>/bin/simple (test_executor_parsing.spl find_simple_binary).
+    # Without it every probe dies as "Compilation failed: .../bin/simple: No
+    # such file", which is an infrastructure failure, not a runner verdict.
+    if [ ! -x "$repo_root/bin/simple" ]; then
+        echo "ERROR — nothing was checked (--from-source needs an executable $repo_root/bin/simple for the runner to spawn as its child)"
+        exit 2
+    fi
+else
+    if [ -z "$binary" ] || [ ! -x "$binary" ]; then
+        echo "ERROR — nothing was checked (binary '$binary' is missing or not executable)"
+        exit 2
+    fi
+    subject="$binary"
+fi
+
+executed=0
+failed=0
+offenders=""
+
+probe() {
+    _name="$1"; _fixture="$2"; _assert="$3"
+    run_probe "$_name" "$_fixture"
+    if probe_is_inconclusive; then
+        _first=$(plain "$PROBE_OUT" | grep -m1 'Compilation failed')
+        echo "ERROR — nothing was checked (child binary did not run on the $_name fixture: $_first)"
+        exit 2
+    fi
+    executed=$((executed + 1))
+    if ! "$_assert"; then
+        failed=$((failed + 1))
+        offenders="$offenders $_name[$CHECK_FAIL_REASON]"
+    fi
+}
+
+probe green "$GREEN_FIX" assert_green
+probe red   "$RED_FIX"   assert_red
+probe zero  "$ZERO_FIX"  assert_zero
+
+if [ "$executed" -eq 0 ]; then
+    echo "ERROR — nothing was checked (0 probes executed)"
+    exit 2
+fi
+
+if [ "$failed" -gt 0 ]; then
+    echo "FAIL — $executed probe(s) executed against $subject, $failed failed:$offenders"
+    exit 1
+fi
+
+echo "PASS — $executed probe(s) executed against $subject, runner executes it bodies and discriminates"
+exit 0

@@ -1,0 +1,94 @@
+# @cover src/os/kernel/net/rt_net_socket_facade.spl 25%
+
+use std.spec
+use std.io_runtime.{file_read}
+use os.kernel.net.rt_net_socket_facade.{rt_net_ssh_identification_line_allowed, rt_net_ssh_identification_poll_action}
+
+fn _ascii(value: text) -> [u8]:
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < value.len():
+        out.push(value.char_code_at(i.to_i64()).to_u8())
+        i = i + 1
+    out
+
+describe "SSH identification input hardening":
+    it "accepts one printable SSH 2.0 identification line":
+        expect(rt_net_ssh_identification_line_allowed(
+            _ascii("SSH-2.0-OpenSSH_9.9"))).to_be(true)
+
+    it "rejects a corrupted prefix and embedded control byte":
+        expect(rt_net_ssh_identification_line_allowed(
+            _ascii("XSH-2.0-corrupt"))).to_be(false)
+        var control = _ascii("SSH-2.0-client")
+        control.push(0x0Au8)
+        expect(rt_net_ssh_identification_line_allowed(control)).to_be(false)
+
+    it "rejects an identification line beyond the RFC wire bound":
+        var oversized = _ascii("SSH-2.0-")
+        while oversized.len() < 254u64:
+            oversized.push(0x41u8)
+        expect(rt_net_ssh_identification_line_allowed(oversized)).to_be(false)
+
+    it "keeps the fallback reader bounded and non-destructive":
+        val facade = file_read("src/os/kernel/net/rt_net_socket_facade.spl")
+        val owner_reader = facade.split(
+            "fn _rt_net_read_identification_wire(os_fd: i64)")[1].split(
+            "pub fn rt_net_ssh_identification_line_allowed")[0]
+        expect(owner_reader).to_contain("while line.len() < RT_NET_SSH_IDENTIFICATION_WIRE_MAX")
+        expect(owner_reader).to_contain("rt_net_ssh_identification_poll_action(line.len(), empty_reads, byte)")
+
+        val session = file_read("src/os/apps/sshd/ssh_session.spl")
+        val exchange = session.split("me do_version_exchange() -> bool:")[1].split(
+            "# ========================================================================")[0]
+        expect(exchange.contains("rt_net_recv_version_text")).to_be(false)
+        expect(exchange).to_contain("invalid client version bytes")
+
+    it "uses one byte consumer for raw and mapped descriptor paths":
+        val facade = file_read("src/os/kernel/net/rt_net_socket_facade.spl")
+        val bytes_reader = facade.split(
+            "@export(\"C\", name: \"rt_net_recv_version_bytes\")")[1].split(
+            "@export(\"C\", name: \"rt_net_recv_ssh_plain_packet_payload\")")[0]
+        expect(bytes_reader).to_contain("rt_boot_tcp_take_version_bytes(sock_fd)")
+        expect(bytes_reader).to_contain("_rt_net_read_identification_wire(current.os_fd)")
+
+        val owner_reader = facade.split(
+            "fn _rt_net_read_identification_wire(os_fd: i64)")[1].split(
+            "pub fn rt_net_ssh_identification_line_allowed")[0]
+        expect(owner_reader).to_contain("_rt_net_transport_read(os_fd, 1)")
+        expect(owner_reader.contains("rt_boot_tcp_read_bytes(1)")).to_be(false)
+
+    it "waits for fragmented input using a total empty-poll budget":
+        expect(rt_net_ssh_identification_poll_action(0u64, 0u64, -1)).to_equal(0)
+        expect(rt_net_ssh_identification_poll_action(3u64, 999u64, -1)).to_equal(0)
+        expect(rt_net_ssh_identification_poll_action(3u64, 1000u64, -1)).to_equal(-1)
+        expect(rt_net_ssh_identification_poll_action(3u64, 1000u64, 83)).to_equal(1)
+
+    it "accepts the final permitted LF and rejects overlong input":
+        expect(rt_net_ssh_identification_poll_action(254u64, 0u64, 10)).to_equal(2)
+        expect(rt_net_ssh_identification_poll_action(254u64, 0u64, 65)).to_equal(-1)
+        expect(rt_net_ssh_identification_poll_action(255u64, 0u64, 10)).to_equal(-1)
+
+    it "stops the shared poll decisions at newline before packet bytes":
+        val transcript = _ascii("SSH-2.0-client\r\nPACKET")
+        var i: u64 = 0
+        var line: [u8] = []
+        while i < transcript.len():
+            val byte = transcript[i]
+            val action = rt_net_ssh_identification_poll_action(line.len(), 0u64, byte.to_i64())
+            expect(action > 0).to_be(true)
+            line.push(byte)
+            i = i + 1
+            if action == 2:
+                break
+        expect(line).to_equal(_ascii("SSH-2.0-client\r\n"))
+        expect(transcript.slice(i, transcript.len())).to_equal(_ascii("PACKET"))
+
+    it "initializes compact flags at constructors without a raw allocator loop":
+        val runtime = file_read(
+            "examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c")
+        val constructor = runtime.split("static inline void runtime_heap_header_init")[1].split(
+            "/* Native [u8]")[0]
+        expect(constructor).to_contain("header->gc_flags = 0")
+        expect(constructor).to_contain("header->reserved = 0")
+        expect(runtime.contains("->hdr.type = HEAP_")).to_be(false)

@@ -14,6 +14,7 @@ Mutations that must persist live on structs the controller OWNS as fields
 """
 
 use nvme_types.*
+use nvme_payload.*   # LBA_BYTES — the single declaration of the advertised block size
 use nvme_admin_types.*
 use hil_queue.*   # bool_to_i64
 
@@ -106,7 +107,7 @@ fn build_identify_controller() -> IdentifyData:
     IdentifyData(kind: CNS_CONTROLLER, vid: 0x1B36, num_ns: 1, max_queues: MAX_IO_QUEUES, mdts: MDTS_BLOCKS, target_id: 0, channels: 0, ways_per_channel: 0, nvme_blocks_per_slice: 0, cpu_cores: 0, nsid: 0, ns_size: 0, ns_cap: 0, lba_bytes: 0)
 
 fn build_identify_namespace(nsid: i64) -> IdentifyData:
-    IdentifyData(kind: CNS_NAMESPACE, vid: 0, num_ns: 0, max_queues: 0, mdts: 0, target_id: 0, channels: 0, ways_per_channel: 0, nvme_blocks_per_slice: 0, cpu_cores: 0, nsid: nsid, ns_size: LBA_COUNT, ns_cap: LBA_COUNT, lba_bytes: 4096)
+    IdentifyData(kind: CNS_NAMESPACE, vid: 0, num_ns: 0, max_queues: 0, mdts: 0, target_id: 0, channels: 0, ways_per_channel: 0, nvme_blocks_per_slice: 0, cpu_cores: 0, nsid: nsid, ns_size: LBA_COUNT, ns_cap: LBA_COUNT, lba_bytes: LBA_BYTES)
 
 fn identify_lbas_safe(lbas: i64) -> i64:
     if lbas < 0:
@@ -115,7 +116,7 @@ fn identify_lbas_safe(lbas: i64) -> i64:
 
 fn identify_lba_bytes_safe(lba_bytes: i64) -> i64:
     if lba_bytes <= 0:
-        return 4096
+        return LBA_BYTES
     lba_bytes
 
 fn build_identify_namespace_for_target(nsid: i64, lbas: i64, lba_bytes: i64) -> IdentifyData:
@@ -609,7 +610,12 @@ fn nvme_admin_selftest() -> i64:
     fail = fail + expect_eq(ictrl.max_queues, MAX_IO_QUEUES, "identify-controller reports max queues")
     val ins: IdentifyData = build_identify_namespace(1)
     fail = fail + expect_eq(ins.ns_size, LBA_COUNT, "identify-namespace reports LBA count")
-    fail = fail + expect_eq(ins.lba_bytes, 4096, "identify-namespace block size 4096")
+    fail = fail + expect_eq(ins.lba_bytes, LBA_BYTES, "identify-namespace block size == LBA_BYTES")
+    # Anti-drift: the advertised block size is the width the media actually
+    # stores, not an independent literal (payload plan §0 — this was a 512x
+    # over-claim while a page held one i64).
+    fail = fail + expect_eq(ins.lba_bytes, PAGE_BYTES / LBAS_PER_PAGE, "advertised block size matches the real page width")
+    fail = fail + expect_eq(PAGE_WORDS * WORD_BYTES, ins.lba_bytes, "the media page really is that many bytes wide")
 
     # SMART derived metrics: endurance used (from max erase) and available spare (from bad blocks).
     fail = fail + expect_eq(smart_percent_used(50), 50, "percent_used from max erase count")

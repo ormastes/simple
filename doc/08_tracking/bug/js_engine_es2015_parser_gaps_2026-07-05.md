@@ -1,9 +1,12 @@
 # JS engine: es2015 conformance spec was silently broken; parser gaps now exposed
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-05
 **Spec:** `test/03_system/feature/js/es2015_conformance_spec.spl`
-Status: OPEN (P2)
-Status re-verified 2026-08-17 by source inspection (triage shard 02).
+**Status:** open — 13 genuine failures now visible (25 pass)
 
 ## What happened
 
@@ -46,3 +49,4 @@ limitations — most real web pages use `let`/`const`.
 - Related audit lesson: the interpreter file-summary greenwash bug
   (`doc/08_tracking/bug/test_runner_interpreter_file_summary_greenwash_2026-07-03.md`)
   is how a 38/38-failing spec stayed invisible.
+

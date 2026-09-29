@@ -1,0 +1,231 @@
+# SimpleOS QEMU Vulkan and Adreno Staged Contract
+
+> This scenario is the operator contract for the shared SimpleOS GPU boundary. It proves that the repository recognizes the existing ivshmem producer as host offload while keeping direct guest Vulkan explicitly blocked. It also proves that an Adreno adapter without native SimpleOS owners cannot manufacture a shader artifact, GPU handle, identity, or device-origin receipt.
+
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 1 | 1 | 0 | 0 |
+
+<details>
+<summary>Full Scenario Manual</summary>
+
+# SimpleOS QEMU Vulkan and Adreno Staged Contract
+
+This scenario is the operator contract for the shared SimpleOS GPU boundary. It proves that the repository recognizes the existing ivshmem producer as host offload while keeping direct guest Vulkan explicitly blocked. It also proves that an Adreno adapter without native SimpleOS owners cannot manufacture a shader artifact, GPU handle, identity, or device-origin receipt.
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Hardware & OS |
+| Status | Active |
+| Requirements | doc/02_requirements/feature/simpleos_vulkan_cuda_adreno_knowledge_routing.md |
+| Plan | doc/03_plan/sys_test/simpleos_vulkan_cuda_adreno_knowledge_routing.md |
+| Design | doc/05_design/simpleos_vulkan_cuda_adreno_knowledge_routing.md |
+| Research | doc/01_research/domain/simpleos_vulkan_cuda_adreno_knowledge_routing.md |
+| Source | `/tmp/simple-os-vulkan-adreno-mdso-UmgtoO/test/03_system/os/qemu/simpleos_qemu_vulkan_adreno_contract_spec.spl` |
+| Updated | 2026-08-02 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+This scenario is the operator contract for the shared SimpleOS GPU boundary.
+It proves that the repository recognizes the existing ivshmem producer as host
+offload while keeping direct guest Vulkan explicitly blocked. It also proves
+that an Adreno adapter without native SimpleOS owners cannot manufacture a
+shader artifact, GPU handle, identity, or device-origin receipt.
+
+The scenario does not claim that QEMU exposes Vulkan directly to SimpleOS and
+does not claim that UNO Q runs SimpleOS-native Turnip. Those are separate live
+environment rows with retained evidence requirements.
+
+**Requirements:** doc/02_requirements/feature/simpleos_vulkan_cuda_adreno_knowledge_routing.md
+
+**NFR:** doc/02_requirements/nfr/simpleos_vulkan_cuda_adreno_knowledge_routing.md
+
+**Plan:** doc/03_plan/sys_test/simpleos_vulkan_cuda_adreno_knowledge_routing.md
+
+**Design:** doc/05_design/simpleos_vulkan_cuda_adreno_knowledge_routing.md
+
+**Research:** doc/01_research/domain/simpleos_vulkan_cuda_adreno_knowledge_routing.md
+
+## Evidence model
+
+`host-offload` means SimpleOS sends a bounded request to the host daemon and
+the host submits it to a physical GPU. `guest-native` means the guest owns the
+Vulkan loader/ICD and virtio-gpu or passthrough submission path. These evidence
+classes are never interchangeable.
+
+CUDA may execute ProcessingIR through the host-offload processing port while
+rendering remains Vulkan. CUDA receipts retain CUDA backend identity. Adreno
+uses the Vulkan device port and remains blocked until the SimpleOS-native
+firmware, memory, queue, fence, and readback owners are real.
+
+## Operator flow
+
+1. Probe the checker source for typed host-offload and direct-guest classes.
+2. Lower one canonical ProcessingIR FillU32 request through the staged adapter.
+3. Submit through the selected Vulkan device boundary.
+4. Reject the result because it lacks device-origin provenance.
+
+## Expected result
+
+This contract passes when the staged adapter fails closed. A zero handle,
+zero identity, blocked evidence class, and rejected native receipt are the
+correct result on an unprepared host. A synthetic positive handle or a CPU
+mirror would be a test failure, not progress.
+
+## Examples
+
+Expected staged classification:
+
+```text
+canonical_producer=host-offload-only
+simpleos_guest_vulkan_cuda_evidence_class=host-offload
+direct_guest_evidence_class=blocked
+```
+
+Rejected staged Adreno receipt:
+
+```text
+backend=vulkan
+evidence_class=blocked
+backend_handle=0
+device_identity=0
+device_origin=false
+```
+
+## Evidence checklist
+
+- The canonical producer is discovered from tracked guest source.
+- Host offload has its own evidence class.
+- Direct guest execution has its own evidence class.
+- The two classes are never promoted by string similarity.
+- ProcessingIR is constructed through the shared owner.
+- Invalid lowering returns a concrete reason.
+- The selected backend remains Vulkan for Adreno.
+- A blocked adapter returns no artifact payload.
+- A blocked adapter returns no backend handle.
+- A blocked adapter returns no device identity.
+- A blocked adapter returns no submission identity.
+- A blocked adapter returns no fence identity.
+- A blocked adapter returns no readback identity.
+- Device-origin is false for the blocked result.
+- Native receipt validation rejects the blocked result.
+- The CPU oracle is not treated as device evidence.
+- CUDA identity is not rewritten as Vulkan.
+- Board-Linux evidence is not SimpleOS-native evidence.
+- The resume command points at the live board spec.
+- Missing prerequisites remain visible to verification.
+
+## Troubleshooting
+
+- If the producer is reported missing, inspect the guest probe entry source.
+- If host offload is called guest-native, reject the checker change.
+- If the adapter emits a positive handle while blocked, reject the adapter.
+- If device-origin becomes true without submission/fence, reject the receipt.
+- If QEMU only provides default 2D virtio-gpu, retain the blocked native row.
+- If Venus is available only on the host, the guest ICD row is still blocked.
+- If CUDA executes compute, require a CUDA processing receipt.
+- If a screenshot exists without device readback, it is diagnostic only.
+- If a CPU mirror matches, it does not satisfy native provenance.
+- If the source revision changes, invalidate cached capability evidence.
+- If the device generation changes, reject stale receipts.
+- If the protocol version changes, renegotiate before submission.
+- If docgen reports a stub, improve this executable docstring and regenerate.
+- If the pure-Simple runner is absent, retain provisional status.
+- If native prerequisites become available, run the dedicated live gate.
+
+## Native continuation
+
+Use the live UNO Q scenario for physical-board promotion. Direct QEMU Vulkan
+requires Venus-capable QEMU/virglrenderer plus SimpleOS capset, blob, context,
+fence, shared-memory, and guest Vulkan ICD implementation.
+
+## Scenarios
+
+### SimpleOS QEMU Vulkan device boundary
+
+#### should separate canonical host offload from blocked guest-native Vulkan
+
+- Probe the GPU environment
+- Lower shared processing IR
+   - Expected: artifact.valid is false
+   - Expected: artifact.reason equals `adreno-turnip-simpleos-native-lowering-not-admitted`
+- Submit through the selected Vulkan device
+   - Expected: receipt.backend equals `vulkan`
+   - Expected: receipt.evidence_class equals `VULKAN_EVIDENCE_BLOCKED`
+   - Expected: receipt.backend_handle equals `0`
+   - Expected: receipt.device_identity equals `0`
+- Verify device-origin readback
+   - Expected: receipt.device_origin is false
+   - Expected: vulkan_device_receipt_native_valid(receipt, 12, []) is false
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 36 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Probe the GPU environment")
+val checker = file_read("scripts/check/check-simpleos-qemu-guest-gpu-passthrough.shs")
+expect(checker).to_contain("echo host-offload-only")
+expect(checker).to_contain("simpleos_guest_vulkan_cuda_evidence_class=host-offload")
+expect(checker).to_contain("direct_guest_evidence_class=blocked")
+val probe = file_read("examples/09_embedded/simple_os/arch/common/host_gpu_ivshmem_probe_entry.spl")
+expect(probe).to_contain("CudaHostOffloadAdapter.create")
+expect(probe).to_contain("processing_ir_fill_u32(256, 7u32)")
+expect(probe).to_contain("cuda_adapter.negotiated(hello)")
+expect(probe).to_contain("cuda_adapter.submit_fill_u32")
+expect(probe).to_contain("cuda_adapter.device_receipt_valid")
+expect(probe).to_contain("VulkanHostOffloadAdapter.create")
+expect(probe).to_contain("vulkan_adapter.negotiated(hello)")
+expect(probe).to_contain("vulkan_adapter.submit_fill_u32")
+expect(probe).to_contain("vulkan_adapter.device_receipt_valid")
+expect(probe).to_contain("evidence_class=host-offload")
+
+step("Lower shared processing IR")
+val adapter = AdrenoTurnipAdapter.blocked(
+    "qualcomm-uno-q", "mesa-turnip-pinned", "MIT")
+val ir = processing_ir_fill_u32(16, 0x12345678u32)
+val artifact = adapter.lower_processing_ir(ir)
+expect(artifact.valid).to_equal(false)
+expect(artifact.reason).to_equal("adreno-turnip-simpleos-native-lowering-not-admitted")
+
+step("Submit through the selected Vulkan device")
+val receipt = adapter.submit_processing_ir(ir, 12, 13)
+expect(receipt.backend).to_equal("vulkan")
+expect(receipt.evidence_class).to_equal(VULKAN_EVIDENCE_BLOCKED)
+expect(receipt.backend_handle).to_equal(0)
+expect(receipt.device_identity).to_equal(0)
+
+step("Verify device-origin readback")
+expect(receipt.device_origin).to_equal(false)
+expect(vulkan_device_receipt_native_valid(receipt, 12, [])).to_equal(false)
+expect(ADRENO_TURNIP_RESUME_COMMAND).to_contain("SIMPLEOS_UNO_Q_ADRENO_LIVE=1")
+```
+
+</details>
+
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 1 |
+| Active scenarios | 1 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
+
+
+## Related Documentation
+
+- **Requirements:** `doc/02_requirements/feature/simpleos_vulkan_cuda_adreno_knowledge_routing.md`
+- **Plan:** `doc/03_plan/sys_test/simpleos_vulkan_cuda_adreno_knowledge_routing.md`
+- **Design:** `doc/05_design/simpleos_vulkan_cuda_adreno_knowledge_routing.md`
+- **Research:** `doc/01_research/domain/simpleos_vulkan_cuda_adreno_knowledge_routing.md`
+
+
+</details>

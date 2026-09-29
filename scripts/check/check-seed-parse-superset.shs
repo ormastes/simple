@@ -150,6 +150,13 @@ function fence_count(s,   n, i) {
     return n
 }
 
+FNR == 1 {
+    if (NR > 1) report_file()
+    N = 0
+    in_doc = 0
+    file_name = FILENAME
+}
+
 {
     raw = $0
     sub(/\r$/, "", raw)
@@ -172,7 +179,7 @@ function fence_count(s,   n, i) {
     DELTA[N] = DEPTH_DELTA
 }
 
-END {
+function report_file(   depth, prev, head, hits, i, is_cont, b, why) {
     depth = 0   # bracket depth entering the current line
     prev  = 0   # previous meaningful line
     head  = 0   # line that STARTED the current logical line
@@ -210,7 +217,7 @@ END {
             # would have rejected legal code. See the header.
 
             if (why != "") {
-                printf "%s:%d: %s\n", FILENAME, i, why
+                printf "%s:%d: %s\n", file_name, i, why
                 printf "    %s\n", substr(LINE[i], 1, 120)
                 hits++
             }
@@ -223,8 +230,12 @@ END {
         if (depth < 0) depth = 0
     }
 
-    if (hits > 0) exit 1
-    exit 0
+    total_hits += hits
+}
+
+END {
+    if (N > 0) report_file()
+    if (total_hits > 0 && EXIT_ON_HIT == 1) exit 1
 }
 AWK_EOF
 
@@ -274,19 +285,39 @@ selftest() {
     st_ran=0
     for st_f in "$st_dir"/pos_*.spl; do
         st_ran=$((st_ran + 1))
-        if awk -f "$DETECT" "$st_f" > /dev/null 2>&1; then
+        if awk -v EXIT_ON_HIT=1 -f "$DETECT" "$st_f" > /dev/null 2>&1; then
             echo "SELFTEST FAIL: detector did NOT flag $(basename "$st_f")" >&2
             st_fail=1
         fi
     done
     for st_f in "$st_dir"/neg_*.spl; do
         st_ran=$((st_ran + 1))
-        if ! awk -f "$DETECT" "$st_f" > /dev/null 2>&1; then
+        if ! awk -v EXIT_ON_HIT=1 -f "$DETECT" "$st_f" > /dev/null 2>&1; then
             echo "SELFTEST FAIL: detector WRONGLY flagged $(basename "$st_f")" >&2
-            awk -f "$DETECT" "$st_f" >&2 || true
+            awk -v EXIT_ON_HIT=1 -f "$DETECT" "$st_f" >&2 || true
             st_fail=1
         fi
     done
+
+    # A batch must produce the same report as separate scans. This also pins
+    # file names, line numbers, and state reset after positive and negative
+    # fixtures; otherwise one file can change the verdict for the next.
+    st_expected="$st_dir/expected-batch.txt"
+    st_actual="$st_dir/actual-batch.txt"
+    : > "$st_expected"
+    for st_f in "$st_dir/neg_plus.spl" "$st_dir/pos_eq.spl" \
+        "$st_dir/neg_trailing.spl" "$st_dir/pos_ne.spl"; do
+        awk -v EXIT_ON_HIT=1 -f "$DETECT" "$st_f" >> "$st_expected" || true
+    done
+    if ! printf '%s\0' "$st_dir/neg_plus.spl" "$st_dir/pos_eq.spl" \
+        "$st_dir/neg_trailing.spl" "$st_dir/pos_ne.spl" |
+        xargs -0 -n 2 awk -f "$DETECT" > "$st_actual"; then
+        echo "SELFTEST FAIL: batched detector execution failed" >&2
+        st_fail=1
+    elif ! cmp -s "$st_expected" "$st_actual"; then
+        echo "SELFTEST FAIL: batched detector changed per-file results" >&2
+        st_fail=1
+    fi
 
     if [ "$st_ran" -ne "$SELFTEST_EXPECTED" ]; then
         echo "SELFTEST FAIL: expected $SELFTEST_EXPECTED fixtures, ran $st_ran -- the harness did not run" >&2
@@ -396,14 +427,10 @@ count="$(wc -l < "$FILES" | tr -d ' ')"
 
 REPORT="$WORK_DIR/report.txt"
 : > "$REPORT"
-scanned=0
-while IFS= read -r f; do
-    scanned=$((scanned + 1))
-    awk -f "$DETECT" "$f" >> "$REPORT" 2>/dev/null || true
-done < "$FILES"
-
-if [ "$scanned" -ne "$count" ]; then
-    echo "FAIL: scanned $scanned of $count files -- the scan aborted early" >&2
+# Bound the number of file arguments per awk process. Each invocation scans
+# complete files and fails if awk itself fails; detector hits go to REPORT.
+if ! tr '\n' '\000' < "$FILES" | xargs -0 -n 128 awk -f "$DETECT" >> "$REPORT"; then
+    echo "FAIL: batched bootstrap-path scan aborted" >&2
     exit 1
 fi
 
@@ -421,6 +448,6 @@ if [ -s "$REPORT" ]; then
     exit 1
 fi
 
-echo "PASS: $scanned bootstrap-path .spl files, 0 seed-incompatible continuations"
+echo "PASS: $count bootstrap-path .spl files, 0 seed-incompatible continuations"
 echo "roots: $ROOTS"
 exit 0

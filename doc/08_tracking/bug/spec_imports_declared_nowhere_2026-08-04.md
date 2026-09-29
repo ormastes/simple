@@ -1,4 +1,8 @@
 # Spec imports that resolve to no declaration anywhere in owned `src/`
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** ARCHITECTURAL/OUT-OF-SCOPE-OPEN (triaged 2026-08-10)  
 **Filed:** 2026-08-04  
@@ -736,16 +740,3 @@ python3 classify.py <path> out.json rows.json  # module-resolves / does-not-reso
 ```
 
 
-## STILL_PRESENT — re-verified 2026-08-17 (P2 triage, compiler lane)
-
-Re-measured at HEAD 2026-08-17 with an independent census (symlinks followed,
-realpath dedupe, decl keywords + bare `NAME =` + `export` lists + receiver forms;
-braced `use` only, whole `test/` tree, duplicate test trees NOT collapsed):
-**4290 distinct names missing across 1728 spec files**, out of 29405 distinct
-imported names over 12390 spec files. Not directly comparable to the doc figure
-of 1003/294 (different collapsing), but the same order or worse — nothing has
-closed it. Still warning-only, never an error:
-`src/compiler_rust/compiler/src/interpreter_module/module_loader.rs:520` emits
-`"[use-warning] {name} is named in \`use ...\` but module {} does not provide it"`
-(deduped at `:516`, with no error path). NOT FIXED by this lane — this is a
-policy decision (warn vs fail) with a 4290-name blast radius, not a local defect.

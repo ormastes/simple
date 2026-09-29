@@ -1,9 +1,12 @@
 # GPU compute offload is not wired to real SFFI kernel launch (CUDA/HIP/Vulkan)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-06
 **Area:** lib/nogc_async_mut/compute, lib/nogc_sync_mut/text_layout, lib/gpu/engine2d
-Status: OPEN (P2)
-Status re-verified 2026-08-17 by source inspection (triage shard 01).
+**Status:** Open (honest gap — device execution unproven off Metal)
 
 ## Summary
 
@@ -59,3 +62,4 @@ structure. Session-evidence parity for Metal/Vulkan is a separate follow-up.
 3. Real ROCm/HIP hsaco launch+readback (`rt_rocm_*` guard).
 4. `*SessionEvidence` + checksum-readback parity for the Metal and Vulkan
    engine2d sessions.
+

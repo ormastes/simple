@@ -1,0 +1,133 @@
+#!/bin/sh
+# Every bootstrap-lane script must end its run with exactly one `VERDICT — `
+# line, so a run that dies silently (killed, SIGHUP'd, or crashes before its
+# own success/failure message) is still diagnosable from its log alone.
+#
+# Incident this closes: a backgrounded `--resume-stage3-from-admitted=...` run
+# died silently — two progress-marker lines in its lane log, a 0-byte
+# native-build log, no live process, no error, and no verdict line anywhere.
+# See doc/07_guide/tooling/bootstrap_options.md.
+#
+# Two checks:
+#  (static)  each of the three bootstrap-lane scripts installs a trap on
+#            EXIT/HUP/INT/TERM that writes a `VERDICT — ` line when nothing
+#            else already wrote one, and has at least one explicit
+#            `VERDICT — ADMITTED` write on its normal success path.
+#  (dynamic) a fixture harness, reusing the exact trap pattern, is
+#            `kill -TERM`ed mid-run and must leave exactly one
+#            `VERDICT — ABORTED ... signal=TERM` line in its log; a fast
+#            no-op path through the same harness must NOT write an ABORTED
+#            line.
+#
+# Verdict convention matches the other push guards documented in
+# .claude/rules/vcs.md: `PASS — <n> ... checked ...` exit 0 / `FAIL — ...`
+# exit 1 / `ERROR — nothing was checked` exit 2.
+
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P) || exit 2
+
+scripts="scripts/bootstrap/bootstrap-from-scratch.sh scripts/bootstrap/resume-stage3-from-admitted.sh scripts/bootstrap/bootstrap-strategy.sh"
+
+run_selftest() {
+  work=$(mktemp -d 2>/dev/null) || { echo "ERROR — nothing was checked (mktemp failed)" >&2; exit 2; }
+  trap 'rm -rf "$work"' EXIT
+
+  fixture="$work/fixture.sh"
+  cat >"$fixture" <<'EOF'
+#!/bin/sh
+set -eu
+log=$1
+mode=$2
+verdict_written=0
+verdict() {
+  verdict_written=1
+  echo "VERDICT — $1" >>"$log"
+}
+onexit() {
+  status=$?
+  sig=${1:-none}
+  if [ "$verdict_written" -eq 0 ]; then
+    verdict "ABORTED: stage=running exit=${status} signal=${sig} reason=running"
+  fi
+}
+trap 'onexit none' EXIT
+trap 'onexit HUP' HUP
+trap 'onexit INT' INT
+trap 'onexit TERM' TERM
+if [ "$mode" = fast ]; then
+  verdict "ADMITTED: stage=complete exit=0 signal=none reason=fast-path"
+  exit 0
+fi
+# slow mode: sleep so the caller can kill -TERM mid-run
+sleep 10
+EOF
+  chmod +x "$fixture"
+
+  # (b) fast no-op path must not write an ABORTED line.
+  fast_log="$work/fast.log"
+  : >"$fast_log"
+  "$fixture" "$fast_log" fast
+  if grep -q 'ABORTED' "$fast_log"; then
+    echo "FAIL — selftest: fast no-op path wrote an ABORTED verdict" >&2
+    exit 1
+  fi
+  if ! grep -q 'VERDICT — ADMITTED' "$fast_log"; then
+    echo "FAIL — selftest: fast path wrote no VERDICT line at all" >&2
+    exit 1
+  fi
+
+  # (a) kill -TERM mid-run must leave exactly one ABORTED/signal=TERM line.
+  slow_log="$work/slow.log"
+  : >"$slow_log"
+  "$fixture" "$slow_log" slow &
+  pid=$!
+  sleep 1
+  kill -TERM "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  n=$(grep -c 'VERDICT — ABORTED' "$slow_log" 2>/dev/null || true)
+  n=${n:-0}
+  if [ "$n" -ne 1 ]; then
+    echo "FAIL — selftest: expected exactly 1 ABORTED verdict line after SIGTERM, found ${n}" >&2
+    exit 1
+  fi
+  if ! grep -q 'signal=TERM' "$slow_log"; then
+    echo "FAIL — selftest: ABORTED verdict line did not record signal=TERM" >&2
+    exit 1
+  fi
+
+  trap - EXIT
+  rm -rf "$work"
+}
+
+run_selftest
+
+checked=0
+missing=""
+for rel in $scripts; do
+  f="$repo_root/$rel"
+  [ -f "$f" ] || { echo "ERROR — nothing was checked (missing script: $rel)" >&2; exit 2; }
+  checked=$((checked + 1))
+
+  has_verdict_write=0
+  grep -q "VERDICT" "$f" && has_verdict_write=1
+  has_admitted=0
+  grep -q "VERDICT — ADMITTED\|ADMITTED: stage=" "$f" && has_admitted=1
+  has_term_trap=0
+  grep -q "trap.*TERM" "$f" && has_term_trap=1
+  has_exit_trap=0
+  grep -q "trap.*EXIT" "$f" && has_exit_trap=1
+
+  if [ "$has_verdict_write" -eq 0 ] || [ "$has_admitted" -eq 0 ] || \
+     [ "$has_term_trap" -eq 0 ] || [ "$has_exit_trap" -eq 0 ]; then
+    missing="${missing} ${rel}"
+  fi
+done
+
+if [ -n "$missing" ]; then
+  echo "FAIL — ${checked} script(s) checked, missing VERDICT-on-exit contract in:${missing}" >&2
+  exit 1
+fi
+
+echo "PASS — ${checked} script(s) checked, VERDICT-on-exit contract present, selftest green"
+exit 0

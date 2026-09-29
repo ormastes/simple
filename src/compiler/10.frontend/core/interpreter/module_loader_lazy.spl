@@ -387,6 +387,40 @@ fn _lazy_std_candidates(module_name: text) -> [text]:
     cands.push(root + "/lib/nogc_async_mut_noalloc/" + sub)
     cands
 
+fn _lazy_is_all_digits(part: text) -> i64:
+    if part.len() == 0:
+        return 0
+    for ch in part:
+        if ch < "0" or ch > "9":
+            return 0
+    1
+
+fn _lazy_compiler_numbered_candidate(module_name: text) -> text:
+    # `compiler.<NN>.<name>...` module names spell the numbered directory
+    # (e.g. `src/compiler/00.common/`) as two dotted segments — the numeric
+    # prefix and the semantic name — rather than the bare name that
+    # resolve_with_numbered_dirs()/find_numbered_dir_interp() expect (they
+    # look up `NN.<segment>` from a plain `<segment>` component). Re-merge
+    # any purely-numeric segment with the segment that follows it into a
+    # single `NN.name` path component so this exact spelling resolves too.
+    if not module_name.starts_with("compiler."):
+        return ""
+    val parts = module_name.split(".")
+    if parts.len() < 2:
+        return ""
+    var merged: [text] = []
+    var i: i64 = 0
+    while i < parts.len():
+        val part = parts[i]
+        if _lazy_is_all_digits(part) == 1 and i + 1 < parts.len():
+            merged.push(part + "." + parts[i + 1])
+            i = i + 2
+        else:
+            merged.push(part)
+            i = i + 1
+    val root = _lazy_lib_root()
+    root + "/" + merged.join("/") + ".spl"
+
 # ===== Whole-File Fallback =====
 
 fn _lazy_load_whole(module_name: text, current_file: text) -> i64:
@@ -432,6 +466,17 @@ fn load_module_lazy(module_name: text, current_file: text) -> i64:
                             source = Some(attempt)
                             resolved = cand
                     case Err(_): pass
+    if source == nil:
+        # Resolver answer unreadable — retry the compiler numbered-directory
+        # spelling (see _lazy_compiler_numbered_candidate).
+        val compiler_cand = _lazy_compiler_numbered_candidate(module_name)
+        if compiler_cand != "":
+            match _lazy_try_read(compiler_cand):
+                case Ok(attempt):
+                    if attempt != "":
+                        source = Some(attempt)
+                        resolved = compiler_cand
+                case Err(_): pass
     if source == nil:
         return _lazy_load_whole(module_name, current_file)
 

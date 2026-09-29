@@ -1,4 +1,9 @@
 # Counterpart: the matrix engine hardcodes `ConversionLoss.identity`, so the exactness gate is unreachable end to end
+## Closed 2026-09-16 — Status: FIXED; registry-taking matrix entry points landed, specs 19/19 and 21/21
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - **Date:** 2026-08-09
 - **Lane:** F9 (foundation red-team), Counterpart Conformance Wave 1
@@ -108,3 +113,4 @@ share one canonical schema and now resolve a measured identity route.
 |---|---|---|
 | carry the measured `route.loss` (re-hardcode `ConversionLoss.identity`) | 19 exec / 18 pass / **1 fail** | 19/19/0 |
 | turn an unresolved route into a failing cell | 19 exec / 17 pass / **2 fail** | 19/19/0 |
+

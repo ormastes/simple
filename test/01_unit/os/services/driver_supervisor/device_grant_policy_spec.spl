@@ -1,0 +1,46 @@
+use std.spec.{describe, it, expect}
+use os.kernel.types.capability_types.{CapabilityKind}
+use os.services.driver_supervisor.device_grant_policy.{ManagedDeviceGrantBroker, managed_device_grant_request, managed_device_request_is_valid}
+
+describe "managed driver device grant policy":
+    it "rejects incomplete and malformed device authority before issuing a grant":
+        var broker = ManagedDeviceGrantBroker.create()
+        val no_owner = managed_device_grant_request(0, 0, 4, 0, 0, 65536, 9)
+        val bad_bar = managed_device_grant_request(42, 0, 4, 0, 6, 65536, 9)
+        val no_dma = managed_device_grant_request(42, 0, 4, 0, 0, 0, 9)
+        val no_iommu = managed_device_grant_request(42, 0, 4, 0, 0, 65536, 0)
+        expect(managed_device_request_is_valid(no_owner)).to_equal(false)
+        expect(managed_device_request_is_valid(bad_bar)).to_equal(false)
+        expect(managed_device_request_is_valid(no_dma)).to_equal(false)
+        expect(managed_device_request_is_valid(no_iommu)).to_equal(false)
+        expect(broker.issue(no_owner).is_err()).to_equal(true)
+
+    it "emits only exact BDF BAR DMA and IOMMU capability kinds":
+        var broker = ManagedDeviceGrantBroker.create()
+        val request = managed_device_grant_request(42, 0, 4, 1, 2, 131072, 19)
+        val result = broker.issue(request)
+        expect(result.is_ok()).to_equal(true)
+        val grant = result.unwrap()
+        val kinds = broker.authority_kinds_for(grant)
+        expect(kinds.len()).to_equal(4)
+        expect(kinds[0]).to_equal(CapabilityKind.DeviceGrant(bdf_bus: 0, bdf_device: 4, bdf_func: 1))
+        expect(kinds[1]).to_equal(CapabilityKind.DeviceBarMap(bdf_bus: 0, bdf_device: 4, bdf_func: 1, bar_index: 2))
+        expect(kinds[2]).to_equal(CapabilityKind.DeviceDma(bdf_bus: 0, bdf_device: 4, bdf_func: 1, max_bytes: 131072))
+        expect(kinds[3]).to_equal(CapabilityKind.IommuDomain(domain_id: 19))
+
+        var forged = grant
+        forged.dma_max_bytes = 262144
+        expect(broker.authority_kinds_for(forged).len()).to_equal(0)
+
+    it "revokes stale authority before permitting the PCI function to be reassigned":
+        var broker = ManagedDeviceGrantBroker.create()
+        val old_request = managed_device_grant_request(42, 0, 4, 0, 0, 65536, 9)
+        val new_request = managed_device_grant_request(84, 0, 4, 0, 0, 65536, 10)
+        val old = broker.issue(old_request).unwrap()
+        expect(broker.issue(new_request).is_err()).to_equal(true)
+        expect(broker.revoke_owner(42)).to_equal(1)
+        expect(broker.authority_kinds_for(old).len()).to_equal(0)
+        val replacement = broker.issue(new_request).unwrap()
+        expect(replacement.generation).to_equal(old.generation + 1)
+        expect(broker.active_for_owner(42).len()).to_equal(0)
+        expect(broker.active_for_owner(84).len()).to_equal(1)

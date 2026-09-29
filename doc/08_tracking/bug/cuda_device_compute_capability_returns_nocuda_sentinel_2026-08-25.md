@@ -1,4 +1,8 @@
 # `cuda_device_compute_capability` returns the no-CUDA sentinel (-3) on a working CUDA host (2026-08-25)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN — `test/03_system/acceptance/gpu_cuda_programming_acceptance_spec.spl` is
 deliberately RED on this (1 of 5 examples).
@@ -34,3 +38,4 @@ SIMPLE_CUDA_TEST=1 bin/simple test test/03_system/acceptance/gpu_cuda_programmin
 ```
 → `Results: 5 total, 4 passed, 1 failed`, failing example
 `discovers the machine's GPUs and what they are, with no CUDA toolkit installed`.
+

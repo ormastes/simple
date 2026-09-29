@@ -1,0 +1,157 @@
+# Retained backend sessions projected over existing KPF worker transports.
+
+use std.nogc_async_mut.kernel_plugin.runtime.KpfRequestHandleV1
+use os.smf.kernel_plugin.worker_protocol.{KpfWorkerOutcome, KpfWorkerResultV1}
+use os.smf.kernel_plugin.worker_transport.KpfWorkerTransportV1
+use os.smf.kernel_plugin.real_worker_transport.KpfRealWorkerTransportV1
+use os.smf.kernel_plugin.shared_memory_transport.KpfSharedMemoryWorkerTransportV1
+use os.smf.kernel_plugin.shared_memory_wire.KpfSharedMemoryWorkerResultV1
+use compiler.common.backend_plugin.model.BackendPluginRequestV1
+use compiler.mir.mir_instructions.MirModule
+use compiler.backend.backend_plugin.kpf_worker.codec.{
+    backend_kpf_worker_encode_compile_v1, backend_kpf_worker_encode_finalize_v1,
+    backend_kpf_worker_copy_result_v1
+}
+use compiler.backend.backend_plugin.kpf_worker.receipt.BackendKpfWorkerReceiptV1
+
+pub class BackendKpfWorkerSessionV1:
+    transport: KpfWorkerTransportV1
+    request: BackendPluginRequestV1
+    receipt: BackendKpfWorkerReceiptV1
+    required_capability_bits: u64
+    submitted_modules: i64
+    closed: bool
+
+impl BackendKpfWorkerSessionV1:
+    pub static fn create(transport: KpfWorkerTransportV1,
+            request: BackendPluginRequestV1, receipt: BackendKpfWorkerReceiptV1,
+            required_capability_bits: u64) -> BackendKpfWorkerSessionV1:
+        BackendKpfWorkerSessionV1(transport, request, receipt,
+            required_capability_bits, 0, false)
+
+    me handshake(now_ns: i64) -> KpfWorkerOutcome:
+        self.transport.handshake(self.required_capability_bits, now_ns)
+
+    me submit_module(handle: KpfRequestHandleV1, module: MirModule,
+            now_ns: i64) -> KpfWorkerOutcome:
+        if self.closed: return KpfWorkerOutcome.Closed
+        val outcome = self.transport.submit(handle, self.required_capability_bits,
+            backend_kpf_worker_encode_compile_v1(self.request, module), now_ns)
+        if outcome == KpfWorkerOutcome.Accepted: self.submitted_modules = self.submitted_modules + 1
+        outcome
+
+    me submit_encoded(handle: KpfRequestHandleV1, payload: [u8],
+            now_ns: i64) -> KpfWorkerOutcome:
+        if self.closed: return KpfWorkerOutcome.Closed
+        val outcome = self.transport.submit(handle, self.required_capability_bits, payload, now_ns)
+        if outcome == KpfWorkerOutcome.Accepted: self.submitted_modules = self.submitted_modules + 1
+        outcome
+
+    me submit_finalize(handle: KpfRequestHandleV1, now_ns: i64) -> KpfWorkerOutcome:
+        if self.closed: return KpfWorkerOutcome.Closed
+        self.transport.submit(handle, self.required_capability_bits,
+            backend_kpf_worker_encode_finalize_v1(), now_ns)
+
+    me poll_into(now_ns: i64, output: [u8]) -> Result<i64, text>:
+        val result = self.transport.poll(now_ns)
+        if result.outcome != KpfWorkerOutcome.Accepted:
+            return Err("backend worker poll outcome was not accepted")
+        backend_kpf_worker_copy_result_v1(result.payload, output)
+
+    me quiesce() -> KpfWorkerOutcome: self.transport.quiesce()
+
+    me close() -> KpfWorkerOutcome:
+        val outcome = self.transport.close()
+        if outcome == KpfWorkerOutcome.Accepted: self.closed = true
+        outcome
+
+pub class BackendKpfRealWorkerSessionV1:
+    transport: KpfRealWorkerTransportV1
+    request: BackendPluginRequestV1
+    receipt: BackendKpfWorkerReceiptV1
+    required_capability_bits: u64
+    submitted_modules: i64
+    closed: bool
+
+impl BackendKpfRealWorkerSessionV1:
+    pub static fn create(transport: KpfRealWorkerTransportV1,
+            request: BackendPluginRequestV1, receipt: BackendKpfWorkerReceiptV1,
+            required_capability_bits: u64) -> BackendKpfRealWorkerSessionV1:
+        BackendKpfRealWorkerSessionV1(transport, request, receipt,
+            required_capability_bits, 0, false)
+
+    me handshake(deadline_ns: i64) -> KpfWorkerOutcome:
+        self.transport.handshake(self.required_capability_bits, deadline_ns)
+
+    me submit_module(handle: KpfRequestHandleV1, module: MirModule,
+            deadline_ns: i64) -> KpfWorkerOutcome:
+        if self.closed: return KpfWorkerOutcome.Closed
+        val outcome = self.transport.submit(handle, self.required_capability_bits,
+            backend_kpf_worker_encode_compile_v1(self.request, module), deadline_ns)
+        if outcome == KpfWorkerOutcome.Accepted: self.submitted_modules = self.submitted_modules + 1
+        outcome
+
+    me submit_encoded(handle: KpfRequestHandleV1, payload: [u8],
+            deadline_ns: i64) -> KpfWorkerOutcome:
+        if self.closed: return KpfWorkerOutcome.Closed
+        val outcome = self.transport.submit(handle, self.required_capability_bits,
+            payload, deadline_ns)
+        if outcome == KpfWorkerOutcome.Accepted: self.submitted_modules = self.submitted_modules + 1
+        outcome
+
+    me poll_into(now_ns: i64, output: [u8]) -> Result<i64, text>:
+        val result = self.transport.poll(now_ns)
+        if result.outcome != KpfWorkerOutcome.Accepted:
+            return Err("backend real worker poll outcome was not accepted")
+        backend_kpf_worker_copy_result_v1(result.payload, output)
+
+    me quiesce() -> KpfWorkerOutcome: self.transport.quiesce()
+
+    me close() -> KpfWorkerOutcome:
+        val outcome = self.transport.close()
+        if outcome == KpfWorkerOutcome.Accepted: self.closed = true
+        outcome
+
+pub class BackendKpfSharedMemorySessionV1:
+    transport: KpfSharedMemoryWorkerTransportV1
+    request: BackendPluginRequestV1
+    receipt: BackendKpfWorkerReceiptV1
+    required_capability_bits: u64
+    submitted_modules: i64
+    closed: bool
+
+impl BackendKpfSharedMemorySessionV1:
+    pub static fn create(transport: KpfSharedMemoryWorkerTransportV1,
+            request: BackendPluginRequestV1, receipt: BackendKpfWorkerReceiptV1,
+            required_capability_bits: u64) -> BackendKpfSharedMemorySessionV1:
+        BackendKpfSharedMemorySessionV1(transport, request, receipt,
+            required_capability_bits, 0, false)
+
+    me handshake() -> KpfWorkerOutcome:
+        self.transport.handshake(self.required_capability_bits)
+
+    me submit_module(handle: KpfRequestHandleV1, module: MirModule) -> KpfWorkerOutcome:
+        if self.closed: return KpfWorkerOutcome.Closed
+        val outcome = self.transport.submit(handle, self.required_capability_bits,
+            backend_kpf_worker_encode_compile_v1(self.request, module))
+        if outcome == KpfWorkerOutcome.Accepted: self.submitted_modules = self.submitted_modules + 1
+        outcome
+
+    me submit_encoded(handle: KpfRequestHandleV1, payload: [u8]) -> KpfWorkerOutcome:
+        if self.closed: return KpfWorkerOutcome.Closed
+        val outcome = self.transport.submit(handle, self.required_capability_bits, payload)
+        if outcome == KpfWorkerOutcome.Accepted: self.submitted_modules = self.submitted_modules + 1
+        outcome
+
+    me poll_into(output: [u8]) -> Result<i64, text>:
+        val result = self.transport.poll()
+        if result.outcome != KpfWorkerOutcome.Accepted:
+            return Err("backend shared-memory worker poll outcome was not accepted")
+        backend_kpf_worker_copy_result_v1(result.payload, output)
+
+    me quiesce() -> KpfWorkerOutcome: self.transport.quiesce()
+
+    me close() -> KpfWorkerOutcome:
+        val outcome = self.transport.close()
+        if outcome == KpfWorkerOutcome.Accepted: self.closed = true
+        outcome

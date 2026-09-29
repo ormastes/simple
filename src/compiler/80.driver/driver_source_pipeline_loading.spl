@@ -2,11 +2,15 @@
 #
 # The main driver retains parsing, HIR, and later compilation phases.
 
+use std.nogc_async_mut.sosix.environment.{sosix_env_get_nullable}
+use std.io_runtime.{file_read_nullable, process_run}
 use compiler.driver.driver_compiler_type.{CompilerDriver}
 use compiler.driver.driver_types.{CompileContext}
 use compiler.common.driver_core_types.{SourceFile}
+use std.common.crypto.sha256.{sha256_text}
 use compiler.frontend.frontend.{parse_full_frontend}
 use compiler.driver.driver_source_loading.{
+    driver_set_spec_prelude_entry,
     _driver_module_name_from_path,
     _driver_collect_sources,
     _driver_collect_sources_via_find,
@@ -25,22 +29,64 @@ use compiler.driver.driver_phase_gates.{driver_explicit_source_entry}
 use compiler.driver.driver_log_helpers.{log_phase, log_build_progress}
 use compiler.common.driver_core_modes.{CompileMode}
 use compiler.common.attributes.{parse_function_attrs}
+use compiler.common.cache_contract.virtual_source_registration_v1.{VirtualSourceRegistrationStatusV1, compiler_virtual_source_read_registered_v1}
+use compiler.driver.cache.package_index_route.{package_index_route_current_v1}
+use compiler.driver.cache.cache_root.{machine_cache_root}
+use compiler.driver.cache.pinned_archive_capability.{
+    pinned_archive_open_verified_v1
+}
+use compiler.driver.cache.route_capability_scope.{
+    route_capability_scope_close_all_v1, route_capability_scope_new_v1,
+    route_capability_scope_register_v1
+}
+use compiler.hir.archive.interface_action_archive.{
+    SemanticContext, CompileActionRegistry,
+    RouteArchiveInstallStageTransferV1, RouteArchiveInstallCommitTransferV1,
+    interface_action_archive_decode_v1, route_archive_install_begin_v1,
+    route_archive_install_stage_owned_v1, route_archive_install_commit_owned_v1,
+    route_archive_install_rollback_owned_v1
+}
+use compiler.driver.action_graph.demand_compile_integration.{
+    demand_archive_action_id_v1, demand_compile_begin_v1,
+    demand_compile_phase_begin_v1,
+    demand_compile_phase_finish_v1, demand_compile_section_reads_v1,
+    demand_compile_source_open_v1, demand_source_action_id_v1
+}
+use compiler.driver.action_graph.artifact_service_bridge.{
+    DemandArtifactClaimTransferV1, DemandArtifactCommitTransferV1,
+    demand_artifact_claim_owned_v1, demand_artifact_commit_owned_v1,
+    demand_artifact_route_v1
+}
+use compiler.driver.action_graph.build_action_v1.{BuildActionResultV1}
+use lib.compiler_artifact_service.profile.{artifact_service_profile_v1}
+use compiler.driver.backend.demand_backend_plan.{
+    DemandBackendIdentityV1, ForegroundBackendBudgetV1,
+    PrecompiledPlatformIdentityV1
+}
+use compiler.driver.smf.runtime_std_package_set.{
+    RuntimeStdPackageAuthorityV1, RUNTIME_PACKAGE_IDENTITY_V1,
+    STD_PACKAGE_IDENTITY_V1, runtime_std_action_digest_v1,
+    runtime_std_load_baseline_v1
+}
+use compiler.driver.demand_mir_evidence_builder.{
+    CombinedMirArchiveEvidenceV1, CombinedMirDirtyEvidenceV1,
+    CombinedMirEvidenceBuilder, CombinedMirScvIdentityV1,
+    combined_mir_evidence_build_v1
+}
 
-@unsafe(reason: "raw nullable bootstrap source read; nil is provider failure", capabilities: [ffi])
-extern fn rt_file_read_text(path: text) -> text?
-extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
-extern fn rt_env_get(key: text) -> text
 extern fn rt_env_set(key: text, value: text) -> bool
-extern fn rt_bytes_to_text(data: [u8]) -> text
+extern fn rt_string_substr_from(value: text, start: i64) -> text
 extern fn rt_hash_text(data: text) -> i64
 
 @always_inline
 fn _pipeline_source_read_raw(path: text) -> text?:
-    unsafe(capabilities: [ffi]):
-        rt_file_read_text(path)
+    file_read_nullable(path)
 
 fn driver_source_owner_text_copy(value: text) -> text:
-    rt_bytes_to_text(value.bytes())
+    # A zero-offset runtime substring owns one exact byte copy. The native
+    # value.bytes() -> rt_bytes_to_text round-trip returned empty for a live
+    # 51-byte source path, so it cannot establish the source owner inventory.
+    rt_string_substr_from(value, 0)
 
 fn _driver_source_has_rt_annotation(content: text) -> bool:
     # `@rt` is common in attribute documentation. Parse only a genuine
@@ -105,7 +151,7 @@ impl CompilerDriver:
         if root.ends_with(".spl"):
             return self.parse_bootstrap_default_file(root)
         val cmd = "find {root} -type f -name '*.spl' 2>/dev/null"
-        val (stdout, _, code) = rt_process_run("sh", ["-c", cmd])
+        val (stdout, _, code) = process_run("sh", ["-c", cmd])
         print "[bootstrap_parse] root {root} code {code} stdout_len {stdout.len()}"
         if code != 0 or stdout == "":
             return true
@@ -145,25 +191,328 @@ impl CompilerDriver:
             driver_inputs = self.ctx.options.input_files
         val closure_source_roots = driver_inputs
         val explicit_entry_input = driver_explicit_source_entry(self.ctx)
-        val native_entry_input = rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY") ?? ""
+        # In-process `run <file.spl>` (CompileMode.Interpret, one .spl input,
+        # no explicit/native entry) must load the file's import closure too.
+        # The "interpret mode resolves imports lazily through the interpreter
+        # module loader" contract (bulk-load note below) has no implementation
+        # on the pure-Simple path: HIR import resolution only consults
+        # registered module surfaces, so a lone entry reported
+        # "missing module surface for <every import>" and then unresolved
+        # describe/it/expect (stage-2 `run` with SIMPLE_NO_BOOTSTRAP_DELEGATE=1,
+        # load_sources total=1, 2026-09-25). Route it through the same
+        # entry-closure walk native-build --entry uses; that walk loads only
+        # the transitive imports, not the bulk trees.
+        val interpret_single_entry =
+            if self.ctx.options.mode == CompileMode.Interpret and driver_inputs.len() == 1 and
+                    driver_inputs[0].ends_with(".spl"):
+                driver_inputs[0]
+            else:
+                ""
+        driver_set_spec_prelude_entry(interpret_single_entry)
+        val native_entry_env = sosix_env_get_nullable("SIMPLE_NATIVE_BUILD_ENTRY") ?? ""
+        val native_entry_input = if native_entry_env != "": native_entry_env else: interpret_single_entry
         val requested_entry_input = if explicit_entry_input != "":
             explicit_entry_input
         else:
             native_entry_input
-        val native_entry_closure_pre = (rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
+        val native_entry_closure_pre = (sosix_env_get_nullable("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
         val explicit_entry_closure = explicit_entry_input != ""
         val entry_closure_walk = explicit_entry_closure or (
             native_entry_input != "" and not native_entry_closure_pre)
+        # The persistent package index route (package_index_route_current_v1)
+        # needs a producer/root-generation/variant-digest compatibility
+        # marker to admit the warm path. Entrypoint admission publishes the
+        # three markers only for an admitted graph; a binding-only generation
+        # clears them. Treat their absence the same as an explicit
+        # SIMPLE_PACKAGE_INDEX_COLD_INIT=1: continue through cold init.
+        # See doc/08_tracking/bug/windows_native_build_index_compatibility_missing_2026-09-20.md.
+        val package_index_compat_markers_present =
+            (sosix_env_get_nullable("SIMPLE_PACKAGE_INDEX_PRODUCER_DIGEST") ?? "") != "" and
+            (sosix_env_get_nullable("SIMPLE_PACKAGE_INDEX_ROOT_GENERATION") ?? "") != "" and
+            (sosix_env_get_nullable("SIMPLE_PACKAGE_INDEX_VARIANT_DIGEST") ?? "") != ""
+        val package_index_cold_init =
+            (sosix_env_get_nullable("SIMPLE_PACKAGE_INDEX_COLD_INIT") ?? "") == "1" or
+            not package_index_compat_markers_present
+        var package_index_routed = false
+        if not package_index_cold_init:
+            val package_resolution_started_ns = demand_compile_phase_begin_v1()
+            var changed_modules: [text] = []
+            val changed_text = sosix_env_get_nullable("SIMPLE_PACKAGE_INDEX_CHANGED_MODULES") ?? ""
+            if changed_text != "":
+                for changed_module in changed_text.split(","):
+                    val normalized = changed_module.trim()
+                    if normalized != "":
+                        changed_modules = changed_modules.push(normalized)
+            val route = package_index_route_current_v1(
+                if entry_closure_walk: requested_entry_input else: "",
+                sosix_env_get_nullable("SIMPLE_SCV_SNAPSHOT_ROOT") ?? "",
+                sosix_env_get_nullable("SIMPLE_SCV_REVISION_ID") ?? "",
+                sosix_env_get_nullable("SIMPLE_SCV_TREE_ID") ?? "",
+                sosix_env_get_nullable("SIMPLE_SCV_INVENTORY_DIGEST") ?? "",
+                sosix_env_get_nullable("SIMPLE_PACKAGE_INDEX_PRODUCER_DIGEST") ?? "",
+                sosix_env_get_nullable("SIMPLE_PACKAGE_INDEX_ROOT_GENERATION") ?? "",
+                sosix_env_get_nullable("SIMPLE_PACKAGE_INDEX_VARIANT_DIGEST") ?? "",
+                changed_modules,
+                (sosix_env_get_nullable("SIMPLE_PACKAGE_INDEX_PUBLIC_INTERFACE_CHANGED") ?? "") == "1")
+            if not route.valid:
+                self.ctx.add_error("persistent package index admission failed: {route.reason}; run explicit cold initialization with SIMPLE_PACKAGE_INDEX_COLD_INIT=1")
+                driver_entry_scan_cache_release()
+                return (self.ctx, false)
+            val runtime_std_authority = RuntimeStdPackageAuthorityV1(
+                sosix_env_get_nullable("SIMPLE_COMPILER_DIGEST") ?? "",
+                sosix_env_get_nullable("SIMPLE_ACTION_ABI_DIGEST") ?? "",
+                sosix_env_get_nullable("SIMPLE_RUNTIME_ABI_DIGEST") ?? "",
+                sosix_env_get_nullable("SIMPLE_STDLIB_ABI_DIGEST") ?? "",
+                sosix_env_get_nullable("SIMPLE_PACKAGE_INDEX_VARIANT_DIGEST") ?? "",
+                self.ctx.native_target,
+                sosix_env_get_nullable("SIMPLE_SCV_REVISION_ID") ?? "")
+            val expected_runtime_action = runtime_std_action_digest_v1(
+                runtime_std_authority, RUNTIME_PACKAGE_IDENTITY_V1)
+            val expected_std_action = runtime_std_action_digest_v1(
+                runtime_std_authority, STD_PACKAGE_IDENTITY_V1)
+            if (expected_runtime_action == "" or expected_std_action == "" or
+                    (sosix_env_get_nullable("SIMPLE_RUNTIME_ACTION_DIGEST") ?? "") !=
+                        expected_runtime_action or
+                    (sosix_env_get_nullable("SIMPLE_STDLIB_ACTION_DIGEST") ?? "") !=
+                        expected_std_action):
+                self.ctx.add_error(
+                    "runtime/std SMF baseline authority mismatch; rebuild the sealed precompiled package set")
+                driver_entry_scan_cache_release()
+                return (self.ctx, false)
+            val runtime_std_baseline = runtime_std_load_baseline_v1(
+                machine_cache_root(), runtime_std_authority)
+            if not runtime_std_baseline.valid:
+                self.ctx.add_error(
+                    "runtime/std SMF baseline admission failed: {runtime_std_baseline.reason}")
+                driver_entry_scan_cache_release()
+                return (self.ctx, false)
+            val demand_execution = demand_compile_begin_v1(
+                route,
+                DemandBackendIdentityV1(
+                    sosix_env_get_nullable("SIMPLE_SCV_REVISION_ID") ?? "",
+                    sosix_env_get_nullable("SIMPLE_SCV_TREE_ID") ?? "",
+                    sosix_env_get_nullable("SIMPLE_SCV_INVENTORY_DIGEST") ?? "",
+                    sosix_env_get_nullable("SIMPLE_SCV_INVENTORY_DIGEST") ?? "",
+                    self.ctx.native_target,
+                    sosix_env_get_nullable("SIMPLE_PACKAGE_INDEX_VARIANT_DIGEST") ?? "",
+                    PrecompiledPlatformIdentityV1(
+                        sosix_env_get_nullable("SIMPLE_RUNTIME_ACTION_DIGEST") ?? "",
+                        sosix_env_get_nullable("SIMPLE_RUNTIME_ABI_DIGEST") ?? "",
+                        sosix_env_get_nullable("SIMPLE_STDLIB_ACTION_DIGEST") ?? "",
+                        sosix_env_get_nullable("SIMPLE_STDLIB_ABI_DIGEST") ?? "")),
+                ForegroundBackendBudgetV1(
+                    100, 512 * 1024 * 1024, 30000, false),
+                true, true, false,
+                (sosix_env_get_nullable("SIMPLE_BUILD_ORDINAL") ?? "0").to_i64() ?? 0)
+            if not demand_execution.valid:
+                self.ctx.add_error(
+                    "demand compile admission failed: {demand_execution.reason}")
+                driver_entry_scan_cache_release()
+                return (self.ctx, false)
+            self.ctx.demand_compile_execution = Some(demand_execution)
+            var measured_execution = self.ctx.demand_compile_execution!
+            _ = demand_compile_phase_finish_v1(
+                &mut measured_execution, "package-resolution",
+                package_resolution_started_ns)
+            self.ctx.demand_compile_execution = Some(measured_execution)
+            val client_profile = sosix_env_get_nullable("SIMPLE_DEMAND_COMPILE_PROFILE") ?? "compiler"
+            val client_priority = match client_profile:
+                "mcp": 1000
+                "lsp": 1000
+                "test-daemon": 800
+                _: 900
+            val client_pools = if client_profile == "test-daemon":
+                ["io", "parse", "semantic", "mir", "cranelift", "llvm", "link", "test"]
+            else:
+                ["io", "parse", "semantic", "mir", "cranelift", "llvm", "link"]
+            val artifact_route = demand_artifact_route_v1(
+                measured_execution,
+                artifact_service_profile_v1(
+                    client_profile,
+                    sosix_env_get_nullable("SIMPLE_PACKAGE_INDEX_VARIANT_DIGEST") ?? "",
+                    client_pools, client_priority, true),
+                (sosix_env_get_nullable("SIMPLE_COMPILER_ARTIFACT_SERVICE_AVAILABLE") ?? "") == "1",
+                sosix_env_get_nullable("SIMPLE_COMPILER_ARTIFACT_OWNER") ?? "local-compiler-owner",
+                (sosix_env_get_nullable("SIMPLE_BUILD_ORDINAL") ?? "0").to_i64() ?? 0)
+            if not artifact_route.valid:
+                self.ctx.add_error(
+                    "artifact service admission failed: {artifact_route.reason}")
+                driver_entry_scan_cache_release()
+                return (self.ctx, false)
+            self.ctx.demand_artifact_route = Some(artifact_route)
+            driver_inputs = route.source_paths
+            self.ctx.demand_dirty_modules = route.dirty_modules
+            package_index_routed = true
+            var archive_transaction = route_archive_install_begin_v1()
+            var capability_scope = route_capability_scope_new_v1(
+                512 * 1024 * 1024)
+            var archive_evidence: [CombinedMirArchiveEvidenceV1] = []
+            var dirty_evidence: [CombinedMirDirtyEvidenceV1] = []
+            val demand_snapshot = CombinedMirScvIdentityV1(
+                sosix_env_get_nullable("SIMPLE_SCV_REVISION_ID") ?? "",
+                sosix_env_get_nullable("SIMPLE_SCV_TREE_ID") ?? "",
+                sosix_env_get_nullable("SIMPLE_SCV_INVENTORY_DIGEST") ?? "")
+            for dirty in route.dirty_modules:
+                var read_set_digests: [text] = []
+                for read in dirty.read_set:
+                    read_set_digests.push(read.content_digest)
+                dirty_evidence.push(CombinedMirDirtyEvidenceV1(
+                    dirty.package_id, dirty.module_id, [dirty.module_id],
+                    dirty.direct_dependency_module_ids, read_set_digests,
+                    dirty.semantic_digest, dirty.producer_compatibility_id,
+                    dirty.configuration_variant, demand_snapshot))
+            for admission in route.archive_admissions:
+                if admission.load.receipt == nil:
+                    _ = route_capability_scope_close_all_v1(&capability_scope)
+                    archive_transaction = route_archive_install_rollback_owned_v1(
+                        archive_transaction)
+                    self.ctx.add_error(
+                        "package archive receipt unavailable: {admission.package_identity}")
+                    driver_entry_scan_cache_release()
+                    return (self.ctx, false)
+                val opened = pinned_archive_open_verified_v1(
+                    machine_cache_root(), admission.archive_path,
+                    admission.load.receipt!)
+                if opened.is_err():
+                    _ = route_capability_scope_close_all_v1(&capability_scope)
+                    archive_transaction = route_archive_install_rollback_owned_v1(
+                        archive_transaction)
+                    self.ctx.add_error(
+                        "package archive pin failed: {admission.package_identity}")
+                    driver_entry_scan_cache_release()
+                    return (self.ctx, false)
+                val capability = opened.unwrap()
+                if route_capability_scope_register_v1(
+                        &capability_scope, capability).is_err():
+                    _ = route_capability_scope_close_all_v1(&capability_scope)
+                    archive_transaction = route_archive_install_rollback_owned_v1(
+                        archive_transaction)
+                    self.ctx.add_error(
+                        "package archive capability ownership failed: {admission.package_identity}")
+                    driver_entry_scan_cache_release()
+                    return (self.ctx, false)
+                val decoded = interface_action_archive_decode_v1(
+                    capability, admission.load.receipt!)
+                if decoded.is_err():
+                    _ = route_capability_scope_close_all_v1(&capability_scope)
+                    archive_transaction = route_archive_install_rollback_owned_v1(
+                        archive_transaction)
+                    self.ctx.add_error(
+                        "package archive decode failed: {admission.package_identity}")
+                    driver_entry_scan_cache_release()
+                    return (self.ctx, false)
+                self.ctx.demand_compile_execution = Some(
+                    demand_compile_section_reads_v1(
+                        self.ctx.demand_compile_execution!, 3))
+                val staged = route_archive_install_stage_owned_v1(
+                    archive_transaction, decoded.unwrap())
+                archive_transaction = staged.transaction
+                if staged.result.is_err():
+                    _ = route_capability_scope_close_all_v1(&capability_scope)
+                    archive_transaction = route_archive_install_rollback_owned_v1(
+                        archive_transaction)
+                    self.ctx.add_error(
+                        "package archive install failed: {admission.package_identity}")
+                    driver_entry_scan_cache_release()
+                    return (self.ctx, false)
+                var archive_read_sets: [text] = []
+                for member in admission.load.receipt!.members:
+                    archive_read_sets.push(member.payload_digest)
+                for entry in admission.module_entries:
+                    archive_evidence.push(CombinedMirArchiveEvidenceV1(
+                        admission.package_identity, entry.module_identity,
+                        [entry.module_identity], entry.direct_imports,
+                        archive_read_sets,
+                        entry.smf_metadata_digest,
+                        admission.load.receipt!.producer_digest,
+                        admission.load.receipt!.variant_digest,
+                        demand_snapshot))
+            val committed = route_archive_install_commit_owned_v1(
+                archive_transaction, self.ctx.archive_semantic_owner,
+                self.ctx.archive_action_owner)
+            archive_transaction = committed.transaction
+            self.ctx.archive_semantic_owner = committed.semantic_owner
+            self.ctx.archive_action_owner = committed.action_owner
+            if committed.result.is_err():
+                _ = route_capability_scope_close_all_v1(&capability_scope)
+                self.ctx.add_error("package archive route commit failed")
+                driver_entry_scan_cache_release()
+                return (self.ctx, false)
+            for admission in route.archive_admissions:
+                var artifact_route = self.ctx.demand_artifact_route!
+                artifact_route.execution = self.ctx.demand_compile_execution!
+                val action_id = demand_archive_action_id_v1(admission.package_identity)
+                val claimed = demand_artifact_claim_owned_v1(
+                    artifact_route, action_id,
+                    "driver-archive-owner:{action_id}", 512 * 1024 * 1024)
+                artifact_route = claimed.route
+                if not claimed.claim.valid:
+                    self.ctx.demand_compile_execution = Some(
+                        artifact_route.execution)
+                    self.ctx.demand_artifact_route = Some(artifact_route)
+                    self.ctx.add_error(
+                        "demand archive action commit failed: {admission.package_identity}")
+                    _ = route_capability_scope_close_all_v1(&capability_scope)
+                    driver_entry_scan_cache_release()
+                    return (self.ctx, false)
+                val artifact_commit = demand_artifact_commit_owned_v1(
+                    artifact_route, BuildActionResultV1(
+                        action_id,
+                        sosix_env_get_nullable("SIMPLE_SCV_REVISION_ID") ?? "",
+                        true, false, admission.load.receipt!.archive_digest,
+                        admission.load.receipt!.archive_digest, [], 0))
+                artifact_route = artifact_commit.route
+                if not artifact_commit.accepted:
+                    self.ctx.demand_compile_execution = Some(
+                        artifact_route.execution)
+                    self.ctx.demand_artifact_route = Some(artifact_route)
+                    self.ctx.add_error(
+                        "demand archive action commit failed: {admission.package_identity}")
+                    _ = route_capability_scope_close_all_v1(&capability_scope)
+                    driver_entry_scan_cache_release()
+                    return (self.ctx, false)
+                self.ctx.demand_compile_execution = Some(artifact_route.execution)
+                self.ctx.demand_artifact_route = Some(artifact_route)
+            val demand_admission = combined_mir_evidence_build_v1(
+                CombinedMirEvidenceBuilder(
+                    demand_snapshot,
+                    sosix_env_get_nullable("SIMPLE_PACKAGE_INDEX_PRODUCER_DIGEST") ?? "",
+                    sosix_env_get_nullable("SIMPLE_PACKAGE_INDEX_VARIANT_DIGEST") ?? "",
+                    archive_evidence, dirty_evidence))
+            val close_result = route_capability_scope_close_all_v1(
+                &capability_scope)
+            if close_result.is_err():
+                self.ctx.add_error("package archive capability cleanup failed")
+                driver_entry_scan_cache_release()
+                return (self.ctx, false)
+            if demand_admission.is_err():
+                self.ctx.add_error(
+                    "combined dirty/archive MIR authority construction failed: {demand_admission.unwrap_err()}")
+                driver_entry_scan_cache_release()
+                return (self.ctx, false)
+            self.ctx.demand_mir_admission = Some(demand_admission.unwrap())
         if entry_closure_walk:
-            driver_inputs = [requested_entry_input]
+            if not package_index_routed:
+                driver_inputs = [requested_entry_input]
         elif driver_inputs.len() == 0:
             if requested_entry_input != "":
                 driver_inputs = [requested_entry_input]
         val input_len = driver_inputs.len()
-        val source_trace = (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1" or (rt_env_get("SIMPLE_INTERP_TRACE") ?? "") == "1"
+        val source_trace = (sosix_env_get_nullable("SIMPLE_COMPILER_TRACE") ?? "") == "1" or (sosix_env_get_nullable("SIMPLE_INTERP_TRACE") ?? "") == "1"
         if source_trace:
             print "[load_sources] inputs {input_len}"
         if input_len <= 0:
+            if package_index_routed:
+                if self.ctx.archive_action_owner.archive_actions.len() == 0:
+                    self.ctx.add_error(
+                        "persistent package index produced an empty archive-only route; refusing bootstrap source fallback")
+                    driver_entry_scan_cache_release()
+                    return (self.ctx, false)
+                # A clean package-index route is complete after pinned archive
+                # ingestion. It must never enter bootstrap source discovery.
+                self.ctx.sources = []
+                driver_entry_scan_cache_release()
+                return (self.ctx, not self.ctx.has_errors())
             if source_trace:
                 print "[load_sources] bootstrap defaults"
             self.parse_bootstrap_default_root("./src/compiler")
@@ -180,6 +529,30 @@ impl CompilerDriver:
             val input_path = driver_inputs[i]
             log_phase(
                 "phase1:load_sources:input:start index={i} path={input_path}")
+            if input_path.starts_with("simple-summary://"):
+                val virtual = compiler_virtual_source_read_registered_v1(input_path, 65536)
+                if virtual.status == VirtualSourceRegistrationStatusV1.Unavailable:
+                    self.ctx.add_error("virtual summary cache unavailable for '{input_path}'")
+                    return (self.ctx, false)
+                if virtual.status == VirtualSourceRegistrationStatusV1.Miss:
+                    self.ctx.add_error("virtual summary missing from the installed exact snapshot: '{input_path}'")
+                    return (self.ctx, false)
+                if virtual.status != VirtualSourceRegistrationStatusV1.Ready or virtual.value == nil:
+                    self.ctx.add_error("virtual summary request rejected: '{input_path}'")
+                    return (self.ctx, false)
+                val virtual_read = virtual.value.unwrap()
+                if not virtual_read.complete:
+                    self.ctx.add_error("virtual summary exceeds the compiler read bound: '{input_path}'")
+                    return (self.ctx, false)
+                val module_name = _driver_module_name_from_path(input_path)
+                val virtual_source = SourceFile(path: input_path, content: rt_bytes_to_text(virtual_read.bytes), module_name: module_name)
+                val virtual_key = input_path + "::" + module_name
+                if not seen_sources.contains_key(virtual_key):
+                    seen_sources[virtual_key] = true
+                    all_sources.append(virtual_source)
+                log_phase("phase1:load_sources:input:done index={i} loaded=1 total={all_sources.len()}")
+                i = i + 1
+                continue
             # `_driver_collect_sources` owns bulk-lane exclusions (interpreter,
             # parser, treesitter, and async lowering).  Applying those filters
             # to the explicit entry makes a real, existing file disappear when
@@ -187,18 +560,58 @@ impl CompilerDriver:
             # then works only by evading the substring filter. Native-build
             # imports retain packaging exclusions; the compiler-owned explicit
             # API admits the exact authored source graph without those filters.
-            val loaded = if entry_closure_walk and input_path == requested_entry_input:
+            val loaded = if package_index_routed:
+                _driver_collect_explicit_compiler_source(input_path)
+            elif entry_closure_walk and input_path == requested_entry_input:
                 if explicit_entry_closure:
                     _driver_collect_explicit_compiler_source(input_path)
                 else:
                     _driver_collect_entry_import_source(input_path)
             else:
                 _driver_collect_sources(input_path)
+            if package_index_routed:
+                var open_execution = self.ctx.demand_compile_execution!
+                demand_compile_source_open_v1(&mut open_execution)
+                self.ctx.demand_compile_execution = Some(open_execution)
             for s in loaded:
                 val source_key = s.path + "::" + s.module_name
                 if not seen_sources.contains_key(source_key):
                     seen_sources[source_key] = true
                     all_sources.append(s)
+            if package_index_routed:
+                var artifact_route = self.ctx.demand_artifact_route!
+                artifact_route.execution = self.ctx.demand_compile_execution!
+                val action_id = demand_source_action_id_v1(input_path)
+                val claimed = demand_artifact_claim_owned_v1(
+                    artifact_route, action_id,
+                    "driver-source-owner:{action_id}", 512 * 1024 * 1024)
+                artifact_route = claimed.route
+                if not claimed.claim.valid:
+                    self.ctx.demand_compile_execution = Some(
+                        artifact_route.execution)
+                    self.ctx.demand_artifact_route = Some(artifact_route)
+                    self.ctx.add_error(
+                        "demand frozen-source action commit failed: {input_path}")
+                    driver_entry_scan_cache_release()
+                    return (self.ctx, false)
+                val artifact_commit = demand_artifact_commit_owned_v1(
+                    artifact_route, BuildActionResultV1(
+                        action_id,
+                        sosix_env_get_nullable("SIMPLE_SCV_REVISION_ID") ?? "",
+                        loaded.len() > 0, false,
+                        if loaded.len() > 0: input_path else: "",
+                        "", [], 0))
+                artifact_route = artifact_commit.route
+                if not artifact_commit.accepted:
+                    self.ctx.demand_compile_execution = Some(
+                        artifact_route.execution)
+                    self.ctx.demand_artifact_route = Some(artifact_route)
+                    self.ctx.add_error(
+                        "demand frozen-source action commit failed: {input_path}")
+                    driver_entry_scan_cache_release()
+                    return (self.ctx, false)
+                self.ctx.demand_compile_execution = Some(artifact_route.execution)
+                self.ctx.demand_artifact_route = Some(artifact_route)
             if input_path.starts_with("src/"):
                 has_project_source = true
             log_phase(
@@ -237,7 +650,7 @@ impl CompilerDriver:
         # module is parsed, lowered, and compiled into the binary. This also
         # keeps the bootstrap Stage-4 path from parsing every explicit source
         # tree before entry-closure pruning can happen.
-        if entry_closure_walk:
+        if entry_closure_walk and not package_index_routed:
             # Explicit --source roots are resolver fallbacks, not closure seeds.
             # This preserves custom source layouts without parsing every file in
             # each root before the entry's transitive imports are known.
@@ -258,7 +671,7 @@ impl CompilerDriver:
             # receipt rate allocation-free and opt into an in-flight receipt
             # for every source only during a bounded closure investigation.
             val trace_closure_file =
-                (rt_env_get("SIMPLE_NATIVE_BUILD_TRACE_CLOSURE_FILE") ?? "") == "1"
+                (sosix_env_get_nullable("SIMPLE_NATIVE_BUILD_TRACE_CLOSURE_FILE") ?? "") == "1"
             log_phase(
                 "phase1:load_sources:closure:start logical={all_sources.len()} physical={closure_scan_sources.len()}")
             log_build_progress("source_closure", "files", 0,
@@ -307,6 +720,8 @@ impl CompilerDriver:
                     closure_imports.push("std.nogc_sync_mut.mcdc.dynamic_probe")
                 elif mcdc_closure_mode == "on":
                     closure_imports.push("std.nogc_sync_mut.mcdc.static_probe")
+                log_phase(
+                    "phase1:load_sources:closure:scan path={closure_src.path} imports={closure_imports.len()} content_len={closure_src.content.len()}")
                 if source_trace:
                     print "[load_sources] entry-closure scan {closure_src.path} imports {closure_imports.len()}"
                 for closure_mp in closure_imports:
@@ -316,6 +731,12 @@ impl CompilerDriver:
                     if closure_loaded_mods.contains_key(closure_mp):
                         # Already satisfied by an explicit --source root (or an
                         # earlier closure step): nothing to resolve, not an error.
+                        # Traced anyway: this branch and the unresolved branch
+                        # above are the only two ways a module can leave the
+                        # closure, so a silent one costs a full bootstrap cycle
+                        # to tell apart. Same bug record as above.
+                        log_phase(
+                            "phase1:load_sources:closure:already-loaded module={closure_mp} used_in={closure_src.path}")
                         continue
                     var closure_file = _driver_resolve_entry_import(closure_mp, closure_dir)
                     if closure_file == "":
@@ -329,6 +750,15 @@ impl CompilerDriver:
                         # prose/scoped pseudo-imports than real module files.
                         if closure_mp.contains("."):
                             self.ctx.add_error("unresolved import '{closure_mp}' (used in {closure_src.path}): no source file found for this module path relative to the working directory, src/, src/lib/, or '{closure_dir}'")
+                        # add_error alone is not observable from a staged
+                        # bootstrap: the Stage-3 native-build worker does not
+                        # forward phase-1 ctx errors, so a run that dropped a
+                        # module here printed only `native-build failed without
+                        # diagnostics` 10,000 lines later, and the drop had to be
+                        # inferred. log_phase IS captured. See
+                        # doc/08_tracking/bug/stage3_closure_omits_definition_owner_modules_2026-09-01.md
+                        log_phase(
+                            "phase1:load_sources:closure:unresolved module={closure_mp} used_in={closure_src.path} dir={closure_dir}")
                         continue
                     val closure_loaded = if explicit_entry_closure:
                         _driver_collect_explicit_compiler_source(closure_file)
@@ -336,6 +766,12 @@ impl CompilerDriver:
                         _driver_collect_entry_import_source(closure_file)
                     if closure_loaded.len() == 0:
                         self.ctx.add_error("import '{closure_mp}' (used in {closure_src.path}) resolved to '{closure_file}' but that file is empty or excluded from compilation")
+                        # Third silent exit from this loop, and the one that hid
+                        # longest: the module RESOLVES to a real file, so the
+                        # unresolved trace never fires, but the collect policy
+                        # returns nothing and the module leaves the closure.
+                        log_phase(
+                            "phase1:load_sources:closure:excluded module={closure_mp} used_in={closure_src.path} file={closure_file}")
                         continue
                     var closure_has_exact = false
                     var closure_content = ""
@@ -367,11 +803,15 @@ impl CompilerDriver:
                 "phase1:load_sources:closure:done scanned={closure_idx} logical={all_sources.len()}")
             log_build_progress("source_closure", "files", closure_idx,
                 closure_idx, "complete", 1, 6, 0, 0, "running")
-            # An explicit-entry walk is a closure even when import resolution
-            # reports an error. Keep that error bounded to the requested graph
-            # instead of hiding it behind an unrelated whole-workspace failure.
-            if not explicit_entry_closure:
-                rt_env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "1")
+            # Every entry walk is now a closure, including the compiler-owned
+            # explicit-entry API.  Downstream parse/HIR/MIR gates consult this
+            # environment channel (they do not receive the local
+            # `explicit_entry_closure` boolean).  Leaving it at `0` made source
+            # loading create canonical aliases while parsing treated them as a
+            # bulk build: numbered-directory spellings then survived into HIR,
+            # produced thousands of invalid export origins, and eventually
+            # crashed the post-mono walker on poisoned statements.
+            rt_env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "1")
 
         # Add core source roots only when compiling project sources (self-hosted build).
         # native-build --entry-closure suppresses this implicit whole-src bulk-load
@@ -381,10 +821,11 @@ impl CompilerDriver:
         # even a one-file test or the native-build worker parses 600+ unrelated
         # modules before its entry can run, exceeding the normal CPU/RSS guard.
         val nb_entry_closure = explicit_entry_closure or (
-            rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
+            sosix_env_get_nullable("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
         val compile_mode = self.ctx.options.mode
         val needs_bulk_project_sources = compile_mode != CompileMode.Check and compile_mode != CompileMode.Interpret
-        if has_project_source and needs_bulk_project_sources and not nb_entry_closure:
+        if (has_project_source and needs_bulk_project_sources and
+                not nb_entry_closure and not package_index_routed):
             val paths = ["src/app", "src/lib", "src/compiler", "src/runtime"]
             val bulk_loaded = _driver_collect_sources_via_find(paths)
             if bulk_loaded.len() > 0:
@@ -418,7 +859,10 @@ impl CompilerDriver:
         var owned_paths: [text] = []
         var owned_authored_paths: [text] = []
         var owned_contents: [text] = []
+        var owned_byte_lengths: [i64] = []
         var owned_content_hashes: [i64] = []
+        var owned_identities: [text] = []
+        var identity_by_physical_path: Dict<text, text> = {}
         var owned_module_names: [text] = []
         var content_by_physical_path: Dict<text, text> = {}
         for loaded_source in all_sources:
@@ -434,16 +878,31 @@ impl CompilerDriver:
             owned_authored_paths = owned_authored_paths.push(
                 driver_source_owner_text_copy(loaded_source.authored_path))
             owned_contents = owned_contents.push(owned_content)
+            owned_byte_lengths = owned_byte_lengths.push(owned_content.len())
             val raw_content_hash = rt_hash_text(owned_content)
             owned_content_hashes = owned_content_hashes.push(
                 if raw_content_hash == 0: 1 else: raw_content_hash)
+            # Capture the whole-source sha256 HERE, while the content is still
+            # live. Every later holder of this text is freed/blanked before
+            # native capsule freeze, so this is the only point at which the
+            # frozen source identity can still be computed. Digests are memoised
+            # per physical path so an aliased file is hashed once.
+            var owned_identity = ""
+            if identity_by_physical_path.contains_key(physical_key):
+                owned_identity = identity_by_physical_path[physical_key]
+            else:
+                owned_identity = sha256_text(owned_content)
+                identity_by_physical_path[physical_key] = owned_identity
+            owned_identities = owned_identities.push(owned_identity)
             owned_module_names = owned_module_names.push(
                 driver_source_owner_text_copy(loaded_source.module_name))
         log_phase("phase1:load_sources:owner_copy:done n={all_sources.len()}")
         self.ctx.source_paths_owner = owned_paths
         self.ctx.source_authored_paths_owner = owned_authored_paths
         self.ctx.source_contents_owner = owned_contents
+        self.ctx.source_byte_lengths_owner = owned_byte_lengths
         self.ctx.source_content_hashes_owner = owned_content_hashes
+        self.ctx.source_identities_owner = owned_identities
         self.ctx.source_module_names_owner = owned_module_names
         # Canonical phase-1 owners now retain the source bodies. Drop the
         # duplicate scan payloads before parsing/lowering grows compiler RSS.

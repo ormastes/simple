@@ -1,0 +1,702 @@
+#!/bin/sh
+# Refuse to push a commit that REWINDS work its own parent already carried.
+#
+# WHY THIS EXISTS
+# ---------------
+# .claude/rules/vcs.md § "Sync must never clobber" describes the practice --
+# rebase before you snapshot, never whole-WC-commit files this session did not
+# change, symbol-grep origin before claiming preservation. Nothing enforced it.
+#
+# Measured 2026-09-06 on ONE commit, e274cd33719 ("chore: merge all
+# share-history worktree branches into main"), which has a SINGLE parent and so
+# is a stale-worktree snapshot, not a merge:
+#
+#   src/app/release/main.spl          978 -> 254 lines; all 21 dispatch targets
+#                                     left called-but-undefined -- the CLI could
+#                                     not compile.
+#   .github/workflows/candidate.yml   1053 -> 932; 4 of the 5 staged-bootstrap
+#                                     steps its own contract check requires.
+#   .spipe/policy/vcs.sdn             the privileged self-review live-apply block.
+#   .github/workflows/review-admission.yml
+#                                     expected_head_sha binding + invalidation ladder.
+#   src/app/release/self_review_policy.spl
+#                                     hardened db/2 evaluator replaced by grant/1
+#                                     -- AND THE FILE GREW.
+#
+# Two more commits did the same to the LLVM backend (cb1e4981701) and to the
+# WFFI consumer (9eb38c592b1).
+#
+# WHY EVERY CHEAPER SIGNAL FAILS (all four were measured, not assumed)
+# --------------------------------------------------------------------
+#  1. "The file shrank."  self_review_policy.spl GREW while losing its security
+#     property. A size heuristic reads that row as progress.
+#  2. "The new blob equals an ancestor's blob."  Measured against the five named
+#     files: ONE of five matches (.spipe/policy/vcs.sdn -> b76f796235031ed).
+#     The other four carry NOVEL blobs -- an agent edited a stale checkout, so
+#     the result was never any historical state exactly. Exact-blob reachability
+#     is a sharpener here, not the signal.
+#  3. "One old ancestor explains many files."  Maximising the count of files
+#     byte-identical to a single first-parent ancestor peaks at 4,490 files for
+#     e274cd33719 -- and 4,456 of those are doc/, none of them is any of the
+#     five named files. It finds regenerated-doc noise, not damage.
+#  4. "Lines added between a fixed window anchor and the parent went missing."
+#     The anchor lands in a different place per file: measured 88% lost for
+#     main.spl but 2% for vcs.sdn, whose damage is one localised block.
+#
+# THE SIGNAL THIS GUARD USES: PER-CONTRIBUTOR SUPERSESSION
+# --------------------------------------------------------
+# Do not ask "what did C change?" -- ask "what recently LANDED, and did C throw
+# it away?". For every recent ancestor commit X on the parent's history, take
+# the lines X ADDED, keep only those still LIVE at the parent P (X's surviving
+# contribution), and ask how many of those survive into C:
+#
+#     live(X,F) = lines_added_by_X(F)  INTERSECT  lines(P:F)
+#     lost(X,F) = live(X,F) \ lines(C:F)
+#
+# A file is REWOUND when some single contributor X loses a large enough, large
+# enough FRACTION of its live contribution. That is reachability: C's content
+# supersedes newer content with older content, whether the file grew or shrank,
+# because the test is on the CONTRIBUTION, never on the file size or the blob.
+# self_review_policy.spl growing is irrelevant -- the hardened db/2 lines are
+# gone from a file that is bigger.
+#
+# The loop is inverted deliberately. Iterating C's changed files would be
+# 16,695 in-scope files for e274cd33719; iterating the recent CONTRIBUTORS is
+# bounded by the window size times the average commit footprint, and is
+# therefore independent of how enormous the snapshot is.
+#
+# A single-file rewind is a legitimate revert and is not interesting. FORTY is
+# a snapshot. So the file count carries the false-positive budget, not the
+# per-file test -- see FALSE POSITIVES below.
+#
+# SCOPE
+# -----
+# Product code only: src/ scripts/ config/ test/ .github/ .spipe/ (override with
+# --scope). This is not laziness -- .claude/rules/vcs.md itself draws the line
+# there: "Non-code artifacts (docs, skills, workflows, spipe state) may sync
+# freely; the danger is only src/**, scripts/** and other product code."
+# doc/ is auto-generated in bulk by every test run and is pure noise here (see
+# the 4,456-file measurement above). Vendored trees are excluded per CLAUDE.md
+# Owned-Code Scope.
+#
+# FALSE POSITIVES -- three deliberate escapes, none of which turns a check off
+# ---------------------------------------------------------------------------
+#  1. A deliberate `git revert` is legitimate. A one-file revert scores one
+#     rewound file and is under the threshold anyway. A BULK revert is
+#     recognised: `This reverts commit <sha>` in the commit message excuses
+#     exactly the files that <sha> touched, and no others.
+#  2. `Rewind-Allowed: <n> <reason>` as a commit-message trailer RECORDS the
+#     accepted count in the verdict line and recentres the threshold for that
+#     one commit -- same philosophy as check-tree-size-push.shs's --expect-files
+#     and check-runtime-api-regression-push.shs's --expect-removals. It does not
+#     silence anything: the files are still named on stdout.
+#  3. A BULK ancestor (more than --bulk-max in-scope files, default 500) is
+#     skipped AS A CONTRIBUTOR and the skip is printed. A snapshot's content is
+#     not work that deserves protection, and without this rule the commit that
+#     REPAIRS a clobber is structurally identical to the clobber itself: both
+#     drop ~100% of the other's lines. This is the one case this guard genuinely
+#     cannot tell apart on content alone, so it is resolved by refusing to
+#     treat a bulk snapshot as a protected contributor.
+#
+# FAIL-CLOSED CONTRACT
+# --------------------
+# COMMITTED CONTENT ONLY. Every read is `git rev-parse <rev>:<path>` /
+# `git cat-file` / `git diff <rev> <rev>` -- never the working copy, which
+# parallel sessions in this repo write continuously and which every other guard
+# here learned the hard way not to trust.
+#
+#   PASS  — <n> commit(s) checked, 0 rewind(s)     exit 0   (n is ALWAYS > 0)
+#   FAIL  — ... naming the files and the commit    exit 1
+#   ERROR — nothing was checked (<reason>)         exit 2
+#
+# A 0-commit range is ERROR, never a pass. Not being in a git repository is
+# ERROR. A range that cannot be resolved is ERROR. The verdict is the LAST line
+# of stdout. Never read this script's status from a pipeline: $? is the LAST
+# command's status, which has produced false greens in this repo before.
+#
+# --selftest runs FIRST and is FATAL, on fixture repositories built here.
+#
+# KNOWN LIMITS, stated rather than papered over
+# ---------------------------------------------
+#  * Content only. It proves lines that landed went missing; it cannot prove the
+#    result is semantically broken, nor that a deletion was unintended.
+#  * Out-of-window damage. A contributor older than --window (default 40) is not
+#    consulted. e274cd33719 also resurrected 99 archived duplicates under
+#    src/app/llm_caret/claude_full/; the commit that removed them is 4,977
+#    first-parent commits back AND the re-added blobs are not byte-identical to
+#    the removed ones (measured against first-parent anchors at depths 64, 256,
+#    1024, 4096, 6000 and 16384: zero blob hits at every depth). No windowed or
+#    blob-reachability rule reaches that row. It is not caught.
+#  * DILUTED loss inside a large file. Measured on the incident: the guard names
+#    4 of the 5 headline files (main.spl, candidate.yml, review-admission.yml,
+#    vcs.sdn) and MISSES src/app/release/self_review_policy.spl -- the growing
+#    file. Its contributor b76f7962350 added 641 lines, 640 live at the parent,
+#    and the clobber drops 49 of them: a real 7% loss that swaps the hardened
+#    db/2 evaluator for grant/1 while keeping the rest of the file. 7% is under
+#    MIN_LOST_PCT and lowering the floor that far would flag ordinary editing.
+#    The synthetic growing-file case IS caught (selftest fixture src/g.spl,
+#    120 lines out of 90, 40 of 40 live lines lost) -- so the mechanism is not
+#    size-blind; it is VOLUME-weighted, and a small critical block inside a
+#    large otherwise-preserved file is below the noise floor. This is the
+#    honest boundary of the signal, not a bug to tune away.
+#  * Renames are followed via `git diff -M` for the parent..commit edge only.
+#  * A clobber confined to fewer than --threshold files passes, by design.
+#  * A contributor whose own landing commit exceeds --bulk-max in-scope files is
+#    not protected. Because the window is a FIRST-PARENT walk, side-branch work
+#    is seen only through its merge commit, so a large legitimate merge is
+#    bulk-skipped too. That is the price of the repair-vs-clobber rule above.
+#  * Deleting >= --threshold recently-worked files reads as a rewind. That is
+#    usually right; `Rewind-Allowed:` is the escape when it is not.
+#  * Wired ADVISORY (repo-hygiene.yml `advisory-gates`, continue-on-error), so
+#    it REPORTS and cannot block. Promotion path is a `tier=push` row in
+#    config/check/must_check_gates.sdn plus a byte-matching case arm in
+#    run_manifest_push_gates (check-push-must-pass.shs) -- which is why
+#    --from-pre-push-hook is already accepted and ignored here.
+
+set -u
+
+SELF=$(basename "$0")
+EMPTY_TREE=4b825dc642cb6eb9a060e54bf8d69288fbee4904
+
+# ---------------------------------------------------------------------------
+# Tunables. Every one of these is DERIVED FROM MEASUREMENT on the real incident
+# and on ordinary origin/main commits -- see the acceptance report in the commit
+# message. Do not lower them to make a red build green.
+# ---------------------------------------------------------------------------
+WINDOW=40            # recent ancestor commits consulted as contributors
+THRESHOLD=5          # rewound files needed to FAIL. Matches the --min-files=5
+                     # precedent in check-no-revert-push.shs: a handful of
+                     # intentional removals is routine, forty is a snapshot.
+MIN_LOST_LINES=4     # absolute floor, so a 2-line tweak is never a "rewind".
+                     # 4 and not 8: the .spipe/policy/vcs.sdn row of the real
+                     # incident is a FIVE-line privileged live-apply block, lost
+                     # 100%. At 8 it was missed; at 4 it is named, and all 15
+                     # ordinary/revert commits re-sampled at 4 still PASS with
+                     # 0 rewinds. The file COUNT carries the false-positive
+                     # budget, so this floor only has to exclude noise.
+MIN_LOST_PCT=25      # fraction of ONE contributor's live contribution lost
+BULK_MAX=500         # an ancestor touching more than this is not a contributor
+MAX_FLAGGED=400      # per-commit early stop. When it is hit the per-commit line
+                     # says "(early stop)" and the count is a LOWER BOUND.
+SCOPE_RE='^(src|scripts|config|test|\.github|\.spipe)/'
+EXCLUDE_RE='(^|/)vendor/|^src/runtime/(miniaudio|stb_image|stb_truetype)\.h$'
+
+RANGE=
+EXPECT=
+SELFTEST=0
+VERBOSE=0
+
+usage() {
+    cat <<EOF
+$SELF [--range A..B] [--commit SHA] [--window N] [--threshold N] [--selftest]
+Detects commits that rewind work their own parent already carried.
+Verdict is the last line of stdout: PASS exit 0 / FAIL exit 1 / ERROR exit 2.
+EOF
+}
+
+while [ $# -gt 0 ]; do
+    case $1 in
+        --range) RANGE=${2:-}; shift 2 || exit 2 ;;
+        --commit) RANGE="${2:-}~1..${2:-}"; shift 2 || exit 2 ;;
+        --window) WINDOW=${2:-}; shift 2 || exit 2 ;;
+        --threshold) THRESHOLD=${2:-}; shift 2 || exit 2 ;;
+        --min-lost-lines) MIN_LOST_LINES=${2:-}; shift 2 || exit 2 ;;
+        --min-lost-pct) MIN_LOST_PCT=${2:-}; shift 2 || exit 2 ;;
+        --bulk-max) BULK_MAX=${2:-}; shift 2 || exit 2 ;;
+        --max-flagged) MAX_FLAGGED=${2:-}; shift 2 || exit 2 ;;
+        --scope) SCOPE_RE=${2:-}; shift 2 || exit 2 ;;
+        --expect-rewinds) EXPECT=${2:-}; shift 2 || exit 2 ;;
+        --selftest) SELFTEST=1; shift ;;
+        --verbose) VERBOSE=1; shift ;;
+        --from-pre-push-hook) shift ;;
+        -h|--help) usage; exit 0 ;;
+        *) printf 'ERROR — nothing was checked (unknown argument: %s)\n' "$1"; exit 2 ;;
+    esac
+done
+
+LC_ALL=C
+export LC_ALL
+
+TMPROOT=
+cleanup() { [ -n "$TMPROOT" ] && [ -d "$TMPROOT" ] && rm -rf "$TMPROOT"; }
+trap cleanup EXIT INT TERM
+
+die_error() {
+    printf 'ERROR — nothing was checked (%s)\n' "$1"
+    exit 2
+}
+
+# Count lines in a file, 0 when it does not exist.
+# NOT `grep -c . f || echo 0`: `grep -c` PRINTS 0 and EXITS 1 on no match, so
+# that idiom emits "0\n0" and every later [ ] test dies with "Illegal number".
+nlines() {
+    if [ -f "$1" ]; then wc -l < "$1" | tr -d ' \t'; else printf '0'; fi
+}
+
+# ---------------------------------------------------------------------------
+# scan <repo-dir> <range>
+#
+# Prints findings to stdout and writes two facts to $TMPROOT/result:
+#   EV_COMMITS=<commits actually examined>
+#   EV_REWINDS=<distinct rewound files across the range>
+# Returns 0 always; the CALLER decides the verdict, so a helper that dies
+# mid-way cannot be mistaken for a clean scan.
+# ---------------------------------------------------------------------------
+scan() {
+    _repo=$1
+    _range=$2
+    _work=$TMPROOT/work
+    rm -rf "$_work"; mkdir -p "$_work/blob"
+
+    ( cd "$_repo" && git rev-parse --git-dir ) >/dev/null 2>&1 \
+        || { echo "NOTGIT" > "$TMPROOT/result"; return 0; }
+
+    if ! ( cd "$_repo" && git rev-list --reverse "$_range" ) > "$_work/commits" 2>/dev/null; then
+        echo "BADRANGE" > "$TMPROOT/result"
+        return 0
+    fi
+
+    _ncommits=0
+    _nrewinds=0
+    : > "$_work/findings"
+
+    while IFS= read -r C; do
+        [ -n "$C" ] || continue
+        scan_commit "$_repo" "$C" "$_work" || true
+        _ncommits=$((_ncommits + 1))
+    done < "$_work/commits"
+
+    _nrewinds=$(sort -u "$_work/findings" 2>/dev/null | wc -l | tr -d " ")
+    printf 'EV_COMMITS=%s\nEV_REWINDS=%s\n' "$_ncommits" "$_nrewinds" > "$TMPROOT/result"
+    return 0
+}
+
+# Read one blob's lines, trimmed of trailing whitespace, sorted unique.
+# Cached by blob sha: the same parent blob is consulted once per contributor.
+blob_lines() {
+    _repo=$1; _rev=$2; _path=$3; _work=$4
+    _sha=$( cd "$_repo" && git rev-parse --quiet --verify "$_rev:$_path" 2>/dev/null )
+    if [ -z "$_sha" ]; then
+        : > "$_work/blob/EMPTY"
+        printf '%s\n' "$_work/blob/EMPTY"
+        return 0
+    fi
+    if [ ! -f "$_work/blob/$_sha" ]; then
+        ( cd "$_repo" && git cat-file blob "$_sha" 2>/dev/null ) \
+            | sed 's/[ 	]*$//' | grep -v '^$' | sort -u > "$_work/blob/$_sha" 2>/dev/null
+    fi
+    printf '%s\n' "$_work/blob/$_sha"
+}
+
+scan_commit() {
+    _repo=$1; C=$2; _work=$3
+    _c=$_work/c
+    rm -rf "$_c"; mkdir -p "$_c"
+
+    P=$( cd "$_repo" && git rev-parse --quiet --verify "$C^1" 2>/dev/null )
+    if [ -z "$P" ]; then
+        printf '  %s: root commit, nothing to rewind\n' "$(short "$_repo" "$C")"
+        return 0
+    fi
+    _nparents=$( cd "$_repo" && git rev-list --parents -n1 "$C" 2>/dev/null | wc -w )
+    _nparents=$((_nparents - 1))
+
+    # --- changed, in-scope files at the parent..commit edge, with rename map ---
+    # `-M` so a moved file is compared against its destination content, not
+    # against an absent path (which would score 100% lost for every file of a
+    # legitimate 20-file move).
+    ( cd "$_repo" && git diff --raw -M "$P" "$C" 2>/dev/null ) > "$_c/raw" || true
+    awk -F'\t' '
+        {
+            split($1, a, " ")
+            st = a[5]
+            src = $2
+            dst = ($3 != "") ? $3 : $2
+            print src "\t" dst "\t" substr(st, 1, 1)
+        }' "$_c/raw" 2>/dev/null > "$_c/pairs"
+    grep -E "$SCOPE_RE" "$_c/pairs" 2>/dev/null | grep -Ev "$EXCLUDE_RE" > "$_c/scoped" || true
+    cut -f1 "$_c/scoped" 2>/dev/null | sort -u > "$_c/changed"
+
+    if [ ! -s "$_c/changed" ]; then
+        printf '  %s: 0 in-scope file(s) changed\n' "$(short "$_repo" "$C")"
+        return 0
+    fi
+
+    # --- declared-revert excuse -------------------------------------------
+    ( cd "$_repo" && git log -1 --format=%B "$C" 2>/dev/null ) > "$_c/msg" || true
+    : > "$_c/excused"
+    # `This reverts commit <sha>` excuses EXACTLY the files that sha touched.
+    sed -n 's/.*[Tt]his reverts commit \([0-9a-f]\{7,40\}\).*/\1/p' "$_c/msg" 2>/dev/null \
+        | sort -u > "$_c/reverted_shas"
+    while IFS= read -r RS; do
+        [ -n "$RS" ] || continue
+        ( cd "$_repo" && git diff --name-only "$RS^1" "$RS" 2>/dev/null ) >> "$_c/excused" || true
+    done < "$_c/reverted_shas"
+    sort -u "$_c/excused" -o "$_c/excused" 2>/dev/null || true
+
+    _allowed=$(sed -n 's/^[Rr]ewind-[Aa]llowed:[ ]*\([0-9][0-9]*\).*/\1/p' "$_c/msg" | head -1)
+    [ -n "$_allowed" ] || _allowed=0
+
+    # --- the window of recent contributors --------------------------------
+    ( cd "$_repo" && git rev-list --max-count="$WINDOW" --first-parent "$P" 2>/dev/null ) > "$_c/window" || true
+
+    : > "$_c/flag"
+    : > "$_c/detail"
+    _scored=0
+    while IFS= read -r X; do
+        [ -n "$X" ] || continue
+        _sofar=$(nlines "$_c/flag")
+        [ "$_sofar" -ge "$MAX_FLAGGED" ] && break
+
+        XP=$( cd "$_repo" && git rev-parse --quiet --verify "$X^1" 2>/dev/null )
+        [ -n "$XP" ] || XP=$EMPTY_TREE
+
+        ( cd "$_repo" && git diff --name-only "$XP" "$X" 2>/dev/null ) \
+            | grep -E "$SCOPE_RE" 2>/dev/null | grep -Ev "$EXCLUDE_RE" | sort -u > "$_c/xfiles" || true
+        _xn=$(nlines "$_c/xfiles")
+        if [ "$_xn" -gt "$BULK_MAX" ]; then
+            [ "$VERBOSE" -eq 1 ] && printf '      skipped bulk ancestor %s (%s in-scope files)\n' \
+                "$(short "$_repo" "$X")" "$_xn"
+            continue
+        fi
+        [ "$_xn" -eq 0 ] && continue
+
+        comm -12 "$_c/xfiles" "$_c/changed" > "$_c/cand" 2>/dev/null || true
+        [ -s "$_c/cand" ] || continue
+
+        # Lines X added, per candidate file. The content diff is restricted by
+        # an explicit pathspec so an ancestor that also churns thousands of
+        # out-of-scope files can never produce a giant diff here.
+        # NOT --pathspec-from-file: `git diff` does not accept it (verified on
+        # git 2.43.0, which answers with the usage block and exit 0 — a silent
+        # empty diff, i.e. a fail-open. `xargs -0` is the portable form.)
+        tr '\n' '\0' < "$_c/cand" > "$_c/cand0"
+        ( cd "$_repo" && xargs -0 git diff -U0 --no-color "$XP" "$X" -- \
+              < "$_c/cand0" 2>/dev/null ) > "$_c/xdiff" || true
+        awk '
+            /^\+\+\+ b\// { f = substr($0, 7); next }
+            /^\+\+\+ / { f = ""; next }
+            /^--- / { next }
+            /^\+/ && f != "" { line = substr($0, 2); sub(/[ \t]*$/, "", line); if (line != "") print f "\t" line }
+        ' "$_c/xdiff" 2>/dev/null | sort -u > "$_c/xadd"
+        [ -s "$_c/xadd" ] || continue
+
+        cut -f1 "$_c/xadd" | sort -u > "$_c/candf"
+        while IFS= read -r F; do
+            [ -n "$F" ] || continue
+            grep -qxF "$F" "$_c/flag" 2>/dev/null && continue
+            grep -qxF "$F" "$_c/excused" 2>/dev/null && continue
+
+            awk -F'\t' -v f="$F" '$1 == f { print $2 }' "$_c/xadd" | sort -u > "$_c/add" 2>/dev/null
+            [ -s "$_c/add" ] || continue
+
+            DST=$(awk -F'\t' -v f="$F" '$1 == f { print $2; exit }' "$_c/scoped")
+            [ -n "$DST" ] || DST=$F
+
+            PL=$(blob_lines "$_repo" "$P" "$F" "$_work")
+            CL=$(blob_lines "$_repo" "$C" "$DST" "$_work")
+
+            comm -12 "$_c/add" "$PL" > "$_c/live" 2>/dev/null || true
+            _nlive=$(nlines "$_c/live")
+            [ "$_nlive" -eq 0 ] && continue
+
+            _nkept=$(comm -12 "$_c/live" "$CL" 2>/dev/null | wc -l | tr -d " ")
+            _nlost=$((_nlive - _nkept))
+            _scored=$((_scored + 1))
+            [ "$_nlost" -lt "$MIN_LOST_LINES" ] && continue
+            _pct=$((_nlost * 100 / _nlive))
+            [ "$_pct" -lt "$MIN_LOST_PCT" ] && continue
+
+            printf '%s\n' "$F" >> "$_c/flag"
+            printf '%s\t%s\t%s\t%s\t%s\n' "$C" "$F" "$_nlost" "$_nlive" "$X" >> "$_c/detail"
+        done < "$_c/candf"
+    done < "$_c/window"
+
+    _nflag=$(nlines "$_c/flag")
+    [ -n "$_nflag" ] || _nflag=0
+    _eff=$((_nflag - _allowed))
+    [ "$_eff" -lt 0 ] && _eff=0
+
+    # An accepted Rewind-Allowed is RECORDED for the final verdict line, not
+    # just for this per-commit line — an escape that only shows up mid-scroll
+    # is an escape nobody reviewing the verdict can see.
+    if [ "$_allowed" -gt 0 ]; then
+        printf '%s\t%s\n' "$(short "$_repo" "$C")" "$_allowed" >> "$_work/allowed"
+    fi
+    [ "$_nflag" -ge "$MAX_FLAGGED" ] && printf '%s\n' "$C" >> "$_work/capped"
+
+    if [ "$_nflag" -gt 0 ]; then
+        _note=
+        [ "$_allowed" -gt 0 ] && _note=" (Rewind-Allowed: $_allowed recorded)"
+        [ "$_nflag" -ge "$MAX_FLAGGED" ] && _note="$_note (early stop at $MAX_FLAGGED; the count is a LOWER BOUND)"
+        printf '  %s: %s rewound file(s)%s\n' "$(short "$_repo" "$C")" "$_nflag" "$_note"
+        printf '    parents=%s scoped-changed=%s scored=%s window=%s\n' \
+            "$_nparents" "$(nlines "$_c/changed")" "$_scored" "$WINDOW"
+        sort -t"$(printf '\t')" -k3,3nr "$_c/detail" 2>/dev/null | head -20 | while IFS="$(printf '\t')" read -r _ f l v x; do
+            printf '    %s — drops %s of %s live line(s) landed by %s\n' "$f" "$l" "$v" "$(short "$_repo" "$x")"
+        done
+        if [ "$_eff" -ge "$THRESHOLD" ]; then
+            sed "s|^|$C\t|" "$_c/flag" >> "$_work/findings"
+        fi
+    else
+        printf '  %s: 0 rewound file(s) (%s in-scope changed, %s scored)\n' \
+            "$(short "$_repo" "$C")" "$(nlines "$_c/changed")" "$_scored"
+    fi
+    return 0
+}
+
+short() {
+    ( cd "$1" && git rev-parse --short=11 "$2" 2>/dev/null ) || printf '%s' "$2"
+}
+
+# ---------------------------------------------------------------------------
+# SELFTEST — fatal, runs before any real scan.
+# ---------------------------------------------------------------------------
+mkfixture() {
+    _d=$1
+    mkdir -p "$_d"
+    ( cd "$_d" && git init -q . \
+      && git config user.email f@f && git config user.name f \
+      && git config commit.gpgsign false ) >/dev/null 2>&1
+}
+
+fx_commit() {
+    ( cd "$1" && git add -A && git commit -q -m "$2" ) >/dev/null 2>&1
+}
+
+gen_lines() {
+    _n=$1; _tag=$2; _i=1
+    while [ "$_i" -le "$_n" ]; do printf '%s line %s payload\n' "$_tag" "$_i"; _i=$((_i + 1)); done
+}
+
+run_selftest() {
+    _st=$TMPROOT/selftest
+    _fail=0
+    _ran=0
+
+    # --- fixture 1: ordinary forward commit must PASS --------------------
+    F1=$_st/forward; mkfixture "$F1"
+    mkdir -p "$F1/src"
+    gen_lines 60 base > "$F1/src/a.spl"; fx_commit "$F1" "base"
+    gen_lines 60 base > "$F1/src/a.spl"; gen_lines 40 feature >> "$F1/src/a.spl"
+    fx_commit "$F1" "feat: add feature"
+    { gen_lines 60 base; gen_lines 40 feature; gen_lines 30 more; } > "$F1/src/a.spl"
+    fx_commit "$F1" "feat: add more"
+    scan "$F1" "HEAD~1..HEAD"; _ran=$((_ran + 1))
+    if ! grep -q '^EV_REWINDS=0$' "$TMPROOT/result" 2>/dev/null; then
+        echo "  [selftest FAIL] forward commit was flagged as a rewind"; _fail=$((_fail + 1))
+    fi
+
+    # --- fixture 2: snapshot clobber over several files must FAIL --------
+    # Replays the incident shape, INCLUDING the growing-file case: g.spl gets
+    # BIGGER while losing the hardened block that landed in the parent.
+    F2=$_st/clobber; mkfixture "$F2"
+    mkdir -p "$F2/src"
+    for n in 1 2 3 4 5 6; do gen_lines 50 base > "$F2/src/f$n.spl"; done
+    gen_lines 50 base > "$F2/src/g.spl"
+    fx_commit "$F2" "base"
+    for n in 1 2 3 4 5 6; do { gen_lines 50 base; gen_lines 40 hardening; } > "$F2/src/f$n.spl"; done
+    { gen_lines 50 base; gen_lines 40 hardening; } > "$F2/src/g.spl"
+    fx_commit "$F2" "feat: land the hardened evaluator"
+    # the clobber: an agent's stale checkout, edited. Novel blobs, not reverts.
+    for n in 1 2 3 4 5 6; do { gen_lines 50 base; gen_lines 5 staleedit; } > "$F2/src/f$n.spl"; done
+    # g.spl GROWS to 120 lines yet loses all 40 hardening lines.
+    { gen_lines 50 base; gen_lines 70 staleedit; } > "$F2/src/g.spl"
+    fx_commit "$F2" "chore: merge all share-history worktree branches into main"
+    scan "$F2" "HEAD~1..HEAD"; _ran=$((_ran + 1))
+    _got=$(sed -n 's/^EV_REWINDS=//p' "$TMPROOT/result" 2>/dev/null)
+    if [ "${_got:-0}" -lt 7 ]; then
+        echo "  [selftest FAIL] snapshot clobber scored ${_got:-0} rewinds, expected >= 7"; _fail=$((_fail + 1))
+    fi
+
+    # --- fixture 3: growing file alone, verified by name ------------------
+    scan "$F2" "HEAD~1..HEAD" >/dev/null 2>&1
+    # (covered by fixture 2; assert the grown file is named)
+    if ! scan_names "$F2" "HEAD~1..HEAD" | grep -q 'src/g\.spl'; then
+        echo "  [selftest FAIL] the file that GREW while losing its block was not named"; _fail=$((_fail + 1))
+    fi
+    _ran=$((_ran + 1))
+
+    # --- fixture 4: deliberate bulk `git revert` must PASS ----------------
+    # A >= THRESHOLD-file revert, so the declared-revert escape is exercised
+    # rather than the count threshold masking it.
+    F4=$_st/revert; mkfixture "$F4"
+    mkdir -p "$F4/src"
+    for n in 1 2 3 4 5 6; do gen_lines 50 base > "$F4/src/f$n.spl"; done
+    fx_commit "$F4" "base"
+    for n in 1 2 3 4 5 6; do { gen_lines 50 base; gen_lines 40 bad; } > "$F4/src/f$n.spl"; done
+    fx_commit "$F4" "feat: the change we will revert"
+    BADSHA=$( cd "$F4" && git rev-parse HEAD )
+    for n in 1 2 3 4 5 6; do gen_lines 50 base > "$F4/src/f$n.spl"; done
+    ( cd "$F4" && git add -A && git commit -q -m "Revert \"feat: the change we will revert\"
+
+This reverts commit $BADSHA." ) >/dev/null 2>&1
+    scan "$F4" "HEAD~1..HEAD"; _ran=$((_ran + 1))
+    if ! grep -q '^EV_REWINDS=0$' "$TMPROOT/result" 2>/dev/null; then
+        echo "  [selftest FAIL] a declared 6-file git revert was flagged"; _fail=$((_fail + 1))
+    fi
+
+    # --- fixture 5: a pure rename must PASS -------------------------------
+    F5=$_st/rename; mkfixture "$F5"
+    mkdir -p "$F5/src/old"
+    for n in 1 2 3 4 5 6 7; do gen_lines 50 base > "$F5/src/old/f$n.spl"; done
+    fx_commit "$F5" "base"
+    for n in 1 2 3 4 5 6 7; do { gen_lines 50 base; gen_lines 40 work; } > "$F5/src/old/f$n.spl"; done
+    fx_commit "$F5" "feat: land work"
+    mkdir -p "$F5/src/new"
+    ( cd "$F5" && git mv src/old src/new/pkg ) >/dev/null 2>&1
+    fx_commit "$F5" "refactor: move the package"
+    scan "$F5" "HEAD~1..HEAD"; _ran=$((_ran + 1))
+    if ! grep -q '^EV_REWINDS=0$' "$TMPROOT/result" 2>/dev/null; then
+        echo "  [selftest FAIL] a pure rename was flagged as a rewind"; _fail=$((_fail + 1))
+    fi
+
+    # --- fixture 6: empty range must ERROR (0 commits) --------------------
+    scan "$F1" "HEAD..HEAD"; _ran=$((_ran + 1))
+    if ! grep -q '^EV_COMMITS=0$' "$TMPROOT/result" 2>/dev/null; then
+        echo "  [selftest FAIL] an empty range did not yield EV_COMMITS=0"; _fail=$((_fail + 1))
+    fi
+
+    # --- fixture 7: Rewind-Allowed trailer recentres the threshold --------
+    F7=$_st/allowed; mkfixture "$F7"
+    mkdir -p "$F7/src"
+    for n in 1 2 3 4 5 6; do gen_lines 50 base > "$F7/src/f$n.spl"; done
+    fx_commit "$F7" "base"
+    for n in 1 2 3 4 5 6; do { gen_lines 50 base; gen_lines 40 work; } > "$F7/src/f$n.spl"; done
+    fx_commit "$F7" "feat: land work"
+    for n in 1 2 3 4 5 6; do gen_lines 50 base > "$F7/src/f$n.spl"; done
+    ( cd "$F7" && git add -A && git commit -q -m "chore: roll back the experiment
+
+Rewind-Allowed: 6 reviewed rollback, see doc/08_tracking/bug/x.md" ) >/dev/null 2>&1
+    scan "$F7" "HEAD~1..HEAD"; _ran=$((_ran + 1))
+    if ! grep -q '^EV_REWINDS=0$' "$TMPROOT/result" 2>/dev/null; then
+        echo "  [selftest FAIL] Rewind-Allowed: 6 did not recentre the threshold"; _fail=$((_fail + 1))
+    fi
+
+    # --- fixture 8: not a git repository must be reported, never a pass ---
+    mkdir -p "$_st/notgit"
+    scan "$_st/notgit" "HEAD~1..HEAD"; _ran=$((_ran + 1))
+    if ! grep -q '^NOTGIT$' "$TMPROOT/result" 2>/dev/null; then
+        echo "  [selftest FAIL] a non-repository directory did not report NOTGIT"; _fail=$((_fail + 1))
+    fi
+
+    if [ "$_ran" -eq 0 ]; then
+        echo "  [selftest FAIL] no fixture ran"
+        return 1
+    fi
+    printf '  selftest: %s fixture(s) run, %s failure(s)\n' "$_ran" "$_fail"
+    [ "$_fail" -eq 0 ]
+}
+
+# Helper used by fixture 3: re-run a scan and emit only the flagged file names.
+scan_names() {
+    scan "$1" "$2" >"$TMPROOT/names.raw" 2>&1
+    cut -f2 "$TMPROOT/work/findings" 2>/dev/null
+}
+
+# ---------------------------------------------------------------------------
+# MAIN
+# ---------------------------------------------------------------------------
+TMPROOT=$(mktemp -d 2>/dev/null) || die_error "cannot create a temp directory"
+
+if [ "$SELFTEST" -eq 1 ]; then
+    echo "--- selftest ---"
+    if ! run_selftest; then
+        printf 'ERROR — nothing was checked (selftest failed; the guard is not trustworthy)\n'
+        exit 2
+    fi
+    echo "--- selftest passed ---"
+fi
+
+command -v git >/dev/null 2>&1 || die_error "git is not on PATH"
+REPO=$(git rev-parse --show-toplevel 2>/dev/null) \
+    || die_error "not inside a git repository (cwd=$(pwd)); run this from a real clone"
+[ -n "$REPO" ] || die_error "not inside a git repository (cwd=$(pwd))"
+
+# --- range resolution -------------------------------------------------------
+# Committed content only, and the default is the outgoing push range.
+resolve_range() {
+    if [ -n "$RANGE" ]; then printf '%s' "$RANGE"; return 0; fi
+    if [ -n "${GITHUB_BASE_REF:-}" ] \
+       && git rev-parse --quiet --verify "origin/$GITHUB_BASE_REF" >/dev/null 2>&1; then
+        printf 'origin/%s...HEAD' "$GITHUB_BASE_REF"; return 0
+    fi
+    if command -v jj >/dev/null 2>&1 && [ -d "$REPO/.jj" ] \
+       && git rev-parse --quiet --verify 'main@origin' >/dev/null 2>&1; then
+        printf 'main@origin..@-'; return 0
+    fi
+    if git rev-parse --quiet --verify origin/main >/dev/null 2>&1; then
+        if [ -n "$(git rev-list --max-count=1 origin/main..HEAD 2>/dev/null)" ]; then
+            printf 'origin/main..HEAD'; return 0
+        fi
+    fi
+    # Last resort, and only where there is no push range to speak of: the tip
+    # commit. Stated in the verdict so it can never look like a range scan.
+    if git rev-parse --quiet --verify 'HEAD~1' >/dev/null 2>&1; then
+        printf 'HEAD~1..HEAD'; return 0
+    fi
+    printf ''
+}
+
+RANGE=$(resolve_range)
+[ -n "$RANGE" ] || die_error "could not resolve a range (no origin/main, no HEAD~1)"
+case $RANGE in
+    *..*) : ;;
+    *) die_error "range '$RANGE' is not a range (a bare revision is rejected, never reinterpreted)" ;;
+esac
+
+printf 'range: %s\n' "$RANGE"
+printf 'window: %s ancestor(s)  threshold: %s file(s)  min-lost: %s line(s) / %s%%\n' \
+    "$WINDOW" "$THRESHOLD" "$MIN_LOST_LINES" "$MIN_LOST_PCT"
+
+scan "$REPO" "$RANGE"
+
+if grep -q '^NOTGIT$' "$TMPROOT/result" 2>/dev/null; then
+    die_error "not a git repository"
+fi
+if grep -q '^BADRANGE$' "$TMPROOT/result" 2>/dev/null; then
+    die_error "range '$RANGE' could not be resolved by git rev-list"
+fi
+
+NC=$(sed -n 's/^EV_COMMITS=//p' "$TMPROOT/result" 2>/dev/null)
+NR=$(sed -n 's/^EV_REWINDS=//p' "$TMPROOT/result" 2>/dev/null)
+[ -n "$NC" ] || die_error "the scan produced no commit count"
+[ -n "$NR" ] || die_error "the scan produced no rewind count"
+
+if [ "$NC" -eq 0 ]; then
+    die_error "range '$RANGE' resolves to 0 commits; an empty range is never a pass"
+fi
+
+if [ -n "$EXPECT" ]; then
+    if [ "$NR" -le "$EXPECT" ]; then
+        printf 'PASS — %s commit(s) checked, %s rewind(s) (accepted: --expect-rewinds %s recorded)\n' \
+            "$NC" "$NR" "$EXPECT"
+        exit 0
+    fi
+fi
+
+# Both escapes and the early stop are RECORDED in the verdict line itself, so a
+# reader of the last line alone can never mistake an excused or truncated scan
+# for an exhaustive clean one.
+VERDICT_NOTE=
+if [ -s "$TMPROOT/work/allowed" ]; then
+    VERDICT_NOTE=" (Rewind-Allowed accepted: $(tr '\t' '=' < "$TMPROOT/work/allowed" | tr '\n' ' ' | sed 's/ $//'))"
+fi
+if [ -s "$TMPROOT/work/capped" ]; then
+    VERDICT_NOTE="$VERDICT_NOTE (early stop at $MAX_FLAGGED on $(nlines "$TMPROOT/work/capped") commit(s); counts are LOWER BOUNDS)"
+fi
+
+if [ "$NR" -gt 0 ]; then
+    echo "rewound files (commit, file):"
+    sort -u "$TMPROOT/work/findings" 2>/dev/null | head -60 | while IFS="$(printf '\t')" read -r c f; do
+        printf '  %s %s\n' "$c" "$f"
+    done
+    OFFENDERS=$(cut -f1 "$TMPROOT/work/findings" 2>/dev/null | sort -u | tr '\n' ' ')
+    NAMES=$(cut -f2 "$TMPROOT/work/findings" 2>/dev/null | sort -u | head -8 | tr '\n' ' ')
+    printf 'FAIL — %s commit(s) checked, %s rewind(s) in %s: %s%s\n' \
+        "$NC" "$NR" "${OFFENDERS% }" "${NAMES% }" "$VERDICT_NOTE"
+    exit 1
+fi
+
+printf 'PASS — %s commit(s) checked, 0 rewind(s)%s\n' "$NC" "$VERDICT_NOTE"
+exit 0

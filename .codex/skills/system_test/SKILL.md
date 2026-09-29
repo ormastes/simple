@@ -92,100 +92,13 @@ describe "<Feature Name>":
 - No test depends on external state or other tests
 - Error paths use `Result<T, E>` pattern, not exceptions
 - After writing or changing an SSpec file, run
-  `bin/simple spipe-docgen <spec> --output doc/06_spec --no-index`. The generator
+  `simple spipe-docgen <spec> --output doc/06_spec --no-index`. The generator
   must report the affected spec as complete with `0 stubs`; if it reports an
   auto/manual spec as a stub, fix the spec or docgen validation before handoff.
-  Use only the pure-Simple `simple-core` or `core-c-bootstrap` runtime lanes.
-
-### NVMe/RV32 Transport Profile Rules
-
-Use these profile names consistently in NVMe firmware specs and manuals:
-The agent-facing configuration inventory, exact runners, MMIO apertures, and
-open evidence gates are in
-`doc/07_guide/app/llm/simple_riscv_nvme_feature_inventory.md`; update that page
-whenever a target profile or acceptance command changes.
-The reusable feature wiki is
-`doc/00_llm_process/feature_expert/nvme_firmware/skill.md`. Specs must name the
-target profile, independent `NVME_RV32_*` build mode, transport, media, and
-evidence class; a target ID alone is not a complete test configuration.
-Before running NVMe SSpec/docgen, check the admission record in
-`doc/08_tracking/bug/stage2_native_sspec_process_run_sigsegv_2026-07-29.md`.
-The current-source Phase 2 artifact is admitted for the exact 5-scenario native
-SSpec and zero-stub standalone docgen; a Rust seed, stale deployed full CLI, or
-bootstrap receipt cannot satisfy that gate.
-For RV32 IDs `3`/`4`, catalog presence is not runtime dispatch: require evidence
-from the selected build mode and transport runner before naming the profile as
-exercised.
-The RV32 `.nandram` lane proves scalar digital prevention/recovery policy; only
-`src/lib/hardware/nand_emu/` may be labeled per-cell Vt/analog NAND emulation.
-
-| Profile | What it proves | What it does not prove |
-|---|---|---|
-| `TARGET_SIMPLE_SIM` / `fw/` | Host-model controller, FTL/FIL and command semantics | RV32 ELF, AXI, IRQ, PCIe, OpenSSD silicon |
-| `emu/` | Host/device memcpy seam, RAM NAND and emulator data path | Hardware MMIO, host queue DMA, PCIe or physical NAND |
-| `fw_rv32` + QEMU | Real RV32 ELF, external mailbox command sequence, guest PRP buffers, and scalar RAM-NAND recovery | AXI, queue DMA engine, IRQ, PCIe, or board transport |
-| RV32 + GHDL AXI | Synthesizable H1 AXI model evidence | PCIe enumeration, MSI/PERST, OpenSSD silicon |
-| KV260/K26 GHDL | Emulation qualification through firmware-in-loop AXI and the synthesizable K26 top | KV260 silicon, OpenSSD/physical-NAND, or PCIe acceptance |
-| KV260 FPGA | Physical FPGA-model evidence when the board protocol and transcript are real; currently postponed | OpenSSD/physical-NAND or PCIe acceptance |
-| Cosmos+ OpenSSD | Vendor/H2 target contract only when the board gate runs | Any claim from QEMU, GHDL, or internal selftest |
-
-For `rv32_nvme_host_axi_mmio`, a passing transport spec must show actual
-external MMIO register traffic, host queue-memory SQE/CQE DMA, payload movement,
-IRQ assertion/acknowledgement, and host completion consumption. CPU-local
-submission, linker `.nandram` reads/writes, UART markers from an internal
-selftest, or `rv32_ctrl_obs_slave` debug traffic are not host-NVMe evidence.
-The first accepted PRP contract is one dword-aligned PRP1 contained in a 4 KiB
-page. Identify writes 256 bytes; current NAND Read/Write moves one 4-byte word.
-Unsupported PRP2/multi-page requests must fail
-closed. QEMU and synthesizable AXI must use the same host sequence. Missing
-target, runtime, trace, DMA, IRQ, or marker is FAIL/POSTPONED evidence, never a
-PASS or fallback to `TARGET_SIMPLE_SIM`.
-
-Cosmos+ physical BT-001..BT-006 evidence is accepted only through
-`sh scripts/check/check-nvme-firmware-remaining-gates.shs --board-evidence DIR`.
-Do not hand-accept a summary table: every BT row must bind an in-campaign raw
-log by SHA-256, use the independent reviewer in `manifest.txt`, and match the
-source, board, boot mode, and artifact hashes in the verified v3 package
-manifest.
-
-Source/evidence assertions document design obligations but never satisfy a
-`@req` by themselves. Once an endpoint exists, its SSpec must invoke the real
-runner and tag only requirements exercised by that runner. A mocked firmware
-mailbox completion is endpoint evidence, not firmware or recovery evidence.
-The canonical real-firmware GHDL command is
-`sh scripts/fpga/ghdl_rv32_nvme_fw_in_loop.shs`; accept it only with
-`firmware=real transport=axi-ram` plus nonzero recovery, refresh, remap, and read
-counters in the retained transcript. QEMU firmware parity uses
-`sh scripts/qemu/qemu_rv32_nvme_fw_in_loop.shs`; accept it only with
-`firmware=real transport=qemu-gdb-mailbox` and never promote it to AXI/DMA/IRQ
-evidence.
-  An unresolved runtime symbol, nonzero exit, signal exit, or missing output is
-  a FAIL; do not substitute a hand-edited manual or the Rust seed.
 - Scenario-oriented specs must produce manual-quality generated docs:
   primary scenarios visible, reusable setup hidden with `@inline` and expanded
   by `@prev`/`@include`, advanced/edge/matrix/stress details folded or skipped
   by policy, and executable SSpec folded below the manual flow.
-  Generated manuals must retain module-level triple-quoted scope and claim-
-  boundary prose; a structurally complete manual that drops those limits is a
-  documentation failure.
-  Every named setup/checker helper used by a displayed scenario must appear as
-  a visible manual step or in complete folded executable source.
-- If a scenario claims formal verification coverage, include the formal
-  evidence path and exact proof command in the test plan or generated/manual
-  doc. Lean evidence must point at a checked proof lane with no `sorry` or
-  `admit`; RVFI/SymbiYosys evidence must distinguish readiness from an actual
-  `sby` proof pass. For Lean or BYL lanes, cite generated artifacts separately
-  from durable theorem files so regeneration cannot replace manual proof
-  obligations. For RISC-V lanes spanning generated RTL sidecars and Lean/BYL,
-  cite `sh scripts/check/check-riscv-formal-dual-track.shs` as the aggregate
-  gate so the sidecar contract self-test and manual proof layer are checked
-  together. Do not let regenerated SPipe docs replace the manual Lean/BYL proof
-  layer. If a generated evidence matrix reports readiness rows as `pass`, keep
-  mission-critical release wording separate and cite the stricter release gate
-  explicitly with `sh scripts/check/check-riscv-rtl-sby-proof.shs` and
-  `sh scripts/check/check-simpleos-mission-critical-release.shs`; a readiness
-  matrix pass or missing-tool blocker is not a substitute for `release_blockers=none`
-  and a strict SBY proof pass.
 - For broad lanes with shared interfaces, the primary/best model must define
   shared interface names, manual `step("...")` flow helper names, and
   setup/checker helper names before lower-model sidecars such as Codex Spark,
@@ -240,95 +153,6 @@ evidence.
   state, not merely call the renderer: check Draw IR/object state, scene nodes,
   layout boxes, visible text, readback pixels, hashes, or diffs that prove the
   expected surface exists.
-- GUI/web font specs assert semantic `DrawIrComposition` text/style before
-  backend/readback evidence. When vector text is enabled, `FontRenderBatch`
-  remains transient material inside the Engine2D executor; an app-private font
-  draw path or Engine3D HUD/world shortcut is not valid GUI/web/2D evidence.
-  WM route evidence must distinguish the canonical `SharedWmScene ->
-  DrawIrComposition -> Engine2D` executor from compatibility direct
-  backend/pixel-buffer renderers. A builder-only fixture is supporting evidence:
-  production acceptance must exercise the real hosted frame owner, canonical
-  SimpleOS entry wiring, and independent QEMU framebuffer pixels. Platform
-  backends present final pixels; they do not own a second font path.
-- Shared multilingual font specs use the frozen steps, setup helpers, and
-  checkers in `doc/03_plan/sys_test/shared_multilingual_gpu_fonts.md`; do not
-  rename them or introduce parallel vocabulary. Exact-face acceptance is
-  limited to the witnesses the shaping gate proves: the pinned Hindi `हिन्दी`
-  `dev2` case and the exact pinned Arabic `العربية` / Urdu `اردو` lookup-vector
-  cases are accepted. The Arabic/Urdu acceptance is witness-specific after
-  Script/LangSys validation; it is not general GSUB/GPOS, mark, BiDi, or
-  positioning support. A single pinned monochrome `U+1F600` emoji candidate
-  may promote only after its exact-face shape-to-`FontRenderBatch` gate passes;
-  parser/cmap/raster evidence alone is insufficient. Variation-selector,
-  modifier, ZWJ, color, and multi-codepoint emoji remain fail-closed.
-  The final irreversible registered-only SimpleOS scenario must register the
-  exact Arabic and Devanagari bytes, shape the accepted Arabic/Urdu and Hindi
-  witnesses without host font ABI or filesystem access, keep Draw IR
-  handle-free, and prepare nonempty material through the existing selected-byte
-  `FontRenderer`. This source/spec result is not QEMU framebuffer evidence.
-  Vulkan font promotion requires `artifact_mode=precompiled-spirv` and the exact
-  pinned artifact hash; runtime GLSL may be diagnostic execution but cannot
-  satisfy native promotion. The checker requires extracted optimization/font
-  source bytes to match their emitter-declared hashes and rejects malformed hashes
-  before compilation. A well-formed stale Vulkan source may compile and retain
-  its `.comp`/`.spv` candidate for review, but its evidence remains invalid;
-  admission requires both source and artifact pins to match.
-  The portable checker aggregates only targets named by
-  `PORTABLE_COMPUTE_TARGETS` and rejects a source whose emitted semantics does
-  not equal `PORTABLE_COMPUTE_EXPECTED_SEMANTICS`. Phase one requires
-  `candidate_compiled=true` and `artifact_validated=true`, with compiler and
-  validator path/version/SHA-256 provenance and a passing `spirv-val` row for
-  Vulkan. Stale pins must report `pinned_verified=false`. After independent
-  review updates tracked source/artifact pins, a reproducing phase-two run must
-  report `pinned_verified=true`; never update pins merely to green phase one.
-  Compiled native evidence must name the Simple-emitted font companion, prove
-  its versioned exported symbol, and prove the promoted runtime loaded that same
-  artifact; a handwritten PTX or independently generated SPIR-V blob is not
-  emitter provenance. CUDA font execution must use the separately
-  source-tracked Simple-generated companion after runtime PTX hash, entry, and
-  program-version checks pass; checker/SPipe exact equality must bind its pinned
-  source and emitter-version hashes to the current Simple emission. The default
-  CUDA 2D module must not provide the font entry.
-  Production CUDA loading additionally requires packaged or tracked generated
-  PTX bound to an immutable trusted hash and program version; ignored `build/`
-  output and caller-provided adjacent hashes cannot satisfy that trust gate.
-  When a producer emits selected shaping, assert that the handle-free
-  `DrawIrGlyphRunPayload` survives SDN round-trip with identical glyph IDs,
-  positions, and logical clusters. The Engine2D executor must reject a missing
-  or malformed shaped payload and must consume serialized advances through the
-  canonical `FontRenderer`; do not serialize face handles, atlases, caches, or
-  backend resources into Draw IR.
-  Runtime configuration evidence must use the single text-layout-owned config
-  and prove each identity dimension reaches bitmap, selected-vector, shaped,
-  Engine2D, and Engine3D material. Assert `Suggested` named-target/remaining-
-  canonical-GPUs/CPU, `Preferred` named-target/CPU, and `Required` named-target-
-  only behavior. Assert `Suggested(auto)` uses the engine's executable adapter
-  order. Spell the canonical target `rocm` and separately prove the `hip` alias
-  selects identical HIP emission; Preferred/Required with `auto` and unknown targets reject before any
-  cache, counter, upload, framebuffer, or backend mutation.
-  Unsupported rendering modes or CTM must fail before cache generation,
-  telemetry, upload, or backend state changes.
-  Before accepting deployed font execution, prove the candidate uses the
-  four-argument `rt_env_set(key_ptr, key_len, value_ptr, value_len)` ABI and
-  passes one tiny `check` fixture. A bootstrap-only stage compiler, a Rust
-  seed, or a candidate whose full-CLI closure has unresolved runtime
-  symbols is blocker evidence, not an executable font PASS.
-  The canonical runner and the pure test runner must reuse
-  `build_interpreter_result_wrapper`; it appends `print_summary`,
-  `get_executed_test_count`, and `get_exit_code` checks inside the interpreted source.
-  `CompileResult.Success` alone is false green because matcher failures update
-  spec state without raising. Before trusting the runner, require exit 1 plus
-  `test-runner: spec failed` from
-  `scripts/check/fixtures/font_evidence_runner_fail_spec.spl`, and exit 1 plus
-  `test-runner: no examples executed` from
-  `scripts/check/fixtures/font_evidence_runner_empty_spec.spl`. Reject usage
-  exit 2, timeout 124, signal exit 139, and missing markers. Retain the exact
-  commands, runner binary SHA-256, and both logs under
-  `build/test-artifacts/shared_multilingual_gpu_fonts/runner-calibration/`.
-  Shaped pixel evidence must include a nonzero bearing or GPOS offset and check
-  the full CPU/device pixels. Pen positions are +Y-down baseline offsets;
-  OpenType y offsets are negated, and quad top-left is
-  `(pen_x + bearing_x, ascent + pen_y - bearing_y - height)`.
 - For HTML/CSS/WASM-backed surfaces, prefer HTML or DOM-visible-text checks
   before raster checks. Assert semantic text, attributes, layout-relevant
   objects, or canvas/wasm bridge state when available; use GUI screenshots,
@@ -393,13 +217,6 @@ evidence.
   whose shared transport is known to support multi-message framed stdin.
   Include all local Simple-created MCP wrappers in one system spec when the
   contract is "launch by command line and handshake within a time limit".
-  Bootstrap acceptance parameterizes that same checker with the exact fresh
-  Stage 5 MCP/LSP paths, requires successful `simple_status` and `lsp_symbols`
-  calls, and fails on missing/stale artifacts, runtime stubs, source or Rust-seed
-  fallback, nonzero exit, timeout, malformed frames, or error responses. Run it
-  for every bootstrap route that produces a full MCP/LSP output pair. The
-  separate Stage 2 MCP spec covers only its single cached MCP artifact; earlier
-  stages and `--no-mcp` supply no full-pair MCP/LSP acceptance evidence.
 - Short grammar features must have runtime-specific coverage:
   - Interpreter specs may cover pipe-forward, composition, placeholder lambdas, method references, optional access, and compact DSL forms.
   - Native specs must cover only compact forms intended to work in native mode.
@@ -424,30 +241,6 @@ evidence.
     fails closed until a valid `SMF\0` artifact exists.
 
 ## Phase 3: Traceability Matrix
-
-### Performance and memory evidence
-
-For compiler, linter, optimizer, or tooling hot paths, derive scenarios from
-the four tiers in `doc/07_guide/compiler/performance_diagnostics.md`:
-
-- fast typed lints prove high-confidence source diagnostics and suppress
-  unresolved guesses;
-- MIR scenarios pair an exact semantic oracle with a structural activation or
-  rejection oracle and preserve zero-trip, alias, effect, overflow, ownership,
-  and malformed-input boundaries relevant to the transform;
-- deep-analysis scenarios expose bounded symbolic results and explicit
-  `AnalysisIncomplete(reason)` outcomes;
-- profile scenarios bind timing, allocation/copy bytes, cardinality, and peak
-  memory to the same fixture and revision.
-
-Do not present static Big-O reasoning as measured latency/RSS evidence, or one
-successful candidate as proof that a registered pass is active generally.
-Performance fixtures must distinguish user-facing lint findings from passed,
-missed, analysis, and failure optimization remarks. When a change removes a
-copy or allocation pattern, retain a behavior oracle plus a structural or
-counter oracle that would fail if the old hot path returned. Mirror every
-changed SSpec into `doc/06_spec` and state clearly when evidence was authored
-but not executed.
 
 Create a traceability matrix linking requirements to tests:
 
@@ -506,12 +299,11 @@ Output: `doc/03_plan/sys_test/<feature>.md`
 
 ## Interpreter Mode Limitation
 
-Interpreter `it` bodies may execute, but the outer summary, exit status, and
-`CompileResult.Success` are not trustworthy assertion results without the
-counter guards above. Native acceptance uses:
+**Important:** The test runner in interpreter mode only verifies file loading, NOT `it` block execution. The `it` block bodies do not execute in interpreter mode. Use compiled mode for actual test execution:
 
 ```bash
-SIMPLE_NO_STUB_FALLBACK=1 bin/simple test path/to/spec.spl --mode=native
+bin/simple test path/to/spec.spl          # Interpreter mode (loading only)
+bin/simple test path/to/spec.spl --native  # Compiled mode (full execution)
 ```
 
 ## Multi-LLM Collaboration
@@ -532,22 +324,3 @@ SIMPLE_NO_STUB_FALLBACK=1 bin/simple test path/to/spec.spl --mode=native
 - NO inheritance in test helpers — use composition
 - NEVER skip or ignore failing tests without user approval
 - Do not write short-grammar tests that only prove a longer equivalent form; the compact token/form itself must appear in executable coverage.
-
-## Documentization quality gate
-
-After changing an SSpec, run `simple sspec-maintain scan <spec>` and inspect the
-seven scores independently, the blocker cap (49), mirror state, and stable
-`SSDOC-*` findings. A missing/stale mirror or fail-fast scaffold cannot count as
-coverage. Professional
-manuals contain purpose/audience, preconditions, operator workflow, scenario
-narratives, scorecard, findings/remediation, evidence/provenance, and
-compatibility/limitations. Use literal `step("...")`, never bare `@step "..."`.
-Reference scaffolds preserve REQ IDs and source hashes and fail fast for every
-unresolved result. SPipe remains the full-manual generator; `documentize` adds
-score/provenance through that owner. Baseline review uses `--baseline`;
-suppression review uses `--suppressions` records with stable rule ID, owner,
-reason, and optional fingerprint. Blockers cannot be suppressed. LLM advice is
-source-evidenced preview only, excluded from scoring, and never self-applies.
-For lossless external-standard intake, follow the shared
-`spec-to-spipe`/compatibility `spec-to-sspec` architecture; do not treat the
-bounded Markdown scaffold as byte-complete conversion.

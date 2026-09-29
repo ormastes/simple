@@ -1,0 +1,63 @@
+use std.nogc_async_mut.kernel_plugin.runtime.KpfRequestHandleV1
+use os.smf.kernel_plugin.wasm_component.contract.*
+use os.smf.kernel_plugin.wasm_component.fake_host.*
+
+pub class KpfWasmComponentTransportV1:
+    host: KpfDeterministicWasmHostV1
+    generation: i64
+    session_slot: i64
+    granted_capability_bits: u64
+    maximum_payload_bytes: i64
+    var quiescing: bool
+    var closed: bool
+    var inflight: i64
+
+impl KpfWasmComponentTransportV1:
+    pub static fn create(host: KpfDeterministicWasmHostV1, generation: i64,
+            session_slot: i64, granted_capability_bits: u64,
+            maximum_payload_bytes: i64) -> KpfWasmComponentTransportV1:
+        KpfWasmComponentTransportV1(host: host, generation: generation,
+            session_slot: session_slot, granted_capability_bits: granted_capability_bits,
+            maximum_payload_bytes: maximum_payload_bytes, quiescing: false,
+            closed: false, inflight: 0)
+
+    me submit(request: KpfRequestHandleV1, required_capability_bits: u64,
+            payload: [u8]) -> KpfWasmComponentOutcome:
+        if self.closed: return KpfWasmComponentOutcome.Closed
+        if self.quiescing: return KpfWasmComponentOutcome.Quiescing
+        if request.generation != self.generation or request.session_slot != self.session_slot:
+            return KpfWasmComponentOutcome.StaleHandle
+        if payload.len > self.maximum_payload_bytes: return KpfWasmComponentOutcome.WouldBlock
+        if (self.granted_capability_bits & required_capability_bits) != required_capability_bits:
+            return KpfWasmComponentOutcome.CapabilityDenied
+        val outcome = self.host.submit(request.request_slot, request.request_epoch, payload)
+        if outcome == KpfWasmComponentOutcome.Accepted: self.inflight = self.inflight + 1
+        outcome
+
+    me poll() -> KpfWasmCompletionV1:
+        if self.closed:
+            return KpfWasmCompletionV1(outcome: KpfWasmComponentOutcome.Closed,
+                request_slot: -1, request_epoch: 0, payload: [])
+        val completion = self.host.poll()
+        if completion.outcome == KpfWasmComponentOutcome.Accepted or
+                completion.outcome == KpfWasmComponentOutcome.Cancelled:
+            self.inflight = self.inflight - 1
+        completion
+
+    me cancel(request: KpfRequestHandleV1) -> KpfWasmComponentOutcome:
+        if self.closed: return KpfWasmComponentOutcome.Closed
+        if request.generation != self.generation or request.session_slot != self.session_slot:
+            return KpfWasmComponentOutcome.StaleHandle
+        self.host.cancel(request.request_slot, request.request_epoch)
+
+    me quiesce() -> KpfWasmComponentOutcome:
+        if self.closed: return KpfWasmComponentOutcome.Closed
+        self.quiescing = true
+        KpfWasmComponentOutcome.Accepted
+
+    me close() -> KpfWasmComponentOutcome:
+        if self.closed: return KpfWasmComponentOutcome.Closed
+        if not self.quiescing or self.inflight != 0 or self.host.live_resource_count() != 0:
+            return KpfWasmComponentOutcome.Quiescing
+        self.closed = true
+        KpfWasmComponentOutcome.Accepted

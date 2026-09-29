@@ -105,3 +105,12 @@ DMA bounds, and artifact hashes with omission/mutation rejection. Current
 SSpec/docgen evidence and all physical board evidence remain absent.
 The supported claim is **production BLOCKED/FAIL; silicon acceptance is not
 established**.
+
+## 2026-08-19 ECC Ownership Clarification
+
+REQ-002 data-integrity interpretation is owned by pure Simple: CRC-valid,
+spare-valid, page-valid, worst-chunk, refresh-threshold, and terminal status
+policy must not remain in C. C may retain volatile error-info acquisition and
+the established `cosmos_nfc_decode_ecc` ABI bridge. Acceptance requires exact
+legacy-C oracle parity and real nonzero scoped branch/decision evidence; neither
+host result may be promoted to physical NAND/ECC board evidence.

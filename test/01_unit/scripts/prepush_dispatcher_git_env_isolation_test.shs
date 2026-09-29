@@ -1,0 +1,40 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/simple-prepush-env.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+fail() { echo "FAIL: $*" >&2; exit 1; }
+
+repo="$tmp/repo"
+mkdir -p "$repo/scripts/hooks" "$repo/scripts/check"
+cp "$root/scripts/hooks/pre-push" "$repo/scripts/hooks/pre-push"
+cat >"$repo/scripts/check/pre-push-conflict-tree-guard.shs" <<'EOF'
+#!/bin/sh
+set -eu
+for name in GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_COMMON_DIR; do
+  eval "value=\${$name-}"
+  [ -z "$value" ] || { echo "inherited $name" >&2; exit 1; }
+done
+cat >/dev/null
+printf 'isolated\n' >"$PREPUSH_ENV_MARKER"
+EOF
+chmod +x "$repo/scripts/hooks/pre-push" "$repo/scripts/check/pre-push-conflict-tree-guard.shs"
+(
+  unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_COMMON_DIR
+  cd "$repo"
+  git init -q
+)
+
+marker="$tmp/marker"
+(
+  cd "$repo"
+  printf '' | env \
+    GIT_DIR="$repo/.git" GIT_WORK_TREE="$repo" \
+    GIT_INDEX_FILE="$repo/.git/index" GIT_OBJECT_DIRECTORY="$repo/.git/objects" \
+    GIT_COMMON_DIR="$repo/.git" PREPUSH_ENV_MARKER="$marker" \
+    sh scripts/hooks/pre-push origin fixture
+)
+[ "$(cat "$marker")" = isolated ] || fail 'canonical guard did not execute in an isolated Git environment'
+
+echo 'PASS: pre-push dispatcher clears inherited Git plumbing before guards'

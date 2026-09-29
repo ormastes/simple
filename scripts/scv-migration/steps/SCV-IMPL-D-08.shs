@@ -1,0 +1,72 @@
+#!/bin/sh
+# SCV-IMPL-D-08 — merge corpus measuring MISSED REAL CONFLICTS (not only spurious),
+# incl. rename/edit through preprocessor-heavy sources.
+# Verdict is ALWAYS the last stdout line: PASS exit 0 / FAIL exit 1 / ERROR exit 2.
+# Committed UNSIGNED.
+#
+# Note: the FULL corpus scan is owned by scripts/check/check-scv-merge-corpus.shs and
+# costs ~100s per case (~50 min for the committed corpus). This step script verifies
+# the artifacts, the gate's fatal selftest, and the spec; it does NOT re-run the full
+# scan. Run the gate itself for the missed/spurious numbers.
+set -u
+GATE="scripts/check/check-scv-merge-corpus.shs"
+CORPUS="test/fixtures/scv_merge_corpus"
+SPEC="test/integration/app/scv_merge_corpus_spec.spl"
+TWIN="test/02_integration/app/scv_merge_corpus_spec.spl"
+[ -f "$GATE" ] && [ -d "$CORPUS" ] && [ -f "$SPEC" ] && [ -f "$TWIN" ] || { echo "ERROR — nothing was checked (missing files)"; exit 2; }
+checked=0
+bad=""
+
+N=$(find "$CORPUS" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')
+[ "$N" -ge 20 ] || bad="$bad corpus-too-small($N)"
+[ "$N" -le 200 ] || bad="$bad corpus-too-large($N)"
+checked=$((checked + 1))
+
+CONF=$(grep -l '^expect: conflict' "$CORPUS"/*/truth.sdn 2>/dev/null | wc -l | tr -d ' ')
+CLEAN=$(grep -l '^expect: clean' "$CORPUS"/*/truth.sdn 2>/dev/null | wc -l | tr -d ' ')
+PP=$(ls -d "$CORPUS"/*cpp* 2>/dev/null | wc -l | tr -d ' ')
+[ "$CONF" -ge 5 ] || bad="$bad too-few-conflict-cases($CONF)"
+[ "$CLEAN" -ge 5 ] || bad="$bad too-few-clean-cases($CLEAN)"
+[ "$PP" -ge 3 ] || bad="$bad too-few-preprocessor-cases($PP)"
+checked=$((checked + 3))
+
+grep -q 'MISSED' "$GATE" || bad="$bad gate(no-missed-class)"
+grep -q 'SPURIOUS' "$GATE" || bad="$bad gate(no-spurious-class)"
+grep -q 'merge-commits' "$GATE" || bad="$bad gate(does-not-drive-merge-pipeline)"
+checked=$((checked + 3))
+
+cmp -s "$SPEC" "$TWIN" || bad="$bad spec-twins-differ"
+checked=$((checked + 1))
+
+SOUT="${TMPDIR:-/tmp}/SCV-IMPL-D-08.selftest.$$.log"
+sh "$GATE" --selftest > "$SOUT" 2>&1
+srr=$?
+SVERDICT=$(tail -1 "$SOUT")
+rm -f "$SOUT"
+checked=$((checked + 1))
+[ "$srr" -eq 0 ] || bad="$bad gate-selftest-rc($srr)"
+case "$SVERDICT" in
+  PASS*) : ;;
+  *) bad="$bad gate-selftest($SVERDICT)" ;;
+esac
+
+OUT="${TMPDIR:-/tmp}/SCV-IMPL-D-08.$$.log"
+SIMPLE_TIMEOUT_SECONDS=1800 bin/simple test "$SPEC" > "$OUT" 2>&1
+rc=$?
+checked=$((checked + 1))
+RESULTS=$(grep 'Results:' "$OUT" | tail -1)
+rm -f "$OUT"
+[ "$rc" -eq 0 ] || bad="$bad spec-rc($rc)"
+case "$RESULTS" in
+  *", 0 failed"*) : ;;
+  "") bad="$bad spec(no-results-line)" ;;
+  *) bad="$bad spec($RESULTS)" ;;
+esac
+
+[ "$checked" -gt 0 ] || { echo "ERROR — nothing was checked"; exit 2; }
+if [ -z "$bad" ]; then
+  echo "PASS — $checked check(s): merge corpus wired ($N cases: $CONF conflict-truth, $CLEAN clean-truth, $PP preprocessor), gate selftest green, $RESULTS"
+  exit 0
+fi
+echo "FAIL — $checked check(s), unmet:$bad"
+exit 1

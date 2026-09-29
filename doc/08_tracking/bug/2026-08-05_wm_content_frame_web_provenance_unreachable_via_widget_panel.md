@@ -1,8 +1,16 @@
 # `wm_content_frame_web_provenance_valid` is unreachable for `widget-panel`-wrapped WM content
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Date:** 2026-08-05
 - Status: OPEN (P2)
 - Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
+## Status 2026-09-13 — Left Open
+
+Verified entry is still valid and open. Requires architectural changes across wm-core and compositor layers to resolve gate unreachability. No regression detected.
 - **Severity:** Medium — the canonical themed WM content-frame path silently
   rejects every frame that goes through it, regardless of caller
 - **Area:** `src/lib/common/ui/window_scene.spl` (gate),
@@ -106,3 +114,4 @@ the already-admitted surface classes instead of `.widget-panel`. Any of these
 touches shared theme/renderer code used well beyond this showcase and needs
 its own verification pass; each interpreted HTML render in this environment
 costs 30-50 CPU-minutes, so iterating on it is expensive.
+

@@ -7,7 +7,7 @@ filesystem. See `README.md` for the primary vs secondary channel rule.
 - **Owning design doc:** `doc/05_design/nvfs_design.md`
 - **Upfront contributions (primary channel):**
   - `doc/05_design/nvfs/from_simple_db.md`
-  - `doc/05_design/nvfs/slang_requirements.md`
+  - `doc/05_design/nvfs/svllm_requirements.md`
 
 ## Schema
 
@@ -23,7 +23,7 @@ Entries use the fields in `TEMPLATE.md`:
 | Status | `Open` / `Accepted` / `Implemented` / `Rejected` |
 | Requested-semantics | one-paragraph description |
 | Acceptance-criteria | observable bullets |
-| Related-upfront | `from_simple_db.md §S#`, `slang_requirements.md §R#`, or `none` |
+| Related-upfront | `from_simple_db.md §S#`, `svllm_requirements.md §R#`, or `none` |
 | Related-design-doc | `nvfs_design.md §#`, or `tbd` |
 | Related-issue | GH issue URL (optional) |
 
@@ -45,13 +45,6 @@ edits go there, not in this tracker.
 | `[UPFRONT] S5` | Preferred I/O granule + capability query (`fs_caps`) | P0 | `from_simple_db.md §S5` |
 | `[UPFRONT] S6` | Capability-gated atomic-pointer-record publish | P0 | `from_simple_db.md §S6` |
 | `[UPFRONT] S7` | NVMe Flush / FUA pass-through tied to durability classes | P0 | `from_simple_db.md §S7` |
-
-Durability status (2026-08-20): the fs-driver capability vocabulary retains
-`Capability.DurableSync`, but no current adapter advertises it. The canonical
-`BlockDevice.flush()` default remains fail-closed, and the new
-`BlockDeviceDurabilityPortV1` is an owner seam only; it has no implementation
-until an NVMe/block adapter can acknowledge an actual Flush or FUA ordering
-boundary. WAL/group-commit counters must not promote this capability.
 
 The seven `[UPFRONT]` items above are **not** open entries. They are already
 locked into the fs-API contract. Do not re-file them here. Updates to their

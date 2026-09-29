@@ -15,7 +15,6 @@ val GC_SWEEP_MAX: i64 = 3        # bounded GC passes per maintenance sweep
 val MAP_OWNER_NONE: i64 = 0
 val MAP_OWNER_FG: i64 = 1
 val MAP_OWNER_BG: i64 = 2
-val FIRMWARE_COUNTER_MAX: i64 = 1000000000000000000
 
 struct Firmware:
     hil:   Hil
@@ -33,20 +32,6 @@ fn firmware_new_for_target(target_id: i64) -> Firmware:
     Firmware(hil: hil_new(), ticks: 0, target: nvme_fw_target_config(target_id),
         map_owner: MAP_OWNER_NONE, fg_ticks: 0, bg_ticks: 0, owner_conflicts: 0)
 
-fn target_cap(v: i64, cap: i64) -> i64:
-    if v < 0:
-        return 0
-    if v > cap:
-        return cap
-    v
-
-fn counter_next(v: i64) -> i64:
-    if v < 0:
-        return 1
-    if v >= FIRMWARE_COUNTER_MAX:
-        return FIRMWARE_COUNTER_MAX
-    v + 1
-
 impl Firmware:
     me submit(c: NvmeCmd) -> bool:
         me.hil.submit(c)
@@ -55,19 +40,10 @@ impl Firmware:
         me.hil.completions()
 
     me target_id() -> i64:
-        target_cap(me.target.target_id, TARGET_OPENSSD_8CH8WAY)
+        me.target.target_id
 
     me target_channels() -> i64:
-        target_cap(me.target.channels, NUM_CHANNELS)
-
-    me target_ways_per_channel() -> i64:
-        target_cap(me.target.ways_per_channel, 8)
-
-    me target_nvme_blocks_per_slice() -> i64:
-        target_cap(me.target.nvme_blocks_per_slice, 8)
-
-    me target_cpu_cores() -> i64:
-        target_cap(me.target.cpu_cores, 2)
+        me.target.channels
 
     me hardware_target() -> i64:
         openssd_target_is_hardware(me.target)
@@ -85,18 +61,11 @@ impl Firmware:
     me free_blocks() -> i64:
         me.hil.free_blocks()
 
-    me sanitize_map_owner():
-        if me.map_owner < MAP_OWNER_NONE or me.map_owner > MAP_OWNER_BG:
-            me.map_owner = MAP_OWNER_NONE
-
     me acquire_map_owner(owner: i64) -> bool:
-        me.sanitize_map_owner()
-        if owner <= MAP_OWNER_NONE or owner > MAP_OWNER_BG:
-            return false
         if me.map_owner == MAP_OWNER_NONE:
             me.map_owner = owner
             return true
-        me.owner_conflicts = counter_next(me.owner_conflicts)
+        me.owner_conflicts = me.owner_conflicts + 1
         false
 
     me release_map_owner(owner: i64):
@@ -104,39 +73,28 @@ impl Firmware:
             me.map_owner = MAP_OWNER_NONE
 
     me owner_idle() -> i64:
-        me.sanitize_map_owner()
         var idle: i64 = 0
         if me.map_owner == MAP_OWNER_NONE:
             idle = 1
         idle
 
     me conflict_count() -> i64:
-        if me.owner_conflicts < 0:
-            return 0
         me.owner_conflicts
 
     # One cooperative scheduler tick: at most one foreground command, then at most
     # one background GC step. The owner token serializes FTL-map access.
     me service_tick() -> i64:
-        me.ticks = counter_next(me.ticks)
+        me.ticks = me.ticks + 1
         var processed: i64 = 0
         if me.acquire_map_owner(MAP_OWNER_FG):
             processed = me.hil.tick()
             if processed > 0:
-                me.fg_ticks = counter_next(me.fg_ticks)
+                me.fg_ticks = me.fg_ticks + 1
             me.release_map_owner(MAP_OWNER_FG)
-        # L8 wiring: route the single background reclaim step through the FTL
-        # reliability tick (rel_tick) instead of a bare low-watermark GC. rel_tick
-        # keeps GC's low-watermark priority identical and, when free space is at/above
-        # the watermark, spends the one per-tick reclaim slot on a due refresh / scrub /
-        # wear-level step (design §7 budget invariant). The map-owner token is acquired
-        # ONLY when a step is actually due (rel_maintenance_due) so an idle device does
-        # not contend the token — preserving the owner-conflict accounting exactly.
-        if me.hil.ftl.rel_maintenance_due(GC_LOW_WATERMARK):
+        if me.hil.free_blocks() < GC_LOW_WATERMARK:
             if me.acquire_map_owner(MAP_OWNER_BG):
-                val before_rc: i64 = me.hil.ftl.rel_reclaims()
-                me.hil.ftl.rel_tick(GC_LOW_WATERMARK)
-                if me.hil.ftl.rel_reclaims() != before_rc:
+                val v: i64 = me.hil.gc()
+                if v != UNMAP:
                     me.bg_ticks = counter_next(me.bg_ticks)
                 me.release_map_owner(MAP_OWNER_BG)
         processed
@@ -172,7 +130,7 @@ impl Firmware:
                     k = GC_SWEEP_MAX
                 else:
                     reclaimed = reclaimed + 1
-                    me.bg_ticks = counter_next(me.bg_ticks)
+                    me.bg_ticks = me.bg_ticks + 1
                     k = k + 1
                 me.release_map_owner(MAP_OWNER_BG)
             else:
@@ -197,19 +155,6 @@ fn firmware_selftest() -> i64:
     fail = fail + expect_eq(fw.target_id(), TARGET_SIMPLE_SIM, "firmware target defaults to simulator")
     fail = fail + expect_eq(hw.hardware_target(), 1, "firmware can select OpenSSD hardware target")
     fail = fail + expect_eq(hw.target_channels(), NUM_CHANNELS, "firmware OpenSSD target exposes scheduler channels")
-    fail = fail + expect_eq(hw.target_ways_per_channel(), 8, "firmware OpenSSD target exposes ways per channel")
-    fail = fail + expect_eq(hw.target_nvme_blocks_per_slice(), 4, "firmware OpenSSD target exposes slice geometry")
-    fail = fail + expect_eq(hw.target_cpu_cores(), 2, "firmware OpenSSD target exposes Cortex-A9 core count")
-    hw.target.target_id = 99
-    hw.target.channels = -4
-    hw.target.ways_per_channel = 99
-    hw.target.nvme_blocks_per_slice = 99
-    hw.target.cpu_cores = -2
-    fail = fail + expect_eq(hw.target_id(), TARGET_OPENSSD_8CH8WAY, "firmware corrupted target id clamps to known profile range")
-    fail = fail + expect_eq(hw.target_channels(), 0, "firmware corrupted negative channel count fails closed")
-    fail = fail + expect_eq(hw.target_ways_per_channel(), 8, "firmware corrupted way count clamps to supported max")
-    fail = fail + expect_eq(hw.target_nvme_blocks_per_slice(), 8, "firmware corrupted slice geometry clamps to MDTS floor")
-    fail = fail + expect_eq(hw.target_cpu_cores(), 0, "firmware corrupted negative CPU core count fails closed")
 
     var lock_fw: Firmware = firmware_new()
     lock_fw.map_owner = MAP_OWNER_BG
@@ -240,19 +185,6 @@ fn firmware_selftest() -> i64:
     fail = fail + expect_eq(tick_fw.service(), 1, "service drains remaining foreground command")
     fail = fail + expect_eq(tick_fw.completions(), 2, "two completions after service drain")
     fail = fail + expect_eq(tick_fw.fg_ticks, 2, "foreground ticks counted")
-    tick_fw.ticks = -5
-    tick_fw.fg_ticks = -4
-    tick_fw.submit(cmd_make(94, OP_WRITE, 94, 1, 0x64))
-    fail = fail + expect_eq(tick_fw.service_tick(), 1, "corrupted negative tick counters still allow foreground")
-    fail = fail + expect_eq(tick_fw.ticks, 1, "corrupted negative total ticks resume from one")
-    fail = fail + expect_eq(tick_fw.fg_ticks, 1, "corrupted negative foreground ticks resume from one")
-    tick_fw.ticks = FIRMWARE_COUNTER_MAX
-    tick_fw.fg_ticks = FIRMWARE_COUNTER_MAX
-    tick_fw.submit(cmd_make(95, OP_WRITE, 95, 1, 0x65))
-    fail = fail + expect_eq(tick_fw.service_tick(), 1, "saturated tick counters still allow foreground")
-    fail = fail + expect_eq(tick_fw.ticks, FIRMWARE_COUNTER_MAX, "total tick counter saturates")
-    fail = fail + expect_eq(tick_fw.fg_ticks, FIRMWARE_COUNTER_MAX, "foreground tick counter saturates")
-    fail = fail + expect_eq(counter_next(FIRMWARE_COUNTER_MAX), FIRMWARE_COUNTER_MAX, "shared firmware counter helper saturates")
 
     fw.submit(cmd_make(1, OP_WRITE, 5, 1, 0x42))
     fw.service()

@@ -1,0 +1,156 @@
+# @tag:in-development
+# Tracks: doc/08_tracking/bug/pr1870_pr1830_unreviewed_merge_fallout_2026-09-28.md
+use std.spec.*
+use std.nogc_sync_mut.src.collections.adaptive_text_map.AdaptiveTextMap
+use std.nogc_sync_mut.src.collections.adaptive_text_set.{
+    AdaptiveSetAlgorithm, AdaptiveSetAttribute, AdaptiveSetProfile,
+    AdaptiveSetWorkloadProfile
+}
+
+describe "AdaptiveTextMap per-container algorithms":
+    it "keeps values when current-run hash collisions select ordered storage":
+        val policy = AdaptiveSetProfile(linear_size_limit: 0, lookup_promotion_count: 1, allow_hash: true)
+        var map = AdaptiveTextMap.with_profile(policy)
+        expect(map.put("alpha", "value")).to_be(true)
+        expect(map.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Hash)
+        # alpha and e share one bucket in the three-bucket text map.
+        expect(map.get("e")).to_be_nil()
+        expect(map.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Ordered)
+        expect(map.get("alpha")).to_equal(Some("value"))
+        map.clear()
+        expect(map.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Ordered)
+
+    it "preserves payloads when a no-hash profile selects ordered storage":
+        val policy = AdaptiveSetProfile(linear_size_limit: 2, lookup_promotion_count: 32, allow_hash: false)
+        val prior = AdaptiveSetWorkloadProfile(
+            site_id: "ast://map/no-hash#stable", target_profile_id: "x86_64-v3",
+            sample_count: 1, size_p95: 3, lookup_count_p95: 40,
+            hit_count_p95: 30, miss_count_p95: 10
+        )
+        var map = AdaptiveTextMap.with_site_and_target(policy, prior.site_id, prior.target_profile_id)
+        expect(map.put("alpha", "value")).to_be(true)
+        expect(map.apply_workload_profile(prior)).to_be(true)
+        expect(map.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Ordered)
+        expect(map.get("alpha")).to_equal(Some("value"))
+        map.clear()
+        expect(map.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Ordered)
+
+    it "keeps map payloads when measured collisions select ordered auto storage":
+        val policy = AdaptiveSetProfile(linear_size_limit: 8, lookup_promotion_count: 32, allow_hash: true)
+        val prior = AdaptiveSetWorkloadProfile(
+            site_id: "ast://map/collision#stable", target_profile_id: "x86_64-v3",
+            sample_count: 2, size_p95: 20, lookup_count_p95: 100,
+            hit_count_p95: 80, miss_count_p95: 20,
+            hash_probe_count_p95: 100, hash_collision_count_p95: 40
+        )
+        var map = AdaptiveTextMap.with_site_and_target(policy, prior.site_id, prior.target_profile_id)
+        expect(map.put("alpha", "value")).to_be(true)
+        expect(map.apply_workload_profile(prior)).to_be(true)
+        expect(map.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Ordered)
+        expect(map.get("alpha")).to_equal(Some("value"))
+        map.clear()
+        expect(map.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Ordered)
+        var forced = AdaptiveTextMap.with_attribute(
+            policy, prior.site_id, prior.target_profile_id, AdaptiveSetAttribute.Linear)
+        expect(forced.apply_workload_profile(prior)).to_be(false)
+        expect(forced.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Linear)
+
+    it "rejects impossible single-sample workload feedback":
+        val policy = AdaptiveSetProfile(linear_size_limit: 8, lookup_promotion_count: 32, allow_hash: true)
+        var map = AdaptiveTextMap.with_site_and_target(policy, "ast://map/invalid#stable", "x86_64-v3")
+        val invalid = AdaptiveSetWorkloadProfile(
+            site_id: "ast://map/invalid#stable", target_profile_id: "x86_64-v3",
+            sample_count: 1, size_p95: 64, lookup_count_p95: 100,
+            hit_count_p95: 80, miss_count_p95: 10
+        )
+        expect(map.apply_workload_profile(invalid)).to_be(false)
+        expect(map.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Linear)
+
+    it "changes only one map and preserves values through three representations":
+        val policy = AdaptiveSetProfile(
+            linear_size_limit: 2, lookup_promotion_count: 100, allow_hash: true
+        )
+        var selected = AdaptiveTextMap.with_profile(policy)
+        var other = AdaptiveTextMap.with_profile(policy)
+        expect(selected.put("m", "middle")).to_be(true)
+        expect(selected.put("a", "first")).to_be(true)
+        expect(other.put("m", "other")).to_be(true)
+        expect(selected.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Linear)
+        expect(selected.put("z", "last")).to_be(true)
+        expect(selected.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Hash)
+        expect(other.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Linear)
+        selected.set_attribute(AdaptiveSetAttribute.Ordered)
+        expect(selected.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Ordered)
+        expect(selected.put("q", "successor")).to_be(true)
+        expect(selected.put("q", "updated")).to_be(false)
+        expect(selected.remove("m") ?? "").to_equal("middle")
+        expect(selected.get("q") ?? "").to_equal("updated")
+        expect(selected.keys()).to_equal(["a", "q", "z"])
+        selected.set_attribute(AdaptiveSetAttribute.Linear)
+        expect(selected.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Linear)
+        expect(selected.get("a") ?? "").to_equal("first")
+        expect(other.get("m") ?? "").to_equal("other")
+
+    it "distinguishes an empty stored value from an absent key":
+        var map = AdaptiveTextMap.new()
+        expect(map.put("empty", "")).to_be(true)
+        expect(map.contains_key("empty")).to_be(true)
+        expect(map.get("empty") ?? "missing").to_equal("")
+        expect(map.remove("empty") ?? "missing").to_equal("")
+        expect(map.contains_key("empty")).to_be(false)
+        expect(map.len()).to_equal(0)
+
+    it "returns the same sorted entry snapshot from each physical map":
+        var map = AdaptiveTextMap.new()
+        map.put("z", "last")
+        map.put("a", "first")
+        map.put("m", "middle")
+        for attribute in [AdaptiveSetAttribute.Linear, AdaptiveSetAttribute.Hash, AdaptiveSetAttribute.Ordered]:
+            map.set_attribute(attribute)
+            val entries = map.entries()
+            expect(entries.len()).to_equal(3)
+            expect(entries[0].key).to_equal("a")
+            expect(entries[0].value).to_equal("first")
+            expect(entries[1].key).to_equal("m")
+            expect(entries[1].value).to_equal("middle")
+            expect(entries[2].key).to_equal("z")
+            expect(entries[2].value).to_equal("last")
+
+    it "applies matching prior load to automatic storage before the first insertion":
+        val policy = AdaptiveSetProfile(
+            linear_size_limit: 8, lookup_promotion_count: 100, allow_hash: true
+        )
+        var map = AdaptiveTextMap.with_site_and_target(
+            policy, "ast://map/hot#stable", "x86_64-v3"
+        )
+        val prior = AdaptiveSetWorkloadProfile(
+            site_id: "ast://map/hot#stable", target_profile_id: "x86_64-v3",
+            sample_count: 1, size_p95: 100, lookup_count_p95: 500,
+            hit_count_p95: 250, miss_count_p95: 250
+        )
+        expect(map.apply_workload_profile(prior)).to_be(true)
+        expect(map.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Hash)
+        expect(map.put("key", "value")).to_be(true)
+        expect(map.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Hash)
+        expect(map.observation().lookups).to_equal(0)
+        map.clear()
+        expect(map.len()).to_equal(0)
+        expect(map.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Hash)
+        expect(map.observation().peak_size).to_equal(1)
+
+    it "keeps an explicit linear map when prior load is hot":
+        val policy = AdaptiveSetProfile(
+            linear_size_limit: 8, lookup_promotion_count: 100, allow_hash: true
+        )
+        var map = AdaptiveTextMap.with_attribute(
+            policy, "ast://map/forced#stable", "x86_64-v3",
+            AdaptiveSetAttribute.Linear
+        )
+        val prior = AdaptiveSetWorkloadProfile(
+            site_id: "ast://map/forced#stable", target_profile_id: "x86_64-v3",
+            sample_count: 1, size_p95: 100, lookup_count_p95: 500,
+            hit_count_p95: 250, miss_count_p95: 250
+        )
+        expect(map.apply_workload_profile(prior)).to_be(false)
+        map.put("key", "value")
+        expect(map.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Linear)

@@ -390,3 +390,7 @@ recording:
 
 Retained evidence: `build/wm_lane_evidence/run_2026-08-09_0324_cssvar_receipt/`
 (`serial.log`, `gate-stdout.log`, `native-build.out`).
+
+## Triage 2026-09-13 (BUGFIX-7 lane)
+
+Out of lane: needs a live SimpleOS x86_64 WM guest render + QEMU evidence to verify CSS var() resolution. No change made.

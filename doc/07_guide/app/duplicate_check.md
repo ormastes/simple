@@ -25,15 +25,10 @@ simple duplicate-check src/ --semantic-threshold 0.92
 
 # Force JSON output
 simple duplicate-check src/ --format json
-
-# Persist a lexical duplicate database
-simple duplicate-check src/ --mode token --format sdn
 ```
 
 Modes:
-- `semantic` is the default and looks for documentation/concept duplication. It
-  compares candidates across the whole scanned tree, so a clone whose copies
-  live in different directories is still reported.
+- `semantic` is the default and looks for documentation/concept duplication.
 - `token` finds concrete lexical duplication and honors `--min-lines` and `--min-tokens`.
 - `cosine` finds fuzzy lexical near-duplicates and honors `--similarity-threshold`, `--min-lines`, and `--min-tokens`.
 
@@ -43,7 +38,6 @@ Modes:
 
 `simple duplicate-check` supports:
 - `--mode semantic`
-- `--mode semantic-llm`
 - `--mode token`
 - `--mode cosine`
 
@@ -52,15 +46,6 @@ The compatibility aliases `--semantic` and `--cosine` are still accepted. Lexica
 - `--min-tokens`
 - `--min-impact`
 - `--similarity-threshold`
-
-Similarity, semantic, and semantic-drift thresholds are probabilities and must
-remain between `0` and `1`, inclusive. Invalid CLI or configuration values are
-usage errors rather than empty-match success.
-
-Use `--no-default-excludes` when the requested scan root is itself under a
-normally excluded directory such as `test/`. Normal newline-terminated source
-is counted by logical lines; the terminal split artifact is not a candidate
-line or duplicate window.
 
 ---
 
@@ -71,8 +56,8 @@ Use `--progress` to print periodic progress to stderr while keeping stdout
 reserved for the normal text or JSON report:
 
 ```bash
-bin/simple duplicate-check src/compiler --mode token --progress
-bin/simple duplicate-check src/compiler --mode cosine --progress --progress-interval-ms 10000
+bin/simple run src/compiler/90.tools/duplicate_check/main.spl duplicate-check src/compiler --mode token --progress
+bin/simple run src/compiler/90.tools/duplicate_check/main.spl duplicate-check src/compiler --mode cosine --progress --progress-interval-ms 10000
 ```
 
 Progress lines include phase, completed work, elapsed seconds, and current RSS.
@@ -99,18 +84,6 @@ For refactors, prefer scanning the smallest owned directory first. If token or
 cosine mode stays in one phase for several progress intervals, narrow the target
 path or raise `--min-lines` / `--min-tokens`.
 
-## Bootstrap Smoke Boundary
-
-The full CLI links the canonical duplicate-check owner in-process; production
-evidence must not execute `main.spl` as a raw source worker. After Stage 4,
-`scripts/check/check-bootstrap-essential-tools-smoke.shs` runs the exact fresh
-binary from a temporary non-repository directory. It proves clean and cloned
-token JSON, token/cosine uncached parity, cache creation and reuse, changed and
-deleted-file invalidation, `--no-cache` precedence, exit codes, and clean
-stdout/stderr separation. It does not replace repository-scale checks.
-The shared [Stage 4 essential-tools gate](../tooling/pure_simple_tooling.md#stage-4-essential-tools-gate)
-also requires the test-runner and lint markers from that same fresh binary.
-
 ---
 
 ## Configuration
@@ -120,7 +93,6 @@ Create `simple.duplicate-check.sdn` in the project root:
 ```sdn
 duplicate-check:
   output-format: text
-  report-path: doc/01_research/analysis/duplicate_db.sdn
   max-allowed: 0
   mode: semantic
 
@@ -139,24 +111,7 @@ duplicate-check:
   min-lines: 5
   min-tokens: 30
   similarity-threshold: 0.85
-  use-incremental: false
-  incremental-cache-path: .simple-cache/duplicate-check.sdn
 ```
-
-`mode` accepts `semantic`, `semantic-llm`, `token`, or `cosine`;
-`output-format` accepts `text`, `json`, or `sdn`. `sdn` requires `token` or
-`cosine` mode, writes the lexical duplicate database to `report-path`, and
-fails nonzero if that write fails. The CLI applies explicit flags after
-loading this file, then validates the effective values. An invalid value that
-is not replaced by a valid CLI override is a configuration error and exits `2`
-instead of silently selecting a different analysis or output mode.
-
-For token or cosine mode, `--cache-path PATH` enables the versioned per-file
-cache and `--no-cache` disables it. Semantic modes reject incremental caching.
-Malformed, old-format, changed, or deleted entries fail cold and are rebuilt.
-Semantic imports are lazy on interpreted token/cosine startup and their JSON
-helpers do not import MCP; native one-binary closure remains static and is
-tracked separately until fresh Stage-4 qualification.
 
 ---
 
@@ -169,7 +124,6 @@ simple duplicate-check src/ --max-allowed 5
 
 - `text` prints a mode-specific report.
 - `json` emits a stable top-level `mode` field plus mode-specific result arrays.
-- `sdn` writes the lexical duplicate database configured by `report-path`.
 
 ---
 

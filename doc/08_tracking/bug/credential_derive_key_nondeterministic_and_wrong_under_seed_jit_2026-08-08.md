@@ -1,4 +1,9 @@
 # `credential_derive_key` is non-deterministic AND wrong under the seed JIT — the credential-store KDF does not derive a key
+## Closed 2026-09-16 — Status: FIXED; RED-GREEN-RED control, all module/engine cells return 74807
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - **Filed:** 2026-08-08
 - **Severity:** CRITICAL (the credential-store KDF is not a function of its
@@ -316,3 +321,4 @@ equal, and equal to neither JIT value.
 - `doc/08_tracking/bug/credential_store_key_and_salt_corrupted_by_list_param_hex_2026-08-08.md`
 - `doc/08_tracking/bug/credential_key_generate_random_hex_length_reads_shifted_2026-08-08.md`
 - `doc/08_tracking/bug/rt_package_chmod_family_fails_from_jit_key_left_world_readable_2026-08-08.md`
+

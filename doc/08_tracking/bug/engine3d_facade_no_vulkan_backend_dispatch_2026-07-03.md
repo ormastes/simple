@@ -1,8 +1,7 @@
 # Engine3D facade never dispatches to the Vulkan backend
 
 Date: 2026-07-03
-Status: FIXED
-Status re-verified 2026-08-17 by source inspection (triage shard 01).
+Status: open
 Severity: P3
 Found by: W6d lane agent (game.rollball, G4.1 Vulkan leg)
 
@@ -51,7 +50,3 @@ and `rt_vk3d_available()`), forwarding the render methods to it. Separately,
 wire `VulkanBackend3D` to submit through the `rt_vk3d_*` device path (with a
 lavapipe software ICD for deterministic CI) so the Vulkan leg exercises a real
 device rather than a CPU reimplementation.
-
-## Runtime verification (2026-07-17)
-
-Source read of `create_with_backend` in `src/lib/gc_async_mut/gpu/engine3d/engine.spl:117-142` confirms: only `CpuBackend3D` field exists, and for `"vulkan"/"vulkan-font"` calls `install_vulkan_font_backend()` (font adapter swap, not triangle dispatch). No `VulkanBackend3D` field or dispatch. Runtime probe blocked by env skew (seed/source mismatch on `rt_vulkan_create_offscreen_render_pass`) and native-build timeout. Source-confirmed STILL-REPRODUCES.

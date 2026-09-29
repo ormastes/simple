@@ -32,10 +32,12 @@ treesitter_cursor_spec -> compiler
 <details>
 <summary>Full Scenario Manual</summary>
 
+```simple
 # TreeSitter Heuristic Mode Specification
 
 use compiler.treesitter.*
 
+```
 ## At a Glance
 
 | Field | Value |

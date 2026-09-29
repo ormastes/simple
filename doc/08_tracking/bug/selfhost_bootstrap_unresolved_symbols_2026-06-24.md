@@ -1,4 +1,13 @@
 # Self-host bootstrap broken: stage4 (seed-built) has 548 unresolved symbols
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
+
+## Triage note 2026-09-13 — left OPEN: fix blocked by the concurrent bootstrap
+- **inferred**: the remedy named in this entry lands in `src/compiler/**` and/or `src/compiler_rust/**`. A bootstrap is running concurrently in this workspace, so editing either tree would desync it; no repair was attempted.
+- **measured**: the referenced product paths still exist, so there is no removed-code basis for a stale closure.
+- **inferred**: `bin/simple` on this host is the Rust seed (v1.0.0-rc.1), not the self-hosted binary; and `bin/simple test` is broken here (a trivial spec returns a false `outer-bound-timeout`), so neither arm of a verification is available.
 
 **Date:** 2026-06-24
 **Area:** bootstrap / self-hosting / native-build (cranelift) codegen
@@ -36,7 +45,7 @@ The self-hosted binary can't be produced cleanly because of the above.
 ## Dominant cluster root cause: `use X as Y` alias mangling (seed codegen)
 `ParserModule` (32+ unresolved) is an **import alias**:
 `use compiler.frontend.parser_types.{Module as ParserModule, ...}`
-(`_Items/lowering_helpers.spl:10`). The seed's native-build mangles method symbols on the
+(`items_part1.spl:10`). The seed's native-build mangles method symbols on the
 *alias* (`<using_module>__ParserModule`) instead of the canonical type
 (`parser_types.Module`), so call sites don't match definitions → unresolved. This
 is why "most cases work" — only `use X as Y`-aliased types break. (Other clusters
@@ -177,35 +186,3 @@ exit 0 even when it prints a diagnostic.
   `wasm_cli_emit_no_artifact_2026-05-30.md` — but that is the Rust seed, not the
   pure-Simple compiler.
 
----
-
-## 2026-08-17 (W2 driver lane) — BOTH NAMED FOLLOW-ON BLOCKERS RETIRED (measured)
-
-The two "next blockers" this doc closes with were re-tested against CURRENT
-SOURCE, classified by content rather than SHA. Binary: the Rust seed
-`bin/release/x86_64-unknown-linux-gnu/simple` (a stale bootstrap seed), driving
-the pure-Simple driver as SOURCE via `bin/simple run
-src/compiler/80.driver/main.spl --check <file>` — the stdlib and compiler are
-read as `.spl` every run, so no build was needed and no binary was deployed.
-
-1. **`--target` rejected** — FIXED. `src/compiler/80.driver/main.spl:583` handles
-   the spaced form and `:589` the `--target=` form, both assigning
-   `cli_args.target`; `:121` maps the value onto the codegen backend
-   (wasm32/wasm select the pure-Simple wasm path). Both arms sit before the
-   `elif arg.starts_with("-")` catch-all at `:591` that used to swallow it.
-2. **`--check` exited 0 on a diagnostic** — FIXED. Measured directly:
-   - clean file (`fn main(): print("ok")`) → **rc=0**, phases 1-3 complete;
-   - file with `nope_undefined_fn()` → **rc=1**, and the diagnostic is printed:
-     `HIR lowering error ...: unresolved name: nope_undefined_fn at ...:2:35`,
-     preceded by the `[collect-all] 1 module(s) poisoned` summary.
-
-**The headline claim (548 unresolved symbols in the seed-built stage 4) remains
-UNVERIFIED, not retired** — checking it needs a native stage-4 link, which was
-not run. Only the two follow-on blockers are closed here.
-
-Guard: `test/01_unit/compiler/driver/driver_main_cli_contract_spec.spl` —
-`Results: 4 total, 4 passed, 0 failed`. It pins the `--target` arms, the
-arm-ordering-before-catch-all property that was the actual defect, the
-target→backend mapping, and the `--check` compile-mode routing. Behavioural
-re-verification costs ~4 minutes per invocation and is deliberately not
-spec-shaped.

@@ -1,0 +1,42 @@
+"""
+# MCP Handler Graph Lazy Boundary
+
+Regression contract for `mcp_interpreter_startup_12s_2026-09-14`.
+The entry module must keep handler families behind their dispatch functions,
+and protocol startup must defer the compiler graph used only by virtual-summary
+resource reads.
+"""
+
+# @feature mcp_handler_graph_lazy_boundary
+# tag: unit
+
+use std.spec
+
+extern fn rt_file_read_text(path: text) -> text
+
+fn mcp_contract_file_text(path: text) -> text:
+    rt_file_read_text(path) ?? ""
+
+fn before_first_fn(text_value: text) -> text:
+    text_value.split("\nfn ")[0]
+
+describe "MCP handler graph lazy boundary":
+    it "keeps tool handler families out of main_dispatch module scope":
+        val dispatch_preamble = before_first_fn(mcp_contract_file_text("src/app/mcp/main_dispatch.spl"))
+        expect(dispatch_preamble).to_contain("use .main_lazy_json")
+        expect(dispatch_preamble.contains("use .main_lazy_diag_tools")).to_equal(false)
+        expect(dispatch_preamble.contains("use .main_lazy_debug_tools")).to_equal(false)
+        expect(dispatch_preamble.contains("use .main_lazy_caret_tools")).to_equal(false)
+
+    it "keeps the virtual-summary compiler graph out of protocol module scope":
+        val protocol = mcp_contract_file_text("src/app/mcp/main_lazy_protocol.spl")
+        val protocol_preamble = before_first_fn(protocol)
+        expect(protocol_preamble.contains("use compiler.common.cache_contract.virtual_source_registration_v1")).to_equal(false)
+        expect(protocol).to_contain("fn read_registered_summary(id: text, uri: text) -> text:")
+        expect(protocol).to_contain("    use compiler.common.cache_contract.virtual_source_registration_v1")
+
+    it "retains lazy imports for representative tool families":
+        val dispatch = mcp_contract_file_text("src/app/mcp/main_dispatch.spl")
+        expect(dispatch).to_contain("use app.mcp.main_lazy_diag_tools")
+        expect(dispatch).to_contain("use app.mcp.main_lazy_debug_tools")
+        expect(dispatch).to_contain("use app.mcp.main_lazy_caret_tools")

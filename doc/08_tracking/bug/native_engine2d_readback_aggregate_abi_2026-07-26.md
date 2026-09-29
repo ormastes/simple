@@ -1,4 +1,8 @@
 # Native Engine2DReadback Aggregate ABI
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -49,8 +53,3 @@ Deploy the name-keyed field-layout precedence fix from
 device readback, positive handle/device identity, zero mismatches, and passing
 strict/parity specs.
 
-## Triage 2026-08-17 (lane m7c_lib_async) — UNVERIFIED on this host
-
-A native aggregate-return ABI fault: unreachable from an interpreted spec body and needing a GPU readback this host cannot perform. Not reproduced and not closed: this lane could neither exercise the path nor
-find content-level evidence of a fix. Recording UNVERIFIED explicitly so it is
-not mistaken for either a live confirmation or a close.

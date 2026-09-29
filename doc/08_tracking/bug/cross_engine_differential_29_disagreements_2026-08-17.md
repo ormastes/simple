@@ -1,10 +1,51 @@
 # Cross-engine differential: 29 of 150 cells disagree between interpreter and JIT
+## Closed 2026-09-16 — Status: RESOLVED; all 29 cells fixed, last one 2026-08-23 with regression fixture
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Filed:** 2026-08-17
 **Severity:** HIGH — silent wrong results, no diagnostic on any of them
 **Found by:** `scripts/check/check-engine-differential.shs` on first run
-**Status:** RESOLVED for 28 of 29 cells; **ONE still live** — see the update
-below, which is the actionable part of this document.
+**Status:** RESOLVED — all 29 cells. 28 were already fixed in-tree on
+2026-08-17 (see the update below); the last one, section E's `copy_arr_u8_copy`,
+was fixed 2026-08-23 by lane `divergence-1`.
+
+**Section E fix (2026-08-23).** The defect was NOT in either runtime's
+`rt_array_copy` — both already reproduce the byte-packed layout
+(`is_byte_packed()` + `copy_nonoverlapping` in
+`src/compiler_rust/runtime/src/value/collections.rs`;
+`RT_CORE_ARRAY_FLAG_BYTES` + `memcpy` in `src/runtime/runtime_native.c`). It was
+in the seed's MIR local-bind lowering:
+`src/compiler_rust/compiler/src/mir/lower/lowering_stmt.rs`'s
+`is_array_place_alias` predicate ended in `.is_some_and(|elem| elem !=
+TypeId::U8)`, an explicit carve-out whose stated reason ("rt_array_copy's
+rt_array_push-based copy loop does not understand [the byte-packed layout]")
+had gone stale — the runtime grew the byte-packed branch afterwards and the
+lowering-side exclusion was never removed. So `val cp = src` for a `[u8]`
+skipped `rt_array_copy` entirely and stored the source handle. Fix: drop the
+element-type condition (`.is_some()`), i.e. treat every array element type
+alike. Verified on a rebuilt seed: `interpret` and `jit` now both report
+`cp[1] == 2`; `[i8]`, `[u16]`, `[u32]`, `[bool]`, `[f32]`, `[i64]` unchanged.
+
+Regression coverage:
+`test/fixtures/engine_differential/packed_array_value_semantics.spl` — the
+pre-existing `array_value_semantics.spl` fixture covered `[i64]` only, which is
+why this cell survived a 150-cell sweep and a 13-fixture gate.
+
+Twin check (cross-implementation rule), both directions:
+- pure-Simple MIR lowering (`src/compiler/50.mir/mir_lowering_stmts.spl`,
+  `maybe_copy_array_value`): twin **ABSENT** — it gates on
+  `local_is_runtime_array` alone and has no per-element-type carve-out, so it
+  copies `[u8]` like every other element type.
+- C runtime vs Rust runtime `rt_array_copy`: twin **ABSENT** — both handle the
+  byte-packed layout (evidence above).
+- Stale comment noted, not edited (another lane's file): that same
+  `maybe_copy_array_value` docstring still claims `runtime_native.c` "implements
+  rt_array_len/rt_array_new/rt_array_get/rt_array_push but NOT rt_array_copy".
+  `rt_array_copy` is now defined at `src/runtime/runtime_native.c:6930` and
+  declared at `src/runtime/runtime.h:470`.
 
 ---
 
@@ -191,3 +232,4 @@ radius:
 
     sh scripts/check/check-engine-differential.shs --quick
     SIMPLE_BIN=/path/to/fresh/simple sh scripts/check/check-engine-differential.shs
+

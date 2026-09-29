@@ -4,15 +4,20 @@
 #
 # Wires the frozen cross-stage receipt contract
 # (`StageReceipt`, src/lib/common/compute/placement_contracts/backend.spl —
-# REUSED, never redefined) onto the three CPU-reference SMF link steps that
-# exist today: collect (smf_collect_records), resolve (smf_resolve) and
-# reachability (smf_reachable_sections). Each `*_with_receipt` wrapper calls
+# REUSED, never redefined) onto the CPU-reference SMF link stages L2-L8. Each `*_with_receipt` wrapper calls
 # the frozen function unchanged and attaches one receipt keyed by the
 # matching pipeline-stage const from resolve_types.spl:
 #
 #   collect      -> SMF_LINK_STAGE_L2_ARENAS   (record arenas built)
+#   sort         -> SMF_LINK_STAGE_L3_INTERN_SORT
 #   resolve      -> SMF_LINK_STAGE_L4_SELECT   (winning definition selected)
+#   archive      -> SMF_LINK_STAGE_L5_ARCHIVE_FIXPOINT (no-archive closure)
 #   reachability -> SMF_LINK_STAGE_L6_REACHABILITY
+#   layout       -> SMF_LINK_STAGE_L7_ADDRESS_LAYOUT
+#   relocation   -> SMF_LINK_STAGE_L8_RELOCATION
+#
+# The L2 multi-module, L3, L5, L7 and L8 wrappers were added for the
+# L2->L8 driver (smf_link_driver.spl, linker plan lane A6).
 #
 # Receipt content is DETERMINISTIC ONLY: item counts and SHA-256 content
 # roots over canonical serializations of the stage's inputs/outputs
@@ -44,9 +49,14 @@ use std.common.structural.resolve.resolve_types.{
     ReferenceRecord,
     ResolutionRecord,
     SMF_LINK_STAGE_L2_ARENAS,
+    SMF_LINK_STAGE_L3_INTERN_SORT,
     SMF_LINK_STAGE_L4_SELECT,
-    SMF_LINK_STAGE_L6_REACHABILITY
+    SMF_LINK_STAGE_L5_ARCHIVE_FIXPOINT,
+    SMF_LINK_STAGE_L6_REACHABILITY,
+    SMF_LINK_STAGE_L7_ADDRESS_LAYOUT,
+    SMF_LINK_STAGE_L8_RELOCATION
 }
+use std.common.structural.resolve.resolve_core.{sort_definitions_stable, sort_references_stable}
 use std.common.structural.resolve.resolve_frontier.{ResolveEdge, ReachableResult}
 use compiler.backend.linker.gpu_smf.smf_link_profile.{
     SmfLinkInputs,
@@ -55,6 +65,9 @@ use compiler.backend.linker.gpu_smf.smf_link_profile.{
     smf_resolve
 }
 use compiler.backend.linker.gpu_smf.smf_reachability.{smf_reachable_sections}
+use compiler.backend.linker.gpu_smf.smf_section_layout.{SmfLayoutResult, smf_layout_sections}
+use compiler.backend.linker.gpu_smf.smf_reloc_apply.{SmfApplyResult, smf_apply_relocations}
+use compiler.backend.linker.smf_writer.{SmfRelocation}
 
 # ----------------------------------------------------------------------------
 # Receipt identity constants.
@@ -259,3 +272,156 @@ fn smf_reachable_sections_with_receipt(section_count: i64, edges: [ResolveEdge],
         marked as u64,
         malformed)
     SmfReachabilityOutcome(result: result, receipt: receipt)
+
+# ----------------------------------------------------------------------------
+# Driver-stage wrappers (smf_link_driver.spl, lane A6).
+# ----------------------------------------------------------------------------
+
+struct SmfSortOutcome:
+    """`sort_definitions_stable`/`sort_references_stable` output plus its L3
+    StageReceipt."""
+    defs: [DefinitionRecord]
+    refs: [ReferenceRecord]
+    receipt: StageReceipt
+
+struct SmfLayoutOutcome:
+    """`smf_layout_sections` output plus its L7 StageReceipt."""
+    result: SmfLayoutResult
+    receipt: StageReceipt
+
+struct SmfRelocJob:
+    """One section's relocation pass: the exact arguments of
+    `smf_apply_relocations`."""
+    section_bytes: [u8]
+    section_addr: i64
+    relocs: [SmfRelocation]
+    symbol_addrs: [i64]
+
+struct SmfRelocOutcome:
+    """One `SmfApplyResult` per job (job order) plus the L8 StageReceipt."""
+    results: [SmfApplyResult]
+    receipt: StageReceipt
+
+fn _ser_u8s(bytes: [u8]) -> text:
+    var out = "b:" + bytes.len().to_text() + ":"
+    for b in bytes:
+        out = out + (b as i64).to_text() + ","
+    out + ";"
+
+fn _ser_i64s(values: [i64]) -> text:
+    var out = "v:" + values.len().to_text() + ":"
+    for v in values:
+        out = out + v.to_text() + ","
+    out + ";"
+
+fn smf_collect_modules_with_receipt(inputs: [SmfLinkInputs]) -> SmfCollectOutcome:
+    """`smf_collect_records` over several modules, concatenated in input
+    order, with ONE L2_ARENAS receipt for the whole link (the single-module
+    `smf_collect_records_with_receipt` is unchanged)."""
+    var defs: [DefinitionRecord] = []
+    var refs: [ReferenceRecord] = []
+    var input_ser = "smf.collect.modules.v1|"
+    var symbol_count: i64 = 0
+    for module in inputs:
+        val (mdefs, mrefs) = smf_collect_records(module)
+        for d in mdefs:
+            defs.push(d)
+        for r in mrefs:
+            refs.push(r)
+        input_ser = input_ser + "m:" + (module.module_index as i64).to_text() + "|"
+        for sym in module.symbols:
+            input_ser = input_ser + _ser_symbol_input(sym)
+        symbol_count = symbol_count + module.symbols.len()
+    val receipt = _smf_stage_receipt(
+        SMF_LINK_STAGE_L2_ARENAS,
+        input_ser,
+        _ser_records(defs, refs),
+        symbol_count as u64,
+        (defs.len() + refs.len()) as u64,
+        0)
+    SmfCollectOutcome(defs: defs, refs: refs, receipt: receipt)
+
+fn smf_sort_records_with_receipt(defs: [DefinitionRecord], refs: [ReferenceRecord]) -> SmfSortOutcome:
+    """GraphResolveCore's stable sorts plus the L3_INTERN_SORT receipt
+    (names were interned at collect; this stage is the key-order sort).
+    Counts in and out are equal by construction — a sort never drops."""
+    val sorted_defs = sort_definitions_stable(defs)
+    val sorted_refs = sort_references_stable(refs)
+    val n = (defs.len() + refs.len()) as u64
+    val receipt = _smf_stage_receipt(
+        SMF_LINK_STAGE_L3_INTERN_SORT,
+        "smf.sort.v1|" + _ser_records(defs, refs),
+        _ser_records(sorted_defs, sorted_refs),
+        n,
+        (sorted_defs.len() + sorted_refs.len()) as u64,
+        0)
+    SmfSortOutcome(defs: sorted_defs, refs: sorted_refs, receipt: receipt)
+
+fn smf_archive_closure_receipt(unresolved_count: i64) -> StageReceipt:
+    """L5_ARCHIVE_FIXPOINT receipt for an SMF link with NO archive inputs
+    (in-memory modules only): the closure converges immediately, zero
+    members extracted. `item_count_in` = unresolved references presented to
+    the closure, `item_count_out` = members extracted (0). Emitted so the
+    stage sequence is gap-free and a future archive-aware L5 changes the
+    receipt, never the stage count."""
+    val ser = "smf.archive.v1|archives:0|unresolved:" + unresolved_count.to_text()
+    _smf_stage_receipt(
+        SMF_LINK_STAGE_L5_ARCHIVE_FIXPOINT,
+        ser,
+        "extracted:0|unresolved:" + unresolved_count.to_text(),
+        unresolved_count as u64,
+        0,
+        0)
+
+fn smf_layout_sections_with_receipt(base_addr: i64, sizes: [i64], alignments: [i64]) -> SmfLayoutOutcome:
+    """`smf_layout_sections` plus its L7_ADDRESS_LAYOUT receipt. A rejected
+    layout is recorded as `malformed_count: 1`."""
+    val result = smf_layout_sections(base_addr, sizes, alignments)
+    val input_ser = ("smf.layout.v1|base:" + base_addr.to_text() +
+        "|sizes|" + _ser_i64s(sizes) + "|aligns|" + _ser_i64s(alignments))
+    val output_ser = ("ok:" + _ser_bool(result.ok) + "|offsets|" +
+        _ser_i64s(result.offsets) + "|total:" + result.total_size.to_text())
+    val malformed: u32 = if result.ok: 0 else: 1
+    val receipt = _smf_stage_receipt(
+        SMF_LINK_STAGE_L7_ADDRESS_LAYOUT,
+        input_ser,
+        output_ser,
+        sizes.len() as u64,
+        result.offsets.len() as u64,
+        malformed)
+    SmfLayoutOutcome(result: result, receipt: receipt)
+
+fn smf_apply_relocation_jobs_with_receipt(jobs: [SmfRelocJob]) -> SmfRelocOutcome:
+    """`smf_apply_relocations` once per job plus ONE L8_RELOCATION receipt.
+    `item_count_in` = relocations presented, `item_count_out` = relocations
+    applied by accepted jobs; every rejected job counts once in
+    `malformed_count` (all-or-nothing per job, as the applier defines)."""
+    var results: [SmfApplyResult] = []
+    var input_ser = "smf.reloc.v1|"
+    var output_ser = "applied|"
+    var reloc_in: i64 = 0
+    var reloc_out: i64 = 0
+    var rejected: i64 = 0
+    for job in jobs:
+        input_ser = input_ser + "j:" + job.section_addr.to_text() + "|" + _ser_u8s(job.section_bytes)
+        for r in job.relocs:
+            input_ser = (input_ser + "r:" + r.offset.to_text() + "," + r.symbol_index.to_text() +
+                "," + (r.reloc_type.to_wire_u8() as i64).to_text() + "," + r.addend.to_text() + ";")
+        input_ser = input_ser + _ser_i64s(job.symbol_addrs)
+        val applied = smf_apply_relocations(job.section_bytes, job.section_addr, job.relocs, job.symbol_addrs)
+        results.push(applied)
+        output_ser = (output_ser + "ok:" + _ser_bool(applied.ok) + ",rej:" +
+            applied.rejected_index.to_text() + "|" + _ser_u8s(applied.bytes))
+        reloc_in = reloc_in + job.relocs.len()
+        if applied.ok:
+            reloc_out = reloc_out + job.relocs.len()
+        else:
+            rejected = rejected + 1
+    val receipt = _smf_stage_receipt(
+        SMF_LINK_STAGE_L8_RELOCATION,
+        input_ser,
+        output_ser,
+        reloc_in as u64,
+        reloc_out as u64,
+        rejected as u32)
+    SmfRelocOutcome(results: results, receipt: receipt)

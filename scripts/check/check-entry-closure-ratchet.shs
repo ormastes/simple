@@ -1,0 +1,422 @@
+#!/bin/sh
+# check-entry-closure-ratchet.shs — an entry point's PHYSICAL import closure may
+# shrink or stay put, never grow.
+#
+# WHY A RATCHET AND NOT A BAR
+# ---------------------------
+# The closure numbers are large debt (131 physical files / 1.3 MB of source for
+# `mcp --help`), so a hard bar would have to be set at today's numbers anyway.
+# What actually needs defending is the DIRECTION: the L5 wave is removing eager
+# imports in parallel across five packages, and the failure mode is a later
+# change quietly putting a hub import back. So this freezes
+# config/perf/entry_closure_baselines.sdn and fails any growth.
+#
+# WHAT IT RATCHETS, AND WHY ONLY THAT
+# Only `physical_files` and `source_bytes_physical`. The other two receipt
+# numbers — `spl_opens` (syscalls) and `unit_spellings` (distinct path strings) —
+# move under work that is not an import change at all: the seed reads the same
+# physical file once per alias spelling and once per lane (HIR lowerer +
+# interpreter), and L5-E is unifying that. Ratcheting them would make an
+# unrelated caching change look like an import regression, and would make an
+# import fix look smaller than it is. The physical pair is invariant under both.
+#
+# Measurement is delegated in full to scripts/perf/measure-entry-closure.shs
+# (contract: doc/07_guide/perf/entry_closure_receipt_v1.md), which is the single
+# producer of these numbers. This gate never re-implements the strace method; if
+# the two ever disagreed, the number in the baseline would stop meaning what the
+# receipt says it means.
+#
+# EXECUTION LANE (contract amendment 2026-09-12)
+# Baselines are keyed by (entry_id, LANE), not by entry alone. `default` is the
+# JIT-attempt lane, which whole-module-compiles; `interpreter` sets
+# SIMPLE_EXECUTION_MODE=interpreter. L5-C found that a function-local `use`
+# shrinks only the interpreter lane while the default lane still pulls the module
+# in, so a per-entry number without a lane would let a real default-lane
+# regression hide behind an interpreter-lane improvement. Every baselined pair is
+# ratcheted independently and both must not grow.
+#
+# Usage:
+#   sh scripts/check/check-entry-closure-ratchet.shs [--quick|--all]
+#                                                    [--entries a,b,c] [--lane default|interpreter]
+#                                                    [--binary <path>]
+#   sh scripts/check/check-entry-closure-ratchet.shs --update-baseline --reason "<text>"
+#   sh scripts/check/check-entry-closure-ratchet.shs --selftest
+#
+# Verdict is the LAST line of stdout:
+#   PASS  — <n> entry(ies) checked, 0 grown     exit 0
+#   FAIL  — <n> entry(ies) checked, <k> grown   exit 1
+#   ERROR — nothing was checked (<reason>)      exit 2
+# 0 entries checked is always ERROR, never a pass.
+#
+# --update-baseline is for REVIEWED landings only. A FAIL naming a grown entry is
+# real new debt; regenerating hides it. It requires --reason and records the text
+# in the row, exactly like the tree-size guard's --expect-files.
+set -u
+
+ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
+BASELINE=$ROOT/config/perf/entry_closure_baselines.sdn
+# Overridable so the selftest can drive the gate with a stub producer and never
+# needs strace, a binary or a real entry point.
+MEASURER=${ENTRY_CLOSURE_MEASURER:-$ROOT/scripts/perf/measure-entry-closure.shs}
+
+# The `--quick` set is the cheap `--help`-class entries. The push tier runs it
+# because the full set includes `test-one-spec`, which is minutes; CI's advisory
+# job runs `--all`. Both are honest about which entries they checked — the
+# verdict names every one.
+QUICK_ENTRIES='cli-version cli-help query-help check-help mcp-help lspmcp-help'
+
+err_exit() {
+    printf 'ERROR — nothing was checked (%s)\n' "$1"
+    exit 2
+}
+
+# ---------------------------------------------------------------------------
+# Baseline file I/O. Rows are
+#   <entry_id>, <physical_files>, <source_bytes_physical>, <recorded_at_utc>,
+#   <binary_sha256>, <reason>
+# ---------------------------------------------------------------------------
+# `lane` sits at position 2 rather than appended last: `reason` is free text that
+# may contain commas, so any column after it cannot be addressed by field index.
+baseline_rows() {  # <file> -> `id<TAB>lane<TAB>phys<TAB>bytes` per row
+    awk -F, '
+        /^[[:space:]]+[a-z0-9][a-z0-9-]*,/ {
+            id = $1; gsub(/^[[:space:]]+|[[:space:]]+$/, "", id)
+            ln = $2; gsub(/[^a-z]/, "", ln)
+            p  = $3; gsub(/[^0-9]/, "", p)
+            b  = $4; gsub(/[^0-9]/, "", b)
+            if (id != "" && ln != "" && p != "" && b != "") printf "%s\t%s\t%s\t%s\n", id, ln, p, b
+        }
+    ' "$1"
+}
+
+# measure_entry <id> <binary> -> `phys<TAB>bytes` on stdout, non-zero on failure.
+# --samples 0: the ratchet reads counts only, and the informative timing runs
+# would triple a push-tier gate's cost for a number it is forbidden to gate on.
+measure_entry() {  # <id> <lane> <binary>
+    _mline=$(sh "$MEASURER" "$1" --lane "$2" ${3:+--binary "$3"} --samples 0 2>/dev/null | tail -1)
+    case $_mline in
+        PASS*physical_files=*) ;;
+        *) printf '%s\n' "$_mline" >&2; return 1 ;;
+    esac
+    _mp=$(printf '%s\n' "$_mline" | sed -n 's/.*physical_files=\([0-9][0-9]*\).*/\1/p')
+    _mb=$(printf '%s\n' "$_mline" | sed -n 's/.*source_bytes_physical=\([0-9][0-9]*\).*/\1/p')
+    # The sha comes from the producer's own verdict, not from a second hash of
+    # whatever this script thinks the binary is: the baseline row must record the
+    # binary the numbers were actually measured on.
+    _ms=$(printf '%s\n' "$_mline" | sed -n 's/.*(binary \([0-9a-z]*\), rc=.*/\1/p')
+    [ -n "$_mp" ] && [ -n "$_mb" ] || return 1
+    [ -n "$_ms" ] || _ms=unknown
+    printf '%s\t%s\t%s\n' "$_mp" "$_mb" "$_ms"
+}
+
+# ---------------------------------------------------------------------------
+# Selftest: four fixtures against a stub producer, plus one that proves the
+# stub-producer seam itself is live rather than dead code.
+# ---------------------------------------------------------------------------
+selftest() {
+    _t=$(mktemp -d) || err_exit "mktemp failed"
+    _fails=0
+    _ran=0
+    _assert() {
+        _ran=$((_ran + 1))
+        if [ "$2" = "$3" ]; then printf 'selftest ok   %s\n' "$1"
+        else printf 'selftest FAIL %s: expected [%s] got [%s]\n' "$1" "$2" "$3"; _fails=$((_fails + 1)); fi
+    }
+
+    # A stub measurer that answers from a table file, in the producer's exact
+    # verdict shape. Everything below this line drives the real gate logic.
+    cat > "$_t/stub.shs" <<'STUB'
+#!/bin/sh
+_id=$1
+_lane=default
+while [ $# -gt 0 ]; do case $1 in --lane) _lane=$2; shift ;; esac; shift; done
+_row=$(grep "^$_id $_lane " "$STUB_TABLE" 2>/dev/null) || { echo "ERROR — nothing was checked (no stub row for $_id/$_lane)"; exit 2; }
+set -- $_row
+printf 'PASS — %s unit spelling(s) checked for %s lane=%s: spl_opens=0 unit_spellings=0 physical_files=%s source_bytes_spellings=0 source_bytes_physical=%s (binary stub, rc=0)\n' "$3" "$_id" "$_lane" "$3" "$4"
+STUB
+
+    _mkbase() { # _mkbase <file> <rows: id lane phys bytes ...>
+        _f=$1; shift
+        printf 'entry_closure_baselines |entry_id, lane, physical_files, source_bytes_physical, recorded_at_utc, binary_sha256, reason|\n' > "$_f"
+        while [ $# -ge 4 ]; do
+            printf '    %s, %s, %s, %s, 2026-09-12T00:00:00Z, stub, "fixture"\n' "$1" "$2" "$3" "$4" >> "$_f"
+            shift 4
+        done
+    }
+
+    _gate() { # _gate <baseline> <table> <entries> -> "<rc> <verdict>"
+        _o=$( ENTRY_CLOSURE_MEASURER=$_t/stub.shs STUB_TABLE=$2 \
+              ENTRY_CLOSURE_BASELINE=$1 sh "$0" --entries "$3" --no-selftest 2>&1 )
+        printf '%s %s' "$?" "$(printf '%s\n' "$_o" | tail -1 | cut -c1-5)"
+    }
+
+    # 1. equal -> PASS (a ratchet is not a bar; standing still is allowed).
+    _mkbase "$_t/b1" alpha default 10 1000
+    printf 'alpha default 10 1000\n' > "$_t/t1"
+    _assert "equal is PASS" "0 PASS " "$(_gate "$_t/b1" "$_t/t1" alpha)"
+
+    # 2. shrink -> PASS (and the verdict must report the improvement).
+    printf 'alpha default 7 700\n' > "$_t/t2"
+    _assert "shrink is PASS" "0 PASS " "$(_gate "$_t/b1" "$_t/t2" alpha)"
+
+    # 3. growth in FILES -> FAIL.
+    printf 'alpha default 11 1000\n' > "$_t/t3"
+    _assert "more physical files is FAIL" "1 FAIL " "$(_gate "$_t/b1" "$_t/t3" alpha)"
+
+    # 4. growth in BYTES alone -> FAIL. Separate fixture because a refactor can
+    #    keep the file count flat while pulling in a much larger module, and a
+    #    files-only check would call that an improvement.
+    printf 'alpha default 10 1001\n' > "$_t/t4"
+    _assert "more source bytes is FAIL" "1 FAIL " "$(_gate "$_t/b1" "$_t/t4" alpha)"
+
+    # 5. an entry with no baseline row -> ERROR, not a silent skip. This is the
+    #    rot axis a ratchet dies of: measuring something nothing is frozen for.
+    _assert "unbaselined entry is ERROR" "2 ERROR" "$(_gate "$_t/b1" "$_t/t1" beta)"
+
+    # 6. a baseline row whose entry cannot be measured -> ERROR, never a pass.
+    _mkbase "$_t/b6" alpha default 10 1000 gamma default 5 500
+    _assert "unmeasurable baselined entry is ERROR" "2 ERROR" \
+        "$(_gate "$_t/b6" "$_t/t1" alpha,gamma)"
+
+    # 7. zero entries selected -> ERROR. A run that compared nothing must not
+    #    report a pass; this is the vacuity rule every guard in this repo shares.
+    _assert "empty selection is ERROR" "2 ERROR" "$(_gate "$_t/b1" "$_t/t1" '')"
+
+    # 8. the stub seam is live: with a table the gate would PASS on, pointing
+    #    ENTRY_CLOSURE_MEASURER at a non-existent file must ERROR rather than
+    #    silently falling back to the real producer (which would make every
+    #    fixture above a test of nothing).
+    _o=$( ENTRY_CLOSURE_MEASURER=$_t/does-not-exist STUB_TABLE=$_t/t1 \
+          ENTRY_CLOSURE_BASELINE=$_t/b1 sh "$0" --entries alpha --no-selftest 2>&1 )
+    _assert "missing measurer is ERROR" "2 ERROR" \
+        "$? $(printf '%s\n' "$_o" | tail -1 | cut -c1-5)"
+
+    # 9. a baseline file with no parseable row -> ERROR.
+    printf 'entry_closure_baselines |entry_id, physical_files, source_bytes_physical, recorded_at_utc, binary_sha256, reason|\n' > "$_t/b9"
+    _assert "empty baseline is ERROR" "2 ERROR" "$(_gate "$_t/b9" "$_t/t1" alpha)"
+
+    # 10. a NARROW --update-baseline must leave every unselected row, and every
+    #     comment, byte-for-byte. The first shape of this code regenerated the
+    #     file from the selection and silently deleted the other rows, which
+    #     would have turned "re-baseline these two entries" into "lose the other
+    #     eight". Also pins that the row it DOES rewrite carries the measured
+    #     numbers, the reason, and the sha the producer reported.
+    _mkbase "$_t/b10" alpha default 10 1000 gamma default 5 500
+    printf '# a comment that must survive\n' >> "$_t/b10"
+    printf 'alpha default 4 400\ngamma default 5 500\n' > "$_t/t10"
+    ENTRY_CLOSURE_MEASURER=$_t/stub.shs STUB_TABLE=$_t/t10 ENTRY_CLOSURE_BASELINE=$_t/b10 \
+        sh "$0" --entries alpha --update-baseline --reason "fixture reason" --no-selftest >/dev/null 2>&1
+    _assert "narrow update keeps unselected row" \
+        "    gamma, default, 5, 500, 2026-09-12T00:00:00Z, stub, \"fixture\"" \
+        "$(grep '^    gamma,' "$_t/b10")"
+    _assert "narrow update keeps comments" "1" \
+        "$(grep -c '^# a comment that must survive' "$_t/b10")"
+    _assert "narrow update rewrites the selected row" "alpha, default, 4, 400" \
+        "$(grep '^    alpha,' "$_t/b10" | cut -d, -f1-4 | sed 's/^ *//')"
+    _assert "narrow update records the reason" "1" \
+        "$(grep -c '"fixture reason"' "$_t/b10")"
+    _assert "narrow update records the producer sha" "1" \
+        "$(grep -c '^    alpha,.*, stub, ' "$_t/b10")"
+
+    # 11. --update-baseline without --reason is ERROR: an unexplained
+    #     re-baseline is the exact move this flag exists to make visible.
+    _mkbase "$_t/b11" alpha default 10 1000
+    _o=$( ENTRY_CLOSURE_MEASURER=$_t/stub.shs STUB_TABLE=$_t/t1 ENTRY_CLOSURE_BASELINE=$_t/b11 \
+          sh "$0" --update-baseline --no-selftest 2>&1 )
+    _assert "reasonless update is ERROR" "2 ERROR" \
+        "$? $(printf '%s\n' "$_o" | tail -1 | cut -c1-5)"
+
+    # 12. lanes are INDEPENDENT keys. The same entry baselined in both lanes,
+    #     growing only in `default`, must FAIL and must name the lane — this is
+    #     the exact shape L5-C found (a function-local `use` shrinks the
+    #     interpreter lane while the default lane still whole-module-compiles),
+    #     and a per-entry-only ratchet would have let the default-lane regression
+    #     hide behind the interpreter-lane win.
+    _mkbase "$_t/b12" alpha default 10 1000 alpha interpreter 8 800
+    printf 'alpha default 12 1000\nalpha interpreter 6 600\n' > "$_t/t12"
+    _assert "default-lane growth FAILs despite interpreter-lane shrink" "1 FAIL " \
+        "$(_gate "$_t/b12" "$_t/t12" alpha)"
+    _o=$( ENTRY_CLOSURE_MEASURER=$_t/stub.shs STUB_TABLE=$_t/t12 ENTRY_CLOSURE_BASELINE=$_t/b12 \
+          sh "$0" --entries alpha --no-selftest 2>&1 )
+    _assert "the FAIL names the offending lane" "1" \
+        "$(printf '%s\n' "$_o" | tail -1 | grep -c 'alpha\[default\]')"
+
+    # 13. --lane narrows to one lane of a two-lane entry, and both lanes are
+    #     checked when it is absent (so a two-lane entry counts as TWO pairs).
+    printf 'alpha default 10 1000\nalpha interpreter 8 800\n' > "$_t/t13"
+    _o=$( ENTRY_CLOSURE_MEASURER=$_t/stub.shs STUB_TABLE=$_t/t13 ENTRY_CLOSURE_BASELINE=$_t/b12 \
+          sh "$0" --entries alpha --lane interpreter --no-selftest 2>&1 )
+    _assert "--lane narrows to one pair" "1" \
+        "$(printf '%s\n' "$_o" | tail -1 | sed -n 's/^PASS — \([0-9]*\) .*/\1/p')"
+    _o=$( ENTRY_CLOSURE_MEASURER=$_t/stub.shs STUB_TABLE=$_t/t13 ENTRY_CLOSURE_BASELINE=$_t/b12 \
+          sh "$0" --entries alpha --no-selftest 2>&1 )
+    _assert "both lanes checked without --lane" "2" \
+        "$(printf '%s\n' "$_o" | tail -1 | sed -n 's/^PASS — \([0-9]*\) .*/\1/p')"
+
+    rm -rf "$_t"
+    if [ "$_fails" -ne 0 ]; then
+        printf 'FAIL — %s selftest assertion(s) checked, %s failed\n' "$_ran" "$_fails"
+        return 1
+    fi
+    printf 'selftest: %s assertion(s) checked, 0 failed\n' "$_ran"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+SELECT=''
+SCOPE=quick
+LANE_FILTER=''
+BINARY=''
+DO_SELFTEST=1
+UPDATE=0
+REASON=''
+
+while [ $# -gt 0 ]; do
+    case $1 in
+        --quick)            SCOPE=quick ;;
+        --all)              SCOPE=all ;;
+        --entries)          SELECT=$(printf '%s' "${2:-}" | tr ',' ' '); SCOPE=explicit; shift ;;
+        --lane)             LANE_FILTER=${2:-}; shift
+                            case $LANE_FILTER in default|interpreter) ;; *) err_exit "unknown lane $LANE_FILTER" ;; esac ;;
+        --binary)           BINARY=${2:-}; shift ;;
+        --update-baseline)  UPDATE=1; [ "$SCOPE" = explicit ] || SCOPE=all ;;
+        --reason)           REASON=${2:-}; shift ;;
+        --selftest)         selftest || exit 1; printf 'PASS — selftest only, no entry checked\n'; exit 0 ;;
+        --no-selftest)      DO_SELFTEST=0 ;;
+        *)                  err_exit "unknown option $1" ;;
+    esac
+    shift
+done
+
+[ "$DO_SELFTEST" = 0 ] || { selftest || exit 1; }
+
+BASELINE=${ENTRY_CLOSURE_BASELINE:-$BASELINE}
+[ -f "$BASELINE" ] || err_exit "baseline $BASELINE does not exist"
+[ -f "$MEASURER" ] || err_exit "measurer $MEASURER does not exist"
+
+WORK=$(mktemp -d) || err_exit "mktemp failed"
+trap 'rm -rf "$WORK"' EXIT INT TERM
+
+baseline_rows "$BASELINE" > "$WORK/base"
+[ -s "$WORK/base" ] || err_exit "baseline $BASELINE has no parseable row"
+
+# Selection is a set of (entry_id, lane) PAIRS drawn from the baseline, resolved
+# here — after the whole argv is parsed — so option ORDER cannot change the
+# meaning: `--entries a --update-baseline` narrows to `a`, it does not widen back
+# to every row. A named entry with no baselined lane, or a --lane filter that
+# matches nothing, is an ERROR rather than a silent skip.
+case $SCOPE in
+    all)      SELECT=$(cut -f1 "$WORK/base" | sort -u | tr '\n' ' ') ;;
+    quick)    if [ "$UPDATE" = 1 ]; then SELECT=$(cut -f1 "$WORK/base" | sort -u | tr '\n' ' ')
+              else SELECT=$QUICK_ENTRIES; fi ;;
+    explicit) : ;;
+esac
+
+: > "$WORK/pairs"
+for _e in $SELECT; do
+    _got=$(awk -F'\t' -v e="$_e" -v l="$LANE_FILTER" \
+        '$1 == e && (l == "" || $2 == l) {print $1 "\t" $2 "\t" $3 "\t" $4}' "$WORK/base")
+    [ -n "$_got" ] || err_exit "entry $_e${LANE_FILTER:+ (lane $LANE_FILTER)} has no row in $BASELINE (add one with a written reason)"
+    printf '%s\n' "$_got" >> "$WORK/pairs"
+done
+
+# --- update-baseline ---------------------------------------------------------
+if [ "$UPDATE" = 1 ]; then
+    [ -n "$REASON" ] || err_exit "--update-baseline requires --reason \"<text>\""
+    _now=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+
+    # Measure first, into a replacement table, so a failure part-way through
+    # leaves the baseline untouched rather than half-rewritten.
+    : > "$WORK/repl"
+    _n=0
+    while IFS="$(printf '\t')" read -r _e _l _bp _bb; do
+        [ -n "$_e" ] || continue
+        _m=$(measure_entry "$_e" "$_l" "$BINARY") || err_exit "could not measure entry $_e lane $_l"
+        printf '%s|%s\t%s\n' "$_e" "$_l" "$_m" >> "$WORK/repl"
+        _n=$((_n + 1))
+    done < "$WORK/pairs"
+    [ "$_n" -gt 0 ] || err_exit "no (entry, lane) pair selected (scope=$SCOPE)"
+
+    # Edit in place: every comment, every column and every row NOT selected is
+    # carried through byte-for-byte. Regenerating the file from the selection was
+    # the first shape of this code and it silently DELETED the rows a narrow
+    # --entries update did not name — a re-baseline of two entries must not be a
+    # way to lose the others. The key is (entry_id, lane), so re-baselining one
+    # lane leaves the other lane's row alone.
+    awk -F'\t' -v now="$_now" -v reason="$REASON" '
+        FNR == NR { np[$1] = $2; nb[$1] = $3; ns[$1] = $4; ord[++nord] = $1; next }
+        {
+            line = $0
+            n = split(line, f, ",")
+            id = f[1]; sub(/^[[:space:]]+/, "", id)
+            ln = (n >= 2) ? f[2] : ""; gsub(/[^a-z]/, "", ln)
+            key = id "|" ln
+            if (n >= 4 && (key in np)) {
+                printf "    %s, %s, %s, %s, %s, %s, \"%s\"\n", id, ln, np[key], nb[key], now, ns[key], reason
+                seen[key] = 1
+            } else print line
+        }
+        END {
+            # Iterate the replacement table in FILE order, not awk hash order, so
+            # a run that adds new rows produces the same bytes every time.
+            for (i = 1; i <= nord; i++) {
+                key = ord[i]
+                if (!(key in seen)) {
+                    split(key, k, "|")
+                    printf "    %s, %s, %s, %s, %s, %s, \"%s\"\n", k[1], k[2], np[key], nb[key], now, ns[key], reason
+                }
+            }
+        }
+    ' "$WORK/repl" "$BASELINE" > "$WORK/new" || err_exit "cannot rewrite $BASELINE"
+    [ -s "$WORK/new" ] || err_exit "rewrite produced an empty baseline"
+
+    # Report the delta, not just the reason: a re-baseline that does not say what
+    # it moved is indistinguishable from one that hid a regression.
+    while IFS="$(printf '\t')" read -r _key _np _nb _ns; do
+        _e=${_key%|*}; _l=${_key#*|}
+        _old=$(awk -F'\t' -v e="$_e" -v l="$_l" '$1 == e && $2 == l {print $3 "\t" $4; exit}' "$WORK/base")
+        if [ -n "$_old" ]; then
+            printf '%-16s %-11s physical_files %s -> %s   source_bytes_physical %s -> %s\n' \
+                "$_e" "$_l" "$(printf '%s' "$_old" | cut -f1)" "$_np" "$(printf '%s' "$_old" | cut -f2)" "$_nb"
+        else
+            printf '%-16s %-11s NEW ROW   physical_files %s   source_bytes_physical %s\n' "$_e" "$_l" "$_np" "$_nb"
+        fi
+    done < "$WORK/repl"
+
+    cp "$WORK/new" "$BASELINE" || err_exit "cannot write $BASELINE"
+    printf 'PASS — %s of %s baselined (entry, lane) pair(s) re-recorded in %s (reason: %s)\n' \
+        "$_n" "$(wc -l < "$WORK/base" | tr -d ' ')" "$BASELINE" "$REASON"
+    exit 0
+fi
+
+# --- check -------------------------------------------------------------------
+CHECKED=0
+GROWN=0
+GROWN_NAMES=''
+while IFS="$(printf '\t')" read -r _e _l _bp _bb; do
+    [ -n "$_e" ] || continue
+    _m=$(measure_entry "$_e" "$_l" "$BINARY") || err_exit "could not measure entry $_e lane $_l"
+    _cp=$(printf '%s' "$_m" | cut -f1)
+    _cb=$(printf '%s' "$_m" | cut -f2)
+    CHECKED=$((CHECKED + 1))
+    _verdict=ok
+    if [ "$_cp" -gt "$_bp" ] || [ "$_cb" -gt "$_bb" ]; then
+        _verdict=GROWN
+        GROWN=$((GROWN + 1))
+        GROWN_NAMES="$GROWN_NAMES $_e[$_l]"
+    fi
+    printf '%-16s %-11s physical_files %s (baseline %s)  source_bytes_physical %s (baseline %s)  %s\n' \
+        "$_e" "$_l" "$_cp" "$_bp" "$_cb" "$_bb" "$_verdict"
+done < "$WORK/pairs"
+
+[ "$CHECKED" -gt 0 ] || err_exit "no (entry, lane) pair selected (scope=$SCOPE)"
+
+if [ "$GROWN" -ne 0 ]; then
+    printf 'FAIL — %s (entry, lane) pair(s) checked, %s grown:%s\n' "$CHECKED" "$GROWN" "$GROWN_NAMES"
+    exit 1
+fi
+printf 'PASS — %s (entry, lane) pair(s) checked, 0 grown (scope=%s%s, baseline %s)\n' \
+    "$CHECKED" "$SCOPE" "${LANE_FILTER:+, lane $LANE_FILTER}" "$BASELINE"
+exit 0

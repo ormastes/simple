@@ -13,6 +13,7 @@ bootstrap_stage3_write_command_transcript() {
     bootstrap_stage3_transcript_tmp="${bootstrap_stage3_transcript}.tmp.$$"
     (
         echo "schema=simple-bootstrap-command-transcript-v2"
+        echo "runtime-env-contract:bootstrap-session-v1"
         printf 'cwd:%s:%s\n' "${#bootstrap_stage3_command_cwd}" \
             "$bootstrap_stage3_command_cwd"
         # Emitted one call at a time rather than through `for ... in` over
@@ -39,10 +40,25 @@ bootstrap_stage3_write_command_transcript() {
         # temp location leaks in. Unix still records exactly five entries.
         case "$(uname -s 2>/dev/null || echo unknown)" in
             MSYS*|MINGW*|CYGWIN*)
+                bootstrap_stage3_windows_system_root=\
+${SystemRoot:-${SYSTEMROOT:-${WINDIR:-${windir:-}}}}
+                bootstrap_stage3_windows_system_drive=\
+${SystemDrive:-${SYSTEMDRIVE:-}}
+                bootstrap_stage3_windows_program_data=\
+${ProgramData:-${PROGRAMDATA:-}}
+                [ -n "$bootstrap_stage3_windows_system_root" ] &&
+                    [ -n "$bootstrap_stage3_windows_system_drive" ] &&
+                    [ -n "$bootstrap_stage3_windows_program_data" ] || exit 1
                 bootstrap_stage3_emit_host_env \
                     "TMP=$bootstrap_stage3_command_tmpdir"
                 bootstrap_stage3_emit_host_env \
                     "TEMP=$bootstrap_stage3_command_tmpdir"
+                bootstrap_stage3_emit_host_env \
+                    "SystemRoot=$bootstrap_stage3_windows_system_root"
+                bootstrap_stage3_emit_host_env \
+                    "SystemDrive=$bootstrap_stage3_windows_system_drive"
+                bootstrap_stage3_emit_host_env \
+                    "ProgramData=$bootstrap_stage3_windows_program_data"
                 ;;
         esac
         bootstrap_stage3_emit_host_env "LC_ALL=C"
@@ -56,6 +72,11 @@ bootstrap_stage3_write_command_transcript() {
                 *) exit 1 ;;
             esac
             bootstrap_stage3_env_name=${1%%=*}
+            case "$bootstrap_stage3_env_name" in
+                SIMPLE_BOOTSTRAP_SESSION_ID|SIMPLE_BOOTSTRAP_SESSION_EXEC|SIMPLE_BOOTSTRAP_RSS_CAP_MODE)
+                    echo "bootstrap-transcript-error: reserved session environment name" >&2
+                    exit 1 ;;
+            esac
             case "$bootstrap_stage3_seen_env" in
                 *":$bootstrap_stage3_env_name:"*) exit 1 ;;
             esac
@@ -88,14 +109,50 @@ bootstrap_stage3_write_command_transcript() {
     mv "$bootstrap_stage3_transcript_tmp" "$bootstrap_stage3_transcript"
 }
 
-bootstrap_stage3_verify_command_transcript() {
+bootstrap_stage3_verify_command_transcript() (
+    [ "$#" -ge 3 ] || return 1
     bootstrap_stage3_transcript=$1
     bootstrap_stage3_command_cwd=$2
     shift 2
-    [ -f "$bootstrap_stage3_transcript" ] &&
-        [ ! -L "$bootstrap_stage3_transcript" ] || return 1
-    bootstrap_stage3_expected="${bootstrap_stage3_transcript}.expected.$$"
-    bootstrap_stage3_host="${bootstrap_stage3_transcript}.host.$$"
+    bootstrap_stage3_transcript_descriptor_mode=0
+    case "$bootstrap_stage3_transcript" in
+        /proc/*)
+            if expr "$bootstrap_stage3_transcript" : \
+                '/proc/[1-9][0-9]*/fd/[1-9][0-9]*$' >/dev/null; then
+                :
+            elif expr "$bootstrap_stage3_transcript" : \
+                '/proc/[1-9][0-9]*/fd/[1-9][0-9]*/[A-Za-z0-9][A-Za-z0-9._-]*$' \
+                >/dev/null; then
+                :
+            else
+                return 1
+            fi
+            [ -f "$bootstrap_stage3_transcript" ] || return 1
+            [ -n "${BOOTSTRAP_STAGE3_VERIFIER_SCRATCH_PREFIX-}" ] || return 1
+            case "$BOOTSTRAP_STAGE3_VERIFIER_SCRATCH_PREFIX" in
+                /*) ;;
+                *) return 1 ;;
+            esac
+            bootstrap_stage3_expected="${BOOTSTRAP_STAGE3_VERIFIER_SCRATCH_PREFIX}.transcript-expected"
+            bootstrap_stage3_host="${BOOTSTRAP_STAGE3_VERIFIER_SCRATCH_PREFIX}.transcript-host"
+            bootstrap_stage3_transcript_descriptor_mode=1
+            ;;
+        *)
+            [ -f "$bootstrap_stage3_transcript" ] &&
+                [ ! -L "$bootstrap_stage3_transcript" ] || return 1
+            bootstrap_stage3_expected="${bootstrap_stage3_transcript}.expected.$$"
+            bootstrap_stage3_host="${bootstrap_stage3_transcript}.host.$$"
+            ;;
+    esac
+    trap 'rm -f -- "$bootstrap_stage3_expected" "$bootstrap_stage3_host"' EXIT
+    if [ "$bootstrap_stage3_transcript_descriptor_mode" = 1 ]; then
+        (
+            umask 077
+            set -C
+            : >"$bootstrap_stage3_expected" && : >"$bootstrap_stage3_host"
+        ) || return 1
+        chmod 600 "$bootstrap_stage3_expected" "$bootstrap_stage3_host" || return 1
+    fi
     # Inherited records are forbidden: the producer executes with env -i.
     ! grep -Eq '^inherited-env:' "$bootstrap_stage3_transcript" || return 1
     grep '^host-env:' "$bootstrap_stage3_transcript" \
@@ -104,14 +161,14 @@ bootstrap_stage3_verify_command_transcript() {
         return 1
     }
     # Windows pins TMP and TEMP alongside TMPDIR (see the writer above), so the
-    # host-env set is exactly 7 there and exactly 5 everywhere else. The count
+    # host-env set is exactly 10 there and exactly 5 everywhere else. The count
     # stays EXACT on both -- this widens the contract by platform, it does not
     # relax it into "5 or more".
     bootstrap_stage3_host_env_expected=5
     bootstrap_stage3_host_env_windows=0
     case "$(uname -s 2>/dev/null || echo unknown)" in
         MSYS*|MINGW*|CYGWIN*)
-            bootstrap_stage3_host_env_expected=7
+            bootstrap_stage3_host_env_expected=10
             bootstrap_stage3_host_env_windows=1
             ;;
     esac
@@ -125,7 +182,7 @@ bootstrap_stage3_verify_command_transcript() {
             payload = substr(record, index(record, $3))
             return declared == length(payload)
         }
-        /^host-env:[0-9]+:(HOME|PATH|TMPDIR|TMP|TEMP)=/ {
+        /^host-env:[0-9]+:(HOME|PATH|TMPDIR|TMP|TEMP|SystemRoot|SystemDrive|ProgramData)=/ {
             if (!valid($0, $2)) exit 1
             name = $3
             sub(/=.*/, "", name)
@@ -146,8 +203,12 @@ bootstrap_stage3_verify_command_transcript() {
                 seen["LANG"] != 1) exit 1
             # Fail closed BOTH ways: Windows must carry TMP and TEMP, and a
             # non-Windows transcript must not smuggle them in.
-            if (win == 1 && (seen["TMP"] != 1 || seen["TEMP"] != 1)) exit 1
-            if (win != 1 && (seen["TMP"] > 0 || seen["TEMP"] > 0)) exit 1
+            if (win == 1 && (seen["TMP"] != 1 || seen["TEMP"] != 1 ||
+                seen["SystemRoot"] != 1 || seen["SystemDrive"] != 1 ||
+                seen["ProgramData"] != 1)) exit 1
+            if (win != 1 && (seen["TMP"] > 0 || seen["TEMP"] > 0 ||
+                seen["SystemRoot"] > 0 || seen["SystemDrive"] > 0 ||
+                seen["ProgramData"] > 0)) exit 1
         }
     ' "$bootstrap_stage3_host" || {
         rm -f "$bootstrap_stage3_expected" "$bootstrap_stage3_host"
@@ -190,10 +251,14 @@ bootstrap_stage3_verify_command_transcript() {
     fi
     (
         echo "schema=simple-bootstrap-command-transcript-v2"
+        echo "runtime-env-contract:bootstrap-session-v1"
         printf 'cwd:%s:%s\n' "${#bootstrap_stage3_command_cwd}" \
             "$bootstrap_stage3_command_cwd"
         cat "$bootstrap_stage3_host" || exit 1
         while [ "$#" -gt 0 ] && [ "$1" != -- ]; do
+            case "${1%%=*}" in
+                SIMPLE_BOOTSTRAP_SESSION_ID|SIMPLE_BOOTSTRAP_SESSION_EXEC|SIMPLE_BOOTSTRAP_RSS_CAP_MODE) exit 1 ;;
+            esac
             printf 'explicit-env:%s:%s\n' "${#1}" "$1"
             shift
         done
@@ -214,7 +279,7 @@ bootstrap_stage3_verify_command_transcript() {
     bootstrap_stage3_transcript_status=$?
     rm -f "$bootstrap_stage3_expected" "$bootstrap_stage3_host"
     return "$bootstrap_stage3_transcript_status"
-}
+)
 
 bootstrap_stage3_run_transcribed() {
     bootstrap_stage3_run_transcript=$1
@@ -226,26 +291,38 @@ bootstrap_stage3_run_transcribed() {
     shift 6
     for bootstrap_stage3_run_directory in "$bootstrap_stage3_run_home" \
         "$bootstrap_stage3_run_tmpdir"; do
-        [ -d "$bootstrap_stage3_run_directory" ] &&
-            [ ! -L "$bootstrap_stage3_run_directory" ] &&
-            [ "$(bootstrap_stage3_canonical_path \
-                "$bootstrap_stage3_run_directory")" = \
-                "$bootstrap_stage3_run_directory" ] || return 1
+        if [ ! -d "$bootstrap_stage3_run_directory" ] ||
+           [ -L "$bootstrap_stage3_run_directory" ] ||
+           [ "$(bootstrap_stage3_canonical_path \
+                "$bootstrap_stage3_run_directory")" != \
+                "$bootstrap_stage3_run_directory" ]; then
+            echo "bootstrap-transcript-error: non-canonical stage directory: $bootstrap_stage3_run_directory" >&2
+            return 1
+        fi
     done
     case "$bootstrap_stage3_run_path" in
         /*) ;;
-        *) return 1 ;;
+        *) echo "bootstrap-transcript-error: PATH is not absolute" >&2; return 1 ;;
     esac
     printf '%s\n' "$bootstrap_stage3_run_path" |
-        grep -Eq '(^|:)([^/]|$)' && return 1
+        grep -Eq '(^|:)([^/]|$)' && {
+            echo "bootstrap-transcript-error: PATH contains a non-absolute entry" >&2
+            return 1
+        }
     bootstrap_stage3_write_command_transcript \
         "$bootstrap_stage3_run_transcript" "$bootstrap_stage3_run_cwd" \
         "$bootstrap_stage3_run_home" "$bootstrap_stage3_run_tmpdir" \
         "$bootstrap_stage3_run_path" \
-        "$@" || return 1
+        "$@" || {
+            echo "bootstrap-transcript-error: could not write command transcript" >&2
+            return 1
+        }
     bootstrap_stage3_run_transcript_sha_before=$(
         bootstrap_stage3_hash_file "$bootstrap_stage3_run_transcript"
-    ) || return 1
+    ) || {
+        echo "bootstrap-transcript-error: could not hash command transcript" >&2
+        return 1
+    }
     (
         cd "$bootstrap_stage3_run_cwd" || exit 1
         # Must mirror the host-env recorded by
@@ -254,13 +331,25 @@ bootstrap_stage3_run_transcribed() {
         # the transcript is verified against this set.
         case "$(uname -s 2>/dev/null || echo unknown)" in
             MSYS*|MINGW*|CYGWIN*)
+                bootstrap_stage3_run_system_root=\
+${SystemRoot:-${SYSTEMROOT:-${WINDIR:-${windir:-}}}}
+                bootstrap_stage3_run_system_drive=\
+${SystemDrive:-${SYSTEMDRIVE:-}}
+                bootstrap_stage3_run_program_data=\
+${ProgramData:-${PROGRAMDATA:-}}
                 env -i "HOME=$bootstrap_stage3_run_home" \
                     "PATH=$bootstrap_stage3_run_path" \
                     "TMPDIR=$bootstrap_stage3_run_tmpdir" \
                     "TMP=$bootstrap_stage3_run_tmpdir" \
                     "TEMP=$bootstrap_stage3_run_tmpdir" \
+                    "SystemRoot=$bootstrap_stage3_run_system_root" \
+                    "SystemDrive=$bootstrap_stage3_run_system_drive" \
+                    "ProgramData=$bootstrap_stage3_run_program_data" \
                     "LC_ALL=C" "LANG=C" /bin/sh -c '
                         while [ "$#" -gt 0 ] && [ "$1" != -- ]; do
+                            case "${1%%=*}" in
+                                SIMPLE_BOOTSTRAP_SESSION_ID|SIMPLE_BOOTSTRAP_SESSION_EXEC|SIMPLE_BOOTSTRAP_RSS_CAP_MODE) exit 125 ;;
+                            esac
                             export "$1" || exit 1
                             shift
                         done
@@ -272,11 +361,39 @@ bootstrap_stage3_run_transcribed() {
                 exit $?
                 ;;
         esac
-        env -i "HOME=$bootstrap_stage3_run_home" \
+        # The guard allocates SID after this transcript is frozen. Preserve
+        # its validated session pair and RSS policy across env -i; the guard receipt
+        # owns their concrete values. Fixed host/explicit env remains exact.
+        # Every Stage 2 retry, Stage 3 build, and admitted resume enters here.
+        # Wrap env so the compiler environment and transcript remain exact.
+        bootstrap_stage3_rss_runner="$bootstrap_stage3_run_cwd/scripts/resource/process-tree-rss-watchdog.pl"
+        bootstrap_stage3_rss_session_mode=new
+        if [ "${SIMPLE_BOOTSTRAP_SESSION_ID+x}${SIMPLE_BOOTSTRAP_SESSION_EXEC+x}" != "" ]; then
+            bootstrap_stage3_rss_session_mode=inherit
+        fi
+        perl "$bootstrap_stage3_rss_runner" \
+            --session-mode="$bootstrap_stage3_rss_session_mode" \
+            --rss-cap-mode="${SIMPLE_BOOTSTRAP_RSS_CAP_MODE:-enforce}" \
+            --max-rss-kib="${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB:-5859375}" \
+            --interval-ms="${SIMPLE_PROCESS_TREE_RSS_INTERVAL_MS:-100}" \
+            --receipt="$bootstrap_stage3_run_log.rss.env" -- \
+        /bin/sh -c '
+            if [ "${SIMPLE_BOOTSTRAP_SESSION_ID+x}${SIMPLE_BOOTSTRAP_SESSION_EXEC+x}" != "" ]; then
+                case "${SIMPLE_BOOTSTRAP_SESSION_EXEC:-}" in /*) ;; *) exit 125 ;; esac
+                "$SIMPLE_BOOTSTRAP_SESSION_EXEC" --check || exit 125
+                exec env -i "SIMPLE_BOOTSTRAP_SESSION_ID=$SIMPLE_BOOTSTRAP_SESSION_ID" \
+                    "SIMPLE_BOOTSTRAP_SESSION_EXEC=$SIMPLE_BOOTSTRAP_SESSION_EXEC" \
+                    "SIMPLE_BOOTSTRAP_RSS_CAP_MODE=$SIMPLE_BOOTSTRAP_RSS_CAP_MODE" "$@"
+            fi
+            exec env -i "$@"
+        ' sh "HOME=$bootstrap_stage3_run_home" \
             "PATH=$bootstrap_stage3_run_path" \
             "TMPDIR=$bootstrap_stage3_run_tmpdir" \
             "LC_ALL=C" "LANG=C" /bin/sh -c '
                 while [ "$#" -gt 0 ] && [ "$1" != -- ]; do
+                    case "${1%%=*}" in
+                        SIMPLE_BOOTSTRAP_SESSION_ID|SIMPLE_BOOTSTRAP_SESSION_EXEC|SIMPLE_BOOTSTRAP_RSS_CAP_MODE) exit 125 ;;
+                    esac
                     export "$1" || exit 1
                     shift
                 done
@@ -580,7 +697,7 @@ bootstrap_stage3_source_snapshot_once() {
         }
         @records or die "empty authority\n";
         print join("\n", sort @records), "\n";
-    ' "$bootstrap_stage3_root" src/compiler src/app src/lib examples/10_tooling \
+    ' "$bootstrap_stage3_root" src/compiler src/app src/lib src/plugins src/compositions examples/10_tooling \
         >"$bootstrap_stage3_tmp" || {
         rm -f "$bootstrap_stage3_tmp"
         return 1
@@ -624,7 +741,8 @@ bootstrap_stage3_source_snapshot() {
     rm -f "$bootstrap_stage3_first"
 }
 
-bootstrap_stage3_manifest_value() {
+bootstrap_stage3_manifest_value() (
+    [ "$#" -eq 2 ] || return 1
     bootstrap_stage3_key=$1
     bootstrap_stage3_manifest=$2
     bootstrap_stage3_count=$(
@@ -633,7 +751,7 @@ bootstrap_stage3_manifest_value() {
     )
     [ "$bootstrap_stage3_count" = 1 ] || return 1
     sed -n "s/^${bootstrap_stage3_key}=//p" "$bootstrap_stage3_manifest"
-}
+)
 
 bootstrap_stage3_verify_bound_file() {
     bootstrap_stage3_binding_manifest=$1

@@ -1,0 +1,39 @@
+# Model-free reproducer for page IDs staged across loop and match boundaries.
+
+use std.gc_async_mut.slang.core.page_manager.{KvPageManager, KvPageId}
+
+var ARRAY_MANAGER = KvPageManager.create(17u64, 4, 64, 4, 1, 2, 4, 256).unwrap()
+
+fn main() -> i64:
+    val request = ARRAY_MANAGER.create_request("scope-a").unwrap()
+    var staged: [KvPageId] = []
+    var index = 0
+    while index < 2:
+        val page_result = ARRAY_MANAGER.reserve_page("scope-a", (101 + index).to_u64())
+        val page = match page_result:
+            Err(_):
+                print "FAIL reserve"
+                return 1
+            Ok(value): value
+        staged.push(page)
+        index = index + 1
+    index = 0
+    while index < staged.len():
+        val page = staged[index]
+        print "PAGE " + page.pool_generation.to_string() + ":" +
+            page.slot_generation.to_string() + ":" + page.slot.to_string()
+        if ARRAY_MANAGER.update_writable(page, 2, (19 + index).to_u64()).is_err():
+            print "FAIL update"
+            return 1
+        if ARRAY_MANAGER.seal_page(page).is_err():
+            print "FAIL seal"
+            return 1
+        if ARRAY_MANAGER.attach_sealed(request, page).is_err():
+            print "FAIL attach"
+            return 1
+        index = index + 1
+    if ARRAY_MANAGER.request_page_count(request).unwrap() != 2:
+        print "FAIL page_count"
+        return 1
+    print "PASS page_id_array_boundary"
+    0

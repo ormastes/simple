@@ -1,0 +1,282 @@
+# @req REQ-CSM-007 REQ-CSM-008 REQ-CSM-009 REQ-CSM-012
+# U02 model tests. Authored source; execution/host admission are separate gates.
+use std.spec.{describe, it, expect, step}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.string_core.{text_to_bytes}
+use compiler.common.cache_contract.semantic_scope_live_port_contract_v1.*
+use common.cache_daemon_host_authority_v1.{CacheNamespaceModeV3, CacheNamespaceExpectedHeadV3}
+use compiler.driver.cache.gateway.cooperative_namespace_gc_begin_authority_v1.*
+use .fixtures.l78_namespace_publication_ports_v4.*
+
+fn namespace_attempt() -> L78AttemptKeyV4:
+    L78AttemptKeyV4(root_digest: sha256_text("root"), generation: 7,
+        manifest_digest: sha256_text("manifest"), profile_digest: sha256_text("profile"),
+        operation_digest: sha256_text("operation"))
+
+fn namespace_limits() -> L78LimitsV4:
+    L78LimitsV4(max_items: 8, max_bytes: 4096, max_steps: 16)
+
+fn namespace_seed_for(generation: i64, manifest_digest: text,
+        include_generation: bool, include_object: bool) -> CacheCooperativeNamespaceGcRootUnionV3:
+    var count = 0
+    var records = ""
+    if include_generation:
+        count = count + 1
+        records = "G\n" + generation.to_string() + "\ngeneration_manifest\n1\n" + manifest_digest + "\n"
+    if include_object:
+        count = count + 1
+        records = records + "O\npublic_summary\n1\n" + sha256_text("artifact") + "\nlease_artifact\n"
+    val wire = "simple.cache.namespace-roots.v3\n" + count.to_string() + "\n" + records
+    cache_cooperative_namespace_gc_root_union_decode_v3(text_to_bytes(wire), 8).unwrap()
+
+fn namespace_seed() -> CacheCooperativeNamespaceGcRootUnionV3:
+    namespace_seed_for(7, sha256_text("manifest"), true, true)
+
+fn namespace_fake(name: text) -> L78FakeNamespacePortV4:
+    l78_fake_namespace_port_v4(name, 41, namespace_attempt(), namespace_limits(), namespace_seed())
+
+fn begin_namespace(port: L78FakeNamespacePortV4
+) -> L78OwnedResultV4<L78FakeNamespacePortV4, L78OwnerTokenV4>:
+    var owner = port
+    val outcome = owner.begin(CacheNamespaceModeV3.Collect, CacheNamespaceExpectedHeadV3.Genesis,
+        owner.attempt, owner.limits)
+    L78OwnedResultV4<L78FakeNamespacePortV4, L78OwnerTokenV4>(owner: owner, outcome: outcome)
+
+describe "U02 namespace V4 TestDouble owner lifecycle":
+    it "captures canonical G and O roots through the production owner-returning runner":
+        step("Begin a modeled namespace and retain the owner returned by root capture")
+        val begun = begin_namespace(namespace_fake("namespace_ok"))
+        val token = begun.outcome.unwrap()
+        val captured = l78_capture_roots_with_port_v4(begun.owner, token)
+        var owner = captured.owner
+        val roots = captured.outcome.unwrap()
+        expect(roots.canonical_bytes).to_equal(namespace_seed().canonical_bytes)
+        expect(roots.generation_roots.len()).to_equal(1)
+        expect(roots.protected_objects[0].digest).to_equal(sha256_text("artifact"))
+        expect(owner.events).to_equal(["namespace.begin", "namespace.roots"])
+        expect(token.domain).to_equal(L78AuthorityDomainV4.TestDouble)
+        val closure = owner.closure(token).unwrap()
+        expect(closure.kind).to_equal(L78TokenKindV4.Closure)
+        expect(closure.slot == token.slot).to_equal(false)
+        expect(closure.attempt_digest).to_equal(token.attempt_digest)
+        expect(owner.finish(token)).to_equal(Ok(()))
+        expect(owner.active_slots.len()).to_equal(0)
+        expect(owner.revoked_slots).to_equal([token.slot, closure.slot])
+        expect(owner.abort(token)).to_equal(Err(L78BoundaryErrorV4.ExpiredToken))
+
+    it "retains namespace and closure slots for Unknown finish and abort":
+        for script in ["namespace_unknown_finish", "namespace_unknown_abort"]:
+            step("Observe Unknown without revoking the retained namespace")
+            val begun = begin_namespace(namespace_fake(script))
+            var owner = begun.owner
+            val token = begun.outcome.unwrap()
+            owner.roots(token).unwrap()
+            val closure = owner.closure(token).unwrap()
+            val result = if script == "namespace_unknown_finish":
+                owner.finish(token)
+            else:
+                owner.abort(token)
+            expect(result).to_equal(Err(L78BoundaryErrorV4.Unknown))
+            l78_expect_namespace_retained_v4(owner, token)
+            expect(owner.active_slots).to_contain(closure.slot)
+            expect(owner.revoked_slots.len()).to_equal(0)
+
+    it "rejects foreign owners wrong kinds stale epochs and unissued slots":
+        for mutation in ["owner", "kind", "epoch", "slot", "domain", "attempt"]:
+            val begun = begin_namespace(namespace_fake("namespace_ok"))
+            var owner = begun.owner
+            val issued = begun.outcome.unwrap()
+            var token = issued
+            var expected = L78BoundaryErrorV4.ForeignToken
+            if mutation == "owner": token.owner_instance = 42
+            if mutation == "kind": token.kind = L78TokenKindV4.Closure
+            if mutation == "slot": token.slot = 999
+            if mutation == "domain": token.domain = L78AuthorityDomainV4.Live
+            if mutation == "epoch":
+                token.epoch = token.epoch + 1
+                expected = L78BoundaryErrorV4.StaleToken
+            if mutation == "attempt":
+                token.attempt_digest = sha256_text("other-attempt")
+                expected = L78BoundaryErrorV4.StaleToken
+            expect(owner.roots(token)).to_equal(Err(expected))
+            l78_expect_namespace_retained_v4(owner, issued)
+
+    it "binds every attempt dimension even when the operation digest is unchanged":
+        for dimension in ["root", "generation", "manifest", "profile"]:
+            var owner = namespace_fake("namespace_ok")
+            var changed = owner.attempt
+            if dimension == "root": changed.root_digest = sha256_text("other-root")
+            if dimension == "generation": changed.generation = changed.generation + 1
+            if dimension == "manifest": changed.manifest_digest = sha256_text("other-manifest")
+            if dimension == "profile": changed.profile_digest = sha256_text("other-profile")
+            expect(owner.begin(CacheNamespaceModeV3.Collect, CacheNamespaceExpectedHeadV3.Genesis,
+                changed, owner.limits)).to_equal(Err(L78BoundaryErrorV4.StaleToken))
+            expect(owner.active_slots.len()).to_equal(0)
+
+    it "refuses missing artifact roots and truncated streams while returning updated ownership":
+        for script in ["namespace_missing_artifact", "namespace_truncated_roots"]:
+            val begun = begin_namespace(namespace_fake(script))
+            val token = begun.outcome.unwrap()
+            val captured = l78_capture_roots_with_port_v4(begun.owner, token)
+            expect(captured.outcome).to_equal(Err(L78BoundaryErrorV4.Incomplete))
+            expect(captured.owner.step_count).to_equal(2)
+            l78_expect_namespace_retained_v4(captured.owner, token)
+            var owner = captured.owner
+            expect(owner.closure(token)).to_equal(Err(L78BoundaryErrorV4.Incomplete))
+            expect(owner.abort(token)).to_equal(Ok(()))
+            expect(owner.active_slots.len()).to_equal(0)
+
+    it "checks real truncated bytes and a seed with a missing protected-object projection":
+        for mutation in ["projection", "bytes"]:
+            var owner = namespace_fake("namespace_ok")
+            var inconsistent = owner.seed
+            if mutation == "projection": inconsistent.protected_objects = []
+            if mutation == "bytes":
+                inconsistent.canonical_bytes = text_to_bytes("simple.cache.namespace-roots.v3\n2\nG\n")
+            owner.seed = inconsistent
+            val begun = begin_namespace(owner)
+            var retained = begun.owner
+            expect(retained.roots(begun.outcome.unwrap())).to_equal(Err(L78BoundaryErrorV4.Incomplete))
+
+    it "requires canonical G and O roots and the exact attempt generation and manifest before Closure":
+        for mutation in ["empty", "generation-only", "object-only", "generation", "manifest"]:
+            var owner = namespace_fake("namespace_ok")
+            var generation = owner.attempt.generation
+            var digest = owner.attempt.manifest_digest
+            if mutation == "generation": generation = generation + 1
+            if mutation == "manifest": digest = sha256_text("other-manifest")
+            owner.seed = namespace_seed_for(generation, digest,
+                mutation != "empty" and mutation != "object-only",
+                mutation != "empty" and mutation != "generation-only")
+            val begun = begin_namespace(owner)
+            var retained = begun.owner
+            val token = begun.outcome.unwrap()
+            expect(retained.roots(token).is_ok()).to_equal(true)
+            expect(retained.closure(token)).to_equal(Err(L78BoundaryErrorV4.Incomplete))
+            expect(retained.active_slots).to_equal([token.slot])
+            expect(retained.next_slot).to_equal(2)
+            expect(retained.events).to_equal(["namespace.begin", "namespace.roots", "namespace.closure"])
+
+    it "never reissues a tombstoned namespace slot":
+        val begun = begin_namespace(namespace_fake("namespace_ok"))
+        var owner = begun.owner
+        val token = begun.outcome.unwrap()
+        owner.abort(token).unwrap()
+        owner.next_slot = token.slot
+        expect(owner.begin(CacheNamespaceModeV3.Collect, CacheNamespaceExpectedHeadV3.Genesis,
+            owner.attempt, owner.limits)).to_equal(Err(L78BoundaryErrorV4.ExpiredToken))
+        expect(owner.active_slots.len()).to_equal(0)
+        expect(owner.revoked_slots).to_contain(token.slot)
+
+    it "enforces item byte and step budgets without dropping live slots":
+        for dimension in ["items", "bytes", "steps"]:
+            var port = namespace_fake("namespace_ok")
+            var limits = port.limits
+            if dimension == "items": limits.max_items = 1
+            if dimension == "bytes": limits.max_bytes = 1
+            if dimension == "steps": limits.max_steps = 1
+            port.limits = limits
+            val begun = begin_namespace(port)
+            var owner = begun.owner
+            val token = begun.outcome.unwrap()
+            expect(owner.roots(token)).to_equal(Err(L78BoundaryErrorV4.Bounds))
+            l78_expect_namespace_retained_v4(owner, token)
+
+    it "leaves the closed production port unavailable for a fabricated test token":
+        val begun = begin_namespace(namespace_fake("namespace_ok"))
+        val token = begun.outcome.unwrap()
+        var closed = l78_closed_namespace_port_v4("U02 has no live issuer")
+        expect(closed.roots(token)).to_equal(Err(L78BoundaryErrorV4.Unavailable))
+        val unavailable = begin_namespace(namespace_fake("namespace_unavailable"))
+        expect(unavailable.outcome).to_equal(Err(L78BoundaryErrorV4.Unavailable))
+        expect(unavailable.owner.active_slots.len()).to_equal(0)
+
+    it "drives the whole modeled lifecycle through the owner-returning runners":
+        step("begin, roots, closure, finish each return the updated owner with its Result")
+        val begun = l78_begin_namespace_with_port_v4(namespace_fake("namespace_ok"),
+            CacheNamespaceModeV3.Collect, CacheNamespaceExpectedHeadV3.Genesis,
+            namespace_attempt(), namespace_limits())
+        val token = begun.outcome.unwrap()
+        expect(token.kind).to_equal(L78TokenKindV4.Namespace)
+        expect(begun.owner.events).to_equal(["namespace.begin"])
+        val captured = l78_capture_roots_with_port_v4(begun.owner, token)
+        expect(captured.outcome.unwrap().generation_roots.len()).to_equal(1)
+        val closed_over = l78_closure_with_port_v4(captured.owner, token)
+        val closure = closed_over.outcome.unwrap()
+        expect(closure.kind).to_equal(L78TokenKindV4.Closure)
+        expect(closure.slot == token.slot).to_equal(false)
+        expect(closed_over.owner.events).to_equal(
+            ["namespace.begin", "namespace.roots", "namespace.closure"])
+        val finished = l78_finish_with_port_v4(closed_over.owner, token)
+        expect(finished.outcome).to_equal(Ok(()))
+        expect(finished.owner.active_slots.len()).to_equal(0)
+        expect(finished.owner.revoked_slots).to_equal([token.slot, closure.slot])
+
+    it "returns the retained owner from every runner when finish and abort answer Unknown":
+        for script in ["namespace_unknown_finish", "namespace_unknown_abort"]:
+            step("Unknown must preserve the owner and its outstanding tokens")
+            val begun = l78_begin_namespace_with_port_v4(namespace_fake(script),
+                CacheNamespaceModeV3.Collect, CacheNamespaceExpectedHeadV3.Genesis,
+                namespace_attempt(), namespace_limits())
+            val token = begun.outcome.unwrap()
+            val captured = l78_capture_roots_with_port_v4(begun.owner, token)
+            val closed_over = l78_closure_with_port_v4(captured.owner, token)
+            val closure = closed_over.outcome.unwrap()
+            val ended = if script == "namespace_unknown_finish":
+                l78_finish_with_port_v4(closed_over.owner, token)
+            else:
+                l78_abort_with_port_v4(closed_over.owner, token)
+            expect(ended.outcome).to_equal(Err(L78BoundaryErrorV4.Unknown))
+            l78_expect_namespace_retained_v4(ended.owner, token)
+            expect(ended.owner.active_slots).to_contain(closure.slot)
+            expect(ended.owner.revoked_slots.len()).to_equal(0)
+
+    it "maps stale foreign and out-of-bounds requests to their exact boundary errors":
+        step("Every runner reports the port verdict without softening it")
+        val begun = l78_begin_namespace_with_port_v4(namespace_fake("namespace_ok"),
+            CacheNamespaceModeV3.Collect, CacheNamespaceExpectedHeadV3.Genesis,
+            namespace_attempt(), namespace_limits())
+        val issued = begun.outcome.unwrap()
+        var stale = issued
+        stale.epoch = stale.epoch + 1
+        var foreign = issued
+        foreign.owner_instance = 42
+        val on_stale = l78_closure_with_port_v4(begun.owner, stale)
+        expect(on_stale.outcome).to_equal(Err(L78BoundaryErrorV4.StaleToken))
+        val on_foreign = l78_finish_with_port_v4(on_stale.owner, foreign)
+        expect(on_foreign.outcome).to_equal(Err(L78BoundaryErrorV4.ForeignToken))
+        l78_expect_namespace_retained_v4(on_foreign.owner, issued)
+        var bounded = namespace_fake("namespace_ok")
+        var tight = bounded.limits
+        tight.max_steps = 1
+        bounded.limits = tight
+        val bounded_begun = l78_begin_namespace_with_port_v4(bounded,
+            CacheNamespaceModeV3.Collect, CacheNamespaceExpectedHeadV3.Genesis,
+            namespace_attempt(), tight)
+        val bounded_token = bounded_begun.outcome.unwrap()
+        val bounded_abort = l78_abort_with_port_v4(bounded_begun.owner, bounded_token)
+        expect(bounded_abort.outcome).to_equal(Err(L78BoundaryErrorV4.Bounds))
+        l78_expect_namespace_retained_v4(bounded_abort.owner, bounded_token)
+
+    it "answers Unavailable on the closed production port for every runner":
+        step("A TestDouble token must never be accepted by the closed live adapter")
+        val begun = l78_begin_namespace_with_port_v4(namespace_fake("namespace_ok"),
+            CacheNamespaceModeV3.Collect, CacheNamespaceExpectedHeadV3.Genesis,
+            namespace_attempt(), namespace_limits())
+        val token = begun.outcome.unwrap()
+        expect(token.domain).to_equal(L78AuthorityDomainV4.TestDouble)
+        val closed_begin = l78_begin_namespace_with_port_v4(
+            l78_closed_namespace_port_v4("P07 has no live issuer"),
+            CacheNamespaceModeV3.Collect, CacheNamespaceExpectedHeadV3.Genesis,
+            namespace_attempt(), namespace_limits())
+        expect(closed_begin.outcome).to_equal(Err(L78BoundaryErrorV4.Unavailable))
+        val closed_closure = l78_closure_with_port_v4(closed_begin.owner, token)
+        expect(closed_closure.outcome).to_equal(Err(L78BoundaryErrorV4.Unavailable))
+        val closed_finish = l78_finish_with_port_v4(closed_closure.owner, token)
+        expect(closed_finish.outcome).to_equal(Err(L78BoundaryErrorV4.Unavailable))
+        val closed_abort = l78_abort_with_port_v4(closed_finish.owner, token)
+        expect(closed_abort.outcome).to_equal(Err(L78BoundaryErrorV4.Unavailable))
+        expect(closed_abort.owner.reason).to_equal("P07 has no live issuer")
+        expect(l78_namespace_host_capability_v4()).to_equal(
+            Err(L78BoundaryErrorV4.Unavailable))
+

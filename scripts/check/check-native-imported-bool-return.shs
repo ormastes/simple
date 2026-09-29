@@ -1,0 +1,57 @@
+#!/bin/sh
+# Native cross-module `-> bool` ABI gate. Exit 0=measured PASS,
+# 1=measured regression, 2=UNTESTABLE (no verified self-hosted toolchain).
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)"
+cd "$ROOT_DIR"
+
+. "$ROOT_DIR/scripts/check/lib/require-self-hosted.shs"
+
+SIMPLE_TARGET="${SIMPLE_BIN:-bin/simple}"
+WORK_DIR="${WORK_DIR:-/tmp/check-native-imported-bool-return.$$}"
+FIXTURE_ROOT="test/fixtures/native_imported_bool_return"
+FIXTURE_ENTRY="$FIXTURE_ROOT/main.spl"
+
+require_self_hosted "$SIMPLE_TARGET" "native imported-bool compiler"
+require_tool llvm-as "SIMPLE_LLVM_BITCODE_DEBUG verifier"
+require_tool opt "SIMPLE_LLVM_BITCODE_DEBUG verifier"
+require_tool llc "LLVM native build"
+require_tool timeout "bounded native probe"
+
+mkdir -p "$WORK_DIR" || check_untestable "cannot create probe directory $WORK_DIR"
+trap 'rm -rf "$WORK_DIR"' EXIT HUP INT TERM
+
+candidate="$WORK_DIR/probe"
+build_log="$WORK_DIR/build.log"
+if ! env -u SIMPLE_RUNTIME_PATH SIMPLE_BOOTSTRAP=1 \
+    SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_LLVM_BITCODE_DEBUG=1 SIMPLE_KEEP_LLVM_IR=1 \
+    "$SELF_HOSTED_BIN" native-build --backend llvm \
+    --runtime-bundle core-c-bootstrap --source "$FIXTURE_ROOT" \
+    --entry-closure --threads 1 --cache-dir "$WORK_DIR/cache" \
+    --entry "$FIXTURE_ENTRY" --output "$candidate" >"$build_log" 2>&1; then
+    check_fail "native-build failed; log=$build_log"
+fi
+
+ir_path="$(sed -n 's/^\[llvm-bitcode-debug\] ir //p' "$build_log" | tail -1)"
+if [ -z "$ir_path" ] || [ ! -f "$ir_path" ]; then
+    check_untestable "native build did not retain the verified LLVM IR path"
+fi
+
+# The call must have a destination. A bare `call i1 @...` would discard x0;
+# an assigned i1 SSA result is the backend proof before runtime execution.
+if ! grep -Eq '^[[:space:]]*%[^[:space:]]+[[:space:]]*=[[:space:]]*call[[:space:]]+i1[[:space:]]+@.*imported_bool_helper' "$ir_path"; then
+    check_fail "emitted IR has no assigned i1 call destination for imported_bool_helper; ir=$ir_path"
+fi
+if grep -Eq 'zext[[:space:]]+i1[[:space:]].*[[:space:]]+to[[:space:]]+void' "$ir_path"; then
+    check_fail "emitted IR contains invalid zext i1 to void; ir=$ir_path"
+fi
+
+if ! timeout 20 "$candidate" >"$WORK_DIR/run.log" 2>&1; then
+    check_fail "linked candidate failed; log=$WORK_DIR/run.log"
+fi
+if ! grep -Fq 'IMPORTED BOOL RETURN: PASS' "$WORK_DIR/run.log"; then
+    check_fail "candidate did not consume the imported bool result; log=$WORK_DIR/run.log"
+fi
+
+echo "STATUS: PASS native-imported-bool-return call-result=i1-ssa runtime=pass"

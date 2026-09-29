@@ -1,0 +1,56 @@
+"""
+# Vulkan font-batch admission predicate
+
+Reproduce spec for the gui-vulkan-window red gate (2026-08-31): the packed
+frame-batching font lane records ONE compute dispatch covering every quad
+(dispatch groups on X, quads on Y) and returns evidence with
+status="recorded", dispatch_count=1, quad_count=N. The old inline predicate
+in Engine2D._draw_font_batch_plan required dispatch_count == batch quads, so
+every multi-glyph packed batch was rejected and font execution silently fell
+back to cpu — showcase_font_backend_attempt_succeeded=false, no offscreen
+PPM, gate red. Before the fix the first scenario below FAILS (admission is
+false for the exact evidence shape the packed lane produces).
+
+Also pins the export chain regression that hid the failure behind a
+use-warning: `font_execution_plan_into` must be reachable through the
+gc_async_mut font_renderer facade (engine.spl imports it from there).
+"""
+
+use std.gc_async_mut.gpu.engine2d.engine.{engine2d_vulkan_font_batch_admits}
+use std.gc_async_mut.text_layout.font_renderer.{FontRenderConfig, FontExecutionPolicy, font_execution_plan_into}
+
+describe "vulkan font batch admission":
+    it "admits a recorded packed batch with one dispatch covering all quads":
+        # Exact evidence shape from backend_vulkan_font.spl queued-packed-font-batch
+        expect engine2d_vulkan_font_batch_admits("recorded", 10, 1, 10)
+
+    it "admits an executed per-quad batch":
+        expect engine2d_vulkan_font_batch_admits("executed", 10, 10, 10)
+
+    it "rejects when quad coverage is short":
+        expect not engine2d_vulkan_font_batch_admits("recorded", 7, 1, 10)
+
+    it "rejects when nothing was dispatched":
+        expect not engine2d_vulkan_font_batch_admits("recorded", 10, 0, 10)
+
+    it "rejects a failed attempt regardless of counts":
+        expect not engine2d_vulkan_font_batch_admits("failed", 10, 1, 10)
+
+    it "rejects a failed attempt even when the device executed and counts line up":
+        # oracle-parity / cleanup failures set status="failed" with the fence
+        # waited; admission must key on status, never on execution alone.
+        expect not engine2d_vulkan_font_batch_admits("failed", 10, 10, 10)
+
+describe "font execution plan facade export":
+    it "reaches font_execution_plan_into through the gc facade":
+        val config = FontRenderConfig(
+            family: "auto", category: "auto", language: "und", script: "auto",
+            size: 12, weight: "normal", style: "normal", hinting: "none",
+            antialiasing: "grayscale", atlas_policy: "shared-alpha-1024",
+            execution_target: "auto",
+            execution_policy: FontExecutionPolicy.Suggested
+        )
+        var plan: [text] = []
+        val n = font_execution_plan_into(config, ["vulkan", "cpu"], plan)
+        expect n > 0
+        expect plan.len() == n

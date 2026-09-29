@@ -1,7 +1,6 @@
 ---
 id: browser_net_real_site_gaps_2026-07-11
-Status: OPEN (P2)
-Status re-verified 2026-08-17 by source inspection (triage shard 00).
+status: OPEN
 severity: medium
 discovered: 2026-07-11
 discovered_by: Manual hardening pass against real sites (example.com, en.wikipedia.org,
@@ -15,27 +14,6 @@ related: src/compiler_rust/compiler/src/interpreter_extern/network/mod.rs
 
 # Browser net stack: real-site gaps that need Rust-seed changes (not fixed here)
 
-## Current status update (2026-07-26)
-
-The old host-HTTPS fallback described below no longer exists in `H1Client`.
-HTTPS now uses `rt_tls_client_*` exclusively and fails closed when that runtime
-capability is unavailable. The Rust runtime has a rustls-backed implementation
-when runtime TLS is enabled and `net_tls_stub.rs` otherwise; a production claim
-therefore requires a genuine pure-Simple binary linked to the enabled runtime,
-not source inspection or an HTTPS mock.
-
-The pure-Simple fetch layer now also rejects HTTPS-to-plaintext redirects
-before creating or dispatching the redirected request. H1 skips its own DNS
-lookup for TLS because the authenticated TLS runtime owns resolution and socket
-creation; this removes a discarded duplicate lookup.
-
-Bracketed IPv6 HTTPS authority is now normalized only at transport:
-`_browser_transport_host("[::1]")` returns bare `::1` for socket/TLS, while
-URL, origin, history, and Host authority retain brackets. Malformed brackets,
-DNS names, and IPv4 pass through unchanged. Focused host C TLS evidence passes;
-the pure-Simple browser remains compiler-blocked, so this is not a live browser
-HTTPS PASS.
-
 This session hardened `src/lib/gc_async_mut/gpu/browser_engine/net/**` against
 real sites and fixed several real defects in pure Simple (see the "Fixed this
 session" note at the bottom). The three items below need a Rust seed change
@@ -43,14 +21,7 @@ session" note at the bottom). The three items below need a Rust seed change
 `rt_tls_client_*`) which is out of scope for this pass — documented per the
 "do NOT fix, file a bug" instruction.
 
-## 1. Pure-Simple TLS transport is a stub (`rt_tls_client_* == -1`) — RESOLVED 2026-08-16
-
-**RESOLVED:** the seed interpreter's `rt_tls_client_*` externs now delegate to
-the runtime rustls client (`interpreter_extern/net_tls_client.rs`, driver
-`runtime-tls` feature). The pure-Simple H1/TLS path (`TlsManager.handshake`,
-`execute_tls_http`, chunked decoding) is exercised live under the seed:
-`https://example.com` loads (559 bytes) and `https://self-signed.badssl.com`
-is rejected by the certificate verifier. Original report kept below.
+## 1. Pure-Simple TLS transport is a stub (`rt_tls_client_* == -1`)
 
 `TlsManager.handshake()` (net/tls.spl) always fails because
 `rt_tls_client_connect_with_sni` etc. are unimplemented in the interpreter
@@ -73,8 +44,7 @@ Rust seed.
 `ureq::Response` headers are read (`response.status()`,
 `response.into_string()`) and then dropped without ever being surfaced to
 the tuple. This means every fetch that falls back to the host-HTTPS
-transport (at the time of this report, every real HTTPS fetch — #1 was still
-stubbed; since #1's 2026-08-16 resolution the pure-Simple path carries HTTPS)
+transport (i.e. every real HTTPS fetch today, since TLS is stubbed per #1)
 loses `Content-Type`, `Set-Cookie`, `Cache-Control`, `ETag`, etc. — cookie
 storage and cache freshness policy silently see nothing for HTTPS responses.
 Confirmed the Rust extern discards headers (read-only review, not edited):

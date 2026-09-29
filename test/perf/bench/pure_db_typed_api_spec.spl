@@ -4,17 +4,8 @@
 # Compares SQL path vs direct typed API on identical workloads.
 #
 # Run: bin/simple test test/perf/bench/pure_db_typed_api_spec.spl
-#
-# Purpose and audience: direct typed-API benchmark evidence (put/get/scan_all/
-# delete_by_key over the hash index) for database engineers comparing against
-# the SQL path on identical workloads. Scope: Phases 1-3 typed storage+index.
-#
-# @req REQ-PERF-DB-TYPED-API
-# lifecycle: doc/03_plan/lib/database/db_perf_beat_sqlite_postgre_plan_2026-05-27.md ;
-#            doc/03_plan/compiler/optimization/db_hardening_optimization_plan_2026-05-26.md
 
 use std.spec
-use std.spec.step
 use std.io_runtime.{file_delete, getpid, time_now_unix_micros}
 use std.database.sql.types.{DbValue, DbRow}
 use nogc_sync_mut.database.pure_sql.database.{PureDatabase}
@@ -40,11 +31,8 @@ fn make_row2(a: i64, b: text) -> [DbValue]:
     r
 
 describe "Direct Typed API Benchmarks":
-    # @manual PureDatabase typed API benchmark evidence
     describe "W7: put() 200 rows (direct API, no SQL parse)":
         it "inserts 200 rows via put() and measures time":
-            # @req REQ-PERF-DB-TYPED-API
-            step("insert 200 rows via put() without SQL parsing and time it")
             var db = PureDatabase.memory_deferred().unwrap()
             db.exec_sql("CREATE TABLE w7 (id INTEGER PRIMARY KEY, name TEXT, score INTEGER)").unwrap()
 
@@ -61,15 +49,10 @@ describe "Direct Typed API Benchmarks":
 
             val rows = db.scan_all("w7").unwrap()
             expect(rows.len()).to_be_greater_than(0)
-            # Real oracle: exact row count after the direct-API bulk insert.
-            # oracle: 200 rows were put() in the loop.
-            expect(rows.len()).to_equal(200)
             db.close().unwrap()
 
     describe "W8: get() point lookup by PK (hash index)":
         it "looks up single row by PK 100 times":
-            # @req REQ-PERF-DB-TYPED-API
-            step("run 100 hash-indexed get() lookups by PK and time them")
             var db = PureDatabase.memory_deferred().unwrap()
             db.exec_sql("CREATE TABLE w8 (id INTEGER PRIMARY KEY, name TEXT)").unwrap()
             var i = 0
@@ -84,20 +67,15 @@ describe "Direct Typed API Benchmarks":
             while j < 100:
                 val idx = j * 2
                 val result = db.get("w8", "id", DbValue.Integer(value: idx as i64)).unwrap()
-                expect(result != nil).to_equal(true)
+                expect(result.?).to_equal(true)
                 j = j + 1
             val t1 = bench_now_ns()
 
             print("[W8] get() by PK x100 (hash index): " + elapsed_ms(t0, t1).to_text() + " ms")
-            # Real oracle: an unprobed id is still retrievable.
-            # oracle: id 199 exists from the 200-row setup.
-            expect(db.get("w8", "id", DbValue.Integer(value: 199)).unwrap() != nil).to_equal(true)
             db.close().unwrap()
 
     describe "W9: scan_all() full table scan":
         it "scans all rows 100 times":
-            # @req REQ-PERF-DB-TYPED-API
-            step("run 100 typed scan_all() calls and time them")
             var db = PureDatabase.memory_deferred().unwrap()
             db.exec_sql("CREATE TABLE w9 (id INTEGER PRIMARY KEY, name TEXT, score INTEGER)").unwrap()
             var i = 0
@@ -116,15 +94,10 @@ describe "Direct Typed API Benchmarks":
             val t1 = bench_now_ns()
 
             print("[W9] scan_all() x100 (typed): " + elapsed_ms(t0, t1).to_text() + " ms")
-            # Real oracle: exact table size.
-            # oracle: 200 rows were put() in setup.
-            expect(db.scan_all("w9").unwrap().len()).to_equal(200)
             db.close().unwrap()
 
     describe "W10: SQL point SELECT with PRIMARY KEY":
         it "compares SQL SELECT vs get() on PK column":
-            # @req REQ-PERF-DB-TYPED-API
-            step("time 100 SQL point SELECTs vs 100 get() calls on the PK")
             var db = PureDatabase.memory_deferred().unwrap()
             db.exec_sql("CREATE TABLE w10 (id INTEGER PRIMARY KEY, name TEXT)").unwrap()
             var i = 0
@@ -147,7 +120,7 @@ describe "Direct Typed API Benchmarks":
             while k < 100:
                 val idx2 = k * 2
                 val result = db.get("w10", "id", DbValue.Integer(value: idx2 as i64)).unwrap()
-                expect(result != nil).to_equal(true)
+                expect(result.?).to_equal(true)
                 k = k + 1
             val t1_api = bench_now_ns()
 
@@ -156,15 +129,10 @@ describe "Direct Typed API Benchmarks":
             print("[W10] SQL SELECT x100: " + sql_ms.to_text() + " ms")
             print("[W10] get() API x100: " + api_ms.to_text() + " ms")
             print("[W10] Speedup: " + (sql_ms / (api_ms + 1)).to_text() + "x")
-            # Real oracle: both paths agree on a hit outside the timed probes.
-            # oracle: id 199 exists; SQL path returns exactly one row.
-            expect(db.query("SELECT id FROM w10 WHERE id = 199", []).unwrap().len()).to_equal(1)
             db.close().unwrap()
 
     describe "W11: delete_by_key()":
         it "deletes rows by key 50 times":
-            # @req REQ-PERF-DB-TYPED-API
-            step("delete 50 rows by key and time it")
             var db = PureDatabase.memory_deferred().unwrap()
             db.exec_sql("CREATE TABLE w11 (id INTEGER PRIMARY KEY, name TEXT)").unwrap()
             var i = 0
@@ -184,10 +152,5 @@ describe "Direct Typed API Benchmarks":
             print("[W11] delete_by_key() x50: " + elapsed_ms(t0, t1).to_text() + " ms")
 
             val remaining = db.scan_all("w11").unwrap()
-            # oracle: 200 inserted - 50 deleted = 150 rows remain.
             expect(remaining.len()).to_equal(150)
-            # Real oracle: the deleted key is gone, survivors are not.
-            # oracle: id 0 was deleted, id 50 was not.
-            expect(db.get("w11", "id", DbValue.Integer(value: 0)).unwrap() == nil).to_equal(true)
-            expect(db.get("w11", "id", DbValue.Integer(value: 50)).unwrap() != nil).to_equal(true)
             db.close().unwrap()

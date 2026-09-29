@@ -1,7 +1,10 @@
 # Hosted-WM entry closure was unparseable: two grammar gaps + three landed syntax errors
+## Open 2026-09-16 — needs owner triage
 
-Status: FIXED
-Status re-verified 2026-08-17 by source inspection (triage shard 01).
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
+
+**Status:** source repaired (the original change); **Gap A and Gap C are now
 CLOSED in the grammar** — see "Update 2026-08-01" at the end. Gap B
 (multi-line `match` as a struct-literal field value) is tracked separately.
 **Found:** while trying to calibrate `GLYPH_RGB_SHA256` for
@@ -172,3 +175,4 @@ Non-vacuity, same command on the same file, two binaries:
 The 13 assertions check evaluated *results*, not merely that the file
 loads, so a silent mis-association of a continued condition or RHS fails
 the spec rather than passing it.
+

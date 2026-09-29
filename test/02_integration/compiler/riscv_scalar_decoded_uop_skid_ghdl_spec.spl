@@ -1,0 +1,89 @@
+use std.spec.*
+use app.io.vhdl_ffi.{ghdl_available, ghdl_analyze, ghdl_elaborate, ghdl_run,
+    vhdl_write_file}
+use compiler.mir.hwir.types.{CoreConfig, HwPort}
+use compiler.mir.hwir.riscv_scalar_decoder.{strict_riscv_scalar_decoder_hwir}
+use compiler.mir.hwir.riscv_scalar_decoded_uop_interface.{
+    strict_hw_scalar_decoded_uop_interface}
+use compiler.mir.hwir.riscv_scalar_decode_dispatch_owner.{
+    strict_riscv_scalar_decoded_uop_skid}
+use compiler.backend.backend.hwir_to_vhdl.{render_strict_sequential_hwir}
+use lib.hardware.riscv_common.isa.scalar_database.{riscv_scalar_decoder_plan}
+
+fn signal_type(port: HwPort) -> text:
+    if port.bit_width == 1: return "std_logic"
+    "std_logic_vector(" + (port.bit_width - 1).to_text() + " downto 0)"
+
+fn signal_default(port: HwPort) -> text:
+    if port.bit_width == 1: return "'0'"
+    "(others => '0')"
+
+fn skid_testbench(entity_name: text, ports: [HwPort]) -> text:
+    var declarations = ""
+    var mappings = ""
+    var index = 0
+    for port in ports:
+        declarations = declarations + "  signal " + port.name + " : " +
+            signal_type(port) + " := " + signal_default(port) + ";\n"
+        mappings = mappings + "    " + port.name + " => " + port.name
+        if index + 1 < ports.len(): mappings = mappings + ","
+        mappings = mappings + "\n"
+        index = index + 1
+    """
+library ieee;
+use ieee.std_logic_1164.all;
+use std.env.all;
+entity {entity_name}_tb is end entity;
+architecture sim of {entity_name}_tb is
+{declarations}begin
+  dut: entity work.{entity_name} port map(
+{mappings}  );
+  process begin
+    rst <= '1'; wait for 1 ns; clk <= '1'; wait for 1 ns; clk <= '0'; rst <= '0';
+    upstream_valid <= '1'; upstream_decoded_valid <= '1';
+    upstream_canonical_instruction <= x"00B50533";
+    upstream_provider_event_id <= x"0000000000000007";
+    upstream_decode_event_id <= x"0000000000000007";
+    wait for 1 ns; clk <= '1'; wait for 1 ns; clk <= '0';
+    assert uop_valid = '1' and decode_legal = '1'
+      report "legal decoded uop was not captured" severity failure;
+    assert canonical_instruction = x"00B50533" and lineage_valid = '1'
+      report "captured instruction mismatch" severity failure;
+    upstream_canonical_instruction <= x"40B50533"; upstream_valid <= '0';
+    wait for 1 ns;
+    assert canonical_instruction = x"00B50533" and upstream_ready = '0'
+      report "stalled decoded uop changed" severity failure;
+    uop_ready <= '1'; wait for 1 ns; clk <= '1'; wait for 1 ns; clk <= '0';
+    assert uop_valid = '0' and upstream_ready = '1'
+      report "decoded uop was not consumed exactly once" severity failure;
+    upstream_valid <= '1'; upstream_decoded_valid <= '0';
+    upstream_original_instruction <= x"FFFFFFFF";
+    wait for 1 ns; clk <= '1'; wait for 1 ns; clk <= '0';
+    assert uop_valid = '1' and decode_legal = '0' and illegal_valid = '1'
+      report "illegal transaction envelope was lost" severity failure;
+    assert original_instruction = x"FFFFFFFF"
+      report "illegal instruction lineage was lost" severity failure;
+    finish;
+  end process;
+end architecture;
+"""
+
+describe "scalar decoded-uop skid VHDL protocol":
+    slow_it "captures, stalls, consumes, and preserves illegal transactions":
+        if not ghdl_available():
+            print "SKIP: GHDL not available"
+            return
+        val config = CoreConfig.rv32(); val plan = riscv_scalar_decoder_plan("rv32i").unwrap()
+        val decoder = strict_riscv_scalar_decoder_hwir("uop_skid_decoder", config, plan).unwrap()
+        val descriptor = strict_hw_scalar_decoded_uop_interface(config, plan, decoder).unwrap()
+        val skid = strict_riscv_scalar_decoded_uop_skid(
+            "scalar_decoded_uop_skid_ghdl", plan, decoder, descriptor).unwrap()
+        val emitted = render_strict_sequential_hwir(skid, "hwir-gen2-scalar-decoded-uop-skid-v1")
+        expect(emitted.is_success()).to_equal(true)
+        if emitted.is_success():
+            val path = "/tmp/scalar_decoded_uop_skid_ghdl.vhd"
+            expect(vhdl_write_file(path, emitted.vhdl + "\n" +
+                skid_testbench(skid.entity_name, skid.ports))).to_equal(true)
+            expect(ghdl_analyze(path).success).to_equal(true)
+            expect(ghdl_elaborate("scalar_decoded_uop_skid_ghdl_tb").success).to_equal(true)
+            expect(ghdl_run("scalar_decoded_uop_skid_ghdl_tb", Some("20ns")).success).to_equal(true)

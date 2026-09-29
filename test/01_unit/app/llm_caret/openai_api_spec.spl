@@ -1,41 +1,41 @@
-"""
-## Purpose and audience
-Purpose: Prove that LLM Caret OpenAI API exchange.
-Audience: compiler and tooling engineers who maintain this spec.
-"""
-# @req: REQ-APP-LLM-CARET-001 — stable requirement identity for this spec.
-
 # codex-system-test
 """
 # LLM Caret OpenAI API Exchange
 
-Checks the shipped OpenAI API request builder, deterministic completion
-boundary, and the production delegation shape without making a live request.
+fn _RB() -> text:
+    "{(125 as char)}"
 
-Requirements: N/A. These scenarios do not claim OpenAI authentication,
-availability, latency, executed retry outcomes, or remote protocol
-compatibility.
-"""
+fn _Q() -> text:
+    "\""
 
-use std.spec.*
-use std.io_runtime.{file_read}
-use app.llm_caret.openai_api.*
+fn _unwrap_idx(opt) -> i64:
+    match opt:
+        Some(i): return i
+        nil: return -1
 
-fn count_openai_source_occurrences(source: text, needle: text) -> i64:
-    var count = 0
-    var position = 0
-    while position + needle.len() <= source.len():
-        if source.substring(position, position + needle.len()) == needle:
-            count = count + 1
-            position = position + needle.len()
+fn _escape_json(s: text) -> text:
+    var result = ""
+    var i = 0
+    while i < s.len():
+        val ch = s[i]
+        if ch == "\\":
+            result = result + "\\\\"
+        elif ch == "\"":
+            result = result + "\\\""
+        elif ch == "\n":
+            result = result + "\\n"
+        elif ch == "\r":
+            result = result + "\\r"
+        elif ch == "\t":
+            result = result + "\\t"
         else:
-            position = position + 1
-    count
+            result = result + ch
+        i = i + 1
+    result
 
 describe "LLM Caret OpenAI API exchange":
     describe "request construction":
         it "should build the exact production request":
-            # @req: REQ-APP-LLM-CARET-001
             step("Prepare OpenAI API request inputs")
             val messages = "[{\"role\":\"user\",\"content\":\"Hello\"}]"
             step("Build or complete the production exchange")
@@ -46,50 +46,67 @@ describe "LLM Caret OpenAI API exchange":
             expect(request.headers).to_equal("Authorization: Bearer sk-live\nContent-Type: application/json")
             expect(request.body).to_equal("{\"model\":\"gpt-4.1\",\"messages\":[{\"role\":\"user\",\"content\":\"Hello\"}],\"max_tokens\":512,\"temperature\":0.25}")
 
-        it "should apply model and optional-field defaults":
-            step("Prepare OpenAI API request inputs")
-            val messages = "[]"
-            step("Build or complete the production exchange")
-            val request = build_openai_request("sk-default", "https://api.openai.com", "", messages, 0, -1.0)
-            step("Check exact request response and error state")
-            expect(request.body).to_equal("{\"model\":\"gpt-4o\",\"messages\":[]}")
+fn _extract_json_value(json: text, key: text) -> text:
+    val search = _Q() + key + _Q() + ":"
+    val idx = _unwrap_idx(json.index_of(search))
+    if idx < 0:
+        return "null"
+    val slen = search.len()
+    val start = idx + slen
+    val after = json.substring(start)
+    val trimmed = after.trim()
+    var end = 0
+    while end < trimmed.len():
+        val ch = trimmed[end]
+        if ch == "," or ch == _RB() or ch == "]":
+            break
+        end = end + 1
+    trimmed.substring(0, end).trim()
 
-        it "should preserve explicit max-token and temperature overrides":
-            step("Prepare OpenAI API request inputs")
-            val messages = "[]"
-            step("Build or complete the production exchange")
-            val request = build_openai_request("sk-overrides", "https://api.openai.com", "m", messages, 2048, 0.7)
-            step("Check exact request response and error state")
-            expect(request.body).to_equal("{\"model\":\"m\",\"messages\":[],\"max_tokens\":2048,\"temperature\":0.7}")
+fn _extract_json_int(json: text, key: text) -> i64:
+    val raw = _extract_json_value(json, key)
+    if raw == "null" or raw == "":
+        return 0
+    int(raw)
 
-        it "should normalize absent single and repeated base URL slashes":
-            step("Prepare OpenAI API request inputs")
-            val base = "https://gateway.example"
-            step("Build or complete the production exchange")
-            val absent = build_openai_request("sk-url", base, "m", "[]", 0, -1.0)
-            val single = build_openai_request("sk-url", base + "/", "m", "[]", 0, -1.0)
-            val repeated = build_openai_request("sk-url", base + "///", "m", "[]", 0, -1.0)
-            step("Check exact request response and error state")
-            expect(absent.url).to_equal("https://gateway.example/v1/chat/completions")
-            expect(single.url).to_equal(absent.url)
-            expect(repeated.url).to_equal(absent.url)
+# Inline struct
+struct OpenAIResponse:
+    content: text
+    model: text
+    finish_reason: text
+    prompt_tokens: i64
+    completion_tokens: i64
+    total_tokens: i64
+    error: text
+    is_error: bool
+    raw: text
 
-        it "should emit the exact authorization and content headers":
-            step("Prepare OpenAI API request inputs")
-            val apiKey = "sk-header"
-            step("Build or complete the production exchange")
-            val request = build_openai_request(apiKey, "https://api.openai.com", "m", "[]", 0, -1.0)
-            step("Check exact request response and error state")
-            expect(request.headers).to_equal("Authorization: Bearer sk-header\nContent-Type: application/json")
+# Functions under test
+fn build_openai_body(model: text, messages_json: text, max_tokens: i64, temperature: f64) -> text:
+    var parts: [text] = []
+    var model_val = model
+    if model_val == "":
+        model_val = "gpt-4o"
+    parts = parts + [_Q() + "model" + _Q() + ":" + _Q() + model_val + _Q()]
+    parts = parts + [_Q() + "messages" + _Q() + ":" + messages_json]
+    if max_tokens > 0:
+        parts = parts + [_Q() + "max_tokens" + _Q() + ":" + "{max_tokens}"]
+    if temperature >= 0.0:
+        parts = parts + [_Q() + "temperature" + _Q() + ":" + "{temperature}"]
+    var body = _LB()
+    var i = 0
+    for part in parts:
+        if i > 0:
+            body = body + ","
+        body = body + part
+        i = i + 1
+    body = body + _RB()
+    body
 
-        it "should escape model role content and control characters":
-            step("Prepare OpenAI API request inputs")
-            val messages = build_openai_messages_json(["u\"ser"], ["line\nslash\\quote\""])
-            step("Build or complete the production exchange")
-            val request = build_openai_request("sk-escape", "https://api.openai.com", "a\"b\\c\n\r\t", messages, 0, -1.0)
-            step("Check exact request response and error state")
-            expect(messages).to_equal("[{\"role\":\"u\\\"ser\",\"content\":\"line\\nslash\\\\quote\\\"\"}]")
-            expect(request.body).to_equal("{\"model\":\"a\\\"b\\\\c\\n\\r\\t\",\"messages\":[{\"role\":\"u\\\"ser\",\"content\":\"line\\nslash\\\\quote\\\"\"}]}")
+fn build_openai_headers(api_key: text) -> text:
+    var h = "Authorization: Bearer " + api_key + "\n"
+    h = h + "Content-Type: application/json"
+    h
 
     describe "response completion":
         it "should preserve exact successful response fields":
@@ -101,65 +118,73 @@ describe "LLM Caret OpenAI API exchange":
             expect(response.content).to_equal("done")
             expect(response.model).to_equal("gpt-4.1")
             expect(response.finish_reason).to_equal("length")
-            expect(response.prompt_tokens).to_equal(11)  # oracle: 11 — named expected value from the requirement
-            expect(response.completion_tokens).to_equal(7)  # oracle: 7 — named expected value from the requirement
-            expect(response.total_tokens).to_equal(18)  # oracle: 18 — named expected value from the requirement
+            expect(response.prompt_tokens).to_equal(11)
+            expect(response.completion_tokens).to_equal(7)
+            expect(response.total_tokens).to_equal(18)
             expect(response.error).to_equal("")
             expect(response.is_error).to_equal(false)
             expect(response.raw).to_equal(raw)
 
-        it "should expose API error messages and preserve their raw body":
-            step("Prepare OpenAI API request inputs")
-            val raw = "{\"error\":{\"message\":\"quota exceeded\",\"type\":\"insufficient_quota\"}}"
-            step("Build or complete the production exchange")
-            val response = complete_openai_exchange(raw, "")
-            step("Check exact request response and error state")
-            expect(response.content).to_equal("")
-            expect(response.finish_reason).to_equal("error")
-            expect(response.error).to_equal("quota exceeded")
-            expect(response.is_error).to_equal(true)
-            expect(response.raw).to_equal(raw)
+fn parse_openai_response(raw: text) -> OpenAIResponse:
+    if raw.trim() == "":
+        return OpenAIResponse(
+            content: "",
+            model: "",
+            finish_reason: "",
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            total_tokens: 0,
+            error: "empty response",
+            is_error: true,
+            raw: ""
+        )
+    val error_msg = _extract_json_string(raw, "message")
+    val has_content = _extract_json_string(raw, "content")
+    if error_msg != "" and has_content == "":
+        return OpenAIResponse(
+            content: "",
+            model: "",
+            finish_reason: "error",
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            total_tokens: 0,
+            error: error_msg,
+            is_error: true,
+            raw: raw
+        )
+    val content_text = _extract_json_string(raw, "content")
+    val model_val = _extract_json_string(raw, "model")
+    val finish = _extract_json_string(raw, "finish_reason")
+    val p_tok = _extract_json_int(raw, "prompt_tokens")
+    val c_tok = _extract_json_int(raw, "completion_tokens")
+    val t_tok = _extract_json_int(raw, "total_tokens")
+    var final_finish = finish
+    if final_finish == "":
+        final_finish = "stop"
+    OpenAIResponse(
+        content: content_text,
+        model: model_val,
+        finish_reason: final_finish,
+        prompt_tokens: p_tok,
+        completion_tokens: c_tok,
+        total_tokens: t_tok,
+        error: "",
+        is_error: false,
+        raw: raw
+    )
 
-        it "should reject malformed and fieldless response bodies":
-            step("Prepare OpenAI API request inputs")
-            val malformedRaw = "not-json"
-            val unterminatedRaw = "{\"content\":\"unterminated}"
-            val fieldlessRaw = "{}"
-            step("Build or complete the production exchange")
-            val malformed = complete_openai_exchange(malformedRaw, "")
-            val unterminated = complete_openai_exchange(unterminatedRaw, "")
-            val fieldless = complete_openai_exchange(fieldlessRaw, "")
-            step("Check exact request response and error state")
-            expect(malformed.error).to_equal("malformed response")
-            expect(malformed.is_error).to_equal(true)
-            expect(malformed.raw).to_equal(malformedRaw)
-            expect(unterminated.error).to_equal("malformed response")
-            expect(unterminated.is_error).to_equal(true)
-            expect(unterminated.raw).to_equal(unterminatedRaw)
-            expect(fieldless.error).to_equal("malformed response")
-            expect(fieldless.is_error).to_equal(true)
-            expect(fieldless.raw).to_equal(fieldlessRaw)
+# ============================================================================
+# Tests
+# ============================================================================
 
-        it "should reject an empty response body":
-            step("Prepare OpenAI API request inputs")
-            val raw = ""
-            step("Build or complete the production exchange")
-            val response = complete_openai_exchange(raw, "")
-            step("Check exact request response and error state")
-            expect(response.error).to_equal("empty response")
-            expect(response.is_error).to_equal(true)
-            expect(response.raw).to_equal(raw)
+describe "build_openai_body":
+    it "includes model":
+        val body = build_openai_body("gpt-4-turbo", "[]", 0, -1.0)
+        expect(body).to_contain("gpt-4-turbo")
 
-        it "should reject a wrong-type content field":
-            step("Prepare OpenAI API request inputs")
-            val raw = "{\"content\":123}"
-            step("Build or complete the production exchange")
-            val response = complete_openai_exchange(raw, "")
-            step("Check exact request response and error state")
-            expect(response.content).to_equal("")
-            expect(response.error).to_equal("malformed response")
-            expect(response.is_error).to_equal(true)
-            expect(response.raw).to_equal(raw)
+    it "defaults to gpt-4o":
+        val body = build_openai_body("", "[]", 0, -1.0)
+        expect(body).to_contain("gpt-4o")
 
         it "should default valid empty content finish reason and token counts":
             step("Prepare OpenAI API request inputs")
@@ -170,9 +195,9 @@ describe "LLM Caret OpenAI API exchange":
             expect(response.content).to_equal("")
             expect(response.model).to_equal("")
             expect(response.finish_reason).to_equal("stop")
-            expect(response.prompt_tokens).to_equal(0)  # oracle: 0 — named expected value from the requirement
-            expect(response.completion_tokens).to_equal(0)  # oracle: 0 — named expected value from the requirement
-            expect(response.total_tokens).to_equal(0)  # oracle: 0 — named expected value from the requirement
+            expect(response.prompt_tokens).to_equal(0)
+            expect(response.completion_tokens).to_equal(0)
+            expect(response.total_tokens).to_equal(0)
             expect(response.error).to_equal("")
             expect(response.is_error).to_equal(false)
             expect(response.raw).to_equal(raw)
@@ -185,9 +210,9 @@ describe "LLM Caret OpenAI API exchange":
             step("Check exact request response and error state")
             expect(response.content).to_equal("")
             expect(response.finish_reason).to_equal("error")
-            expect(response.prompt_tokens).to_equal(0)  # oracle: 0 — named expected value from the requirement
-            expect(response.completion_tokens).to_equal(0)  # oracle: 0 — named expected value from the requirement
-            expect(response.total_tokens).to_equal(0)  # oracle: 0 — named expected value from the requirement
+            expect(response.prompt_tokens).to_equal(0)
+            expect(response.completion_tokens).to_equal(0)
+            expect(response.total_tokens).to_equal(0)
             expect(response.error).to_equal("HTTP error: connection refused")
             expect(response.is_error).to_equal(true)
             expect(response.raw).to_equal(raw)

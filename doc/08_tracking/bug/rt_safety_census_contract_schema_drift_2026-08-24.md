@@ -1,4 +1,9 @@
 # rt-safety census read stale SFFI inventory columns
+## Closed 2026-09-16 — Status fixed; before/after census evidence (0 -> 911 unsafe rows)
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** fixed in the current SFFI hardening worktree
 **Severity:** high for audit accuracy; no runtime impact
@@ -29,3 +34,4 @@ for the general tree; the separately reverified fixture admits three clock
 symbols. Final run: 25.27 s, 75,308 KiB peak RSS.
 
 The fix changes audit scripts and tests only. It adds no runtime call-path work.
+

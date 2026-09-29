@@ -1,0 +1,42 @@
+# Native workload for the event-maintained warm inventory reducer.
+# Keep the seed and batch sizes fixed so paired binaries see the same work.
+
+use std.scv.compile_source_inventory.{
+    CompileSourceEventV1, compile_source_inventory_git_event_v1,
+    compile_source_inventory_apply_git_events_v1
+}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove}
+use std.nogc_sync_mut.io.time_ops.{time_sample_monotonic_nanos_or_failure}
+
+extern fn rt_getpid() -> i64
+
+fn main() -> i64:
+    val cache_root = "build/mini_builds/target56_warm_batch_workload-{rt_getpid()}/build/scv"
+    dir_remove(cache_root, true)
+    var initial: [CompileSourceEventV1] = []
+    var edits: [CompileSourceEventV1] = []
+    var index = 0
+    while index < 1200:
+        val path = "src/batch_{index}.spl"
+        initial.push(compile_source_inventory_git_event_v1(
+            "create", path, "export fn value(): {index}\n"))
+        if index < 60:
+            edits.push(compile_source_inventory_git_event_v1(
+                "modify", path, "export fn value(): {index + 2000}\n"))
+        index = index + 1
+    val seeded = compile_source_inventory_apply_git_events_v1(cache_root, initial)
+    if not seeded.valid or seeded.inventory == nil or
+            seeded.inventory!.entries.len() != 1200:
+        print "seed failed: {seeded.reason}"
+        return 1
+    val start = time_sample_monotonic_nanos_or_failure()
+    val changed = compile_source_inventory_apply_git_events_v1(cache_root, edits)
+    val elapsed = time_sample_monotonic_nanos_or_failure() - start
+    if not changed.valid or changed.inventory == nil or
+            changed.inventory!.entries.len() != 1200 or
+            changed.inventory!.generation != seeded.inventory!.generation + 60:
+        print "warm batch failed: {changed.reason}"
+        return 2
+    dir_remove(cache_root, true)
+    print "warm_ns={elapsed}"
+    0

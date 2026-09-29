@@ -1,4 +1,8 @@
 # `bin/simple run` corrupts extern-returned `text`, turning a working 3-device Vulkan host into a silent `skip:` that specs record as a PASS
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN
 **Found:** 2026-08-20
@@ -119,3 +123,4 @@ a helper that prints `value.len()`:
 
 - via `simple run <script>.spl`  → `len=-1  discrete=false`
 - via `simple test <spec>.spl`   → `len=8   discrete=true`
+

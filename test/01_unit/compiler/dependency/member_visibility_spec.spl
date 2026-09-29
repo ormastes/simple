@@ -1,0 +1,79 @@
+use std.spec.*
+use compiler.common.dependency.visibility.Visibility
+use compiler.common.dependency.member_visibility.{MemberAccessScope, member_visibility_allows, aggregate_constructor_visibility_allows, member_access_scope_for_modules}
+
+fn scope(
+    same_module: bool = false,
+    same_package: bool = false,
+    declared_friend: bool = false,
+    internally_exported: bool = false,
+    immediate_parent_facade: bool = false,
+    peer_logical_path: bool = false
+) -> MemberAccessScope:
+    MemberAccessScope(
+        same_module: same_module,
+        same_package: same_package,
+        declared_friend: declared_friend,
+        internally_exported: internally_exported,
+        immediate_parent_facade: immediate_parent_facade,
+        peer_logical_path: peer_logical_path
+    )
+
+describe "member visibility policy":
+    it "allows public members from an unrelated module":
+        expect(member_visibility_allows(Visibility.Public, MemberAccessScope.unrelated())).to_be(true)
+
+    it "keeps private members in their declaring module":
+        expect(member_visibility_allows(Visibility.Private, scope(same_module: true))).to_be(true)
+        expect(member_visibility_allows(Visibility.Private, scope(same_package: true))).to_be(false)
+
+    it "allows package members only in the same package":
+        expect(member_visibility_allows(Visibility.Package, scope(same_package: true))).to_be(true)
+        expect(member_visibility_allows(Visibility.Package, scope(declared_friend: true))).to_be(false)
+
+    it "allows internal members to package and declared friends":
+        expect(member_visibility_allows(Visibility.Internal, scope(same_package: true))).to_be(true)
+        expect(member_visibility_allows(Visibility.Internal, scope(declared_friend: true, internally_exported: true))).to_be(true)
+        expect(member_visibility_allows(Visibility.Internal, scope(declared_friend: true))).to_be(false)
+        expect(member_visibility_allows(Visibility.Internal, scope(peer_logical_path: true))).to_be(false)
+
+    it "keeps up members at the declaring module or immediate parent facade":
+        expect(member_visibility_allows(Visibility.Up, scope(same_module: true))).to_be(true)
+        expect(member_visibility_allows(Visibility.Up, scope(immediate_parent_facade: true))).to_be(true)
+        expect(member_visibility_allows(Visibility.Up, scope(same_package: true))).to_be(false)
+
+    it "keeps peer members at the declaring module or peer logical path":
+        expect(member_visibility_allows(Visibility.Peer, scope(same_module: true))).to_be(true)
+        expect(member_visibility_allows(Visibility.Peer, scope(peer_logical_path: true))).to_be(true)
+        expect(member_visibility_allows(Visibility.Peer, scope(immediate_parent_facade: true))).to_be(false)
+
+    it "seals aggregate construction when any field is inaccessible":
+        val fields = [Visibility.Public, Visibility.Private]
+        expect(aggregate_constructor_visibility_allows(fields, scope(same_module: true))).to_be(true)
+        expect(aggregate_constructor_visibility_allows(fields, scope(same_package: true))).to_be(false)
+
+    it "permits aggregate construction when every scoped field is accessible":
+        val fields = [Visibility.Public, Visibility.Package, Visibility.Internal]
+        expect(aggregate_constructor_visibility_allows(fields, scope(same_package: true))).to_be(true)
+
+    it "derives friend, parent, and peer facts without broadening package access":
+        val friend_scope = member_access_scope_for_modules(
+            "src/client/main.spl", "client", "src/server/model.spl", "server", ["client"], true)
+        expect(friend_scope.declared_friend).to_be(true)
+        expect(friend_scope.internally_exported).to_be(true)
+        expect(friend_scope.same_package).to_be(false)
+        val parent_scope = member_access_scope_for_modules(
+            "src/server/__init__.spl", "server", "src/server/model.spl", "server", [])
+        expect(parent_scope.immediate_parent_facade).to_be(true)
+        val peer_scope = member_access_scope_for_modules(
+            "src/compiler/20.hir/shared/node.spl", "compiler.20.hir.shared",
+            "src/compiler/10.frontend/shared/node.spl", "compiler.10.frontend.shared", [])
+        expect(peer_scope.peer_logical_path).to_be(true)
+
+    it "normalizes absolute and repository-relative module identities":
+        val same = member_access_scope_for_modules(
+            "src/pkg/model.spl", "pkg", "/workspace/repo/src/pkg/model.spl", "pkg", [])
+        expect(same.same_module).to_be(true)
+        val parent = member_access_scope_for_modules(
+            "src/pkg/__init__.spl", "pkg", "/workspace/repo/src/pkg/model.spl", "pkg", [])
+        expect(parent.immediate_parent_facade).to_be(true)

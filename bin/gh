@@ -1,0 +1,154 @@
+#!/bin/sh
+# devhub `gh` shim — a drop-in replacement for the GitHub CLI that routes to
+# whichever git-hosting backend this repo is actually configured for.
+#
+# WHY THIS EXISTS: devhub had every adapter it needed (Bitbucket REST, GitHub
+# passthrough) and was still bypassed for every pull request, because agents
+# and humans type `gh` and there was nothing in the way. An instruction in a
+# rules file is the weakest enforcement surface there is; a shim on PATH is
+# the strongest. See
+# doc/01_research/app/tools/devhub/devhub_cli_wrapper_forwarding_2026-09-06.md
+#
+# TWO TRAPS THIS FILE EXISTS TO AVOID (both measured 2026-09-06):
+#
+#   1. RECURSION. adapter_github.spl runs `process_run("gh", args)` -- a bare
+#      name resolved through PATH. With this shim ahead of the real gh, that
+#      is shim -> devhub -> gh_run -> shim -> ... forever, forking a 12-second
+#      process each cycle. We export DEVHUB_REAL_GH with the absolute path of
+#      the real binary, which gh_run prefers; and we strip our own directory
+#      from PATH before resolving it, so we can still see past ourselves.
+#
+#   2. STARTUP COST. `bin/devhub --version` costs 12.0s wall, because the
+#      stdlib is read as source on every process start. Paying that on every
+#      `gh` call would make the shim a tax that gets routed around. So backend
+#      resolution happens HERE, in sh (~2ms), and the github case never enters
+#      Simple at all: it execs the real gh, byte-identical to not having a
+#      shim. Only a genuinely non-GitHub backend pays for the interpreter, and
+#      only because there is real argv/JSON translation to do.
+#
+# Resolution order (mirrors backend_resolve.spl's, which serves the same
+# chain from Simple for callers that do enter the interpreter):
+#   DEVHUB_GIT_BACKEND > .spipe/config.sdn [devhub] git_backend > origin host
+#
+# Escape hatch: DEVHUB_GH_PASSTHROUGH=1 forces the real gh unconditionally.
+set -eu
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+REPO_ROOT=$(CDPATH= cd -- "${SCRIPT_DIR}/.." && pwd)
+
+# --- Find the real gh, with our own directory removed from PATH -------------
+# Without this strip, `command -v gh` finds this script and we invoke
+# ourselves. Rebuild PATH entry by entry; an empty entry means "." in POSIX
+# PATH semantics, so normalise it rather than dropping it silently.
+strip_self_from_path() {
+    _out=""
+    _ifs_saved=$IFS
+    IFS=:
+    for _entry in $PATH; do
+        [ -n "$_entry" ] || _entry="."
+        _abs=$(CDPATH= cd -- "$_entry" 2>/dev/null && pwd) || _abs=""
+        [ "$_abs" = "$SCRIPT_DIR" ] && continue
+        if [ -z "$_out" ]; then _out="$_entry"; else _out="$_out:$_entry"; fi
+    done
+    IFS=$_ifs_saved
+    printf '%s' "$_out"
+}
+
+REAL_PATH=$(strip_self_from_path)
+REAL_GH=$(PATH="$REAL_PATH" command -v gh 2>/dev/null || true)
+
+# --- Backend resolution (sh only -- no Simple process on this path) ---------
+resolve_backend() {
+    # 1. explicit env override
+    if [ -n "${DEVHUB_GIT_BACKEND:-}" ]; then
+        printf '%s' "$DEVHUB_GIT_BACKEND"
+        return 0
+    fi
+
+    # 2. committed repo config: `git_backend:` inside the `devhub:` section.
+    #    Section-scoped on purpose -- a bare grep for the key would also match
+    #    a same-named key under some other section.
+    #
+    #    Anchored on the CALLER'S working directory, not on this script's own
+    #    repository. That distinction is the whole feature: the shim lives in
+    #    the Simple checkout, but it is meant to be used from any repository
+    #    whose bin/ is on PATH. Reading Simple's own .spipe/config.sdn would
+    #    answer `github` for a Bitbucket-hosted repo -- breaking the exact
+    #    case the shim exists for. Mirrors find_repo_root() in
+    #    backend_resolve.spl, which walks up from cwd for the same file.
+    #    REPO_ROOT survives only to locate bin/devhub.
+    _cfg=""
+    _d=$PWD
+    while [ -n "$_d" ]; do
+        if [ -f "$_d/.spipe/config.sdn" ]; then
+            _cfg="$_d/.spipe/config.sdn"
+            break
+        fi
+        [ "$_d" = "/" ] && break
+        _d=$(dirname -- "$_d")
+    done
+    if [ -n "$_cfg" ] && [ -f "$_cfg" ]; then
+        _v=$(awk '
+            /^[a-zA-Z_]+:[[:space:]]*$/ { in_devhub = ($0 ~ /^devhub:/); next }
+            in_devhub && /^[[:space:]]+git_backend:/ {
+                sub(/^[[:space:]]*git_backend:[[:space:]]*/, "")
+                sub(/[[:space:]]*(#.*)?$/, "")
+                print; exit
+            }
+        ' "$_cfg" 2>/dev/null || true)
+        if [ -n "$_v" ]; then
+            printf '%s' "$_v"
+            return 0
+        fi
+    fi
+
+    # 3. sniff the origin remote's host -- again of the CALLER'S repository
+    #    (no -C), for the same reason as the config lookup above.
+    _url=$(git remote get-url origin 2>/dev/null || true)
+    case "$_url" in
+        *bitbucket.org*) printf 'bitbucket'; return 0 ;;
+        *github.com*)    printf 'github';    return 0 ;;
+    esac
+
+    # 4. default: behave exactly as if this shim were not installed
+    printf 'github'
+}
+
+if [ -n "${DEVHUB_GH_PASSTHROUGH:-}" ]; then
+    BACKEND=github
+else
+    BACKEND=$(resolve_backend)
+fi
+
+# --- github: exec the real gh, never enter Simple ---------------------------
+if [ "$BACKEND" = "github" ]; then
+    if [ -z "$REAL_GH" ]; then
+        echo "devhub gh shim: backend is 'github' but no real \`gh\` binary is on PATH." >&2
+        echo "  install the GitHub CLI, or set DEVHUB_GIT_BACKEND to a backend devhub implements." >&2
+        exit 127
+    fi
+    PATH="$REAL_PATH"
+    export PATH
+    exec "$REAL_GH" "$@"
+fi
+
+# --- everything else: translate through devhub ------------------------------
+# DEVHUB_REAL_GH is the recursion guard (trap 1 above). Exported even though
+# the github adapter should not be reached on a non-github backend, because
+# `devhub gh --backend github ...` is a legitimate explicit override and must
+# not fork-bomb.
+if [ -n "$REAL_GH" ]; then
+    DEVHUB_REAL_GH="$REAL_GH"
+    export DEVHUB_REAL_GH
+fi
+PATH="$REAL_PATH"
+export PATH
+# The resolved backend is handed over as the ENVIRONMENT rung, not as a
+# `--backend` flag. Passing a flag would put the shim's own guess AHEAD of an
+# explicit `gh --backend github ...` from the caller, because _extract_flag
+# takes the first match and the shim's injected copy comes first — silently
+# inverting the documented precedence. As an env value it sits exactly where
+# the design says it belongs: above the config files, below an explicit flag.
+DEVHUB_GIT_BACKEND="$BACKEND"
+export DEVHUB_GIT_BACKEND
+exec "${REPO_ROOT}/bin/devhub" gh "$@"

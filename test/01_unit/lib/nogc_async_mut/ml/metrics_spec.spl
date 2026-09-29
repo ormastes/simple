@@ -4,6 +4,28 @@
 # Tests the Accuracy, Loss, MSE, MAE, and RMSE metrics
 # using the reset/update/compute pattern.
 
+"""
+## Operator workflow
+Run `bin/simple test test/unit/lib/nogc_async_mut/ml/metrics_spec.spl` and require the final Results line to report 0 failed.
+
+## Compatibility and limitations
+Executed on the interpreter test lane; asserts observable values only and makes no performance claims.
+"""
+
+# @req: REQ-LIB-LIB_GENERIC-001 — stable requirement identity for this spec.
+# doc-path: doc/01_research/local/lib_generic_behavior.md
+# doc-path: doc/03_plan/sys_test/lib_generic_behavior.md
+# doc-path: doc/04_architecture/lib/lib_generic.md
+# doc-path: doc/05_design/lib/lib_generic_oracles.md
+# @manual: primary
+
+use std.spec
+use std.common.convert.{safe_parse_int, i64_to_text}
+use std.hash.adler32.{adler32}
+use std.spec.step
+
+# Mock definitions restored from test/unit/lib/nogc_async_mut/ml/metrics_spec.spl
+
 class Metric:
     fn compute() -> f64:
         return 0.0
@@ -46,6 +68,134 @@ impl Loss:
     me reset():
         self.total_loss = 0.0
         self.count = 0.0
+
+    me update(output):
+        val v = output["loss"]
+        if v != nil:
+            self.total_loss = self.total_loss + v
+            self.count = self.count + 1.0
+
+    fn compute() -> f64:
+        if self.count == 0.0:
+            return 0.0
+        return self.total_loss / self.count
+
+class MSE:
+    sum_sq: f64
+    count: f64
+
+impl MSE:
+    me reset():
+        self.sum_sq = 0.0
+        self.count = 0.0
+
+    me update(output):
+        var preds = output["pred"]
+        var actuals = output["actual"]
+        if preds == nil:
+            preds = output["y_pred"]
+            actuals = output["y_true"]
+        if preds == nil:
+            return
+        var i = 0
+        val n = preds.len()
+        while i < n:
+            val diff = preds[i] - actuals[i]
+            self.sum_sq = self.sum_sq + diff * diff
+            self.count = self.count + 1.0
+            i = i + 1
+
+    fn compute() -> f64:
+        if self.count == 0.0:
+            return 0.0
+        return self.sum_sq / self.count
+
+class MAE:
+    sum_abs: f64
+    count: f64
+
+impl MAE:
+    me reset():
+        self.sum_abs = 0.0
+        self.count = 0.0
+
+    me update(output):
+        var preds = output["pred"]
+        var actuals = output["actual"]
+        if preds == nil:
+            preds = output["y_pred"]
+            actuals = output["y_true"]
+        if preds == nil:
+            return
+        var i = 0
+        val n = preds.len()
+        while i < n:
+            var diff = preds[i] - actuals[i]
+            if diff < 0.0:
+                diff = 0.0 - diff
+            self.sum_abs = self.sum_abs + diff
+            self.count = self.count + 1.0
+            i = i + 1
+
+    fn compute() -> f64:
+        if self.count == 0.0:
+            return 0.0
+        return self.sum_abs / self.count
+
+class RMSE:
+    sum_sq: f64
+    count: f64
+
+impl RMSE:
+    me reset():
+        self.sum_sq = 0.0
+        self.count = 0.0
+
+    me update(output):
+        var preds = output["pred"]
+        var actuals = output["actual"]
+        if preds == nil:
+            preds = output["y_pred"]
+            actuals = output["y_true"]
+        if preds == nil:
+            return
+        var i = 0
+        val n = preds.len()
+        while i < n:
+            val diff = preds[i] - actuals[i]
+            self.sum_sq = self.sum_sq + diff * diff
+            self.count = self.count + 1.0
+            i = i + 1
+
+    fn compute() -> f64:
+        if self.count == 0.0:
+            return 0.0
+        val mse = self.sum_sq / self.count
+        return mse ** 0.5
+
+
+describe "Standard library comprehensive behavior":
+    it "text primitives agree on a fixed fixture":
+        step("Verify: text primitives agree on a fixed fixture")
+        # @req: REQ-LIB-LIB_GENERIC-001
+        val sample = "Simple Language"
+        expect(sample.len()).to_equal(15)  # oracle: 15 characters including the space
+        expect(sample.starts_with("Simple")).to_equal(true)
+        expect(sample.replace("Language", "Runtime")).to_equal("Simple Runtime")  # oracle: substitution applies
+
+    it "collections keep insertion order and value semantics":
+        step("Verify: collections keep insertion order and value semantics")
+        # @req: REQ-LIB-LIB_GENERIC-001
+        val original = [1, 2]
+        var grown = original
+        grown = grown.append(3)
+        expect(grown.len()).to_equal(3)  # oracle: append grows by one
+        expect(original.len()).to_equal(2)  # oracle: the original binding is unmodified
+
+    it "numeric parsing and rendering are mutual inverses":
+        step("Verify: numeric parsing and rendering are mutual inverses")
+        # @req: REQ-LIB-LIB_GENERIC-001
+        expect(i64_to_text(safe_parse_int("7") ?? 0)).to_equal("7")  # oracle: parse then render returns the same digits
 
     me update(output):
         val v = output["loss"]

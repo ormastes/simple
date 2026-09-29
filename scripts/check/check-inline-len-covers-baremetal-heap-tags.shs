@@ -1,0 +1,257 @@
+#!/bin/sh
+# check-inline-len-covers-baremetal-heap-tags.shs
+#
+# Pins the fix for the `-1` half of
+# doc/08_tracking/bug/riscv64_freestanding_len_eq_zero_guard_never_fires_2026-09-01.md
+#
+# THE DEFECT CLASS
+# ----------------
+# Cranelift inlines `.len()` on an ANY-erased receiver as a load keyed on the
+# heap object's type byte (`inline_runtime_len_value`,
+# src/compiler_rust/compiler/src/codegen/instr/helpers.rs). Any tag it does not
+# recognise falls through to a `-1` SENTINEL.
+#
+# `-1` is the worst possible answer, and it fails OPEN in two directions at once:
+#
+#     x.len() == 0        is FALSE   (the length is -1, not 0)
+#     while i < x.len()   runs ZERO times   (0 < -1 is false)
+#
+# so an emptiness guard cannot fire AND every loop over the collection silently
+# does nothing. Measured in-guest under real OpenSBI v1.4: the riscv64 baremetal
+# runtime tags its dict 11 (`#define HEAP_DICT 11U`), codegen knew only 1/2/3/6,
+# `hir.functions.len()` answered -1, HIR lowering dropped `main`, and the
+# interpreter reported "module has no main function" -- with the HIR itself
+# well-formed. The same class had already been hit twice before, for tags 3 and
+# 6; each was fixed by hand and nothing stopped the third.
+#
+# WHAT THIS GUARD DOES
+# --------------------
+# It cross-checks the two sides that must agree, deriving BOTH from source
+# rather than from a hardcoded list, so a NEW runtime tag cannot be added
+# without codegen learning it:
+#
+#   producer: every `#define HEAP_<NAME> <n>` in the SimpleOS baremetal runtime
+#   consumer: every tag `inline_runtime_len_value` compares object_type against
+#
+# A producer tag for a LENGTH-BEARING kind (string / array / dict / map) that
+# the consumer does not recognise is a FAIL, named explicitly. Kinds with no
+# length (object, enum, struct, closure) are not required -- `.len()` on those
+# is legitimately undefined and the sentinel is the right answer.
+#
+# Verdict is always the LAST line of stdout:
+#   PASS  — <n> length-bearing tag(s) checked, all recognised   exit 0
+#   FAIL  — ...                                                 exit 1
+#   ERROR — nothing was checked                                 exit 2
+#
+# `--selftest` runs before every scan and is fatal.
+
+set -u
+
+REPO_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+CODEGEN_REL="src/compiler_rust/compiler/src/codegen/instr/helpers.rs"
+RUNTIME_REL="examples/09_embedded/simple_os"
+BASELINE="$REPO_ROOT/scripts/check/inline_len_uncovered_heap_tag_baseline.txt"
+
+TMP=$(mktemp -d)
+trap 'rm -rf "$TMP"' EXIT INT TERM
+
+# Length-bearing kinds. A dict/map is length-bearing: `d.len()` is its entry
+# count and the frontend relies on it.
+is_length_bearing() {
+    case "$1" in
+        *STRING*|*ARRAY*|*DICT*|*MAP*|*LIST*|*TEXT*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# Producer side: "<NAME> <value>" for every HEAP_* define in the runtime tree.
+collect_producer_tags() {
+    root=$1
+    [ -d "$root/$RUNTIME_REL" ] || return 0
+    find "$root/$RUNTIME_REL" \( -name '*.c' -o -name '*.h' -o -name '*.inc.c' \) -type f 2>/dev/null \
+    | sort \
+    | xargs grep -h -E '^[[:space:]]*#define[[:space:]]+HEAP_[A-Z_]+[[:space:]]+[0-9]+' 2>/dev/null \
+    | sed -E 's/^[[:space:]]*#define[[:space:]]+(HEAP_[A-Z_]+)[[:space:]]+([0-9]+).*$/\1 \2/' \
+    | sort -u
+}
+
+# Consumer side: every integer literal inline_runtime_len_value compares
+# object_type against. Scoped to that function body by brace depth so an
+# unrelated comparison elsewhere in the file cannot fake coverage.
+collect_consumer_tags() {
+    f="$1/$CODEGEN_REL"
+    [ -f "$f" ] || return 0
+    awk '
+        /fn[[:space:]]+inline_runtime_len_value/ { infn = 1; depth = 0; seen = 0 }
+        infn {
+            n = gsub(/\{/, "{"); m = gsub(/\}/, "}")
+            depth += n - m
+            if (n > 0) seen = 1
+            if ($0 ~ /object_type/ && $0 ~ /icmp_imm/) {
+                line = $0
+                # take the last integer literal on the comparison line
+                while (match(line, /,[[:space:]]*[0-9]+[[:space:]]*\)/)) {
+                    lit = substr(line, RSTART, RLENGTH)
+                    gsub(/[^0-9]/, "", lit)
+                    print lit
+                    line = substr(line, RSTART + RLENGTH)
+                }
+            }
+            if (seen && depth <= 0) infn = 0
+            next
+        }
+    ' "$f" | sort -u
+}
+
+scan_tree() {
+    root=$1
+    collect_producer_tags "$root" > "$TMP/prod.txt"
+    collect_consumer_tags "$root" > "$TMP/cons.txt"
+    EV_CHECKED=0
+    EV_OFFENDERS=""
+    EV_BASELINED=0
+    EV_STALE=""
+    while read -r name value; do
+        [ -n "${name:-}" ] || continue
+        is_length_bearing "$name" || continue
+        EV_CHECKED=$((EV_CHECKED + 1))
+        if grep -qx "$value" "$TMP/cons.txt"; then
+            # Recognised now. If it is ALSO baselined, the baseline is stale --
+            # same rule as the other ratchets in this tree: a baseline that no
+            # longer describes the tree is how a ratchet silently stops
+            # ratcheting.
+            if [ -n "${BASE_FILE:-}" ] && [ -f "$BASE_FILE" ] && grep -qx "$name=$value" "$BASE_FILE"; then
+                EV_STALE="$EV_STALE $name=$value;"
+            fi
+        else
+            if [ -n "${BASE_FILE:-}" ] && [ -f "$BASE_FILE" ] && grep -qx "$name=$value" "$BASE_FILE"; then
+                EV_BASELINED=$((EV_BASELINED + 1))
+            else
+                EV_OFFENDERS="$EV_OFFENDERS $name=$value;"
+            fi
+        fi
+    done < "$TMP/prod.txt"
+}
+
+# ---------------------------------------------------------------- selftest
+selftest() {
+    st_fail=0
+    fx="$TMP/fx"
+
+    mk() {
+        # $1 dir, $2 producer defines, $3 consumer tag list
+        rm -rf "$1"
+        mkdir -p "$1/$RUNTIME_REL/arch" "$1/$(dirname "$CODEGEN_REL")"
+        printf '%s\n' "$2" > "$1/$RUNTIME_REL/arch/rt.h"
+        {
+            echo 'pub(crate) fn inline_runtime_len_value(builder: &mut FunctionBuilder) -> Value {'
+            for t in $3; do
+                echo "    let is_x = builder.ins().icmp_imm(IntCC::Equal, object_type, $t);"
+            done
+            echo '    result'
+            echo '}'
+            # An unrelated comparison OUTSIDE the function must not count.
+            echo 'pub(crate) fn other() -> Value {'
+            echo '    let z = builder.ins().icmp_imm(IntCC::Equal, object_type, 99);'
+            echo '}'
+        } > "$1/$CODEGEN_REL"
+    }
+
+    DEFS='#define HEAP_STRING 1
+#define HEAP_ARRAY  2
+#define HEAP_DICT   11
+#define HEAP_ENUM   7
+#define HEAP_OBJECT 4'
+
+    # 1. all length-bearing tags covered -> PASS, 3 checked (string/array/dict)
+    mk "$fx" "$DEFS" "1 2 11"
+    scan_tree "$fx"
+    if [ "$EV_CHECKED" -ne 3 ] || [ -n "$(echo "$EV_OFFENDERS" | tr -d ' ')" ]; then
+        echo "selftest[1] covered: expected 3 checked / 0 offenders, got $EV_CHECKED / '$EV_OFFENDERS'"; st_fail=1
+    fi
+
+    # 2. incident replay: dict tag 11 missing -> FAIL naming it
+    mk "$fx" "$DEFS" "1 2 3 6"
+    scan_tree "$fx"
+    case "$EV_OFFENDERS" in
+        *HEAP_DICT=11*) : ;;
+        *) echo "selftest[2] incident replay: expected HEAP_DICT=11 offender, got '$EV_OFFENDERS'"; st_fail=1 ;;
+    esac
+
+    # 3. non-length kinds (enum/object) are NOT required -> their absence PASSes
+    mk "$fx" "$DEFS" "1 2 11"
+    scan_tree "$fx"
+    case "$EV_OFFENDERS" in
+        *HEAP_ENUM*|*HEAP_OBJECT*) echo "selftest[3] non-length kind wrongly required: '$EV_OFFENDERS'"; st_fail=1 ;;
+        *) : ;;
+    esac
+
+    # 4. a comparison OUTSIDE the function must not count as coverage:
+    #    tag 99 is only in other(), so requiring it must still FAIL
+    mk "$fx" '#define HEAP_DICT 99' "1 2"
+    scan_tree "$fx"
+    if [ -z "$(echo "$EV_OFFENDERS" | tr -d ' ')" ]; then
+        echo "selftest[4] scoping: a match outside inline_runtime_len_value must not count"; st_fail=1
+    fi
+
+    # 5b. a BASELINED uncovered tag is tolerated (counted, not an offender)
+    mk "$fx" "$DEFS" "1 2 3 6"
+    echo 'HEAP_DICT=11' > "$TMP/base_ok.txt"
+    BASE_FILE="$TMP/base_ok.txt"
+    scan_tree "$fx"
+    if [ -n "$(echo "$EV_OFFENDERS" | tr -d ' ')" ] || [ "$EV_BASELINED" -ne 1 ]; then
+        echo "selftest[5b] baselined tag: expected 0 offenders / 1 baselined, got '$EV_OFFENDERS' / $EV_BASELINED"; st_fail=1
+    fi
+
+    # 5c. a baselined tag that is NOW covered is a STALE baseline -> must FAIL,
+    #     so a ratchet cannot silently stop ratcheting.
+    mk "$fx" "$DEFS" "1 2 11"
+    BASE_FILE="$TMP/base_ok.txt"
+    scan_tree "$fx"
+    if [ -z "$(echo "$EV_STALE" | tr -d ' ')" ]; then
+        echo "selftest[5c] stale baseline: expected HEAP_DICT=11 flagged stale"; st_fail=1
+    fi
+    BASE_FILE=""
+
+    # 5. empty tree -> 0 checked -> caller ERRORs
+    rm -rf "$fx"; mkdir -p "$fx"
+    scan_tree "$fx"
+    if [ "$EV_CHECKED" -ne 0 ]; then
+        echo "selftest[5] empty tree: expected 0 checked, got $EV_CHECKED"; st_fail=1
+    fi
+
+    if [ "$st_fail" -ne 0 ]; then
+        echo "ERROR — nothing was checked (selftest failed)"
+        exit 2
+    fi
+}
+
+BASE_FILE=""
+selftest
+
+if [ "${1:-}" = "--selftest" ]; then
+    echo "PASS — 7 selftest fixture(s) checked, selftest only"
+    exit 0
+fi
+
+BASE_FILE="$BASELINE"
+scan_tree "$REPO_ROOT"
+
+if [ "${EV_CHECKED:-0}" -eq 0 ]; then
+    echo "ERROR — nothing was checked (no length-bearing HEAP_* define found under $RUNTIME_REL, or $CODEGEN_REL missing)"
+    exit 2
+fi
+
+off=$(echo "$EV_OFFENDERS" | sed 's/^ *//;s/ *$//')
+stale=$(echo "$EV_STALE" | sed 's/^ *//;s/ *$//')
+if [ -n "$off" ]; then
+    echo "FAIL — $EV_CHECKED length-bearing tag(s) checked, NEW tag(s) not recognised by inline_runtime_len_value (would answer -1): $off"
+    exit 1
+fi
+if [ -n "$stale" ]; then
+    echo "FAIL — $EV_CHECKED length-bearing tag(s) checked, stale baseline (now recognised, remove from $(basename "$BASELINE")): $stale"
+    exit 1
+fi
+
+echo "PASS — $EV_CHECKED length-bearing tag(s) checked, all recognised or baselined ($EV_BASELINED known-uncovered)"
+exit 0

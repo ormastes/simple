@@ -1,0 +1,308 @@
+# Test-double-only L7/L8 scope and affected-domain ports.  These fakes never
+# call a host, create a live-domain token, or promote their copied inputs.
+
+use compiler.common.cache_contract.semantic_scope_live_port_contract_v1.{
+    SemanticScopeAttemptLiveRequestV1, L78AuthorityDomainV4,
+    L78TokenKindV4, L78AttemptKeyV4, L78OwnerTokenV4, L78LimitsV4,
+    L78BoundaryErrorV4, l78_attempt_key_digest_v4,
+}
+use compiler.driver.cache.gateway.semantic_scope_authority_v1.{L78ScopePortV4}
+use compiler.driver.cache.reference.reverse_reference_coordinator_v1.{
+    AffectedQueryPlanV1, ChangedSemanticFacetV1, OldNewMembershipV1,
+    VerifiedSccGroupV1, L78AffectedDomainPortV4, L78RrPlanV4,
+}
+
+val L78_KIND_SCOPE_V4: L78TokenKindV4 = L78TokenKindV4.Scope
+
+fn l78_bounds_valid_v4(limits: L78LimitsV4) -> bool:
+    limits.max_items > 0 and limits.max_items <= 65536 and
+        limits.max_bytes > 0 and limits.max_bytes <= 16777216 and
+        limits.max_steps > 0 and limits.max_steps <= 65536
+
+fn l78_digest_valid_v4(value: text) -> bool:
+    if value.len() != 64: return false
+    for ch in value:
+        val decimal = ch >= '0' and ch <= '9'
+        val lower_hex = ch >= 'a' and ch <= 'f'
+        if not decimal and not lower_hex: return false
+    true
+
+fn l78_scope_request_bytes_v4(request: SemanticScopeAttemptLiveRequestV1) -> i64:
+    request.identity.writer_instance_digest.len() +
+        request.identity.manifest_digest.len() +
+        request.identity.pin_snapshot_digest.len() +
+        request.identity.generation_closure_digest.len() +
+        request.identity.binding_digest.len() +
+        request.identity.query_domain_digest.len() +
+        request.identity.semantic_rules_digest.len() +
+        request.attempt_seal_digest.len() + request.source_content_digest.len() +
+        request.snapshot_semantic_digest.len()
+
+fn l78_scope_request_valid_v4(request: SemanticScopeAttemptLiveRequestV1,
+        attempt: L78AttemptKeyV4) -> bool:
+    request.identity.generation == attempt.generation and
+        request.identity.manifest_digest == attempt.manifest_digest and
+        request.identity.semantic_rules_digest == attempt.profile_digest and
+        request.identity.cancellation_epoch >= 0 and
+        l78_digest_valid_v4(request.identity.writer_instance_digest) and
+        l78_digest_valid_v4(request.identity.manifest_digest) and
+        l78_digest_valid_v4(request.identity.pin_snapshot_digest) and
+        l78_digest_valid_v4(request.identity.generation_closure_digest) and
+        l78_digest_valid_v4(request.identity.binding_digest) and
+        l78_digest_valid_v4(request.identity.query_domain_digest) and
+        l78_digest_valid_v4(request.identity.semantic_rules_digest) and
+        l78_digest_valid_v4(request.attempt_seal_digest) and
+        l78_digest_valid_v4(request.source_content_digest) and
+        l78_digest_valid_v4(request.snapshot_semantic_digest)
+
+fn l78_scope_case_known_v4(case_name: text) -> bool:
+    case_name == "scope_ok" or case_name == "scope_unavailable" or
+        case_name == "scope_stale" or case_name == "scope_foreign" or
+        case_name == "scope_expired" or case_name == "scope_close_unknown"
+
+fn l78_rr_case_known_v4(case_name: text) -> bool:
+    case_name == "rr_ok" or case_name == "rr_missing_absence" or
+        case_name == "rr_missing_scc" or case_name == "rr_wrong_generation" or
+        case_name == "rr_unavailable"
+
+fn l78_scope_token_valid_v4(token: L78OwnerTokenV4, owner_instance: i64,
+        epoch: i64, attempt: L78AttemptKeyV4) -> bool:
+    val digest = match l78_attempt_key_digest_v4(attempt):
+        case Ok(value): value
+        case Err(_): return false
+    token.domain == L78AuthorityDomainV4.TestDouble and
+        token.kind == L78_KIND_SCOPE_V4 and
+        token.owner_instance == owner_instance and token.epoch == epoch and
+        token.slot > 0 and token.attempt_digest == digest
+
+fn l78_affected_token_valid_v4(token: L78OwnerTokenV4, owner_instance: i64,
+        epoch: i64, attempt: L78AttemptKeyV4) -> bool:
+    val digest = match l78_attempt_key_digest_v4(attempt):
+        case Ok(value): value
+        case Err(_): return false
+    token.domain == L78AuthorityDomainV4.TestDouble and
+        token.kind == L78TokenKindV4.AffectedDomain and
+        token.owner_instance == owner_instance and token.epoch == epoch and
+        token.slot > 0 and token.attempt_digest == digest
+
+fn l78_external_scope_token_valid_v4(token: L78OwnerTokenV4,
+        attempt: L78AttemptKeyV4) -> bool:
+    val digest = match l78_attempt_key_digest_v4(attempt):
+        case Ok(value): value
+        case Err(_): return false
+    token.domain == L78AuthorityDomainV4.TestDouble and
+        token.kind == L78_KIND_SCOPE_V4 and token.owner_instance > 0 and
+        token.slot > 0 and token.epoch > 0 and token.attempt_digest == digest
+
+pub fn l78_expect_scope_events_v4(actual: [text], expected: [text]) -> ():
+    if actual != expected: panic("L78 scope fake event script mismatch")
+
+pub fn l78_expect_affected_plan_v4(actual: L78RrPlanV4,
+        expected: AffectedQueryPlanV1) -> ():
+    if actual.plan.accepted != expected.accepted or
+            actual.plan.rejection_reason != expected.rejection_reason or
+            actual.plan.ordered_query_ids != expected.ordered_query_ids or
+            actual.plan.owner_modules != expected.owner_modules or
+            actual.plan.changed_dimensions != expected.changed_dimensions or
+            actual.plan.conservative_domain_receipt != expected.conservative_domain_receipt or
+            actual.plan.scc_group_identities != expected.scc_group_identities:
+        panic("L78 affected fake plan mismatch")
+
+pub class L78FakeScopePortV4:
+    case_name: text
+    owner_instance: i64
+    epoch: i64
+    next_slot: i64
+    attempt: L78AttemptKeyV4
+    limits: L78LimitsV4
+    events: [text]
+    active_slots: [i64]
+    revoked_slots: [i64]
+    step_count: i64
+
+    me _known_case_v4() -> bool:
+        l78_scope_case_known_v4(self.case_name)
+
+    me _take_step_v4(event: text) -> Result<(), L78BoundaryErrorV4>:
+        if not l78_bounds_valid_v4(self.limits): return Err(L78BoundaryErrorV4.Bounds)
+        if self.step_count >= self.limits.max_steps: return Err(L78BoundaryErrorV4.Bounds)
+        if not self._known_case_v4(): return Err(L78BoundaryErrorV4.InvalidRequest)
+        self.step_count = self.step_count + 1
+        self.events.push(event)
+        Ok(())
+
+impl L78ScopePortV4 for L78FakeScopePortV4:
+    me acquire(request: SemanticScopeAttemptLiveRequestV1
+    ) -> Result<L78OwnerTokenV4, L78BoundaryErrorV4>:
+        if not l78_bounds_valid_v4(self.limits): return Err(L78BoundaryErrorV4.Bounds)
+        if not l78_scope_request_valid_v4(request, self.attempt):
+            return Err(L78BoundaryErrorV4.InvalidRequest)
+        if l78_scope_request_bytes_v4(request) > self.limits.max_bytes:
+            return Err(L78BoundaryErrorV4.Bounds)
+        if self.events.len() != 0: return Err(L78BoundaryErrorV4.InvalidRequest)
+        self._take_step_v4("scope.acquire")?
+        if self.case_name == "scope_unavailable": return Err(L78BoundaryErrorV4.Unavailable)
+        if self.active_slots.len() >= self.limits.max_items: return Err(L78BoundaryErrorV4.Bounds)
+        val attempt_digest = match l78_attempt_key_digest_v4(self.attempt):
+            case Ok(value): value
+            case Err(error): return Err(error)
+        val slot = self.next_slot
+        self.next_slot = self.next_slot + 1
+        self.active_slots.push(slot)
+        Ok(L78OwnerTokenV4(domain: L78AuthorityDomainV4.TestDouble,
+            kind: L78_KIND_SCOPE_V4, owner_instance: self.owner_instance,
+            slot: slot, epoch: self.epoch,
+            attempt_digest: attempt_digest))
+
+    me validate(token: L78OwnerTokenV4, request: SemanticScopeAttemptLiveRequestV1
+        ) -> Result<(), L78BoundaryErrorV4>:
+        if not l78_bounds_valid_v4(self.limits): return Err(L78BoundaryErrorV4.Bounds)
+        if self.revoked_slots.index_of(token.slot) >= 0: return Err(L78BoundaryErrorV4.StaleToken)
+        if self.events.len() != 1 or self.events[0] != "scope.acquire":
+            return Err(L78BoundaryErrorV4.InvalidRequest)
+        if not l78_scope_request_valid_v4(request, self.attempt):
+            return Err(L78BoundaryErrorV4.InvalidRequest)
+        if l78_scope_request_bytes_v4(request) > self.limits.max_bytes:
+            return Err(L78BoundaryErrorV4.Bounds)
+        self._take_step_v4("scope.validate")?
+        if self.case_name == "scope_unavailable": return Err(L78BoundaryErrorV4.Unavailable)
+        if self.case_name == "scope_stale": return Err(L78BoundaryErrorV4.StaleToken)
+        if self.case_name == "scope_foreign": return Err(L78BoundaryErrorV4.ForeignToken)
+        if self.case_name == "scope_expired": return Err(L78BoundaryErrorV4.ExpiredToken)
+        if not l78_scope_token_valid_v4(token, self.owner_instance, self.epoch, self.attempt):
+            return Err(L78BoundaryErrorV4.ForeignToken)
+        if self.active_slots.index_of(token.slot) < 0: return Err(L78BoundaryErrorV4.InvalidRequest)
+        Ok(())
+
+    me close(token: L78OwnerTokenV4) -> Result<(), L78BoundaryErrorV4>:
+        if not l78_bounds_valid_v4(self.limits): return Err(L78BoundaryErrorV4.Bounds)
+        if self.events.len() != 2 or self.events[0] != "scope.acquire" or
+                self.events[1] != "scope.validate":
+            return Err(L78BoundaryErrorV4.InvalidRequest)
+        self._take_step_v4("scope.close")?
+        if self.case_name == "scope_unavailable": return Err(L78BoundaryErrorV4.Unavailable)
+        if self.case_name == "scope_stale": return Err(L78BoundaryErrorV4.StaleToken)
+        if self.case_name == "scope_foreign": return Err(L78BoundaryErrorV4.ForeignToken)
+        if self.case_name == "scope_expired": return Err(L78BoundaryErrorV4.ExpiredToken)
+        if self.case_name == "scope_close_unknown": return Err(L78BoundaryErrorV4.Unknown)
+        if not l78_scope_token_valid_v4(token, self.owner_instance, self.epoch, self.attempt):
+            return Err(L78BoundaryErrorV4.ForeignToken)
+        if self.active_slots.index_of(token.slot) < 0: return Err(L78BoundaryErrorV4.InvalidRequest)
+        if self.revoked_slots.index_of(token.slot) >= 0: return Err(L78BoundaryErrorV4.StaleToken)
+        var retained: [i64] = []
+        for slot in self.active_slots:
+            if slot != token.slot: retained.push(slot)
+        self.active_slots = retained
+        self.revoked_slots.push(token.slot)
+        Ok(())
+
+pub fn l78_fake_scope_port_v4(case_name: text, owner_instance: i64,
+        attempt: L78AttemptKeyV4, limits: L78LimitsV4) -> L78FakeScopePortV4:
+    if owner_instance <= 0: panic("L78 scope fake owner must be positive")
+    if not l78_bounds_valid_v4(limits): panic("L78 scope fake limits must be positive and bounded")
+    if not l78_scope_case_known_v4(case_name): panic("L78 scope fake case is not frozen")
+    L78FakeScopePortV4(case_name: case_name, owner_instance: owner_instance,
+        epoch: 1, next_slot: 1, attempt: attempt, limits: limits, events: [],
+        active_slots: [], revoked_slots: [], step_count: 0)
+
+pub class L78FakeAffectedDomainPortV4:
+    case_name: text
+    owner_instance: i64
+    epoch: i64
+    next_slot: i64
+    attempt: L78AttemptKeyV4
+    limits: L78LimitsV4
+    events: [text]
+    active_slots: [i64]
+    revoked_slots: [i64]
+    step_count: i64
+    seed: AffectedQueryPlanV1
+
+    me _known_case_v4() -> bool:
+        l78_rr_case_known_v4(self.case_name)
+
+    me _take_step_v4(event: text) -> Result<(), L78BoundaryErrorV4>:
+        if not l78_bounds_valid_v4(self.limits): return Err(L78BoundaryErrorV4.Bounds)
+        if self.step_count >= self.limits.max_steps: return Err(L78BoundaryErrorV4.Bounds)
+        if not self._known_case_v4(): return Err(L78BoundaryErrorV4.InvalidRequest)
+        self.step_count = self.step_count + 1
+        self.events.push(event)
+        Ok(())
+
+    me _scope_valid_v4(token: L78OwnerTokenV4) -> bool:
+        l78_external_scope_token_valid_v4(token, self.attempt)
+
+    me _affected_valid_v4(token: L78OwnerTokenV4) -> bool:
+        l78_affected_token_valid_v4(token, self.owner_instance, self.epoch, self.attempt)
+
+impl L78AffectedDomainPortV4 for L78FakeAffectedDomainPortV4:
+    me plan(scope: L78OwnerTokenV4, changes: [ChangedSemanticFacetV1],
+            membership: [OldNewMembershipV1],
+            groups: [VerifiedSccGroupV1], limits: L78LimitsV4
+        ) -> Result<L78RrPlanV4, L78BoundaryErrorV4>:
+        val _ = changes
+        val _ = membership
+        val _ = groups
+        if not l78_bounds_valid_v4(self.limits) or not l78_bounds_valid_v4(limits):
+            return Err(L78BoundaryErrorV4.Bounds)
+        if self.events.len() != 0: return Err(L78BoundaryErrorV4.InvalidRequest)
+        self._take_step_v4("affected.plan")?
+        if self.case_name == "rr_unavailable": return Err(L78BoundaryErrorV4.Unavailable)
+        if self.case_name == "rr_missing_absence" or self.case_name == "rr_missing_scc":
+            return Err(L78BoundaryErrorV4.Incomplete)
+        if self.case_name == "rr_wrong_generation": return Err(L78BoundaryErrorV4.InvalidRequest)
+        if not self._scope_valid_v4(scope): return Err(L78BoundaryErrorV4.ForeignToken)
+        if self.seed.ordered_query_ids.len() > limits.max_items:
+            return Err(L78BoundaryErrorV4.Bounds)
+        if self.active_slots.len() >= limits.max_items: return Err(L78BoundaryErrorV4.Bounds)
+        val attempt_digest = match l78_attempt_key_digest_v4(self.attempt):
+            case Ok(value): value
+            case Err(error): return Err(error)
+        val slot = self.next_slot
+        self.next_slot = self.next_slot + 1
+        self.active_slots.push(slot)
+        Ok(L78RrPlanV4(token: L78OwnerTokenV4(domain: L78AuthorityDomainV4.TestDouble,
+            kind: L78TokenKindV4.AffectedDomain, owner_instance: self.owner_instance,
+            slot: slot, epoch: self.epoch, attempt_digest: attempt_digest), plan: self.seed))
+
+    me validate(result: L78RrPlanV4, scope: L78OwnerTokenV4
+        ) -> Result<(), L78BoundaryErrorV4>:
+        if not l78_bounds_valid_v4(self.limits): return Err(L78BoundaryErrorV4.Bounds)
+        if self.events.len() != 1 or self.events[0] != "affected.plan":
+            return Err(L78BoundaryErrorV4.InvalidRequest)
+        self._take_step_v4("affected.validate")?
+        if self.case_name != "rr_ok": return Err(L78BoundaryErrorV4.Unavailable)
+        if not self._scope_valid_v4(scope): return Err(L78BoundaryErrorV4.ForeignToken)
+        if not self._affected_valid_v4(result.token): return Err(L78BoundaryErrorV4.ForeignToken)
+        if self.revoked_slots.index_of(result.token.slot) >= 0:
+            return Err(L78BoundaryErrorV4.StaleToken)
+        if self.active_slots.index_of(result.token.slot) < 0:
+            return Err(L78BoundaryErrorV4.InvalidRequest)
+        Ok(())
+
+    me close(token: L78OwnerTokenV4) -> Result<(), L78BoundaryErrorV4>:
+        if not l78_bounds_valid_v4(self.limits): return Err(L78BoundaryErrorV4.Bounds)
+        if self.events.len() != 2 or self.events[0] != "affected.plan" or
+                self.events[1] != "affected.validate":
+            return Err(L78BoundaryErrorV4.InvalidRequest)
+        self._take_step_v4("affected.close")?
+        if self.case_name != "rr_ok": return Err(L78BoundaryErrorV4.Unavailable)
+        if not self._affected_valid_v4(token): return Err(L78BoundaryErrorV4.ForeignToken)
+        if self.revoked_slots.index_of(token.slot) >= 0: return Err(L78BoundaryErrorV4.StaleToken)
+        if self.active_slots.index_of(token.slot) < 0: return Err(L78BoundaryErrorV4.InvalidRequest)
+        var retained: [i64] = []
+        for slot in self.active_slots:
+            if slot != token.slot: retained.push(slot)
+        self.active_slots = retained
+        self.revoked_slots.push(token.slot)
+        Ok(())
+
+pub fn l78_fake_affected_domain_port_v4(case_name: text, owner_instance: i64,
+        attempt: L78AttemptKeyV4, limits: L78LimitsV4,
+        seed: AffectedQueryPlanV1) -> L78FakeAffectedDomainPortV4:
+    if owner_instance <= 0: panic("L78 affected fake owner must be positive")
+    if not l78_bounds_valid_v4(limits): panic("L78 affected fake limits must be positive and bounded")
+    if not l78_rr_case_known_v4(case_name): panic("L78 affected fake case is not frozen")
+    L78FakeAffectedDomainPortV4(case_name: case_name, owner_instance: owner_instance,
+        epoch: 1, next_slot: 1, attempt: attempt, limits: limits, events: [],
+        active_slots: [], revoked_slots: [], step_count: 0, seed: seed)

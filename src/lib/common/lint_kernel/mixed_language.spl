@@ -1,0 +1,122 @@
+use common.kernel_plugin.ids.{KpfId128, KpfDigest256, kpf_id128_equal, kpf_id128_is_zero, kpf_digest256_is_zero, kpf_digest256_zero}
+use common.lint_kernel.model.{AnalysisCoverageV1, LintRunResultV1, LintVerdict, lint_run_result}
+
+pub struct LintLanguageExpectationV1:
+    language_id: KpfId128
+    requested_unit_count: u32
+    requested_rule_count: u32
+    requested_phase_bits: u64
+
+pub struct LintLanguageResultV1:
+    language_id: KpfId128
+    provider_id: KpfId128
+    verdict: LintVerdict
+    completed_unit_count: u32
+    completed_rule_count: u32
+    completed_phase_bits: u64
+    diagnostic_count: u32
+    error_count: u32
+    warning_count: u32
+    provider_receipt_digest: KpfDigest256
+    authoritative: bool
+
+fn _language_index(languages: [KpfId128], language_id: KpfId128) -> i64:
+    var index = 0
+    while index < languages.len():
+        if kpf_id128_equal(languages[index], language_id):
+            return index
+        index = index + 1
+    -1
+
+fn _addition_overflows(left: u32, right: u32) -> bool:
+    right > 4294967295u32 - left
+
+pub fn lint_merge_language_results_v1(expectations: [LintLanguageExpectationV1], results: [LintLanguageResultV1], input_revision_digest: KpfDigest256) -> LintRunResultV1:
+    var requested_units = 0u32
+    var completed_units = 0u32
+    var not_analyzed_units = 0u32
+    var requested_rules = 0u32
+    var completed_rules = 0u32
+    var skipped_rules = 0u32
+    var requested_phases = 0u64
+    var completed_phases = 0u64
+    var diagnostics = 0u32
+    var errors = 0u32
+    var warnings = 0u32
+    var cancelled = false
+    var failed = expectations.len() == 0 or kpf_digest256_is_zero(input_revision_digest)
+    var expected_languages: [KpfId128] = []
+    var observed_languages: [KpfId128] = []
+    var first_receipt = kpf_digest256_zero()
+
+    for expectation in expectations:
+        if kpf_id128_is_zero(expectation.language_id) or expectation.requested_unit_count == 0 or expectation.requested_rule_count == 0 or expectation.requested_phase_bits == 0 or _language_index(expected_languages, expectation.language_id) >= 0:
+            failed = true
+        expected_languages.push(expectation.language_id)
+        if _addition_overflows(requested_units, expectation.requested_unit_count) or _addition_overflows(requested_rules, expectation.requested_rule_count):
+            failed = true
+        else:
+            requested_units = requested_units + expectation.requested_unit_count
+            requested_rules = requested_rules + expectation.requested_rule_count
+        requested_phases = requested_phases | expectation.requested_phase_bits
+
+    for result in results:
+        val expected_index = _language_index(expected_languages, result.language_id)
+        if expected_index < 0 or _language_index(observed_languages, result.language_id) >= 0:
+            failed = true
+            continue
+        observed_languages.push(result.language_id)
+        val expectation = expectations[expected_index]
+        val receipt_valid = not kpf_id128_is_zero(result.provider_id) and not kpf_digest256_is_zero(result.provider_receipt_digest) and result.authoritative
+        val counts_valid = result.completed_unit_count <= expectation.requested_unit_count and result.completed_rule_count <= expectation.requested_rule_count
+        val phases_complete = (result.completed_phase_bits & expectation.requested_phase_bits) == expectation.requested_phase_bits
+        if not receipt_valid or not counts_valid:
+            failed = true
+        if kpf_digest256_is_zero(first_receipt) and receipt_valid:
+            first_receipt = result.provider_receipt_digest
+        if _addition_overflows(completed_units, result.completed_unit_count) or _addition_overflows(completed_rules, result.completed_rule_count) or _addition_overflows(diagnostics, result.diagnostic_count) or _addition_overflows(errors, result.error_count) or _addition_overflows(warnings, result.warning_count):
+            failed = true
+        else:
+            completed_units = completed_units + result.completed_unit_count
+            completed_rules = completed_rules + result.completed_rule_count
+            diagnostics = diagnostics + result.diagnostic_count
+            errors = errors + result.error_count
+            warnings = warnings + result.warning_count
+        completed_phases = completed_phases | result.completed_phase_bits
+        match result.verdict:
+            LintVerdict.Cancelled: cancelled = true
+            LintVerdict.Failed: failed = true
+            LintVerdict.NotAnalyzed: not_analyzed_units = not_analyzed_units + expectation.requested_unit_count
+            LintVerdict.Partial: pass
+            LintVerdict.CompleteClean:
+                if not phases_complete or result.completed_unit_count != expectation.requested_unit_count or result.completed_rule_count != expectation.requested_rule_count:
+                    failed = true
+            LintVerdict.CompleteWithFindings:
+                if not phases_complete or result.completed_unit_count != expectation.requested_unit_count or result.completed_rule_count != expectation.requested_rule_count:
+                    failed = true
+
+    for expectation in expectations:
+        if _language_index(observed_languages, expectation.language_id) < 0:
+            not_analyzed_units = not_analyzed_units + expectation.requested_unit_count
+            skipped_rules = skipped_rules + expectation.requested_rule_count
+
+    val partial_units = if completed_units + not_analyzed_units < requested_units: requested_units - completed_units - not_analyzed_units else: 0u32
+    if completed_rules < requested_rules:
+        val uncompleted_rules = requested_rules - completed_rules
+        if uncompleted_rules > skipped_rules:
+            skipped_rules = uncompleted_rules
+    val coverage = AnalysisCoverageV1(
+        requested_unit_count: requested_units,
+        admitted_unit_count: requested_units - not_analyzed_units,
+        completed_unit_count: completed_units,
+        partial_unit_count: partial_units,
+        not_analyzed_unit_count: not_analyzed_units,
+        requested_rule_count: requested_rules,
+        completed_rule_count: completed_rules,
+        skipped_rule_count: skipped_rules,
+        requested_phase_bits: requested_phases,
+        completed_phase_bits: completed_phases,
+        provider_receipt_digest: first_receipt,
+        input_revision_digest: input_revision_digest,
+    )
+    lint_run_result(coverage, diagnostics, errors, warnings, cancelled, failed)

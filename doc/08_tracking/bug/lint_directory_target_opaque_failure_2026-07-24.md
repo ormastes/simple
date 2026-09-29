@@ -1,7 +1,9 @@
 # Lint directory targets fail as opaque files
+## Closed 2026-09-16 — source-fixed; directory expansion + overlap dedup; Stage 4 qualification pending
 
-Status: FIXED
-Status re-verified 2026-08-17 by source inspection (triage shard 02).
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
 
@@ -45,3 +47,4 @@ Source execution through the temporary Rust bootstrap interpreter produced one
 W001 and one failed-file summary for the mixed-spelling overlap. This is not
 production qualification: the retained binary predates the fix, and a fresh
 Stage 4 essential-tools run remains required.
+

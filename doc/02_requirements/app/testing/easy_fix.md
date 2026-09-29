@@ -34,10 +34,8 @@ determines whether it can be auto-applied.
 
 ## Usage
 
-    
-    ```simple
-    ```
-    
+Usage is exercised by the system-test scenarios below; this specification does
+not define a standalone command-line invocation.
 
 ## Behavior
 
@@ -227,5 +225,4 @@ determines whether it can be auto-applied.
 ### When adjacent replacements
 
 - applies adjacent non-overlapping fixes
-
 

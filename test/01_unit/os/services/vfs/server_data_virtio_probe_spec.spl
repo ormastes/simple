@@ -1,0 +1,154 @@
+# @cover src/os/services/vfs/server_data_virtio_probe.spl 90%
+use std.spec.*
+use os.services.vfs.server_data_virtio_probe.*
+
+fn _server_identity(uuid_lo: u64) -> ServerDataMediaIdentityV1:
+    ServerDataMediaIdentityV1(
+        serial_id: SERVER_DATA_VIRTIO_SERIAL_ID_V1,
+        role_id: SERVER_DATA_DBFS_ROLE_ID_V1,
+        uuid_hi: 0x1234u64,
+        uuid_lo: uuid_lo
+    )
+
+fn _root_identity() -> ServerDataMediaIdentityV1:
+    ServerDataMediaIdentityV1(
+        serial_id: 0x524F4F5453455231u64,
+        role_id: 0x524F4F54524F4C31u64,
+        uuid_hi: 0x9999u64,
+        uuid_lo: 0x8888u64
+    )
+
+fn _x86_candidate(identity: ServerDataMediaIdentityV1) -> ServerDataVirtioCandidateV1:
+    server_data_x86_virtio_pci_candidate_v1(
+        identity, 0u32, 0u8, 5u8, 0u8,
+        SERVER_DATA_SECTOR_SIZE_V1, true, true)
+
+describe "server-data virtio injected discovery":
+    it "selects one x86 PCI descriptor without constructing a device":
+        val requested = _server_identity(1u64)
+        val result = server_data_virtio_select_v1(
+            [_x86_candidate(requested)], requested, _root_identity(),
+            SERVER_DATA_TRANSPORT_X86_VIRTIO_PCI_V1)
+        expect(result.ok).to_be(true)
+        expect(result.error).to_equal(ServerDataVirtioProbeErrorV1.None)
+        expect(result.acquisition.transport).to_equal(SERVER_DATA_TRANSPORT_X86_VIRTIO_PCI_V1)
+        expect(result.acquisition.locator_lo).to_equal(40u64)
+        expect(result.visited).to_equal(1u32)
+
+    it "selects ARM and RV MMIO through the same fixed scalar descriptor":
+        val requested = _server_identity(2u64)
+        val arm = server_data_virtio_mmio_candidate_v1(
+            requested, SERVER_DATA_TRANSPORT_ARM_VIRTIO_MMIO_V1,
+            0x0A004000u64, 512u32, true, true)
+        val rv = server_data_virtio_mmio_candidate_v1(
+            requested, SERVER_DATA_TRANSPORT_RV_VIRTIO_MMIO_V1,
+            0x10008000u64, 512u32, true, true)
+        val arm_result = server_data_virtio_select_v1([arm], requested, _root_identity(), SERVER_DATA_TRANSPORT_ARM_VIRTIO_MMIO_V1)
+        val rv_result = server_data_virtio_select_v1([rv], requested, _root_identity(), SERVER_DATA_TRANSPORT_RV_VIRTIO_MMIO_V1)
+        expect(arm_result.ok).to_be(true)
+        expect(rv_result.ok).to_be(true)
+        expect(arm_result.acquisition.locator_lo).to_equal(0x0A004000u64)
+        expect(rv_result.acquisition.locator_lo).to_equal(0x10008000u64)
+
+    it "rejects duplicate requested identity deterministically":
+        val requested = _server_identity(3u64)
+        val first = _x86_candidate(requested)
+        val second = server_data_virtio_mmio_candidate_v1(
+            requested, SERVER_DATA_TRANSPORT_ARM_VIRTIO_MMIO_V1,
+            0x0A004000u64, 512u32, true, true)
+        val result = server_data_virtio_select_v1(
+            [first, second], requested, _root_identity(), SERVER_DATA_TRANSPORT_X86_VIRTIO_PCI_V1)
+        expect(result.ok).to_be(false)
+        expect(result.error).to_equal(ServerDataVirtioProbeErrorV1.DuplicateIdentity)
+        expect(result.visited).to_equal(2u32)
+
+    it "rejects the root UUID even when serial and role match":
+        val root = _root_identity()
+        val requested = ServerDataMediaIdentityV1(
+            serial_id: SERVER_DATA_VIRTIO_SERIAL_ID_V1,
+            role_id: SERVER_DATA_DBFS_ROLE_ID_V1,
+            uuid_hi: root.uuid_hi,
+            uuid_lo: root.uuid_lo)
+        val result = server_data_virtio_select_v1(
+            [_x86_candidate(requested)], requested, root, SERVER_DATA_TRANSPORT_X86_VIRTIO_PCI_V1)
+        expect(result.error).to_equal(ServerDataVirtioProbeErrorV1.RootDeviceRejected)
+
+    it "rejects read-only no-flush and unsupported-sector media":
+        val requested = _server_identity(4u64)
+        val read_only = server_data_virtio_mmio_candidate_v1(
+            requested, SERVER_DATA_TRANSPORT_ARM_VIRTIO_MMIO_V1,
+            0x0A004000u64, 512u32, false, true)
+        val no_flush = server_data_virtio_mmio_candidate_v1(
+            requested, SERVER_DATA_TRANSPORT_ARM_VIRTIO_MMIO_V1,
+            0x0A004000u64, 512u32, true, false)
+        val wrong_sector = server_data_virtio_mmio_candidate_v1(
+            requested, SERVER_DATA_TRANSPORT_ARM_VIRTIO_MMIO_V1,
+            0x0A004000u64, 4096u32, true, true)
+        expect(server_data_virtio_select_v1([read_only], requested, _root_identity(), SERVER_DATA_TRANSPORT_ARM_VIRTIO_MMIO_V1).error).to_equal(ServerDataVirtioProbeErrorV1.ReadOnlyRejected)
+        expect(server_data_virtio_select_v1([no_flush], requested, _root_identity(), SERVER_DATA_TRANSPORT_ARM_VIRTIO_MMIO_V1).error).to_equal(ServerDataVirtioProbeErrorV1.FlushUnsupported)
+        expect(server_data_virtio_select_v1([wrong_sector], requested, _root_identity(), SERVER_DATA_TRANSPORT_ARM_VIRTIO_MMIO_V1).error).to_equal(ServerDataVirtioProbeErrorV1.SectorSizeUnsupported)
+
+    it "rejects unsupported transport invalid locator and absent match":
+        val requested = _server_identity(5u64)
+        val unsupported = ServerDataVirtioCandidateV1(
+            identity: requested,
+            transport: 99u32,
+            locator_hi: 0u64, locator_lo: 1u64, sector_size: 512u32,
+            writable: 1u32, flush_supported: 1u32)
+        val invalid_mmio = server_data_virtio_mmio_candidate_v1(
+            requested, SERVER_DATA_TRANSPORT_RV_VIRTIO_MMIO_V1,
+            0x10008001u64, 512u32, true, true)
+        expect(server_data_virtio_select_v1([unsupported], requested, _root_identity(), SERVER_DATA_TRANSPORT_RV_VIRTIO_MMIO_V1).error).to_equal(ServerDataVirtioProbeErrorV1.TransportUnsupported)
+        expect(server_data_virtio_select_v1([invalid_mmio], requested, _root_identity(), SERVER_DATA_TRANSPORT_RV_VIRTIO_MMIO_V1).error).to_equal(ServerDataVirtioProbeErrorV1.InvalidCandidate)
+        expect(server_data_virtio_select_v1([], requested, _root_identity(), SERVER_DATA_TRANSPORT_X86_VIRTIO_PCI_V1).error).to_equal(ServerDataVirtioProbeErrorV1.NoMatchingMedia)
+
+    it "rejects invalid requests and caps work before traversal":
+        val zero = ServerDataMediaIdentityV1(serial_id: 0u64, role_id: 0u64, uuid_hi: 0u64, uuid_lo: 0u64)
+        val requested = _server_identity(6u64)
+        expect(server_data_virtio_select_v1([], zero, _root_identity(), SERVER_DATA_TRANSPORT_X86_VIRTIO_PCI_V1).error).to_equal(ServerDataVirtioProbeErrorV1.InvalidRequest)
+        var candidates: [ServerDataVirtioCandidateV1] = []
+        var i: u32 = 0u32
+        while i <= SERVER_DATA_VIRTIO_CANDIDATE_LIMIT_V1:
+            candidates.push(_x86_candidate(_server_identity(i.to_u64() + 100u64)))
+            i = i + 1u32
+        val result = server_data_virtio_select_v1(candidates, requested, _root_identity(), SERVER_DATA_TRANSPORT_X86_VIRTIO_PCI_V1)
+        expect(result.error).to_equal(ServerDataVirtioProbeErrorV1.CandidateLimitExceeded)
+        expect(result.visited).to_equal(0u32)
+
+    it "rejects cross-target records and noncanonical PCI coordinates":
+        val requested = _server_identity(7u64)
+        val arm = server_data_virtio_mmio_candidate_v1(
+            requested, SERVER_DATA_TRANSPORT_ARM_VIRTIO_MMIO_V1,
+            0x0A004000u64, 512u32, true, true)
+        val bad_device = server_data_x86_virtio_pci_candidate_v1(
+            requested, 0u32, 0u8, 32u8, 0u8, 512u32, true, true)
+        val bad_function = server_data_x86_virtio_pci_candidate_v1(
+            requested, 0u32, 0u8, 1u8, 8u8, 512u32, true, true)
+        expect(server_data_virtio_select_v1([arm], requested, _root_identity(), SERVER_DATA_TRANSPORT_X86_VIRTIO_PCI_V1).error).to_equal(ServerDataVirtioProbeErrorV1.TransportUnsupported)
+        expect(server_data_virtio_select_v1([bad_device], requested, _root_identity(), SERVER_DATA_TRANSPORT_X86_VIRTIO_PCI_V1).error).to_equal(ServerDataVirtioProbeErrorV1.InvalidCandidate)
+        expect(server_data_virtio_select_v1([bad_function], requested, _root_identity(), SERVER_DATA_TRANSPORT_X86_VIRTIO_PCI_V1).error).to_equal(ServerDataVirtioProbeErrorV1.InvalidCandidate)
+
+    it "gives root identity rejection precedence over media capability faults":
+        val root = _root_identity()
+        val requested = ServerDataMediaIdentityV1(
+            serial_id: SERVER_DATA_VIRTIO_SERIAL_ID_V1,
+            role_id: SERVER_DATA_DBFS_ROLE_ID_V1,
+            uuid_hi: root.uuid_hi, uuid_lo: root.uuid_lo)
+        val candidate = server_data_virtio_mmio_candidate_v1(
+            requested, SERVER_DATA_TRANSPORT_ARM_VIRTIO_MMIO_V1,
+            0x0A004000u64, 4096u32, false, false)
+        val result = server_data_virtio_select_v1(
+            [candidate], requested, root, SERVER_DATA_TRANSPORT_ARM_VIRTIO_MMIO_V1)
+        expect(result.error).to_equal(ServerDataVirtioProbeErrorV1.RootDeviceRejected)
+
+    it "visits exactly the admitted 64-candidate bound once":
+        val requested = _server_identity(8u64)
+        var candidates: [ServerDataVirtioCandidateV1] = []
+        var i: u32 = 0u32
+        while i < SERVER_DATA_VIRTIO_CANDIDATE_LIMIT_V1:
+            candidates.push(_x86_candidate(_server_identity(i.to_u64() + 1000u64)))
+            i = i + 1u32
+        val result = server_data_virtio_select_v1(
+            candidates, requested, _root_identity(), SERVER_DATA_TRANSPORT_X86_VIRTIO_PCI_V1)
+        expect(result.error).to_equal(ServerDataVirtioProbeErrorV1.NoMatchingMedia)
+        expect(result.visited).to_equal(SERVER_DATA_VIRTIO_CANDIDATE_LIMIT_V1)

@@ -1,0 +1,113 @@
+#!/bin/sh
+set -eu
+root=$(CDPATH= cd -- "$(dirname "$0")/../../.." && pwd -P)
+producer=$root/scripts/check/produce-mci-v2-simpleos-collector.shs
+validator=$root/scripts/check/check-mci-v2-simpleos-manifest.shs
+work=$(mktemp -d "$root/build/mci-simpleos-producer-contract.XXXXXX")
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+mkdir -p "$work/bundle/payload" "$work/evidence/collectors" "$work/evidence/signatures" "$work/evidence/artifacts" "$work/evidence/receipts"
+chmod 700 "$work/evidence" "$work/evidence/collectors" "$work/evidence/signatures" "$work/evidence/artifacts" "$work/evidence/receipts"
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$work/private.pem" >/dev/null 2>&1
+openssl pkey -in "$work/private.pem" -pubout -out "$work/public.pem" >/dev/null 2>&1
+printf 'image\n' > "$work/image.bin"
+printf 'usr\n' > "$work/bundle/payload/usr-bin"
+printf 'bin\n' > "$work/bundle/payload/bin"
+printf 'apps\n' > "$work/bundle/payload/sys-apps"
+printf 'sdn\n' > "$work/bundle/payload/simpletool.sdn"
+printf 'Simple 1.2.3 (pure-Simple)\n' > "$work/bundle/version.raw"
+printf 'output_sha256=%064d\ncompile_result=pass\n' 0 > "$work/bundle/compile.raw"
+printf 'hello world\n' > "$work/bundle/run.raw"
+printf 'sample|1|1024|1|2048\nsample|2|4096|80|8192\n' > "$work/bundle/resources.raw"
+printf 'check|scheduler|pass|0\ncheck|filesystem|pass|0\n' > "$work/bundle/invariants.raw"
+for f in version compile run resources invariants; do
+    printf 'fixture-%s-command\n' "$f" > "$work/bundle/$f.command"
+done
+source_hash=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+compiler_hash=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+printf 'configuration_schema=mci-simpleos-configuration-v1\nprofile=contract\n' > "$work/configuration.manifest"
+config_hash=$(sha256sum "$work/configuration.manifest" | awk '{print $1}')
+image_hash=$(sha256sum "$work/image.bin" | awk '{print $1}')
+output=$("$producer" --mode fixture --contract-fixture --evidence "$work/evidence" --bundle "$work/bundle" \
+    --cell linux:x86_32 --run-id fixture-run --source-hash "$source_hash" \
+    --compiler-receipt-hash "$compiler_hash" --configuration-hash "$config_hash" \
+    --image "$work/image.bin" --collector-key-id fixture-collector \
+    --collector-private-key "$work/private.pem")
+echo "$output" | grep -qx 'mode=CONTRACT_ONLY'
+receipt="$work/evidence/collectors/linux-x86_32.receipt"
+[ -f "$receipt" ] && [ -f "$work/evidence/signatures/linux-x86_32.sig" ]
+expected_keys='collector_schema
+attestation
+collector_key_id
+cell_id
+host_identity
+guest_identity
+run_id
+source_hash
+compiler_receipt_hash
+configuration_hash
+image_hash
+qemu_or_host_collector
+target_side
+guest_filesystem_execution
+payload_paths
+usr_bin_sha256
+bin_sha256
+sys_apps_sha256
+sys_simpletool_sdn_sha256
+captured_at_utc_ns
+valid_until_utc_ns
+payload_execution_schema
+version_command_sha256
+version_exit_code
+version_transcript_relpath
+version_transcript_sha256
+compile_command_sha256
+compile_exit_code
+compile_transcript_relpath
+compile_transcript_sha256
+run_command_sha256
+run_exit_code
+run_transcript_relpath
+run_transcript_sha256
+alias_identity_relpath
+alias_identity_sha256
+stress_schema
+stress_started_at_utc_ns
+stress_ended_at_utc_ns
+stress_duration_ns
+stress_resource_series_relpath
+stress_resource_series_sha256
+stress_invariant_violations
+stress_invariant_ledger_relpath
+stress_invariant_ledger_sha256
+receipt_hash'
+[ "$(sed 's/=.*//' "$receipt")" = "$expected_keys" ]
+manifest="$work/manifest.env"
+{
+    echo manifest_schema=certified-platform-manifest-v2
+    echo run_id=fixture-run
+    echo source_hash="$source_hash"
+    echo compiler_receipt_hash="$compiler_hash"
+    for host in linux windows macos freebsd; do
+        for guest in x86_32 x86_64 arm32 arm64 riscv32 riscv64; do
+            cell=$host:$guest
+            if [ "$cell" = linux:x86_32 ]; then
+                echo "row=$cell|true||host-$host|guest-$guest|$config_hash|$image_hash|collectors/linux-x86_32.receipt|signatures/linux-x86_32.sig"
+            else
+                echo "row=$cell|false|outside-certified-subset|host-$host|guest-$guest|$config_hash|$image_hash||"
+            fi
+        done
+    done
+} > "$manifest"
+if "$validator" --evidence "$work/evidence" --manifest "$manifest" --configuration-manifest "$work/configuration.manifest" --run-id fixture-run \
+    --source-hash "$source_hash" --configuration-hash "$config_hash" --compiler-receipt-hash "$compiler_hash" \
+    --captured-at-utc-ns 100000000000000 --valid-until-utc-ns 186400000000000 --now-utc-ns 100000000000000 \
+    --trusted-key-id producer-key --collector-trust-key "$work/public.pem" --collector-key-id fixture-collector --contract-fixture > "$work/validator.out" 2>&1; then
+    echo 'fixture collector unexpectedly admitted live evidence' >&2
+    exit 1
+fi
+grep -qx 'simpleos_manifest_contract=PASS' "$work/validator.out" || { cat "$work/validator.out" >&2; exit 1; }
+grep -qx 'result=BLOCKED' "$work/validator.out" || { cat "$work/validator.out" >&2; exit 1; }
+grep -q '^row=linux:x86_32|BLOCKED|fixture-contract-only|' "$work/evidence/artifacts/simpleos.evidence"
+grep -q '^attestation=contract-only-v1$' "$receipt"
+echo 'mci_v2_simpleos_collector_producer_contract_test: PASS'

@@ -1,6 +1,13 @@
 # BrowserSession Uint8Array Slice Copy Buffer Gap
 
-Status: fixed
+## Closed 2026-09-13 — Recorded fixed; the repro command is pinned to a dead Linux checkout
+
+- **inferred** The entry's Status line reads `fixed`.
+- **measured** Its repro invokes `/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple` — an absolute path on a Linux box that does not exist from this Windows host, so the exact command is unreproducible by construction.
+- **inferred** No contradicting evidence was found; closing rather than leaving a fixed entry open in a status sweep.
+
+
+Status: closed (2026-09-13 triage) — see the "Closed 2026-09-13" section below
 
 `Uint8Array.prototype.slice` should return a copied typed array with an
 independent `ArrayBuffer`, while `subarray` should keep sharing storage. A

@@ -1,0 +1,220 @@
+"""Chrome-vs-Simple per-page GPU-command metrics CLI.
+
+    bin/simple run src/app/ui/renderdoc_metrics/main.spl --page <name>
+        --chrome <chrome.events.json> --simple <simple.events.json>
+
+Prints the markdown table (header + one row per side), one `invariant=` line per
+invariant, and the verdict LAST on stdout. Exit 0 PASS / 1 FAIL / 2 ERROR. A missing,
+empty or unparseable input on either side is ERROR — never a pass, because an empty
+stream satisfies every "at most one" invariant vacuously.
+
+This answers the question the alignment differ in `app.ui.renderdoc_diff` does not:
+that differ asks "do the two streams draw the same things in the same order"; this
+asks HOW MANY GPU-side commands each side issued, which is what the GPU-offload
+invariants are stated in.
+
+Schema honesty — `renderdoc-events/v1` carries an event `type` of
+draw/dispatch/copy/clear/present and no buffer-upload byte counts, so:
+
+  * `presents` is the SUBMIT proxy (one present per frame submission),
+  * `copies` is the READBACK proxy (a GPU->host copy is how a readback shows up),
+  * upload BYTES are not observable in v1 and print as `n/a`, never as 0 — a 0 would
+    read as "proven no uploads", which the stream cannot say.
+
+SINGLE MODULE ON PURPOSE. Splitting the fold into a sibling module and calling it
+from here aborts the 2026-09-05 seed with SIGBUS (rc 138) at JIT-compile time of
+`main`, before a single line of output — the same seed defect that makes
+`scripts/check/check-renderdoc-web-diff.shs --selftest` unrunnable on macOS. Bisected
+in doc/08_tracking/bug/renderdoc_seed_sigbus_cross_module_call_2026-09-13.md; reading
+the event stream through `app.ui.renderdoc_diff.jsonflat` is proven safe and is kept.
+"""
+
+use std.io_runtime.{file_read, file_exists}
+use std.sffi.cli.{cli_get_args, cli_exit}
+use app.ui.renderdoc_diff.jsonflat.{json_flatten, json_pair_lookup, json_pair_has_prefix}
+
+val RDOC_VERDICT_PREFIX: text = "RENDERDOC CHROME-VS-SIMPLE: "
+
+class RdocMetrics:
+    label: text
+    events: i64
+    draws: i64
+    dispatches: i64
+    clears: i64
+    copies: i64
+    presents: i64
+    pipeline_switches: i64
+    distinct_targets: i64
+    error: text
+
+fn _empty(label: text, err: text) -> RdocMetrics:
+    RdocMetrics(label: label, events: 0, draws: 0, dispatches: 0, clears: 0, copies: 0,
+        presents: 0, pipeline_switches: 0, distinct_targets: 0, error: err)
+
+fn _metrics_for(label: text, path: text) -> RdocMetrics:
+    """Read one events.json and fold it into counts. Every failure is an error-class
+    result carrying its reason, never a zero-filled success."""
+    if path == "":
+        return _empty(label, "no events path given")
+    if not file_exists(path):
+        return _empty(label, "no such events file " + path)
+    val src = file_read(path)
+    if src == "":
+        return _empty(label, "empty events file " + path)
+    val pairs = json_flatten(src)
+    val schema = json_pair_lookup(pairs, "schema")
+    if schema == "":
+        return _empty(label, "missing schema in " + path)
+    if schema != "renderdoc-events/v1":
+        return _empty(label, "unsupported schema " + schema + " in " + path)
+    var events = 0
+    var draws = 0
+    var dispatches = 0
+    var clears = 0
+    var copies = 0
+    var presents = 0
+    var switches = 0
+    var last_key = ""
+    var seen: [i64] = []
+    var idx = 0
+    while true:
+        val base = "events[" + idx.to_text() + "]"
+        if not json_pair_has_prefix(pairs, base):
+            break
+        events = events + 1
+        val etype = json_pair_lookup(pairs, base + ".type")
+        if etype == "draw":
+            draws = draws + 1
+        if etype == "dispatch":
+            dispatches = dispatches + 1
+        if etype == "clear":
+            clears = clears + 1
+        if etype == "copy":
+            copies = copies + 1
+        if etype == "present":
+            presents = presents + 1
+        val vs = json_pair_lookup(pairs, base + ".vsHash")
+        val ps = json_pair_lookup(pairs, base + ".psHash")
+        val cs = json_pair_lookup(pairs, base + ".csHash")
+        val key = vs + "|" + ps + "|" + cs
+        if key != "||":
+            if last_key != "" and key != last_key:
+                switches = switches + 1
+            last_key = key
+        var tid = 0
+        val raw_tid = json_pair_lookup(pairs, base + ".targets[0].id")
+        if raw_tid != "":
+            tid = raw_tid.to_i64()
+        var known = false
+        var t = 0
+        while t < seen.len():
+            if seen[t] == tid:
+                known = true
+            t = t + 1
+        if not known:
+            seen.push(tid)
+        idx = idx + 1
+    RdocMetrics(label: label, events: events, draws: draws, dispatches: dispatches,
+        clears: clears, copies: copies, presents: presents, pipeline_switches: switches,
+        distinct_targets: seen.len(), error: "")
+
+fn _header() -> text:
+    val cols = "| page | side | draws | dispatches | submits | readbacks | clears | pipeline switches | targets | upload bytes | events |"
+    val rule = "|---|---|---|---|---|---|---|---|---|---|---|"
+    cols + "\n" + rule
+
+fn _row(page: text, m: RdocMetrics) -> text:
+    "| " + page + " | " + m.label + " | " + m.draws.to_text() + " | "
+        + m.dispatches.to_text() + " | " + m.presents.to_text() + " | "
+        + m.copies.to_text() + " | " + m.clears.to_text() + " | "
+        + m.pipeline_switches.to_text() + " | " + m.distinct_targets.to_text()
+        + " | n/a | " + m.events.to_text() + " |"
+
+fn _line(name: text, ok: bool, detail: text) -> text:
+    var verdict = "FAIL"
+    if ok:
+        verdict = "PASS"
+    "invariant=" + name + " verdict=" + verdict + " detail=" + detail
+
+fn main():
+    val argv = cli_get_args()
+    var page = ""
+    var chrome_path = ""
+    var simple_path = ""
+    var i = 0
+    while i < argv.len():
+        val arg = argv[i]
+        if arg == "--page" and i + 1 < argv.len():
+            page = argv[i + 1]
+            i = i + 2
+            continue
+        if arg == "--chrome" and i + 1 < argv.len():
+            chrome_path = argv[i + 1]
+            i = i + 2
+            continue
+        if arg == "--simple" and i + 1 < argv.len():
+            simple_path = argv[i + 1]
+            i = i + 2
+            continue
+        i = i + 1
+    if page == "":
+        page = "unnamed"
+    if chrome_path == "" or simple_path == "":
+        print("usage: renderdoc_metrics --page <name> --chrome <a.events.json> --simple <b.events.json>")
+        print(RDOC_VERDICT_PREFIX + "ERROR — nothing was checked (--chrome and --simple are both required)")
+        cli_exit(2)
+        return
+    val chrome = _metrics_for("chrome", chrome_path)
+    val simple = _metrics_for("simple", simple_path)
+    print(_header())
+    print(_row(page, chrome))
+    print(_row(page, simple))
+    # Fail closed BEFORE any invariant: an unreadable or empty stream satisfies every
+    # "at most one" bound vacuously, and that is exactly the pass this repo forbids.
+    if chrome.error != "":
+        print(RDOC_VERDICT_PREFIX + "ERROR — nothing was checked (page " + page
+            + ", chrome side: " + chrome.error + ")")
+        cli_exit(2)
+        return
+    if simple.error != "":
+        print(RDOC_VERDICT_PREFIX + "ERROR — nothing was checked (page " + page
+            + ", simple side: " + simple.error + ")")
+        cli_exit(2)
+        return
+    if chrome.events == 0 or simple.events == 0:
+        print(RDOC_VERDICT_PREFIX + "ERROR — nothing was checked (page " + page
+            + ", empty event stream: chrome=" + chrome.events.to_text()
+            + " simple=" + simple.events.to_text() + ")")
+        cli_exit(2)
+        return
+    var fails = 0
+    val ok_submit = simple.presents <= 1
+    if not ok_submit:
+        fails = fails + 1
+    print(_line("simple_single_submit", ok_submit,
+        "presents=" + simple.presents.to_text() + " (limit 1)"))
+    val ok_readback = simple.copies <= 1
+    if not ok_readback:
+        fails = fails + 1
+    print(_line("simple_single_readback", ok_readback,
+        "copies=" + simple.copies.to_text() + " (limit 1)"))
+    val s_cmds = simple.draws + simple.dispatches
+    val c_cmds = chrome.draws + chrome.dispatches
+    val ok_work = s_cmds > 0
+    if not ok_work:
+        fails = fails + 1
+    print(_line("simple_gpu_work_present", ok_work,
+        "draws+dispatches=" + s_cmds.to_text() + " (must be > 0)"))
+    val ok_rel = s_cmds <= c_cmds * 2
+    if not ok_rel:
+        fails = fails + 1
+    print(_line("simple_commands_within_2x_chrome", ok_rel,
+        "simple=" + s_cmds.to_text() + " chrome=" + c_cmds.to_text()
+            + " limit=" + (c_cmds * 2).to_text()))
+    if fails > 0:
+        print(RDOC_VERDICT_PREFIX + "FAIL — page " + page + ": " + fails.to_text()
+            + " of 4 invariant(s) failed")
+        cli_exit(1)
+        return
+    print(RDOC_VERDICT_PREFIX + "PASS — page " + page + ": 4 invariant(s) checked, 0 failed")
+    cli_exit(0)

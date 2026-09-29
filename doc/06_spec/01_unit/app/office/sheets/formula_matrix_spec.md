@@ -20,7 +20,7 @@ Calc matrix + sum-combination + math/text-niche spec.
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/office/sheets/formula_matrix_spec.spl` |
-| Updated | 2026-08-18 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 Calc matrix + sum-combination + math/text-niche spec.
@@ -41,13 +41,26 @@ against Excel semantics.
 
 #### MMULT computes the matrix product
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- MMULT computes the matrix product
+   - Expected: _disp(sh, "A1") equals `19`
+   - Expected: _disp(sh, "B1") equals `22`
+   - Expected: _disp(sh, "A2") equals `43`
+   - Expected: _disp(sh, "B2") equals `50`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("MMULT computes the matrix product")
 var sh = Sheet.new("s")
 sh.set_value("H1", "1")
 sh.set_value("I1", "2")
@@ -72,13 +85,18 @@ expect(_disp(sh, "B2")).to_equal("50")
 
 #### MMULT fails closed with #ERR on a dimension mismatch
 
+- MMULT fails closed with #ERR on a dimension mismatch
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("MMULT fails closed with #ERR on a dimension mismatch")
 var sh = Sheet.new("s")
 sh.set_value("H1", "1")
 sh.set_value("I1", "2")
@@ -99,13 +117,22 @@ expect(_disp(sh, "A1")).to_contain("#ERR")
 
 #### MINVERSE inverts a 2x2 matrix
 
+- MINVERSE inverts a 2x2 matrix
+   - Expected: _disp(sh, "A1") equals `0.6`
+   - Expected: _disp(sh, "B1") equals `-0.7`
+   - Expected: _disp(sh, "A2") equals `-0.2`
+   - Expected: _disp(sh, "B2") equals `0.4`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("MINVERSE inverts a 2x2 matrix")
 var sh = Sheet.new("s")
 sh.set_value("H1", "4")
 sh.set_value("I1", "7")
@@ -129,13 +156,18 @@ expect(_disp(sh, "B2")).to_equal("0.4")
 
 #### MINVERSE fails closed with #ERR on a singular matrix
 
+- MINVERSE fails closed with #ERR on a singular matrix
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("MINVERSE fails closed with #ERR on a singular matrix")
 var sh = Sheet.new("s")
 sh.set_value("H1", "1")
 sh.set_value("I1", "2")
@@ -156,13 +188,22 @@ expect(_disp(sh, "A1")).to_contain("#ERR")
 
 #### MUNIT builds the identity matrix
 
+- MUNIT builds the identity matrix
+   - Expected: _disp(sh, "A1") equals `1`
+   - Expected: _disp(sh, "B1") equals `0`
+   - Expected: _disp(sh, "A2") equals `0`
+   - Expected: _disp(sh, "B2") equals `1`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("MUNIT builds the identity matrix")
 var sh = Sheet.new("s")
 sh.set_value("A1", "=MUNIT(2)")
 sh = recalculate_formula_cells(sh)
@@ -184,13 +225,19 @@ expect(_disp(sh, "B2")).to_equal("1")
 
 #### MDETERM of a 2x2 matrix
 
+- MDETERM of a 2x2 matrix
+   - Expected: _disp(sh, "A1") equals `-14`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("MDETERM of a 2x2 matrix")
 var sh = Sheet.new("s")
 sh.set_value("H1", "3")
 sh.set_value("I1", "8")
@@ -211,13 +258,19 @@ expect(_disp(sh, "A1")).to_equal("-14")
 
 #### MDETERM of a 3x3 matrix
 
+- MDETERM of a 3x3 matrix
+   - Expected: _disp(sh, "A1") equals `-3`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("MDETERM of a 3x3 matrix")
 var sh = Sheet.new("s")
 sh.set_value("H1", "1")
 sh.set_value("I1", "2")
@@ -242,13 +295,19 @@ expect(_disp(sh, "A1")).to_equal("-3")
 
 #### SUMX2MY2 sums x^2 - y^2
 
+- SUMX2MY2 sums x^2 - y^2
+   - Expected: _disp(sh, "A1") equals `8`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("SUMX2MY2 sums x^2 - y^2")
 var sh = Sheet.new("s")
 sh.set_value("H1", "2")
 sh.set_value("H2", "3")
@@ -263,13 +322,19 @@ expect(_disp(sh, "A1")).to_equal("8")
 
 #### SUMX2PY2 sums x^2 + y^2
 
+- SUMX2PY2 sums x^2 + y^2
+   - Expected: _disp(sh, "A1") equals `18`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("SUMX2PY2 sums x^2 + y^2")
 var sh = Sheet.new("s")
 sh.set_value("H1", "2")
 sh.set_value("H2", "3")
@@ -284,13 +349,19 @@ expect(_disp(sh, "A1")).to_equal("18")
 
 #### SUMXMY2 sums (x - y)^2
 
+- SUMXMY2 sums (x - y)^2
+   - Expected: _disp(sh, "A1") equals `2`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("SUMXMY2 sums (x - y)^2")
 var sh = Sheet.new("s")
 sh.set_value("H1", "2")
 sh.set_value("H2", "3")
@@ -307,13 +378,19 @@ expect(_disp(sh, "A1")).to_equal("2")
 
 #### FACTDOUBLE of an even n
 
+- FACTDOUBLE of an even n
+   - Expected: _disp(sh, "A1") equals `48`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("FACTDOUBLE of an even n")
 var sh = Sheet.new("s")
 sh.set_value("A1", "=FACTDOUBLE(6)")
 sh = recalculate_formula_cells(sh)
@@ -324,13 +401,19 @@ expect(_disp(sh, "A1")).to_equal("48")
 
 #### FACTDOUBLE of an odd n
 
+- FACTDOUBLE of an odd n
+   - Expected: _disp(sh, "A1") equals `105`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("FACTDOUBLE of an odd n")
 var sh = Sheet.new("s")
 sh.set_value("A1", "=FACTDOUBLE(7)")
 sh = recalculate_formula_cells(sh)
@@ -341,13 +424,18 @@ expect(_disp(sh, "A1")).to_equal("105")
 
 #### FACTDOUBLE fails closed with #ERR on a negative n
 
+- FACTDOUBLE fails closed with #ERR on a negative n
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("FACTDOUBLE fails closed with #ERR on a negative n")
 var sh = Sheet.new("s")
 sh.set_value("A1", "=FACTDOUBLE(-1)")
 sh = recalculate_formula_cells(sh)
@@ -358,13 +446,19 @@ expect(_disp(sh, "A1")).to_contain("#ERR")
 
 #### MULTINOMIAL computes (sum)! / product of factorials
 
+- MULTINOMIAL computes (sum)! / product of factorials
+   - Expected: _disp(sh, "A1") equals `1260`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("MULTINOMIAL computes (sum)! / product of factorials")
 var sh = Sheet.new("s")
 sh.set_value("A1", "=MULTINOMIAL(2,3,4)")
 sh = recalculate_formula_cells(sh)
@@ -375,13 +469,19 @@ expect(_disp(sh, "A1")).to_equal("1260")
 
 #### SERIESSUM evaluates a power series
 
+- SERIESSUM evaluates a power series
+   - Expected: _disp(sh, "A1") equals `7`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("SERIESSUM evaluates a power series")
 var sh = Sheet.new("s")
 sh.set_value("H1", "1")
 sh.set_value("H2", "1")
@@ -397,13 +497,19 @@ expect(_disp(sh, "A1")).to_equal("7")
 
 #### ROMAN uses the classic subtractive form (499)
 
+- ROMAN uses the classic subtractive form (499)
+   - Expected: _disp(sh, "A1") equals `CDXCIX`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("ROMAN uses the classic subtractive form (499)")
 var sh = Sheet.new("s")
 sh.set_value("A1", "=ROMAN(499)")
 sh = recalculate_formula_cells(sh)
@@ -414,13 +520,19 @@ expect(_disp(sh, "A1")).to_equal("CDXCIX")
 
 #### ROMAN of a four-figure year
 
+- ROMAN of a four-figure year
+   - Expected: _disp(sh, "A1") equals `MMXXVI`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("ROMAN of a four-figure year")
 var sh = Sheet.new("s")
 sh.set_value("A1", "=ROMAN(2026)")
 sh = recalculate_formula_cells(sh)
@@ -431,13 +543,18 @@ expect(_disp(sh, "A1")).to_equal("MMXXVI")
 
 #### ROMAN fails closed with #ERR outside 1..3999
 
+- ROMAN fails closed with #ERR outside 1..3999
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("ROMAN fails closed with #ERR outside 1..3999")
 var sh = Sheet.new("s")
 sh.set_value("A1", "=ROMAN(4000)")
 sh = recalculate_formula_cells(sh)
@@ -448,13 +565,19 @@ expect(_disp(sh, "A1")).to_contain("#ERR")
 
 #### ARABIC inverts a Roman numeral
 
+- ARABIC inverts a Roman numeral
+   - Expected: _disp(sh, "A1") equals `2026`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("ARABIC inverts a Roman numeral")
 var sh = Sheet.new("s")
 sh.set_value("A1", "=ARABIC(\"MMXXVI\")")
 sh = recalculate_formula_cells(sh)
@@ -465,13 +588,19 @@ expect(_disp(sh, "A1")).to_equal("2026")
 
 #### ARABIC is case-insensitive
 
+- ARABIC is case-insensitive
+   - Expected: _disp(sh, "A1") equals `499`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("ARABIC is case-insensitive")
 var sh = Sheet.new("s")
 sh.set_value("A1", "=ARABIC(\"cdxcix\")")
 sh = recalculate_formula_cells(sh)
@@ -492,3 +621,51 @@ expect(_disp(sh, "A1")).to_equal("499")
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `11e68f1759b1a3a24038fc96e04f121a8e199ba667df5bfd54ca71cf7d22728d`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `11e68f1759b1a3a24038fc96e04f121a8e199ba667df5bfd54ca71cf7d22728d`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `11e68f1759b1a3a24038fc96e04f121a8e199ba667df5bfd54ca71cf7d22728d`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/01_unit/app/office/sheets/formula_matrix_spec.spl
+mirror: doc/06_spec/01_unit/app/office/sheets/formula_matrix_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/app/office/sheets/formula_matrix_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/app/office/sheets/formula_matrix_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/app/office/sheets/formula_matrix_spec.spl:30:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'MMULT computes the matrix product' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/office/sheets/formula_matrix_spec.spl:49:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'MMULT fails closed with #ERR on a dimension mismatch' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/office/sheets/formula_matrix_spec.spl:64:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'MINVERSE inverts a 2x2 matrix' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

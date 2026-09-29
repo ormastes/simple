@@ -1,0 +1,37 @@
+# @req KPM-REQ-005 KPM-REQ-009
+use std.spec.*
+use compiler.tools.lint.param_object_rules.{check_param_object_rules}
+
+fn finding_codes(source: text, path: text) -> [text]:
+    [finding.code for finding in check_param_object_rules(source, path)]
+
+describe "Versioned parameter-object lint":
+    it "accepts an append-only parameter object with hdr first and ext last":
+        val source = "struct DemoV1:\n    hdr: ParamHeader\n    enabled: bool\n    ext: [ParamExt]\n\nstruct DemoV2:\n    hdr: ParamHeader\n    enabled: bool\n    ext: [ParamExt]\n    added: text\n"
+        expect(finding_codes(source, "src/compiler/demo.spl").len()).to_equal(0)
+        print("KPM_PHASE2_APPEND_ONLY_RECEIPT=PASS")
+
+    it "reports PARAM-001 when the header or extension boundary is invalid":
+        val ext_not_last = "struct DemoV1:\n    hdr: ParamHeader\n    ext: [ParamExt]\n    enabled: bool\n"
+        val header_missing = "struct DemoParamsV1:\n    enabled: bool\n    ext: [ParamExt]\n"
+        val extension_missing = "struct DemoParamsV1:\n    hdr: ParamHeader\n    enabled: bool\n"
+        expect(finding_codes(ext_not_last, "src/compiler/demo.spl")).to_contain("PARAM-001")
+        expect(finding_codes(header_missing, "src/compiler/demo.spl")).to_contain("PARAM-001")
+        expect(finding_codes(extension_missing, "src/compiler/demo.spl")).to_contain("PARAM-001")
+
+    it "reports PARAM-002 when V2 changes a V1 ordinal":
+        val source = "struct DemoV1:\n    hdr: ParamHeader\n    enabled: bool\n    ext: [ParamExt]\n\nstruct DemoV2:\n    hdr: ParamHeader\n    renamed: bool\n    ext: [ParamExt]\n"
+        expect(finding_codes(source, "src/compiler/demo.spl")).to_contain("PARAM-002")
+
+    it "reports PARAM-003 for compiler-side AOP environment reads":
+        val source = "fn enabled() -> text?:\n    env_get_opt(\"SIMPLE_AOP_LOG_CALLS\")\n"
+        expect(finding_codes(source, "src/compiler/demo.spl")).to_contain("PARAM-003")
+        expect(finding_codes(source, "src/app/io/demo.spl").len()).to_equal(0)
+
+    it "does not treat comments or string data as environment reads":
+        val source = "# env_get_opt(\"SIMPLE_AOP_LOG_CALLS\")\nval sample = \"rt_env_get SIMPLE_MCDC_MODE\"\n"
+        expect(finding_codes(source, "src/compiler/demo.spl").len()).to_equal(0)
+
+    it "reports PLUG-001 when a port has no trailing extension field":
+        val source = "struct BackendPortV1:\n    hdr: ParamHeader\n    run_fn: i64\n"
+        expect(finding_codes(source, "src/compiler/demo.spl")).to_contain("PLUG-001")

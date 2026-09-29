@@ -1,0 +1,142 @@
+#!/bin/sh
+# Shared T1 harness for the C reference fixtures.
+#
+# Sourced by test/05_perf/ui_slim/ref/<name>/run_t1.shs. Runs a fixture under a
+# REAL pty (expect), sends 'q' only after the greeting has actually appeared,
+# and asserts both the greeting bytes and the terminal-restore sequences.
+#
+# Verdict is the last line of stdout:
+#   PASS — 1 run, greeting seen, terminal restored          exit 0
+#   FAIL — ...                                              exit 1
+#   ERROR — nothing was checked (...)                       exit 2
+
+T1_GREETING="Hello from Simple UI!"
+
+t1_repo() { (cd "$1/../../../.." && pwd); }
+
+# strip CSI/OSC escape sequences so an attribute change inside the greeting run
+# cannot hide the text from a literal grep
+t1_strip_csi() {
+  LC_ALL=C sed -e $'s/\033\\][^\007]*\007//g' -e $'s/\033\\[[0-9;?]*[@-~]//g' -e $'s/\033[()][B0]//g' -e $'s/\033[=>78MDEHc]//g' "$1"
+}
+
+# t1_pty_run <fixture> <transcript> <timefile> [markfile] -> echoes the fixture exit code
+# markfile receives "greeting_us <n>": wall microseconds from spawn to the moment
+# the greeting bytes reached the pty. That, not the total run, is the startup
+# number -- total wall time is dominated by how fast the harness sends 'q'.
+t1_pty_run() {
+  _fx=$1; _tr=$2; _tf=$3; _mk=${4:-/dev/null}
+  expect -f - "$_fx" "$_tr" "$_tf" "$_mk" <<'EXPEOF' >/dev/null 2>&1
+set timeout 20
+set fixture    [lindex $argv 0]
+set transcript [lindex $argv 1]
+set timefile   [lindex $argv 2]
+set markfile   [lindex $argv 3]
+set env(TERM) "xterm-256color"
+log_file -noappend $transcript
+set t0 [clock microseconds]
+spawn sh -c "stty rows 24 cols 80; exec /usr/bin/time -l $fixture 2>$timefile"
+expect {
+    -re "Hello"  {
+        set fh [open $markfile w]
+        puts $fh "greeting_us [expr {[clock microseconds] - $t0}]"
+        close $fh
+    }
+    timeout      { catch { exec kill -TERM [exp_pid] }; exit 70 }
+    eof          { exit 71 }
+}
+send -- "q"
+expect {
+    eof     { }
+    timeout { catch { exec kill -TERM [exp_pid] }; exit 72 }
+}
+catch wait result
+exit [lindex $result 3]
+EXPEOF
+  echo $?
+}
+
+# t1_assert <transcript> <rc> -> 0 pass, 1 fail; prints reasons on stderr
+t1_assert() {
+  _tr=$1; _rc=$2; _bad=""
+  [ "$_rc" = "0" ] || _bad="$_bad fixture-exit=$_rc"
+  _plain=$(t1_strip_csi "$_tr")
+  printf '%s' "$_plain" | LC_ALL=C grep -aqF "$T1_GREETING" || _bad="$_bad greeting-missing"
+  LC_ALL=C grep -aq '\[?1049l' "$_tr" || _bad="$_bad alt-screen-not-exited"
+  LC_ALL=C grep -aq '\[?25h' "$_tr"   || _bad="$_bad cursor-not-restored"
+  if [ -n "$_bad" ]; then echo "$_bad"; return 1; fi
+  return 0
+}
+
+# t1_refuses_non_tty <fixture> -> 0 when the fixture refuses a redirected stdout
+t1_refuses_non_tty() {
+  _out=$(mktemp); _err=$(mktemp)
+  "$1" > "$_out" 2> "$_err" < /dev/null
+  _rc=$?
+  _sz=$(wc -c < "$_out" | tr -d ' ')
+  rm -f "$_out" "$_err"
+  [ "$_rc" = "2" ] && [ "$_sz" = "0" ]
+}
+
+# ---- selftest stubs -------------------------------------------------------
+t1_make_stub_good() {
+  cat > "$1" <<'S'
+#!/bin/sh
+[ -t 0 ] && [ -t 1 ] || { echo "refusing: not a tty" >&2; exit 2; }
+printf '\033[?1049h\033[?25l\033[2J\033[3;5HHello from Simple UI!\033[23;3Hstatus: ready | press q to quit'
+stty raw -echo 2>/dev/null; dd bs=1 count=1 >/dev/null 2>&1; stty sane 2>/dev/null
+printf '\033[?25h\033[?1049l'
+S
+  chmod +x "$1"
+}
+
+t1_make_stub_no_restore() {
+  cat > "$1" <<'S'
+#!/bin/sh
+[ -t 0 ] && [ -t 1 ] || { echo "refusing: not a tty" >&2; exit 2; }
+printf '\033[?1049h\033[?25l\033[2J\033[3;5HHello from Simple UI!'
+stty raw -echo 2>/dev/null; dd bs=1 count=1 >/dev/null 2>&1; stty sane 2>/dev/null
+S
+  chmod +x "$1"
+}
+
+t1_make_stub_non_tty_liar() {
+  cat > "$1" <<'S'
+#!/bin/sh
+printf 'Hello from Simple UI!\n'
+S
+  chmod +x "$1"
+}
+
+# t1_selftest -> 0 pass. Fatal for the caller.
+t1_selftest() {
+  _d=$(mktemp -d); _fails=""
+  t1_make_stub_good        "$_d/good"
+  t1_make_stub_no_restore  "$_d/norestore"
+  t1_make_stub_non_tty_liar "$_d/liar"
+
+  # 1. a well-behaved fixture must PASS
+  _rc=$(t1_pty_run "$_d/good" "$_d/good.log" "$_d/good.time")
+  t1_assert "$_d/good.log" "$_rc" >/dev/null || _fails="$_fails good-stub-should-pass"
+
+  # 2. a fixture that never restores the terminal must FAIL
+  _rc=$(t1_pty_run "$_d/norestore" "$_d/nr.log" "$_d/nr.time")
+  if t1_assert "$_d/nr.log" "$_rc" >/dev/null; then
+    _fails="$_fails no-restore-stub-should-fail"
+  fi
+
+  # 3. a redirected (non-tty) stdout must be refused, never counted as T1
+  t1_refuses_non_tty "$_d/good" || _fails="$_fails non-tty-not-refused"
+
+  # 4. a program that prints the greeting to a non-tty stdout is NOT T1
+  if t1_refuses_non_tty "$_d/liar"; then
+    _fails="$_fails non-tty-liar-accepted"
+  fi
+
+  rm -rf "$_d"
+  if [ -n "$_fails" ]; then
+    echo "selftest FAILED:$_fails" >&2
+    return 1
+  fi
+  return 0
+}

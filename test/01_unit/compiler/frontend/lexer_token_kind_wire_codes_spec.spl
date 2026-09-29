@@ -1,0 +1,109 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-COMPILER-FRONTEND-LEXER-TOKENKIND
+
+"""
+# Core lexer TokenKind is faithful to the tokens.spl wire codes
+
+**Category:** Compiler | Frontend | Lexer
+**Status:** Implemented
+
+Regression cover for D21: `lexer_next_token` used to store the raw `lex_next()`
+integer in `Token.kind` while `compiler.core.lexer` re-exported the *frontend*
+`TokenKind`, whose ordinals are positional (`KwFn` = 7) and therefore disagree
+with the wire codes the lexer actually emits (`TOK_KW_FN` = 20). Every
+`token.kind == TokenKind.X` comparison was silently false, which broke the
+treesitter outline layer as well as the lexer specs.
+
+`compiler/core/tokens.spl` is the authoritative ordinal source; the enum in
+`core/lexer_types.spl` mirrors it exactly and `token_kind_from_code` /
+`token_kind_code` are inverses of each other.
+"""
+use std.spec
+use std.spec.step
+
+use compiler.frontend.core.lexer.*
+use compiler.frontend.core.lexer_types.{TokenKind, token_kind_from_code, token_kind_code}
+
+describe "Lexed token kinds":
+    it "labels keywords with the kind the lexer emits":
+        step("Verify: fn/val/struct lex to their TokenKind")
+        expect(lexer_next_token(lexer_new("fn")).kind).to_equal(TokenKind.KwFn)
+        expect(lexer_next_token(lexer_new("val")).kind).to_equal(TokenKind.KwVal)
+        expect(lexer_next_token(lexer_new("struct")).kind).to_equal(TokenKind.KwStruct)
+
+    it "labels identifiers, literals, operators and delimiters":
+        step("Verify: representative kinds across every tokens.spl range")
+        expect(lexer_next_token(lexer_new("foo")).kind).to_equal(TokenKind.Ident)
+        expect(lexer_next_token(lexer_new("42")).kind).to_equal(TokenKind.Integer)
+        expect(lexer_next_token(lexer_new("+")).kind).to_equal(TokenKind.Plus)
+        expect(lexer_next_token(lexer_new("-")).kind).to_equal(TokenKind.Minus)
+        expect(lexer_next_token(lexer_new("(")).kind).to_equal(TokenKind.LParen)
+        expect(lexer_next_token(lexer_new("->")).kind).to_equal(TokenKind.Arrow)
+
+describe "Lexed source byte spans":
+    it "tracks token positions through a multibyte source character":
+        step("Verify: wrapper spans use source UTF-8 byte offsets")
+        val lexer = lexer_new("\"é\" fn")
+        val string_token = lexer_next_token(lexer)
+        val keyword_token = lexer_next_token(lexer)
+        expect(string_token.span.start).to_equal(0)
+        expect(string_token.span.end_pos).to_equal(4)
+        expect(keyword_token.span.start).to_equal(5)
+        expect(keyword_token.span.end_pos).to_equal(7)
+
+    it "uses the same source byte spans for record tokens":
+        step("Verify: record spans advance past a multibyte character")
+        lex_init("\"é\" fn")
+        val string_token = lex_next_token_record()
+        val keyword_token = lex_next_token_record()
+        expect(string_token.span.start).to_equal(0)
+        expect(string_token.span.end_pos).to_equal(4)
+        expect(keyword_token.span.start).to_equal(5)
+        expect(keyword_token.span.end_pos).to_equal(7)
+
+    it "places EOF after the last source byte":
+        step("Verify: EOF is zero width at the end of the source")
+        val lexer = lexer_new("fn")
+        lexer_next_token(lexer)
+        val eof = lexer_next_token(lexer)
+        expect(eof.kind).to_equal(TokenKind.Eof)
+        expect(eof.span.start).to_equal(2)
+        expect(eof.span.end_pos).to_equal(2)
+
+    it "places repeated dedents at the same source position":
+        step("Verify: pending dedents have zero-width byte spans")
+        val source = "fn a:\n    fn b:\n        \"é\"\n"
+        lex_init(source)
+        var dedents: i64 = 0
+        for i in 0..32:
+            val token = lex_next_token_record()
+            if token.kind == TokenKind.Dedent:
+                expect(token.span.start).to_equal(source.len())
+                expect(token.span.end_pos).to_equal(source.len())
+                dedents = dedents + 1
+            if token.kind == TokenKind.Eof:
+                break
+        expect(dedents).to_equal(2)
+
+describe "TokenKind wire-code mapping":
+    it "carries the exact tokens.spl integer for each kind":
+        step("Verify: token_kind_code matches compiler/core/tokens.spl")
+        expect(token_kind_code(TokenKind.KwFn)).to_equal(20)
+        expect(token_kind_code(TokenKind.Ident)).to_equal(6)
+        expect(token_kind_code(TokenKind.Integer)).to_equal(1)
+        expect(token_kind_code(TokenKind.Plus)).to_equal(60)
+        expect(token_kind_code(TokenKind.LParen)).to_equal(140)
+        expect(token_kind_code(TokenKind.Colon)).to_equal(161)
+        expect(token_kind_code(TokenKind.Arrow)).to_equal(167)
+        expect(token_kind_code(TokenKind.Eof)).to_equal(190)
+
+    it "round-trips code -> kind -> code":
+        step("Verify: token_kind_from_code and token_kind_code are inverses")
+        expect(token_kind_code(token_kind_from_code(20))).to_equal(20)
+        expect(token_kind_code(token_kind_from_code(60))).to_equal(60)
+        expect(token_kind_code(token_kind_from_code(182))).to_equal(182)
+        expect(token_kind_from_code(20)).to_equal(TokenKind.KwFn)
+
+    it "maps an unknown code to Error rather than aliasing a real kind":
+        step("Verify: out-of-table code becomes TokenKind.Error")
+        expect(token_kind_from_code(9999)).to_equal(TokenKind.Error)

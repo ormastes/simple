@@ -1,4 +1,37 @@
 # An untyped function's result is erased to `0` (or to `value << 3`)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
+
+## Re-measured 2026-09-13 — HALF FIXED, entry stays OPEN on the remaining half
+
+Binary: Rust seed `build/vt4/bootstrap/simple.exe` (Windows), the entry's own
+repro run verbatim as a whole program with `main()` appended.
+
+| lane | `no_ret_type` (a) | `with_ret_type` (b) | `untyped_params_ret_i64` (c) |
+|---|---|---|---|
+| default (JIT) | **0 — still WRONG** | 8 | **8 — now CORRECT** |
+| `SIMPLE_NO_JIT=1` | **0 — still WRONG** | 8 | 8 |
+| `SIMPLE_EXECUTION_MODE=interpret` | **8 — CORRECT** | 8 | 8 |
+
+Two things this pins down that the original report could not:
+
+1. **The `value << 3` half is FIXED.** Case (c) — declared return type, untyped
+   parameters — returned the raw tag-boxed word `64` when filed; it now returns
+   `8` on every lane. That sub-defect can be treated as closed.
+2. **The remaining half is a JIT/MIR-only divergence, not a language-wide
+   erasure.** The Rust AST interpreter gets case (a) right. Only the JIT and the
+   `SIMPLE_NO_JIT=1` (MIR) path erase a *missing return type annotation* to `0`.
+   That narrows the search to the return-type-inference/erasure decision on the
+   MIR lowering path, and gives a free differential oracle: any candidate fix can
+   be checked against `SIMPLE_EXECUTION_MODE=interpret` on the same file.
+
+Still **silent wrong data, no error** — severity unchanged.
+
+**Not fixed here:** lives in `src/compiler_rust/**`, off-limits during this pass
+(concurrent bootstrap; editing Rust sources aborts it).
+
 
 **Date:** 2026-08-01
 **Status:** Open
@@ -66,35 +99,3 @@ trailing expression's type instead of dropping the value, and so an untyped
 parameter's indexed read is unboxed before returning. A/B against the
 interpreter, JIT, and native engines.
 
-## RE-VERIFIED 2026-08-17 — STILL LIVE, reproduced on a freshly built seed
-
-Seed built from current `src/compiler_rust` (`BUILDRC=0`, binary 2026-08-17
-08:15). Probe: `test/01_unit/compiler/codegen/probe_any_typed_value_consumption_jit.spl`.
-
-    SIMPLE_EXECUTION_MODE=jit
-      FAIL untyped_fn_result_add got=<value:0x5> want=5
-      FAIL untyped_fn_result_id  got=<value:0x7> want=7
-    SIMPLE_EXECUTION_MODE=interpreter
-      PASS untyped_fn_result_add
-      PASS untyped_fn_result_id
-
-Refinement of the title: the result is NOT erased to zero. The correct value
-IS present (`0x5` is 5, `0x7` is 7) but its static type is `TypeId::ANY`, so
-the value reaches the rendering site still TAGGED and prints `<value:0x..>`
-instead of the number. Same silent-wrong-result class, different mechanism —
-the boxing is never undone rather than the value being lost.
-
-Fixture shape (`fn untyped_result(a: i64, b: i64): return a + b` — no declared
-return type). The interpreter is correct because it decodes the tag
-dynamically per value; the JIT makes the decision statically and has no type
-to make it from.
-
-Not fixed in this pass: unlike the chained-builtin sibling below, there is no
-per-callee name to classify — the fix is to infer the return type from the
-body's return expressions in `hir/lower/type_resolver.rs`, or to emit a
-dynamic `UnboxInt` (now total via `rt_value_unbox_int`) at the consumption
-site. Both are larger than a lookup-table entry and were not attempted here.
-
-Detection spec: `test/01_unit/compiler/codegen/any_typed_value_consumption_class_spec.spl`
-(the `renders an untyped function result as a number` example is RED by design
-until this is fixed).

@@ -1,0 +1,406 @@
+# Purpose: behavioral evidence for atomic SimpleOS release-evidence ownership.
+# @codex-impl
+# @req REQ-SIMPLEOS-RELEASE-EVIDENCE-LEDGER-V1
+
+use std.spec.*
+use std.spec.step
+use std.common.contracts.execution.simpleos_release_evidence_manifest_v1.*
+use std.common.contracts.execution.simpleos_release_evidence_ledger_v1.*
+use os.services.evidence.release_evidence_ledger_owner_v1.{
+    simpleos_release_evidence_owner_start_v1,
+    simpleos_release_evidence_owner_snapshot_v1,
+    simpleos_release_evidence_owner_commit_v1
+}
+use std.concurrent.thread.{thread_spawn}
+
+fn h(marker: text) -> text:
+    "000000000000000000000000000000000000000000000000000000000000000" + marker
+
+fn binding() -> text:
+    "edfb7403d6c1a8e139e1a436a776571f379b81889f42d328a1821e2f7d6fc57c"
+
+fn timed(id: text, marker: text, observed: u64) -> SimpleOsReleaseTimedReceiptV1:
+    SimpleOsReleaseTimedReceiptV1(
+        receipt_id: id, receipt_digest: h(marker),
+        execution_binding_digest: binding(), observed_at_unix_ms: observed,
+        duration_ms: 10u64, succeeded: true, diagnostic_only: false)
+
+fn workflow(
+    kind: SimpleOsReleaseWorkflowKindV1,
+    id: text,
+    marker: text,
+    observed: u64,
+    input: text,
+    artifact: text
+) -> SimpleOsReleaseGuestWorkflowEvidenceV1:
+    SimpleOsReleaseGuestWorkflowEvidenceV1(
+        kind: kind, timed: timed(id, marker, observed),
+        guest_toolchain_receipt_digest: h("c"), compiler_digest: h("b"),
+        input_source_digest: input, produced_artifact_digest: artifact,
+        stdout_digest: h("d"), exit_code: 0, executed_in_guest: true)
+
+fn manifest_for(
+    evidence_id: text,
+    nonce: text,
+    sequence: u64,
+    predecessor: text,
+    consumed_at: u64
+) -> SimpleOsReleaseEvidenceManifestV1:
+    val source = h("1")
+    val artifact = h("2")
+    SimpleOsReleaseEvidenceManifestV1(
+        schema_version: SIMPLEOS_RELEASE_EVIDENCE_MANIFEST_V1_SCHEMA,
+        target_id: "x86_64-unknown-simpleos", profile_id: "dev",
+        candidate: SimpleOsReleaseCandidateEvidenceV1(
+            image_manifest_digest: h("3"), candidate_bytes_digest: h("4"),
+            candidate_byte_length: 4096u64, immutable_candidate: true),
+        derived_state: SimpleOsReleaseDerivedStateEvidenceV1(
+            state_id: "state-1", base_candidate_bytes_digest: h("4"),
+            initial_state_digest: h("5"), final_state_digest: h("6"),
+            writable_overlay_digest: h("7"), derived_only: true),
+        firmware: SimpleOsReleaseFirmwareEvidenceV1(
+            firmware_id: "ovmf-2026", firmware_digest: h("8")),
+        launch: SimpleOsReleaseLaunchEvidenceV1(
+            backend: SimpleOsReleaseMachineBackendV1.Qemu,
+            sealed_plan_digest: h("9"), source_spec_digest: h("a"),
+            admitted: true),
+        boot: timed("boot-1", "e", 1050u64),
+        sosix_filesystem: SimpleOsReleaseSosixFilesystemEvidenceV1(
+            timed: timed("sosix-fs-1", "f", 1100u64),
+            contract_version: "sosix-v1", result_digest: h("9")),
+        version: workflow(
+            SimpleOsReleaseWorkflowKindV1.Version, "version-1", "1", 1150u64,
+            source, h("d")),
+        run: workflow(
+            SimpleOsReleaseWorkflowKindV1.Run, "run-1", "2", 1200u64,
+            source, h("e")),
+        build: workflow(
+            SimpleOsReleaseWorkflowKindV1.Build, "build-1", "3", 1250u64,
+            source, artifact),
+        native_execute: workflow(
+            SimpleOsReleaseWorkflowKindV1.NativeExecute, "native-1", "4",
+            1300u64, artifact, artifact),
+        persistence: SimpleOsReleasePersistenceEvidenceV1(
+            marker_id: "release-marker", marker_value_digest: h("5"),
+            write_receipt: timed("marker-write-1", "5", 1500u64),
+            reboot_receipt: timed("reboot-1", "6", 1600u64),
+            read_receipt: timed("marker-read-1", "7", 1700u64),
+            write_state_id: "state-1", write_state_digest: h("6"),
+            reboot_state_id: "state-1", reboot_state_digest: h("6"),
+            read_state_id: "state-1", read_state_digest: h("6"),
+            observed_marker_digest: h("5"), same_derived_state: true),
+        toolchain: SimpleOsReleaseToolchainEvidenceV1(
+            toolchain_id: "simple-stage4", toolchain_manifest_digest: h("a"),
+            compiler_id: "simple-selfhost", compiler_digest: h("b"),
+            compiler_provenance_digest: h("c"), self_hosted_simple: true,
+            rust_seed: false),
+        started_at_unix_ms: 1000u64, finished_at_unix_ms: 2000u64,
+        total_duration_ms: 1000u64, diagnostic_only: false,
+        consumption: SimpleOsReleaseConsumptionV1(
+            evidence_id: evidence_id, nonce: nonce, sequence: sequence,
+            previous_evidence_digest: predecessor,
+            issued_at_unix_ms: 2000u64, expires_at_unix_ms: 3000u64,
+            consumed_at_unix_ms: consumed_at,
+            consumed_once: consumed_at > 0u64))
+
+fn claim_for(
+    evidence_id: text,
+    nonce: text,
+    sequence: u64,
+    predecessor: text
+) -> SimpleOsReleaseEvidenceClaimV1:
+    SimpleOsReleaseEvidenceClaimV1(
+        target_id: "x86_64-unknown-simpleos",
+        candidate_bytes_digest: h("4"), evidence_id: evidence_id,
+        nonce: nonce, expected_sequence: sequence,
+        expected_predecessor_digest: predecessor,
+        execution_binding_digest: binding())
+
+fn full_ledger() -> SimpleOsReleaseEvidenceLedgerV1:
+    var ledger = simpleos_release_evidence_ledger_genesis_v1()
+    var index = 0
+    while index < SIMPLEOS_RELEASE_EVIDENCE_LEDGER_V1_MAX_ENTRIES:
+        val sequence = (index + 1).to_u64()
+        val claim = claim_for(
+            "evidence-{sequence}", "nonce-{sequence}", sequence,
+            ledger.head_transition_digest)
+        val manifest_digest = h("a")
+        val claim_digest = simpleos_release_evidence_claim_identity_digest_v1(
+            claim, manifest_digest)
+        val transition = simpleos_release_evidence_transition_digest_v1(
+            sequence, ledger.head_transition_digest, claim_digest,
+            manifest_digest, 2100u64)
+        ledger.entries.push(SimpleOsReleaseEvidenceLedgerEntryV1(
+            sequence: sequence,
+            predecessor_digest: ledger.head_transition_digest,
+            claim_identity_digest: claim_digest,
+            manifest_digest: manifest_digest,
+            transition_digest: transition,
+            target_id: claim.target_id,
+            candidate_bytes_digest: claim.candidate_bytes_digest,
+            evidence_id: claim.evidence_id,
+            nonce: claim.nonce,
+            execution_binding_digest: claim.execution_binding_digest,
+            committed_at_unix_ms: 2100u64))
+        ledger.head_sequence = sequence
+        ledger.head_transition_digest = transition
+        index = index + 1
+    ledger
+
+describe "SimpleOsReleaseEvidenceLedgerV1":
+    it "uses a canonical non-artifact genesis and admits one final identity":
+        step("Commit a fully validated final manifest against genesis")
+        val ledger = simpleos_release_evidence_ledger_genesis_v1()
+        val claim = claim_for(
+            "evidence-1", "nonce-1", 1u64,
+            SIMPLEOS_RELEASE_EVIDENCE_LEDGER_V1_GENESIS)
+        val pending = manifest_for("evidence-1", "nonce-1", 1u64,
+            SIMPLEOS_RELEASE_EVIDENCE_LEDGER_V1_GENESIS, 0u64)
+        val result = simpleos_release_evidence_ledger_transition_v1(
+            ledger, claim, pending, 2100u64)
+        expect(result.ok).to_equal(true)
+        expect(result.ledger.head_sequence).to_equal(1u64)
+        expect(result.ledger.entries[0].claim_identity_digest).to_equal(
+            result.claim_identity_digest)
+        expect(result.ledger.entries[0].transition_digest).to_equal(
+            result.transition_digest)
+        expect(pending.consumption.consumed_once).to_equal(false)
+        expect(pending.consumption.consumed_at_unix_ms).to_equal(0u64)
+        expect(simpleos_release_evidence_ledger_valid_v1(result.ledger)).to_equal(true)
+
+    it "rejects competing successors with exact predecessor and sequence CAS":
+        step("Let only the first claim advance the shared head")
+        val genesis = SIMPLEOS_RELEASE_EVIDENCE_LEDGER_V1_GENESIS
+        val first = simpleos_release_evidence_ledger_transition_v1(
+            simpleos_release_evidence_ledger_genesis_v1(),
+            claim_for("evidence-1", "nonce-1", 1u64, genesis),
+            manifest_for("evidence-1", "nonce-1", 1u64, genesis, 0u64),
+            2100u64)
+        expect(first.ok).to_equal(true)
+        val competitor = simpleos_release_evidence_ledger_transition_v1(
+            first.ledger,
+            claim_for("evidence-2", "nonce-2", 1u64, genesis),
+            manifest_for("evidence-2", "nonce-2", 1u64, genesis, 0u64),
+            2100u64)
+        expect(competitor.error).to_equal(
+            SimpleOsReleaseEvidenceLedgerErrorV1.StalePredecessor)
+        expect(competitor.ledger.head_transition_digest).to_equal(
+            first.transition_digest)
+
+    it "validates before irreversible consume and permits correction":
+        step("Reject bad evidence without burning its nonce")
+        val ledger = simpleos_release_evidence_ledger_genesis_v1()
+        val genesis = SIMPLEOS_RELEASE_EVIDENCE_LEDGER_V1_GENESIS
+        val claim = claim_for("evidence-1", "nonce-1", 1u64, genesis)
+        var invalid = manifest_for(
+            "evidence-1", "nonce-1", 1u64, genesis, 0u64)
+        invalid.toolchain.rust_seed = true
+        val rejected = simpleos_release_evidence_ledger_transition_v1(
+            ledger, claim, invalid, 2100u64)
+        expect(rejected.error).to_equal(
+            SimpleOsReleaseEvidenceLedgerErrorV1.InvalidManifest)
+        expect(rejected.ledger.head_sequence).to_equal(0u64)
+        expect(invalid.consumption.consumed_once).to_equal(false)
+        expect(invalid.consumption.consumed_at_unix_ms).to_equal(0u64)
+        val corrected = simpleos_release_evidence_ledger_transition_v1(
+            rejected.ledger,
+            claim, manifest_for(
+                "evidence-1", "nonce-1", 1u64, genesis, 0u64),
+            2100u64)
+        expect(corrected.ok).to_equal(true)
+
+    it "rejects replayed nonce and evidence identities":
+        step("Advance once, then attempt aliases of consumed identities")
+        val genesis = SIMPLEOS_RELEASE_EVIDENCE_LEDGER_V1_GENESIS
+        val first = simpleos_release_evidence_ledger_transition_v1(
+            simpleos_release_evidence_ledger_genesis_v1(),
+            claim_for("evidence-1", "nonce-1", 1u64, genesis),
+            manifest_for("evidence-1", "nonce-1", 1u64, genesis, 0u64),
+            2100u64)
+        val head = first.transition_digest
+        val replay_nonce = simpleos_release_evidence_ledger_transition_v1(
+            first.ledger,
+            claim_for("evidence-2", "nonce-1", 2u64, head),
+            manifest_for("evidence-2", "nonce-1", 2u64, head, 0u64),
+            2100u64)
+        expect(replay_nonce.error).to_equal(
+            SimpleOsReleaseEvidenceLedgerErrorV1.ReplayDetected)
+        val replay_id = simpleos_release_evidence_ledger_transition_v1(
+            first.ledger,
+            claim_for("evidence-1", "nonce-2", 2u64, head),
+            manifest_for("evidence-1", "nonce-2", 2u64, head, 0u64),
+            2100u64)
+        expect(replay_id.error).to_equal(
+            SimpleOsReleaseEvidenceLedgerErrorV1.ReplayDetected)
+
+    it "rejects unavailable, expired, future, and rolling-back clock samples":
+        step("Validate authoritative samples at every state transition")
+        val genesis = SIMPLEOS_RELEASE_EVIDENCE_LEDGER_V1_GENESIS
+        val unavailable = simpleos_release_evidence_ledger_transition_v1(
+            simpleos_release_evidence_ledger_genesis_v1(),
+            claim_for("evidence-1", "nonce-1", 1u64, genesis),
+            manifest_for("evidence-1", "nonce-1", 1u64, genesis, 0u64),
+            0u64)
+        expect(unavailable.error).to_equal(
+            SimpleOsReleaseEvidenceLedgerErrorV1.ClockUnavailable)
+        val expired = simpleos_release_evidence_ledger_transition_v1(
+            unavailable.ledger,
+            claim_for("evidence-1", "nonce-1", 1u64, genesis),
+            manifest_for("evidence-1", "nonce-1", 1u64, genesis, 0u64),
+            3001u64)
+        expect(expired.error).to_equal(
+            SimpleOsReleaseEvidenceLedgerErrorV1.ClaimExpired)
+        expect(expired.ledger.head_sequence).to_equal(0u64)
+
+    it "finalizes consumption once under the authoritative clock":
+        step("Reject pre-finalized input and return the owner-finalized manifest")
+        val genesis = SIMPLEOS_RELEASE_EVIDENCE_LEDGER_V1_GENESIS
+        val rejected = simpleos_release_evidence_ledger_transition_v1(
+            simpleos_release_evidence_ledger_genesis_v1(),
+            claim_for("evidence-1", "nonce-1", 1u64, genesis),
+            manifest_for("evidence-1", "nonce-1", 1u64, genesis, 2100u64),
+            2200u64)
+        expect(rejected.error).to_equal(
+            SimpleOsReleaseEvidenceLedgerErrorV1.InvalidClaim)
+        val admitted = simpleos_release_evidence_ledger_transition_v1(
+            rejected.ledger,
+            claim_for("evidence-1", "nonce-1", 1u64, genesis),
+            manifest_for("evidence-1", "nonce-1", 1u64, genesis, 0u64),
+            2200u64)
+        val finalized = admitted.finalized_manifest.unwrap()
+        expect(finalized.consumption.consumed_at_unix_ms).to_equal(2200u64)
+        expect(finalized.consumption.consumed_once).to_equal(true)
+
+    it "detects ledger history mutation before accepting a successor":
+        step("Tamper with an earlier transition and fail closed")
+        val genesis = SIMPLEOS_RELEASE_EVIDENCE_LEDGER_V1_GENESIS
+        val first = simpleos_release_evidence_ledger_transition_v1(
+            simpleos_release_evidence_ledger_genesis_v1(),
+            claim_for("evidence-1", "nonce-1", 1u64, genesis),
+            manifest_for("evidence-1", "nonce-1", 1u64, genesis, 0u64),
+            2100u64)
+        var tampered = first.ledger
+        tampered.entries[0].manifest_digest = h("f")
+        val rejected = simpleos_release_evidence_ledger_transition_v1(
+            tampered,
+            claim_for("evidence-2", "nonce-2", 2u64, first.transition_digest),
+            manifest_for("evidence-2", "nonce-2", 2u64,
+                first.transition_digest, 0u64),
+            2100u64)
+        expect(rejected.error).to_equal(
+            SimpleOsReleaseEvidenceLedgerErrorV1.InvalidLedger)
+
+    it "rejects exact-sequence mismatch without consuming the claim":
+        step("Offer the right genesis with a skipped sequence")
+        val genesis = SIMPLEOS_RELEASE_EVIDENCE_LEDGER_V1_GENESIS
+        val rejected = simpleos_release_evidence_ledger_transition_v1(
+            simpleos_release_evidence_ledger_genesis_v1(),
+            claim_for("evidence-1", "nonce-1", 2u64, genesis),
+            manifest_for("evidence-1", "nonce-1", 2u64, genesis, 0u64),
+            2100u64)
+        expect(rejected.error).to_equal(
+            SimpleOsReleaseEvidenceLedgerErrorV1.StaleSequence)
+        expect(rejected.ledger.entries.len()).to_equal(0)
+
+    it "rejects rollback below the committed ledger timestamp":
+        step("Keep chronological state monotonic across successors")
+        val genesis = SIMPLEOS_RELEASE_EVIDENCE_LEDGER_V1_GENESIS
+        val first = simpleos_release_evidence_ledger_transition_v1(
+            simpleos_release_evidence_ledger_genesis_v1(),
+            claim_for("evidence-1", "nonce-1", 1u64, genesis),
+            manifest_for("evidence-1", "nonce-1", 1u64, genesis, 0u64),
+            2200u64)
+        val rollback = simpleos_release_evidence_ledger_transition_v1(
+            first.ledger,
+            claim_for("evidence-2", "nonce-2", 2u64, first.transition_digest),
+            manifest_for("evidence-2", "nonce-2", 2u64,
+                first.transition_digest, 0u64),
+            2199u64)
+        expect(rollback.error).to_equal(
+            SimpleOsReleaseEvidenceLedgerErrorV1.ClockRollback)
+
+    it "binds stored replay fields to the reconstructed claim identity":
+        step("Mutate nonce and evidence identity independently")
+        val genesis = SIMPLEOS_RELEASE_EVIDENCE_LEDGER_V1_GENESIS
+        val first = simpleos_release_evidence_ledger_transition_v1(
+            simpleos_release_evidence_ledger_genesis_v1(),
+            claim_for("evidence-1", "nonce-1", 1u64, genesis),
+            manifest_for("evidence-1", "nonce-1", 1u64, genesis, 0u64),
+            2100u64)
+        var nonce_changed = first.ledger
+        nonce_changed.entries[0].nonce = "nonce-alias"
+        expect(simpleos_release_evidence_ledger_valid_v1(nonce_changed)).to_equal(false)
+        var evidence_changed = first.ledger
+        evidence_changed.entries[0].evidence_id = "evidence-alias"
+        expect(simpleos_release_evidence_ledger_valid_v1(evidence_changed)).to_equal(false)
+
+    it "fails closed at the fixed ledger capacity":
+        step("Refuse an unbounded replay-history append")
+        val ledger = full_ledger()
+        expect(simpleos_release_evidence_ledger_valid_v1(ledger)).to_equal(true)
+        val sequence = ledger.head_sequence + 1u64
+        val rejected = simpleos_release_evidence_ledger_transition_v1(
+            ledger,
+            claim_for("evidence-overflow", "nonce-overflow", sequence,
+                ledger.head_transition_digest),
+            manifest_for("evidence-overflow", "nonce-overflow", sequence,
+                ledger.head_transition_digest, 0u64),
+            2100u64)
+        expect(rejected.error).to_equal(
+            SimpleOsReleaseEvidenceLedgerErrorV1.LedgerFull)
+
+    it "serializes the canonical owner and does not alias snapshots":
+        step("Recover explicit genesis and commit through the runtime owner")
+        val genesis = SIMPLEOS_RELEASE_EVIDENCE_LEDGER_V1_GENESIS
+        expect(simpleos_release_evidence_owner_start_v1(
+            simpleos_release_evidence_ledger_genesis_v1())).to_equal(true)
+        var pending = manifest_for(
+            "owner-evidence-1", "owner-nonce-1", 1u64, genesis, 0u64)
+        pending.consumption.expires_at_unix_ms = 18446744073709551615u64
+        var committed = simpleos_release_evidence_owner_commit_v1(
+            claim_for("owner-evidence-1", "owner-nonce-1", 1u64, genesis),
+            pending)
+        expect(committed.ok).to_equal(true)
+        expect(committed.finalized_manifest.unwrap().consumption.consumed_once).to_equal(true)
+        committed.ledger.entries[0].nonce = "result-mutated"
+        expect(simpleos_release_evidence_owner_snapshot_v1().unwrap().entries[0].nonce).to_equal(
+            "owner-nonce-1")
+        var copied = simpleos_release_evidence_owner_snapshot_v1().unwrap()
+        copied.head_sequence = 99u64
+        copied.entries[0].nonce = "caller-mutated"
+        expect(simpleos_release_evidence_owner_snapshot_v1().unwrap().head_sequence).to_equal(1u64)
+        expect(simpleos_release_evidence_owner_snapshot_v1().unwrap().entries[0].nonce).to_equal(
+            "owner-nonce-1")
+        expect(simpleos_release_evidence_owner_start_v1(
+            simpleos_release_evidence_ledger_genesis_v1())).to_equal(false)
+
+        step("Race two exact successors through the private mutex")
+        val head = committed.transition_digest
+        var pending_a = manifest_for(
+            "owner-evidence-2a", "owner-nonce-2a", 2u64, head, 0u64)
+        pending_a.consumption.expires_at_unix_ms = 18446744073709551615u64
+        var pending_b = manifest_for(
+            "owner-evidence-2b", "owner-nonce-2b", 2u64, head, 0u64)
+        pending_b.consumption.expires_at_unix_ms = 18446744073709551615u64
+        val claim_a = claim_for(
+            "owner-evidence-2a", "owner-nonce-2a", 2u64, head)
+        val claim_b = claim_for(
+            "owner-evidence-2b", "owner-nonce-2b", 2u64, head)
+        val thread_a = thread_spawn(\:
+            if simpleos_release_evidence_owner_commit_v1(
+                claim_a, pending_a).ok: 1 else: 0)
+        val thread_b = thread_spawn(\:
+            if simpleos_release_evidence_owner_commit_v1(
+                claim_b, pending_b).ok: 1 else: 0)
+        val accepted = thread_a.join().unwrap() + thread_b.join().unwrap()
+        expect(accepted).to_equal(1)
+        expect(simpleos_release_evidence_owner_snapshot_v1().unwrap().head_sequence).to_equal(2u64)
+
+        step("Keep a rejected result from aliasing canonical history")
+        var rejected = simpleos_release_evidence_owner_commit_v1(
+            claim_for("stale-evidence", "stale-nonce", 2u64, head),
+            pending_a)
+        expect(rejected.ok).to_equal(false)
+        rejected.ledger.entries[0].nonce = "failed-result-mutated"
+        expect(simpleos_release_evidence_owner_snapshot_v1().unwrap().entries[0].nonce).to_equal(
+            "owner-nonce-1")

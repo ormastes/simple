@@ -1,6 +1,6 @@
 """Bounded serialization owner for device-backed NVFS operations and close."""
 
-use std.nogc_sync_mut.concurrent.mutex.{Mutex, mutex_new, mutex_with_lock}
+use std.nogc_sync_mut.concurrent.mutex.{Mutex, mutex_new, mutex_lock, mutex_unlock}
 use std.fs_driver.nvfs_device_identity_owner_v1.{
     NvfsDeviceIdentityBindingV1, NvfsDeviceRegionIdentityV1,
     nvfs_device_identity_validate_v1
@@ -84,7 +84,12 @@ fn _initial_state_v1() -> NvfsOperationOwnerStateV1:
             _slot: -1, _generation: 0u32, _close_nonce: 0u64,
             _outer_instance_id: 0))
 
-var _nvfs_operation_owner_v1: Mutex = mutex_new(_initial_state_v1())
+# Exclusion gate only; the state stays Simple-side for the same reason as
+# nvfs_device_identity_owner_v1: a struct protected value comes back nil
+# through the interpreter's rt_mutex value bridge and can fault with the real
+# lock held. Direct typed updates also avoid Stage2 closure-state type erasure.
+var _nvfs_operation_gate_v1: Mutex = mutex_new(0)
+var _nvfs_operation_state_v1: NvfsOperationOwnerStateV1 = _initial_state_v1()
 
 fn _binding_matches_v1(
     slot: NvfsOperationSlotV1, binding: NvfsDeviceIdentityBindingV1,
@@ -107,32 +112,35 @@ pub fn nvfs_operation_owner_register_v1(
     if nvfs_device_identity_validate_v1(
             binding, outer_instance_id, inner_instance_id, region).is_err():
         return Err(NvfsOperationLeaseErrorV1.InvalidBinding)
-    val updated = mutex_with_lock(_nvfs_operation_owner_v1, \state:
-        var next = state
-        next.last_error = nil
-        val owner_index = binding.owner_slot_index()
-        var duplicate = false
-        var i: i32 = 0
-        while i < state.slots.len():
-            val slot = state.slots[i]
-            if slot.state != NvfsOperationSlotStateV1.Free and slot.outer_instance_id == outer_instance_id:
-                duplicate = true
-            i = i + 1
-        if duplicate:
-            next.last_error = Some(NvfsOperationLeaseErrorV1.InvalidBinding)
-        elif owner_index < 0 or owner_index >= NVFS_OPERATION_OWNER_CAPACITY_V1:
-            next.last_error = Some(NvfsOperationLeaseErrorV1.CapacityExhausted)
-        elif owner_index < state.slots.len() and state.slots[owner_index].state != NvfsOperationSlotStateV1.Free:
-            next.last_error = Some(NvfsOperationLeaseErrorV1.CapacityExhausted)
-        else:
-            while next.slots.len() <= owner_index:
-                next.slots.push(_empty_slot_v1(1u32))
-            next.slots[owner_index] = NvfsOperationSlotV1(
-                state: NvfsOperationSlotStateV1.Active,
-                generation: binding.generation(), binding: binding, region: region,
-                outer_instance_id: outer_instance_id, inner_instance_id: inner_instance_id,
-                active_operation_nonce: 0u64, close_nonce: 0u64)
-        next)
+    val _ = mutex_lock(_nvfs_operation_gate_v1)
+    val state: NvfsOperationOwnerStateV1 = _nvfs_operation_state_v1
+    var next = state
+    next.last_error = nil
+    val owner_index = binding.owner_slot_index()
+    var duplicate = false
+    var i: i32 = 0
+    while i < state.slots.len():
+        val slot = state.slots[i]
+        if slot.state != NvfsOperationSlotStateV1.Free and slot.outer_instance_id == outer_instance_id:
+            duplicate = true
+        i = i + 1
+    if duplicate:
+        next.last_error = Some(NvfsOperationLeaseErrorV1.InvalidBinding)
+    elif owner_index < 0 or owner_index >= NVFS_OPERATION_OWNER_CAPACITY_V1:
+        next.last_error = Some(NvfsOperationLeaseErrorV1.CapacityExhausted)
+    elif owner_index < state.slots.len() and state.slots[owner_index].state != NvfsOperationSlotStateV1.Free:
+        next.last_error = Some(NvfsOperationLeaseErrorV1.CapacityExhausted)
+    else:
+        while next.slots.len() <= owner_index:
+            next.slots.push(_empty_slot_v1(1u32))
+        next.slots[owner_index] = NvfsOperationSlotV1(
+            state: NvfsOperationSlotStateV1.Active,
+            generation: binding.generation(), binding: binding, region: region,
+            outer_instance_id: outer_instance_id, inner_instance_id: inner_instance_id,
+            active_operation_nonce: 0u64, close_nonce: 0u64)
+    _nvfs_operation_state_v1 = next
+    val _ = mutex_unlock(_nvfs_operation_gate_v1, 0)
+    val updated = next
     if val err = updated.last_error: return Err(err)
     Ok(true)
 
@@ -143,93 +151,102 @@ pub fn nvfs_operation_begin_v1(
     if nvfs_device_identity_validate_v1(
             binding, outer_instance_id, inner_instance_id, region).is_err():
         return Err(NvfsOperationLeaseErrorV1.StaleBinding)
-    val updated = mutex_with_lock(_nvfs_operation_owner_v1, \state:
-        var next = state
-        next.last_error = nil
-        next.last_lease = NvfsOperationLeaseV1.invalid_probe()
-        val slot_index = binding.owner_slot_index()
-        if slot_index < 0 or slot_index >= state.slots.len():
+    val _ = mutex_lock(_nvfs_operation_gate_v1)
+    val state: NvfsOperationOwnerStateV1 = _nvfs_operation_state_v1
+    var next = state
+    next.last_error = nil
+    next.last_lease = NvfsOperationLeaseV1.invalid_probe()
+    val slot_index = binding.owner_slot_index()
+    if slot_index < 0 or slot_index >= state.slots.len():
+        next.last_error = Some(NvfsOperationLeaseErrorV1.StaleBinding)
+    else:
+        val slot = state.slots[slot_index]
+        if not _binding_matches_v1(slot, binding, outer_instance_id, inner_instance_id, region):
             next.last_error = Some(NvfsOperationLeaseErrorV1.StaleBinding)
+        elif slot.state == NvfsOperationSlotStateV1.Quarantined:
+            next.last_error = Some(NvfsOperationLeaseErrorV1.Quarantined)
+        elif slot.state != NvfsOperationSlotStateV1.Active:
+            next.last_error = Some(NvfsOperationLeaseErrorV1.Closing)
+        elif slot.active_operation_nonce != 0u64 or state.active_global_nonce != 0u64:
+            next.last_error = Some(NvfsOperationLeaseErrorV1.Busy)
+        elif state.next_nonce == 0u64 or state.next_nonce == _NVFS_OPERATION_NONCE_MAX_V1:
+            next.last_error = Some(NvfsOperationLeaseErrorV1.CounterExhausted)
         else:
-            val slot = state.slots[slot_index]
-            if not _binding_matches_v1(slot, binding, outer_instance_id, inner_instance_id, region):
-                next.last_error = Some(NvfsOperationLeaseErrorV1.StaleBinding)
-            elif slot.state == NvfsOperationSlotStateV1.Quarantined:
-                next.last_error = Some(NvfsOperationLeaseErrorV1.Quarantined)
-            elif slot.state != NvfsOperationSlotStateV1.Active:
-                next.last_error = Some(NvfsOperationLeaseErrorV1.Closing)
-            elif slot.active_operation_nonce != 0u64 or state.active_global_nonce != 0u64:
-                next.last_error = Some(NvfsOperationLeaseErrorV1.Busy)
-            elif state.next_nonce == 0u64 or state.next_nonce == _NVFS_OPERATION_NONCE_MAX_V1:
-                next.last_error = Some(NvfsOperationLeaseErrorV1.CounterExhausted)
-            else:
-                var active = slot
-                active.active_operation_nonce = state.next_nonce
-                next.slots[slot_index] = active
-                next.next_nonce = state.next_nonce + 1u64
-                next.active_global_slot = slot_index
-                next.active_global_nonce = state.next_nonce
-                next.last_lease = NvfsOperationLeaseV1(
-                    _slot: slot_index, _generation: slot.generation,
-                    _operation_nonce: state.next_nonce,
-                    _outer_instance_id: outer_instance_id)
-        next)
+            var active = slot
+            active.active_operation_nonce = state.next_nonce
+            next.slots[slot_index] = active
+            next.next_nonce = state.next_nonce + 1u64
+            next.active_global_slot = slot_index
+            next.active_global_nonce = state.next_nonce
+            next.last_lease = NvfsOperationLeaseV1(
+                _slot: slot_index, _generation: slot.generation,
+                _operation_nonce: state.next_nonce,
+                _outer_instance_id: outer_instance_id)
+    _nvfs_operation_state_v1 = next
+    val _ = mutex_unlock(_nvfs_operation_gate_v1, 0)
+    val updated = next
     if val err = updated.last_error: return Err(err)
     Ok(updated.last_lease)
 
 pub fn nvfs_operation_end_v1(
     lease: NvfsOperationLeaseV1
 ) -> Result<bool, NvfsOperationLeaseErrorV1>:
-    val updated = mutex_with_lock(_nvfs_operation_owner_v1, \state:
-        var next = state
-        next.last_error = nil
-        if lease._slot == -2:
-            if (lease._generation != 1u32 or lease._outer_instance_id != 0 or
-                lease._operation_nonce == 0u64 or
-                state.active_global_slot != -2 or
-                state.active_global_nonce != lease._operation_nonce):
-                next.last_error = Some(NvfsOperationLeaseErrorV1.Replay)
-            else:
-                next.active_global_slot = -1
-                next.active_global_nonce = 0u64
-        elif lease._slot < 0 or lease._slot >= state.slots.len():
+    val _ = mutex_lock(_nvfs_operation_gate_v1)
+    val state: NvfsOperationOwnerStateV1 = _nvfs_operation_state_v1
+    var next = state
+    next.last_error = nil
+    if lease._slot == -2:
+        if (lease._generation != 1u32 or lease._outer_instance_id != 0 or
+            lease._operation_nonce == 0u64 or
+            state.active_global_slot != -2 or
+            state.active_global_nonce != lease._operation_nonce):
             next.last_error = Some(NvfsOperationLeaseErrorV1.Replay)
         else:
-            val slot = state.slots[lease._slot]
-            if (slot.generation != lease._generation or
-                slot.outer_instance_id != lease._outer_instance_id or
-                slot.active_operation_nonce != lease._operation_nonce or
-                lease._operation_nonce == 0u64 or
-                state.active_global_slot != lease._slot or
-                state.active_global_nonce != lease._operation_nonce):
-                next.last_error = Some(NvfsOperationLeaseErrorV1.Replay)
-            else:
-                var released = slot
-                released.active_operation_nonce = 0u64
-                next.slots[lease._slot] = released
-                next.active_global_slot = -1
-                next.active_global_nonce = 0u64
-        next)
+            next.active_global_slot = -1
+            next.active_global_nonce = 0u64
+    elif lease._slot < 0 or lease._slot >= state.slots.len():
+        next.last_error = Some(NvfsOperationLeaseErrorV1.Replay)
+    else:
+        val slot = state.slots[lease._slot]
+        if (slot.generation != lease._generation or
+            slot.outer_instance_id != lease._outer_instance_id or
+            slot.active_operation_nonce != lease._operation_nonce or
+            lease._operation_nonce == 0u64 or
+            state.active_global_slot != lease._slot or
+            state.active_global_nonce != lease._operation_nonce):
+            next.last_error = Some(NvfsOperationLeaseErrorV1.Replay)
+        else:
+            var released = slot
+            released.active_operation_nonce = 0u64
+            next.slots[lease._slot] = released
+            next.active_global_slot = -1
+            next.active_global_nonce = 0u64
+    _nvfs_operation_state_v1 = next
+    val _ = mutex_unlock(_nvfs_operation_gate_v1, 0)
+    val updated = next
     if val err = updated.last_error: return Err(err)
     Ok(true)
 
 pub fn nvfs_global_operation_begin_v1() -> Result<NvfsOperationLeaseV1, NvfsOperationLeaseErrorV1>:
-    val updated = mutex_with_lock(_nvfs_operation_owner_v1, \state:
-        var next = state
-        next.last_error = nil
-        next.last_lease = NvfsOperationLeaseV1.invalid_probe()
-        if state.active_global_nonce != 0u64:
-            next.last_error = Some(NvfsOperationLeaseErrorV1.Busy)
-        elif state.next_nonce == 0u64 or state.next_nonce == _NVFS_OPERATION_NONCE_MAX_V1:
-            next.last_error = Some(NvfsOperationLeaseErrorV1.CounterExhausted)
-        else:
-            next.active_global_slot = -2
-            next.active_global_nonce = state.next_nonce
-            next.next_nonce = state.next_nonce + 1u64
-            next.last_lease = NvfsOperationLeaseV1(
-                _slot: -2, _generation: 1u32,
-                _operation_nonce: state.next_nonce, _outer_instance_id: 0)
-        next)
+    val _ = mutex_lock(_nvfs_operation_gate_v1)
+    val state: NvfsOperationOwnerStateV1 = _nvfs_operation_state_v1
+    var next = state
+    next.last_error = nil
+    next.last_lease = NvfsOperationLeaseV1.invalid_probe()
+    if state.active_global_nonce != 0u64:
+        next.last_error = Some(NvfsOperationLeaseErrorV1.Busy)
+    elif state.next_nonce == 0u64 or state.next_nonce == _NVFS_OPERATION_NONCE_MAX_V1:
+        next.last_error = Some(NvfsOperationLeaseErrorV1.CounterExhausted)
+    else:
+        next.active_global_slot = -2
+        next.active_global_nonce = state.next_nonce
+        next.next_nonce = state.next_nonce + 1u64
+        next.last_lease = NvfsOperationLeaseV1(
+            _slot: -2, _generation: 1u32,
+            _operation_nonce: state.next_nonce, _outer_instance_id: 0)
+    _nvfs_operation_state_v1 = next
+    val _ = mutex_unlock(_nvfs_operation_gate_v1, 0)
+    val updated = next
     if val err = updated.last_error: return Err(err)
     Ok(updated.last_lease)
 
@@ -240,65 +257,71 @@ pub fn nvfs_operation_begin_close_v1(
     if nvfs_device_identity_validate_v1(
             binding, outer_instance_id, inner_instance_id, region).is_err():
         return Err(NvfsOperationLeaseErrorV1.StaleBinding)
-    val updated = mutex_with_lock(_nvfs_operation_owner_v1, \state:
-        var next = state
-        next.last_error = nil
-        val slot_index = binding.owner_slot_index()
-        if slot_index < 0 or slot_index >= state.slots.len():
+    val _ = mutex_lock(_nvfs_operation_gate_v1)
+    val state: NvfsOperationOwnerStateV1 = _nvfs_operation_state_v1
+    var next = state
+    next.last_error = nil
+    val slot_index = binding.owner_slot_index()
+    if slot_index < 0 or slot_index >= state.slots.len():
+        next.last_error = Some(NvfsOperationLeaseErrorV1.StaleBinding)
+    else:
+        val slot = state.slots[slot_index]
+        if not _binding_matches_v1(slot, binding, outer_instance_id, inner_instance_id, region):
             next.last_error = Some(NvfsOperationLeaseErrorV1.StaleBinding)
+        elif slot.state == NvfsOperationSlotStateV1.Quarantined:
+            next.last_error = Some(NvfsOperationLeaseErrorV1.Quarantined)
+        elif (slot.state != NvfsOperationSlotStateV1.Active and
+              slot.state != NvfsOperationSlotStateV1.Draining and
+              slot.state != NvfsOperationSlotStateV1.Retryable):
+            next.last_error = Some(NvfsOperationLeaseErrorV1.Closing)
         else:
-            val slot = state.slots[slot_index]
-            if not _binding_matches_v1(slot, binding, outer_instance_id, inner_instance_id, region):
-                next.last_error = Some(NvfsOperationLeaseErrorV1.StaleBinding)
-            elif slot.state == NvfsOperationSlotStateV1.Quarantined:
-                next.last_error = Some(NvfsOperationLeaseErrorV1.Quarantined)
-            elif (slot.state != NvfsOperationSlotStateV1.Active and
-                  slot.state != NvfsOperationSlotStateV1.Draining and
-                  slot.state != NvfsOperationSlotStateV1.Retryable):
-                next.last_error = Some(NvfsOperationLeaseErrorV1.Closing)
+            var draining = slot
+            draining.state = NvfsOperationSlotStateV1.Draining
+            next.slots[slot_index] = draining
+            if slot.active_operation_nonce != 0u64 or state.active_global_nonce != 0u64:
+                next.last_error = Some(NvfsOperationLeaseErrorV1.Busy)
+            elif state.next_nonce == 0u64 or state.next_nonce == _NVFS_OPERATION_NONCE_MAX_V1:
+                next.last_error = Some(NvfsOperationLeaseErrorV1.CounterExhausted)
             else:
-                var draining = slot
-                draining.state = NvfsOperationSlotStateV1.Draining
+                draining.state = NvfsOperationSlotStateV1.Closing
+                draining.close_nonce = state.next_nonce
                 next.slots[slot_index] = draining
-                if slot.active_operation_nonce != 0u64 or state.active_global_nonce != 0u64:
-                    next.last_error = Some(NvfsOperationLeaseErrorV1.Busy)
-                elif state.next_nonce == 0u64 or state.next_nonce == _NVFS_OPERATION_NONCE_MAX_V1:
-                    next.last_error = Some(NvfsOperationLeaseErrorV1.CounterExhausted)
-                else:
-                    draining.state = NvfsOperationSlotStateV1.Closing
-                    draining.close_nonce = state.next_nonce
-                    next.slots[slot_index] = draining
-                    next.next_nonce = state.next_nonce + 1u64
-                    next.last_fence = NvfsOperationCloseFenceV1(
-                        _slot: slot_index, _generation: slot.generation,
-                        _close_nonce: state.next_nonce,
-                        _outer_instance_id: outer_instance_id)
-        next)
+                next.next_nonce = state.next_nonce + 1u64
+                next.last_fence = NvfsOperationCloseFenceV1(
+                    _slot: slot_index, _generation: slot.generation,
+                    _close_nonce: state.next_nonce,
+                    _outer_instance_id: outer_instance_id)
+    _nvfs_operation_state_v1 = next
+    val _ = mutex_unlock(_nvfs_operation_gate_v1, 0)
+    val updated = next
     if val err = updated.last_error: return Err(err)
     Ok(updated.last_fence)
 
 fn _close_transition_v1(
     fence: NvfsOperationCloseFenceV1, target: NvfsOperationSlotStateV1
 ) -> Result<bool, NvfsOperationLeaseErrorV1>:
-    val updated = mutex_with_lock(_nvfs_operation_owner_v1, \state:
-        var next = state
-        next.last_error = nil
-        if fence._slot < 0 or fence._slot >= state.slots.len():
+    val _ = mutex_lock(_nvfs_operation_gate_v1)
+    val state: NvfsOperationOwnerStateV1 = _nvfs_operation_state_v1
+    var next = state
+    next.last_error = nil
+    if fence._slot < 0 or fence._slot >= state.slots.len():
+        next.last_error = Some(NvfsOperationLeaseErrorV1.Replay)
+    else:
+        val slot = state.slots[fence._slot]
+        if (slot.generation != fence._generation or
+            slot.outer_instance_id != fence._outer_instance_id or
+            slot.close_nonce != fence._close_nonce or
+            fence._close_nonce == 0u64 or
+            slot.state != NvfsOperationSlotStateV1.Closing):
             next.last_error = Some(NvfsOperationLeaseErrorV1.Replay)
         else:
-            val slot = state.slots[fence._slot]
-            if (slot.generation != fence._generation or
-                slot.outer_instance_id != fence._outer_instance_id or
-                slot.close_nonce != fence._close_nonce or
-                fence._close_nonce == 0u64 or
-                slot.state != NvfsOperationSlotStateV1.Closing):
-                next.last_error = Some(NvfsOperationLeaseErrorV1.Replay)
-            else:
-                var changed = slot
-                changed.state = target
-                changed.close_nonce = 0u64
-                next.slots[fence._slot] = changed
-        next)
+            var changed = slot
+            changed.state = target
+            changed.close_nonce = 0u64
+            next.slots[fence._slot] = changed
+    _nvfs_operation_state_v1 = next
+    val _ = mutex_unlock(_nvfs_operation_gate_v1, 0)
+    val updated = next
     if val err = updated.last_error: return Err(err)
     Ok(true)
 
@@ -315,44 +338,51 @@ pub fn nvfs_operation_close_complete_v1(fence: NvfsOperationCloseFenceV1) -> Res
 pub fn nvfs_operation_close_quarantine_v1(fence: NvfsOperationCloseFenceV1) -> Result<bool, NvfsOperationLeaseErrorV1>:
     val transitioned = _close_transition_v1(fence, NvfsOperationSlotStateV1.Quarantined)
     if transitioned.is_err(): return transitioned
-    val _ = mutex_with_lock(_nvfs_operation_owner_v1, \state:
-        var next = state
-        next.quarantined_count = state.quarantined_count + 1
-        next)
+    val _ = mutex_lock(_nvfs_operation_gate_v1)
+    val state: NvfsOperationOwnerStateV1 = _nvfs_operation_state_v1
+    var next = state
+    next.quarantined_count = state.quarantined_count + 1
+    _nvfs_operation_state_v1 = next
+    val _ = mutex_unlock(_nvfs_operation_gate_v1, 0)
     Ok(true)
 
 pub fn nvfs_operation_force_quarantine_v1(
     binding: NvfsDeviceIdentityBindingV1, outer_instance_id: i64,
     inner_instance_id: i64, region: NvfsDeviceRegionIdentityV1
 ) -> Result<bool, NvfsOperationLeaseErrorV1>:
-    val updated = mutex_with_lock(_nvfs_operation_owner_v1, \state:
-        var next = state
-        next.last_error = nil
-        val slot_index = binding.owner_slot_index()
-        if slot_index < 0 or slot_index >= state.slots.len():
+    val _ = mutex_lock(_nvfs_operation_gate_v1)
+    val state: NvfsOperationOwnerStateV1 = _nvfs_operation_state_v1
+    var next = state
+    next.last_error = nil
+    val slot_index = binding.owner_slot_index()
+    if slot_index < 0 or slot_index >= state.slots.len():
+        next.last_error = Some(NvfsOperationLeaseErrorV1.StaleBinding)
+    else:
+        val slot = state.slots[slot_index]
+        if not _binding_matches_v1(slot, binding, outer_instance_id, inner_instance_id, region):
             next.last_error = Some(NvfsOperationLeaseErrorV1.StaleBinding)
-        else:
-            val slot = state.slots[slot_index]
-            if not _binding_matches_v1(slot, binding, outer_instance_id, inner_instance_id, region):
-                next.last_error = Some(NvfsOperationLeaseErrorV1.StaleBinding)
-            elif slot.state == NvfsOperationSlotStateV1.Free:
-                next.last_error = Some(NvfsOperationLeaseErrorV1.Replay)
-            elif slot.state != NvfsOperationSlotStateV1.Quarantined:
-                var quarantined = slot
-                quarantined.state = NvfsOperationSlotStateV1.Quarantined
-                quarantined.active_operation_nonce = 0u64
-                quarantined.close_nonce = 0u64
-                next.slots[slot_index] = quarantined
-                if state.active_global_slot == slot_index:
-                    next.active_global_slot = -1
-                    next.active_global_nonce = 0u64
-                next.quarantined_count = state.quarantined_count + 1
-        next)
+        elif slot.state == NvfsOperationSlotStateV1.Free:
+            next.last_error = Some(NvfsOperationLeaseErrorV1.Replay)
+        elif slot.state != NvfsOperationSlotStateV1.Quarantined:
+            var quarantined = slot
+            quarantined.state = NvfsOperationSlotStateV1.Quarantined
+            quarantined.active_operation_nonce = 0u64
+            quarantined.close_nonce = 0u64
+            next.slots[slot_index] = quarantined
+            if state.active_global_slot == slot_index:
+                next.active_global_slot = -1
+                next.active_global_nonce = 0u64
+            next.quarantined_count = state.quarantined_count + 1
+    _nvfs_operation_state_v1 = next
+    val _ = mutex_unlock(_nvfs_operation_gate_v1, 0)
+    val updated = next
     if val err = updated.last_error: return Err(err)
     Ok(true)
 
 pub fn nvfs_operation_quarantined_count_v1() -> i32:
-    val state = mutex_with_lock(_nvfs_operation_owner_v1, \state: state)
+    val _ = mutex_lock(_nvfs_operation_gate_v1)
+    val state: NvfsOperationOwnerStateV1 = _nvfs_operation_state_v1
+    val _ = mutex_unlock(_nvfs_operation_gate_v1, 0)
     state.quarantined_count
 
 export NvfsOperationLeaseV1, NvfsOperationCloseFenceV1

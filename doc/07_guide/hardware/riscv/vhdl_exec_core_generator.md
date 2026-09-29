@@ -716,6 +716,40 @@ follows the same landed style.
 snapshot/commit/fetch/rebase can sweep uncommitted new files. Keep scratchpad
 copies of new sources until they land.
 
+## Runtime scalar ALU development boundary
+
+The runtime scalar path now has a fixed-XLEN declarative decoder, an atomic
+decoded-uop skid, and one shared integer ALU graph. The ALU covers base integer
+and RV64 integer-word arithmetic, comparisons, U-immediate operations, and
+logical/arithmetic shifts. Shift counts are masked according to RISC-V XLEN or
+word semantics; x0 reads normalize to zero and x0 destinations retire without
+a write. Canonical/original instruction identity, `pc+4` fallthrough, row,
+semantic code, class, effect, raw fields, and event lineage are checked before
+completion.
+
+This is not yet a qualified scalar core. The compiler-owned pipeline must
+consume a decoded uop only on the same event that captures its completion, and
+must retain any provider fault until reset. Leaf source checks or VHDL
+analyze/elaborate results do not substitute for a clocked combined-pipeline
+simulation and an admitted self-hosted compiler receipt.
+
+## Gen2 Zicsr development boundary
+
+The Gen2 compiler currently has a typed CSR access projection for the six
+Zicsr instruction forms. It freezes the instruction and CSR address, checks
+register binding, privilege, CSR presence, and read-only rules, and produces
+fail-closed read/write intent. This is useful compiler-development evidence,
+not a user-reachable Zicsr core capability.
+
+The projection is now wrapped by a one-entry sequential CSR owner and admitted
+through the common scalar arbitration, trap, fault, and sole-retirement
+composition. The owner exposes a pre-write read seam and asserts a captured
+write commit only when its completion is accepted. Do not advertise Zicsr yet:
+the open qualification contract is recorded in
+`doc/08_tracking/bug/riscv_gen2_atomic_csr_owner_missing_2026-08-12.md`.
+Qualification additionally remains blocked until the same focused and
+generated-VHDL/GHDL scenarios run through an admitted full self-hosted CLI.
+
 ## References
 
 - Design: `doc/05_design/hardware/riscv/vhdl_exec_core_generator_design.md`

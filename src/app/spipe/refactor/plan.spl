@@ -1,0 +1,54 @@
+# S1-B — refactor plan construction.
+#
+# Builds an all-or-nothing `RefactorPlan` for a single move/rename: the moved
+# file's old/new path plus, for every OTHER file whose links must be
+# repointed, the byte-range edits to apply. This module never imports
+# `scan/` (S1-A) — it consumes only the already-resolved `RewriteEdit` byte
+# ranges (see `rewrite.spl`), never the scanner itself, per plan §"S1-B Edits".
+#
+# Deviation from the plan doc's literal signature `(edges, reverse_index,
+# request) -> RefactorPlan`: S1-E's frozen `EdgeRecord`/`SourceRange` types
+# (plan §6) were not yet on disk when this package was written (sibling
+# package, written in parallel). `FileRewrite` below is a minimal local
+# stand-in carrying exactly the byte-range data `plan.spl` actually needs
+# (a path plus its resolved `RewriteEdit`s) — once `model/types.spl` lands,
+# a thin adapter can fold `[EdgeRecord]` + the reverse index into
+# `[FileRewrite]` upstream of `build_refactor_plan` without changing this
+# module's validation/ordering logic.
+
+use app.spipe.refactor.rewrite.{RewriteEdit, validate_edit_ranges, validate_no_overlap, edits_sorted_descending}
+
+struct RefactorRequest:
+    old_path: text
+    new_path: text
+
+struct FileRewrite:
+    path: text
+    content_len: i64
+    edits: [RewriteEdit]
+
+struct RefactorPlan:
+    old_path: text
+    new_path: text
+    rewrites: [FileRewrite]   # files OTHER than old_path whose links are repointed
+                              # (validated: non-overlapping, in-range edits)
+
+fn build_refactor_plan(request: RefactorRequest, affected: [FileRewrite]) -> Result<RefactorPlan, text>:
+    if request.old_path == "":
+        return Err("empty_old_path")
+    if request.new_path == "":
+        return Err("empty_new_path")
+    if request.old_path == request.new_path:
+        return Err("old_path_equals_new_path")
+    var i = 0
+    while i < affected.len():
+        val fr = affected[i]
+        if fr.path == request.old_path:
+            return Err("affected_path_is_move_target")
+        validate_edit_ranges(fr.content_len, fr.edits)?
+        validate_no_overlap(edits_sorted_descending(fr.edits))?
+        i = i + 1
+    Ok(RefactorPlan(old_path: request.old_path, new_path: request.new_path, rewrites: affected))
+
+export RefactorRequest, FileRewrite, RefactorPlan
+export build_refactor_plan

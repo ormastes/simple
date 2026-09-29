@@ -1,0 +1,44 @@
+use std.spec.*
+use compiler.backend.linker.coff.coff_directives.{CoffExportDirective}
+use compiler.backend.linker.coff.pe_export_builder.{pe_build_amd64_exports}
+use compiler.backend.linker.coff.coff_link.{coff_validate_export_sections}
+use compiler.backend.linker.coff.pe_image_writer.{PeImageSection}
+
+fn _peb_export(name: text, internal: text, ordinal: i64,
+        noname: bool) -> CoffExportDirective:
+    CoffExportDirective(public_name: name, internal_name: internal,
+        ordinal: ordinal, noname: noname, data: false,
+        private_export: false)
+
+fn _peb_u16(bytes: [u8], offset: i64) -> i64:
+    (bytes[offset] as i64) | ((bytes[offset + 1] as i64) << 8)
+
+fn _peb_u32(bytes: [u8], offset: i64) -> i64:
+    _peb_u16(bytes, offset) | (_peb_u16(bytes, offset + 2) << 16)
+
+describe "PE export directory builder":
+    it "assigns deterministic ordinals and emits valid sorted name tables":
+        val exports = [
+            _peb_export("zeta", "z_impl", 4, true),
+            _peb_export("alpha", "a_impl", -1, false)]
+        val built = pe_build_amd64_exports(exports,
+            {"z_impl": 0x1200, "a_impl": 0x1100}, 0x3000,
+            "simple.exe").unwrap()
+        expect(_peb_u32(built, 16)).to_equal(1)
+        expect(_peb_u32(built, 20)).to_equal(4)
+        expect(_peb_u32(built, 24)).to_equal(1)
+        val section = PeImageSection(name: ".edata", virtual_address: 0x3000,
+            virtual_size: built.len(), data: built, characteristics: 0x40000040)
+        expect(coff_validate_export_sections([section]).unwrap()).to_equal(true)
+
+    it "rejects missing symbols and duplicate explicit ordinals":
+        val missing = [_peb_export("api", "absent", -1, false)]
+        expect(pe_build_amd64_exports(
+            missing, {}, 0x3000, "simple.exe").is_err()).to_equal(true)
+        val duplicate = [
+            _peb_export("one", "one", 7, false),
+            _peb_export("two", "two", 7, false)]
+        expect(pe_build_amd64_exports(duplicate,
+            {"one": 0x1000, "two": 0x1100}, 0x3000,
+            "simple.exe").unwrap_err()).to_contain("duplicate")
+

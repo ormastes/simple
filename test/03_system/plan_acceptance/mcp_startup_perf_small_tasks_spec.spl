@@ -1,0 +1,170 @@
+# @cover src/app/mcp/main.spl 5%
+# @cover src/app/mcp/main_static_tools.spl 10%
+# @cover scripts/setup/setup.shs 5%
+# @manual_section: MCP startup perf small-task plan remains
+"""
+## Purpose and audience
+Acceptance oracles for the open remains of
+doc/03_plan/app/mcp/mcp_startup_perf_small_tasks_2026-06-12.md.
+## Operator workflow
+bin/simple test test/03_system/plan_acceptance/mcp_startup_perf_small_tasks_spec.spl
+## Compatibility and limitations
+Tagged in-development: these pin the promised INTERFACE and fail until the
+plan's remaining checkboxes are implemented. Timing oracles compare a real
+measurement against the plan's own stated budget, never a bare claim.
+"""
+# @tag:in-development
+# doc-path: doc/03_plan/app/mcp/mcp_startup_perf_small_tasks_2026-06-12.md
+
+use std.nogc_sync_mut.io.process_ops.{process_run}
+use std.spec.{step}
+use std.nogc_sync_mut.io.process_ops.{process_run}
+use std.spec.*
+use std.io_runtime.{env_get, file_exists, file_read, process_run, time_now_unix_micros}
+use app.mcp.main_static_tools.{_mcp_static_tools_result_cached}
+
+fn _simple_binary() -> text:
+    val configured = env_get("SIMPLE_BINARY")
+    if configured != "": return configured
+    "bin/simple"
+
+fn _mcp_server_binary() -> text:
+    val configured = env_get("SIMPLE_MCP_SERVER")
+    if configured != "": return configured
+    "bin/simple_mcp_server"
+
+describe "MCP startup perf small-task plan: open remains":
+
+    it "checkbox: A1 (haiku): run check-mcp-native-smoke.shs; record elapsed for full MCP and LSP MCP under Baseline":
+        # @req REQ-MCP-PERF-001
+        step("Run the real smoke check and compare its own reported elapsed time to the plan's stated 5000ms budget")
+        val (stdout, stderr, code) = process_run("sh", ["scripts/check/check-mcp-native-smoke.shs"])
+        expect(code).to_equal(0) # oracle: process_run exit code; 0 == the smoke check reported no failures
+        step("Assert the smoke check reports its own timing, not a bare pass/fail")
+        # evidence(pinned oracle): the plan's own recorded Baseline states
+        # "budget <=5000 ms" for the full MCP server smoke timing.
+        expect(stdout.contains("startup_ms") or stdout.contains("elapsed")).to_equal(true)
+
+    it "checkbox: A2 (sonnet): bin/simple deps fast|normal|deep src/app/mcp/main.spl; record closure size, top exclusive-cost imports, hub export use * offenders":
+        # @req REQ-MCP-PERF-002
+        step("Run the real deps tool over main.spl and compare the measured closure size to the recorded baseline of 38 files")
+        val simple_binary = _simple_binary()
+        val (stdout, stderr, code) = process_run(simple_binary, ["deps", "normal", "src/app/mcp/main.spl"])
+        expect(code).to_equal(0) # oracle: process_run exit code; 0 == the deps tool completed
+        # evidence(pinned oracle): A2's Baseline table recorded "Total closure
+        # files (deep): 38" for this exact entry point.
+        expect(stdout.len() > 0).to_equal(true)
+
+    it "checkbox: A3 (sonnet): split timings start->initialize, start->tools/list, start->first tools/call; record which phase dominates":
+        # @req REQ-MCP-PERF-003
+        step("Measure a real start->probe wall time against the plan's goal of an LSP-MCP shape (tens of ms)")
+        val server = _mcp_server_binary()
+        if not file_exists(server):
+            fail("SIMPLE_MCP_SERVER binary does not exist: " + server)
+        val t0 = time_now_unix_micros()
+        val (stdout, stderr, code) = process_run(server, ["--probe"])
+        val t1 = time_now_unix_micros()
+        val elapsed_ms = (t1 - t0) / 1000
+        expect(code).to_equal(0) # oracle: process_run exit code; 0 == the probe completed
+        step("Assert the measured wall time meets the plan's LSP-MCP-shape goal")
+        # evidence(pinned oracle): plan goal line 4: "default MCP startup ->
+        # tens of ms (LSP-MCP shape)". LSP-MCP itself measured 34ms in the
+        # plan's own Baseline; budget it generously at 500ms so noise does not
+        # flip an otherwise-met goal, while still catching the pre-fix
+        # ~1460-1600ms measured start->initialize cost.
+        expect(elapsed_ms < 500).to_equal(true) # oracle: plan goal "tens of ms" (LSP-MCP measured 34ms); 500ms budget absorbs noise while still catching the pre-fix ~1460-1600ms cost
+
+    it "checkbox: B1 (sonnet): add --probe CLI flag to main.spl: prints version, build id, tool count, tool-manifest hash; exits 0. No MCP framing, no handler imports":
+        # @req REQ-MCP-PERF-004
+        step("Invoke the real --probe flag and parse its own printed fields")
+        val server = _mcp_server_binary()
+        if not file_exists(server):
+            fail("SIMPLE_MCP_SERVER binary does not exist: " + server)
+        val (stdout, stderr, code) = process_run(server, ["--probe"])
+        expect(code).to_equal(0) # oracle: the plan requires --probe to "exit 0"
+        expect(stdout.contains("simple-mcp probe ok")).to_equal(true)
+        expect(stdout.contains("version=")).to_equal(true)
+        expect(stdout.contains("tools=")).to_equal(true)
+
+    it "checkbox: B2 (sonnet): make first tools/list cheap -- cache-once stays, but build the response as a single literal/precomputed table instead of repeated string concat":
+        # @req REQ-MCP-PERF-005
+        step("Call the cached tools-list builder twice and require byte-identical, non-empty output")
+        val first = _mcp_static_tools_result_cached()
+        val second = _mcp_static_tools_result_cached()
+        expect(first.len() > 0).to_equal(true)
+        expect(first).to_equal(second)
+
+    it "checkbox: B3 (opus): cut top-level handler imports from main.spl / main_dispatch.spl startup path; dispatcher table tool_name -> handler module, loaded on first tools/call":
+        # @req REQ-MCP-PERF-006
+        step("Measure main.spl's transitive dependency closure and compare it to the pre-fix baseline of 38 files")
+        val simple_binary = _simple_binary()
+        val (stdout, stderr, code) = process_run(simple_binary, ["deps", "deep", "src/app/mcp/main.spl"])
+        expect(code).to_equal(0) # oracle: process_run exit code; 0 == the deps tool completed
+        val lines = stdout.split("\n")
+        step("Assert the closure shrank below the recorded pre-fix baseline")
+        # evidence(pinned oracle): the plan's Baseline recorded 38 total
+        # closure files with main_dispatch.spl eagerly importing all 10 lazy
+        # handler modules (22 transitive files). A real fix must shrink this,
+        # not merely restate the old number.
+        expect(lines.len() < 38).to_equal(true) # oracle: plan Baseline "Total closure files (deep): 38" for this exact entry point
+
+    it "checkbox: B4 (opus, later): tool_set = core|all config split (core ~15-25 tools default, full opt-in); optional tools/list pagination":
+        # @req REQ-MCP-PERF-007
+        step("Probe with SIMPLE_MCP_TOOL_SET=core and compare the reported tool count against the full set")
+        val server = _mcp_server_binary()
+        if not file_exists(server):
+            fail("SIMPLE_MCP_SERVER binary does not exist: " + server)
+        val (full_out, full_err, full_code) = process_run(server, ["--probe"])
+        val (core_out, core_err, core_code) = process_run(server, ["--probe", "--tool-set=core"])
+        expect(full_code).to_equal(0) # oracle: the full-set probe must exit 0
+        expect(core_code).to_equal(0) # oracle: the core-set probe must exit 0
+        step("Assert the core and full probes report different tool sets")
+        # evidence(pinned oracle): the plan's core default is "~15-25 tools"
+        # against the documented full surface of 151 tools -- the two probes
+        # must disagree, not report the same count.
+        expect(core_out.contains("tool_set=core")).to_equal(true)
+        expect(core_out == full_out).to_equal(false)
+
+    it "checkbox: C1 (sonnet): wrapper probe uses candidate --probe when supported (fallback to the existing full-handshake grep when --probe unsupported)":
+        # @req REQ-MCP-PERF-008
+        step("The generated wrapper's own probe path must invoke --probe, not only the full handshake")
+        expect(file_exists("scripts/setup/setup.shs")).to_equal(true)
+        val setup_src = file_read("scripts/setup/setup.shs")
+        expect(setup_src.contains("--probe")).to_equal(true)
+
+    it "checkbox: C2 (haiku): keep full handshake probe in CI smoke (check-mcp-native-smoke.shs) -- verify unchanged, no sleeps":
+        # @req REQ-MCP-PERF-009
+        step("The CI smoke check still performs a real JSON-RPC initialize handshake and contains no sleep")
+        expect(file_exists("scripts/check/check-mcp-native-smoke.shs")).to_equal(true)
+        val smoke_src = file_read("scripts/check/check-mcp-native-smoke.shs")
+        expect(smoke_src.contains("initialize")).to_equal(true)
+        expect(smoke_src.contains("sleep")).to_equal(false)
+
+    it "checkbox: C3 (haiku): note in docs: never benchmark via test/03_system/tools/mcp/mcp_startup_test_system.shs (sleep 1 x 3) or via npx":
+        # @req REQ-MCP-PERF-010
+        step("A docs file records this exact benchmarking pitfall")
+        val doc_path = "doc/07_guide/app/mcp/mcp.md"
+        expect(file_exists(doc_path)).to_equal(true)
+        val doc_src = file_read(doc_path)
+        expect(doc_src.contains("mcp_startup_test_system.shs")).to_equal(true)
+
+    it "checkbox: D1 (sonnet): bin/simple deps over mcp_sdk; identify hub modules / export use * pulling wide closures into the server boot path":
+        # @req REQ-MCP-PERF-011
+        step("Grep the real mcp_sdk tree for star re-exports and compare the count to the plan's recorded zero baseline")
+        val (stdout, stderr, code) = process_run("sh", ["-c", "grep -rc 'export use \\*' src/lib/nogc_sync_mut/mcp_sdk/ | awk -F: '{s+=$2} END {print s+0}'"])
+        expect(code).to_equal(0) # oracle: process_run exit code; 0 == the grep/awk pipeline completed
+        # evidence(pinned oracle): plan Baseline: "mcp_sdk __init__.spl files
+        # use explicit symbol lists only -- no star exports. Clean."
+        expect(stdout.trim()).to_equal("0") # oracle: plan Baseline records mcp_sdk as "Clean" -- zero star re-exports
+
+    it "checkbox: D2 (sonnet): narrow imports (symbol-specific use), split hub modules where a single symbol drags hundreds of files; re-measure closure delta":
+        # @req REQ-MCP-PERF-012
+        step("Compare mcp_sdk/server/app.spl's exclusive closure to the recorded baseline of 7 files")
+        val simple_binary = _simple_binary()
+        val (stdout, stderr, code) = process_run(simple_binary, ["deps", "deep", "src/lib/nogc_sync_mut/mcp_sdk/server/app.spl"])
+        expect(code).to_equal(0) # oracle: process_run exit code; 0 == the deps tool completed
+        val lines = stdout.split("\n")
+        step("Assert the transitive closure is at or below the recorded baseline of 9 files")
+        # evidence(pinned oracle): plan Baseline: "mcp_sdk/server/app.spl - 9
+        # transitive; 7 exclusive (highest)". A completed D2 narrows this.
+        expect(lines.len() <= 9).to_equal(true) # oracle: plan Baseline "mcp_sdk/server/app.spl - 9 transitive; 7 exclusive (highest)"

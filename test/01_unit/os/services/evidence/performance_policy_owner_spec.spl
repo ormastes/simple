@@ -1,0 +1,227 @@
+# @cover src/os/services/evidence/performance_policy_owner.spl
+# @req NFR-002 NFR-003
+
+use std.spec.*
+use std.spec.step
+use std.common.structural.receipt.simpleos_evidence_receipt_v1.{
+    SimpleOsEvidenceEnvironment,
+    SimpleOsEvidenceStepV1,
+    SimpleOsPerformanceSampleV1,
+    SimpleOsEvidenceReceiptV1
+}
+use std.common.structural.parallel_commit.simpleos_ledger_commit_v1.{
+    SimpleOsCapabilityStatus,
+    SimpleOsCapabilityRowV1,
+    SimpleOsCapabilityLedgerCandidateV1,
+    simpleos_capability_row_key
+}
+use std.common.contracts.execution.simpleos_performance_v1.{
+    SimpleOsPerformanceWorkloadV1
+}
+use os.services.evidence.artifact_snapshot.{
+    SimpleOsEvidenceArtifactSnapshotV1
+}
+use os.services.evidence.performance_policy_owner.{
+    SimpleOsPerformanceCampaignPolicyV1,
+    simpleos_evidence_performance_policy_value_check_v1,
+    simpleos_evidence_performance_policy_check_v1
+}
+
+val HASH_A: text = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+val HASH_B: text = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+val HASH_C: text = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+val HASH_D: text = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+
+fn performance_candidate() -> SimpleOsCapabilityLedgerCandidateV1:
+    var samples: [SimpleOsPerformanceSampleV1] = []
+    var i: i64 = 0
+    while i < 10:
+        samples = samples.push(SimpleOsPerformanceSampleV1(
+            sequence: i, metric_value_milli: 1000,
+            elapsed_us: 100, max_rss_bytes: 1000))
+        i = i + 1
+    val receipt = SimpleOsEvidenceReceiptV1(
+        schema_version: 1,
+        receipt_id: "policy-receipt",
+        nonce: "policy-nonce",
+        requirement_id: "NFR-002",
+        capability: "performance",
+        target: "x86_64",
+        target_abi: "x86_64-simpleos-v1",
+        environment: SimpleOsEvidenceEnvironment.NativeHost,
+        firmware_profile: "ovmf-grub-efi",
+        board_identity: "host-identity",
+        accelerator: "native",
+        filesystem: "fat32",
+        protocol_profile: "",
+        source_hash: HASH_A,
+        image_hash: HASH_B,
+        binary_hash: HASH_C,
+        config_hash: HASH_D,
+        exact_argv: ["/usr/bin/simple", "--version"],
+        artifact_hashes: [HASH_A, HASH_B, HASH_C, HASH_D],
+        steps: [SimpleOsEvidenceStepV1(
+            sequence: 0, behavior_id: "version", outcome: "ok",
+            exit_code: 0, artifact_hash: HASH_A)],
+        performance_workload: "http_db_loopback",
+        performance_unit: "microseconds_milli",
+        performance_warmup_count: 2,
+        performance_cpu_identity: "stable-cpu",
+        performance_frequency_hz: 1000000,
+        performance_noise_profile: "controlled",
+        performance_comparable: true,
+        performance_samples: samples,
+        started_unix_us: 100,
+        finished_unix_us: 200,
+        owner: "runner",
+        reviewer: "reviewer",
+        signer_key_id: "key-1",
+        signature: "signed-receipt")
+    SimpleOsCapabilityLedgerCandidateV1(
+        row: SimpleOsCapabilityRowV1(
+            requirement_id: "NFR-002",
+            capability: "performance",
+            target: "x86_64",
+            environment: SimpleOsEvidenceEnvironment.NativeHost,
+            filesystem: "fat32",
+            protocol_profile: "",
+            status: SimpleOsCapabilityStatus.Pass,
+            receipt_id: "policy-receipt",
+            receipt_nonce: "policy-nonce",
+            source_hash: HASH_A,
+            image_hash: HASH_B,
+            binary_hash: HASH_C,
+            config_hash: HASH_D,
+            artifacts: [HASH_A, HASH_B, HASH_C, HASH_D],
+            artifact_paths: [],
+            blocker_reason: "",
+            todo: "",
+            prerequisite: "",
+            resume_command: "",
+            owner: "runner",
+            reviewer: "reviewer"),
+        receipt_present: true,
+        receipt: receipt)
+
+fn fixture_snapshot(index: i64) -> SimpleOsEvidenceArtifactSnapshotV1:
+    # This pure policy spec exercises index binding. The verifier's separate
+    # snapshot check owns byte rehash before calling the authoritative API.
+    SimpleOsEvidenceArtifactSnapshotV1(
+        source_manifest_bytes: [1u8],
+        image_bytes: [2u8],
+        binary_bytes: [3u8],
+        config_bytes: [4u8],
+        artifact_bytes: [[1u8], [2u8], [3u8], [4u8]],
+        performance_fixture_artifact_index: index)
+
+fn policy_for(candidate: SimpleOsCapabilityLedgerCandidateV1)
+        -> SimpleOsPerformanceCampaignPolicyV1:
+    SimpleOsPerformanceCampaignPolicyV1(
+        row_key: simpleos_capability_row_key(candidate.row),
+        workload: SimpleOsPerformanceWorkloadV1.HttpDbLoopback,
+        config_hash: HASH_D,
+        board_identity: "host-identity",
+        cpu_identity: "stable-cpu",
+        frequency_hz: 1000000,
+        noise_profile: "controlled",
+        accelerator_identity: "native",
+        fixture_hash: HASH_A,
+        baseline_identity_hash: HASH_D,
+        baseline_value: 1u64,
+        baseline_rss_bytes: 1000u64,
+        max_rss_bytes: 1000000u64,
+        externally_comparable: true)
+
+describe "SimpleOS service-owned performance campaign policy":
+    it "leaves ordinary non-performance candidates outside policy admission":
+        step("leaves ordinary non-performance candidates outside policy admission")
+        var candidate = performance_candidate()
+        var row = candidate.row
+        var receipt = candidate.receipt
+        row.requirement_id = "REQ-001"
+        row.capability = "ledger"
+        receipt.requirement_id = "REQ-001"
+        receipt.capability = "ledger"
+        candidate.row = row
+        candidate.receipt = receipt
+        val result = simpleos_evidence_performance_policy_check_v1(
+            candidate, fixture_snapshot(-1))
+        expect(result.applicable).to_equal(false)
+        expect(result.ok).to_equal(true)
+
+    it "cannot admit native samples from caller-selected policy values":
+        step("cannot admit native samples from caller-selected policy values")
+        val candidate = performance_candidate()
+        val diagnostic = simpleos_evidence_performance_policy_value_check_v1(
+            candidate, fixture_snapshot(0), policy_for(candidate))
+        expect(diagnostic.ok).to_equal(true)
+        val authoritative = simpleos_evidence_performance_policy_check_v1(
+            candidate, fixture_snapshot(0))
+        expect(authoritative.applicable).to_equal(true)
+        expect(authoritative.ok).to_equal(false)
+        expect(authoritative.reason).to_equal("performance-policy-unavailable")
+
+    it "binds the exact measured fixture index and row identity":
+        step("binds the exact measured fixture index and row identity")
+        val candidate = performance_candidate()
+        val policy = policy_for(candidate)
+        val wrong_fixture = simpleos_evidence_performance_policy_value_check_v1(
+            candidate, fixture_snapshot(1), policy)
+        expect(wrong_fixture.ok).to_equal(false)
+        expect(wrong_fixture.reason).to_equal("performance-policy-artifacts")
+        var wrong_row = policy
+        wrong_row.row_key = "NFR-002|performance|aarch64"
+        val wrong_identity = simpleos_evidence_performance_policy_value_check_v1(
+            candidate, fixture_snapshot(0), wrong_row)
+        expect(wrong_identity.ok).to_equal(false)
+        expect(wrong_identity.reason).to_equal("performance-policy-identity")
+
+    it "rejects CPU and configuration substitutions in a campaign":
+        step("rejects CPU and configuration substitutions in a campaign")
+        val candidate = performance_candidate()
+        var policy = policy_for(candidate)
+        policy.cpu_identity = "different-cpu"
+        val wrong_cpu = simpleos_evidence_performance_policy_value_check_v1(
+            candidate, fixture_snapshot(0), policy)
+        expect(wrong_cpu.ok).to_equal(false)
+        expect(wrong_cpu.reason).to_equal("performance-policy-environment")
+        policy = policy_for(candidate)
+        policy.config_hash = HASH_B
+        val wrong_config = simpleos_evidence_performance_policy_value_check_v1(
+            candidate, fixture_snapshot(0), policy)
+        expect(wrong_config.ok).to_equal(false)
+        expect(wrong_config.reason).to_equal("performance-policy-environment")
+
+    it "rejects an unbounded RSS ceiling and missing comparable baseline":
+        step("rejects an unbounded RSS ceiling and missing comparable baseline")
+        val candidate = performance_candidate()
+        var policy = policy_for(candidate)
+        policy.max_rss_bytes = 1099511627777u64
+        val oversized = simpleos_evidence_performance_policy_value_check_v1(
+            candidate, fixture_snapshot(0), policy)
+        expect(oversized.ok).to_equal(false)
+        expect(oversized.reason).to_equal("performance-policy-bounds")
+        policy = policy_for(candidate)
+        policy.externally_comparable = false
+        val unverified = simpleos_evidence_performance_policy_value_check_v1(
+            candidate, fixture_snapshot(0), policy)
+        expect(unverified.ok).to_equal(false)
+        expect(unverified.reason).to_equal("performance-policy-bounds")
+
+    it "preserves canonical regression admission after service policy binding":
+        step("preserves canonical regression admission after service policy binding")
+        val candidate = performance_candidate()
+        var policy = policy_for(candidate)
+        policy.baseline_value = 1u64
+        var receipt = candidate.receipt
+        var samples = receipt.performance_samples
+        var first = samples[0]
+        first.metric_value_milli = 1100
+        samples[0] = first
+        receipt.performance_samples = samples
+        var changed = candidate
+        changed.receipt = receipt
+        val result = simpleos_evidence_performance_policy_value_check_v1(
+            changed, fixture_snapshot(0), policy)
+        expect(result.ok).to_equal(false)
+        expect(result.reason).to_equal("performance-policy-admission")

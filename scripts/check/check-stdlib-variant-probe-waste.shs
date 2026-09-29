@@ -1,0 +1,197 @@
+#!/bin/sh
+# check-stdlib-variant-probe-waste.shs — counts the filesystem probes that the
+# stdlib-variant candidate roots cost at startup.
+#
+# `stdlib_root_candidates` (src/compiler_rust/compiler/src/stdlib_variant.rs)
+# is called once per stdlib module resolution. It calls `active_simd_tier()`
+# -> `host_cpu_config()`, which re-stats `$HOME/.cache/simple/host/<triple>/
+# cpu_config.sdn` on EVERY call by design (an on-disk edit must be picked up
+# mid-process), and it returns `<root>/variants/<tier>` candidate roots. In this
+# repo neither `src/lib/variants/` nor `src/std/variants/` exists, so every one
+# of those candidates is a guaranteed miss and every path built under it is a
+# doomed stat.
+#
+# Verdict is the LAST line of stdout:
+#   PASS — <n> stat(s) checked, cpu_config=<c> missing_variant_root=<m> ...
+#   FAIL — ... (a budget was exceeded)
+#   ERROR — nothing was checked (<reason>)
+# A run that observed 0 stats is ERROR, never a pass: absence of a trace is
+# absence of evidence.
+#
+# usage:
+#   sh scripts/check/check-stdlib-variant-probe-waste.shs [--selftest]
+#       [--lane default|interpreter]
+#       [--max-cpu-config N] [--max-missing-variant-root N]
+#       [--max-var-sdn-opens N]
+# env: SIMPLE_BIN (default ./bin/simple)
+#
+# The measured entry runs with the caller's lane environment CLEARED and the
+# requested lane set explicitly. Without that, the same binary scores
+# differently depending on who invoked the gate: the spec runner exports
+# SIMPLE_RUNTIME_MODE=interpreter / SIMPLE_EXECUTION_MODE=interpret, which is a
+# different resolution path, and a gate whose number depends on its caller is
+# not a gate.
+
+set -u
+
+repo_root=$(cd "$(dirname "$0")/../.." && pwd)
+SIMPLE_BIN=${SIMPLE_BIN:-"$repo_root/bin/simple"}
+max_cpu=-1
+max_missing=-1
+max_var_sdn=-1
+selftest_only=0
+lane=default
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --selftest) selftest_only=1 ;;
+        --lane) shift; lane=$1 ;;
+        --max-cpu-config) shift; max_cpu=$1 ;;
+        --max-missing-variant-root) shift; max_missing=$1 ;;
+        --max-var-sdn-opens) shift; max_var_sdn=$1 ;;
+        *) echo "ERROR — nothing was checked (unknown argument $1)"; exit 2 ;;
+    esac
+    shift
+done
+
+# The single reducer. Reads a strace file on stdin-path $1, prints the five
+# counters as "stats cpu missing var_sdn variants_init".
+reduce() {
+    awk '
+    function pathof(line) {
+        if (match(line, /"[^"]*"/)) return substr(line, RSTART + 1, RLENGTH - 2)
+        return ""
+    }
+    /newfstatat\(|statx\(|[^a-z]stat\(/ {
+        stats++
+        p = pathof($0)
+        if (p ~ /cpu_config\.sdn$/) cpu++
+        if (p ~ /\/src\/(lib|std)\/variants\//) missing++
+        next
+    }
+    /openat\(/ {
+        p = pathof($0)
+        if ($0 ~ /= -1 /) {
+            if (p ~ /\/src\/(lib|std)\/variants\//) missing++
+            next
+        }
+        if (p ~ /\/config\/var\.sdn$/) varsdn++
+        if (p ~ /\/variants\/__init__\.spl$/) vinit++
+        if (p ~ /\/src\/(lib|std)\/variants\//) missing++
+    }
+    END { printf "%d %d %d %d %d\n", stats + 0, cpu + 0, missing + 0, varsdn + 0, vinit + 0 }
+    ' "$1"
+}
+
+selftest() {
+    # Fixture 1: a trace with known lines must produce known counters.
+    fx=$(mktemp) || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
+    cat > "$fx" <<'FIXTURE'
+100 newfstatat(AT_FDCWD, "/h/.cache/simple/host/aarch64-unknown-linux-gnu/cpu_config.sdn", 0x1, 0) = 0
+100 newfstatat(AT_FDCWD, "/h/.cache/simple/host/aarch64-unknown-linux-gnu/cpu_config.sdn", 0x1, 0) = 0
+100 newfstatat(AT_FDCWD, "/r/src/lib/variants/aarch64_neon/common", 0x1, 0) = -1 ENOENT (No such file)
+100 openat(AT_FDCWD, "/r/src/std/variants/aarch64_neon/io.spl", O_RDONLY) = -1 ENOENT (No such file)
+100 openat(AT_FDCWD, "/r/config/var.sdn", O_RDONLY|O_CLOEXEC) = 7
+100 openat(AT_FDCWD, "/r/variants/__init__.spl", O_RDONLY|O_CLOEXEC) = 8
+100 openat(AT_FDCWD, "/r/src/lib/common/text.spl", O_RDONLY|O_CLOEXEC) = 9
+FIXTURE
+    got=$(reduce "$fx")
+    want="3 2 2 1 1"
+    rm -f "$fx"
+    if [ "$got" != "$want" ]; then
+        echo "selftest fixture 1 FAILED: got [$got] want [$want]"
+        return 1
+    fi
+
+    # Fixture 2: an empty trace must reduce to 0 stats so the caller ERRORs.
+    fx=$(mktemp) || return 1
+    : > "$fx"
+    got=$(reduce "$fx")
+    rm -f "$fx"
+    case "$got" in
+        "0 0 0 0 0") : ;;
+        *) echo "selftest fixture 2 FAILED: empty trace gave [$got]"; return 1 ;;
+    esac
+
+    # Fixture 3: a clean trace (no variant probes, no cpu_config) must score 0
+    # on both defect counters while still counting stats -- proves the counters
+    # discriminate rather than counting everything.
+    fx=$(mktemp) || return 1
+    cat > "$fx" <<'FIXTURE'
+100 newfstatat(AT_FDCWD, "/r/src/lib/common/text.spl", 0x1, 0) = 0
+100 openat(AT_FDCWD, "/r/src/lib/common/text.spl", O_RDONLY|O_CLOEXEC) = 3
+FIXTURE
+    got=$(reduce "$fx")
+    rm -f "$fx"
+    if [ "$got" != "1 0 0 0 0" ]; then
+        echo "selftest fixture 3 FAILED: got [$got] want [1 0 0 0 0]"
+        return 1
+    fi
+    echo "selftest: 3 fixture(s) checked, 0 failures"
+    return 0
+}
+
+if ! selftest; then
+    echo "ERROR — nothing was checked (selftest failed)"
+    exit 2
+fi
+if [ "$selftest_only" = "1" ]; then
+    echo "PASS — 3 selftest fixture(s) checked, 0 failures"
+    exit 0
+fi
+
+command -v strace >/dev/null 2>&1 || {
+    echo "ERROR — nothing was checked (strace not installed)"
+    exit 2
+}
+[ -x "$SIMPLE_BIN" ] || {
+    echo "ERROR — nothing was checked (SIMPLE_BIN not executable: $SIMPLE_BIN)"
+    exit 2
+}
+
+work=$(mktemp -d) || { echo "ERROR — nothing was checked (mktemp -d failed)"; exit 2; }
+trace="$work/trace"
+# Hermetic HOME: cpu_config.sdn is created on first use, so a warm HOME and a
+# cold one must not give different counters.
+case "$lane" in
+    default) lane_env="" ;;
+    interpreter) lane_env="SIMPLE_RUNTIME_MODE=interpreter SIMPLE_EXECUTION_MODE=interpret" ;;
+    *) rm -rf "$work"; echo "ERROR — nothing was checked (unknown lane $lane)"; exit 2 ;;
+esac
+
+# shellcheck disable=SC2086 # lane_env is a deliberate word-split assignment list
+env -u SIMPLE_RUNTIME_MODE -u SIMPLE_EXECUTION_MODE -u SIMPLE_NO_JIT \
+    -u SIMPLE_JIT_ENABLED -u SIMPLE_BINARY -u SIMPLE_SIMD_TIER \
+    -u SIMPLE_CPU_CONFIG_PATH -u SIMPLE_TEST_RESULT_FILE -u SIMPLE_TEST_DEPTH \
+    HOME="$work/home" $lane_env \
+    timeout 300 strace -f -o "$trace" \
+    -e trace=openat,stat,newfstatat,statx \
+    "$SIMPLE_BIN" check --help >"$work/out" 2>"$work/err"
+
+if [ ! -s "$trace" ]; then
+    rm -rf "$work"
+    echo "ERROR — nothing was checked (strace produced no trace)"
+    exit 2
+fi
+
+set -- $(reduce "$trace")
+stats=$1; cpu=$2; missing=$3; varsdn=$4; vinit=$5
+rm -rf "$work"
+
+if [ "$stats" -eq 0 ]; then
+    echo "ERROR — nothing was checked (0 stat syscalls observed)"
+    exit 2
+fi
+
+summary="lane=$lane stats=$stats cpu_config=$cpu missing_variant_root=$missing var_sdn_opens=$varsdn variants_init_opens=$vinit"
+fail=""
+[ "$max_cpu" -ge 0 ] && [ "$cpu" -gt "$max_cpu" ] && fail="$fail cpu_config=$cpu>$max_cpu"
+[ "$max_missing" -ge 0 ] && [ "$missing" -gt "$max_missing" ] && fail="$fail missing_variant_root=$missing>$max_missing"
+[ "$max_var_sdn" -ge 0 ] && [ "$varsdn" -gt "$max_var_sdn" ] && fail="$fail var_sdn_opens=$varsdn>$max_var_sdn"
+
+if [ -n "$fail" ]; then
+    echo "FAIL — $stats stat(s) checked, over budget:$fail ($summary)"
+    exit 1
+fi
+echo "PASS — $stats stat(s) checked, $summary"
+exit 0

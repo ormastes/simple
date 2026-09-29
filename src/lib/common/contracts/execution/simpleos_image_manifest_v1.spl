@@ -1,0 +1,662 @@
+# SimpleOS image manifest v1: bounded, backend-neutral value contracts.
+#
+# This is a descriptive image identity, not loader authority or release
+# evidence.  Execution-machine discovery and launch policy belong to their
+# own contracts and are deliberately absent here.
+
+use std.common.contracts.execution.simpleos_target_v1.{
+    simpleos_target_v1_is_userland_triple,
+    simpleos_target_v1_firmware_for_triple
+}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.structural.digest.hash256.{hash256_hex_valid}
+
+pub enum SimpleOsImageArtifactRoleV1:
+    Kernel
+    Service
+    Runtime
+    Compiler
+    Provider
+    Symbols
+
+pub enum SimpleOsImageProviderTierV1:
+    Baseline
+    Optimized
+
+pub enum SimpleOsImageCarrierKindV1:
+    RawDiskImage
+    PartitionImage
+
+pub enum SimpleOsImageFilesystemV1:
+    Fat32
+    Dbfs
+    Nvfs
+
+pub enum SimpleOsImageVolumeRoleV1:
+    Boot
+    System
+    Mutable
+    User
+
+pub enum SimpleOsImageManifestErrorV1:
+    None
+    UnsupportedSchema
+    InvalidTarget
+    InvalidProfile
+    InvalidIdentity
+    InvalidDigest
+    InvalidPath
+    SectionLimitExceeded
+    TotalArtifactLimitExceeded
+    DuplicateOrUnsortedArtifact
+    DuplicateArtifactPath
+    ArtifactRoleMismatch
+    InvalidArtifactPolicy
+    MissingBaselineKernel
+    MissingBaselineInit
+    MissingBaselineLoader
+    MissingBaselineSelector
+    InvalidEntry
+    InvalidFirmware
+    InvalidSosix
+    InvalidCarrier
+    InvalidVolume
+    DuplicateOrUnsortedVolume
+    InvalidRoot
+    InvalidSnapshot
+    InvalidOverlay
+    OptimizedProviderRequired
+    TextBudgetExceeded
+    CanonicalTooLarge
+
+pub struct SimpleOsImageArtifactV1:
+    artifact_id: text
+    role: SimpleOsImageArtifactRoleV1
+    image_path: text
+    digest: text
+    required: bool
+    baseline: bool
+
+pub struct SimpleOsImageProviderV1:
+    artifact: SimpleOsImageArtifactV1
+    interface_id: text
+    tier: SimpleOsImageProviderTierV1
+
+pub struct SimpleOsImageCarrierV1:
+    kind: SimpleOsImageCarrierKindV1
+    format_id: text
+    digest: text
+    byte_length: u64
+
+pub struct SimpleOsImageVolumeV1:
+    volume_id: text
+    role: SimpleOsImageVolumeRoleV1
+    filesystem: SimpleOsImageFilesystemV1
+    digest: text
+    byte_length: u64
+    writable: bool
+
+pub struct SimpleOsImageRootV1:
+    volume_id: text
+    filesystem: SimpleOsImageFilesystemV1
+    mount_point: text
+    snapshot_id: text
+    overlay_id: text
+
+pub struct SimpleOsImageSnapshotV1:
+    present: bool
+    snapshot_id: text
+    volume_id: text
+    digest: text
+
+pub struct SimpleOsImageOverlayV1:
+    present: bool
+    overlay_id: text
+    base_snapshot_id: text
+    upper_volume_id: text
+    digest: text
+
+pub struct SimpleOsImageBaselineV1:
+    kernel_artifact_id: text
+    init_artifact_id: text
+    loader_artifact_id: text
+    selector_artifact_id: text
+
+pub struct SimpleOsImageEntryV1:
+    artifact_id: text
+    symbol: text
+
+pub struct SimpleOsImageManifestV1:
+    schema_version: u16
+    target_id: text
+    profile_id: text
+    build_id: text
+    source_id: text
+    kernel: SimpleOsImageArtifactV1
+    services: [SimpleOsImageArtifactV1]
+    runtime: [SimpleOsImageArtifactV1]
+    compiler: [SimpleOsImageArtifactV1]
+    providers: [SimpleOsImageProviderV1]
+    symbols: [SimpleOsImageArtifactV1]
+    carrier: SimpleOsImageCarrierV1
+    root: SimpleOsImageRootV1
+    volumes: [SimpleOsImageVolumeV1]
+    snapshot: SimpleOsImageSnapshotV1
+    overlay: SimpleOsImageOverlayV1
+    firmware_profile: text
+    sosix_version: text
+    entry: SimpleOsImageEntryV1
+    baseline: SimpleOsImageBaselineV1
+
+pub const SIMPLEOS_IMAGE_MANIFEST_V1_SCHEMA: u16 = 1u16
+pub const SIMPLEOS_IMAGE_MANIFEST_V1_MAX_IDENTITY_BYTES: i64 = 128
+pub const SIMPLEOS_IMAGE_MANIFEST_V1_MAX_PATH_BYTES: i64 = 4096
+pub const SIMPLEOS_IMAGE_MANIFEST_V1_MAX_SECTION_ARTIFACTS: i64 = 64
+pub const SIMPLEOS_IMAGE_MANIFEST_V1_MAX_TOTAL_ARTIFACTS: i64 = 256
+pub const SIMPLEOS_IMAGE_MANIFEST_V1_MAX_VOLUMES: i64 = 16
+pub const SIMPLEOS_IMAGE_MANIFEST_V1_MAX_TOTAL_TEXT_BYTES: i64 = 131072
+pub const SIMPLEOS_IMAGE_MANIFEST_V1_MAX_CANONICAL_BYTES: i64 = 262144
+
+fn _image_id_atom_v1(code: i64) -> bool:
+    (code >= 97 and code <= 122) or (code >= 48 and code <= 57)
+
+fn _image_id_separator_v1(code: i64) -> bool:
+    code == 45 or code == 46 or code == 95
+
+pub fn simpleos_image_identity_valid_v1(value: text) -> bool:
+    """Validate one canonical lowercase image identity without normalization."""
+    if value.len() == 0 or
+        value.len() > SIMPLEOS_IMAGE_MANIFEST_V1_MAX_IDENTITY_BYTES:
+        return false
+    if not _image_id_atom_v1(value.char_code_at(0)) or
+        not _image_id_atom_v1(value.char_code_at(value.len() - 1)):
+        return false
+    var previous_separator = false
+    var i = 1
+    while i < value.len() - 1:
+        val code = value.char_code_at(i)
+        if _image_id_atom_v1(code):
+            previous_separator = false
+        elif _image_id_separator_v1(code):
+            if previous_separator:
+                return false
+            previous_separator = true
+        else:
+            return false
+        i = i + 1
+    true
+
+pub fn simpleos_image_profile_id_valid_v1(value: text) -> bool:
+    value == "dev" or value == "runtime" or value == "minimal"
+
+fn _image_path_valid_v1(path: text) -> bool:
+    if path.len() == 0 or path.len() > SIMPLEOS_IMAGE_MANIFEST_V1_MAX_PATH_BYTES or
+        not path.starts_with("/") or path == "/" or path.ends_with("/") or
+        path.contains("\\") or path.contains("//") or path.contains("/./") or
+        path.ends_with("/.") or path.contains("/../") or path.ends_with("/.."):
+        return false
+    var i = 0
+    while i < path.len():
+        val code = path.char_code_at(i)
+        if code < 33 or code > 126:
+            return false
+        i = i + 1
+    true
+
+fn _image_artifact_validate_v1(
+    artifact: SimpleOsImageArtifactV1,
+    expected_role: SimpleOsImageArtifactRoleV1
+) -> SimpleOsImageManifestErrorV1:
+    if artifact.role != expected_role:
+        return SimpleOsImageManifestErrorV1.ArtifactRoleMismatch
+    if not simpleos_image_identity_valid_v1(artifact.artifact_id):
+        return SimpleOsImageManifestErrorV1.InvalidIdentity
+    if not _image_path_valid_v1(artifact.image_path):
+        return SimpleOsImageManifestErrorV1.InvalidPath
+    if not hash256_hex_valid(artifact.digest):
+        return SimpleOsImageManifestErrorV1.InvalidDigest
+    if artifact.baseline and not artifact.required:
+        return SimpleOsImageManifestErrorV1.InvalidArtifactPolicy
+    SimpleOsImageManifestErrorV1.None
+
+fn _image_artifact_section_validate_v1(
+    items: [SimpleOsImageArtifactV1],
+    expected_role: SimpleOsImageArtifactRoleV1
+) -> SimpleOsImageManifestErrorV1:
+    if items.len() > SIMPLEOS_IMAGE_MANIFEST_V1_MAX_SECTION_ARTIFACTS:
+        return SimpleOsImageManifestErrorV1.SectionLimitExceeded
+    var i = 0
+    while i < items.len():
+        val item_check = _image_artifact_validate_v1(items[i], expected_role)
+        if item_check != SimpleOsImageManifestErrorV1.None:
+            return item_check
+        if i > 0 and items[i - 1].artifact_id >= items[i].artifact_id:
+            return SimpleOsImageManifestErrorV1.DuplicateOrUnsortedArtifact
+        i = i + 1
+    SimpleOsImageManifestErrorV1.None
+
+fn _image_provider_section_validate_v1(
+    providers: [SimpleOsImageProviderV1]
+) -> SimpleOsImageManifestErrorV1:
+    if providers.len() > SIMPLEOS_IMAGE_MANIFEST_V1_MAX_SECTION_ARTIFACTS:
+        return SimpleOsImageManifestErrorV1.SectionLimitExceeded
+    var i = 0
+    while i < providers.len():
+        val provider = providers[i]
+        val artifact_check = _image_artifact_validate_v1(
+            provider.artifact, SimpleOsImageArtifactRoleV1.Provider)
+        if artifact_check != SimpleOsImageManifestErrorV1.None:
+            return artifact_check
+        if not simpleos_image_identity_valid_v1(provider.interface_id):
+            return SimpleOsImageManifestErrorV1.InvalidIdentity
+        if i > 0 and providers[i - 1].artifact.artifact_id >= provider.artifact.artifact_id:
+            return SimpleOsImageManifestErrorV1.DuplicateOrUnsortedArtifact
+        if provider.tier == SimpleOsImageProviderTierV1.Optimized and
+            (provider.artifact.required or provider.artifact.baseline):
+            return SimpleOsImageManifestErrorV1.OptimizedProviderRequired
+        i = i + 1
+    SimpleOsImageManifestErrorV1.None
+
+fn _image_total_artifact_count_v1(manifest: SimpleOsImageManifestV1) -> i64:
+    1 + manifest.services.len() + manifest.runtime.len() +
+        manifest.compiler.len() + manifest.providers.len() + manifest.symbols.len()
+
+fn _image_all_artifact_ids_v1(manifest: SimpleOsImageManifestV1) -> [text]:
+    var ids: [text] = [manifest.kernel.artifact_id]
+    for item in manifest.services: ids.push(item.artifact_id)
+    for item in manifest.runtime: ids.push(item.artifact_id)
+    for item in manifest.compiler: ids.push(item.artifact_id)
+    for item in manifest.providers: ids.push(item.artifact.artifact_id)
+    for item in manifest.symbols: ids.push(item.artifact_id)
+    ids
+
+fn _image_all_artifact_paths_v1(manifest: SimpleOsImageManifestV1) -> [text]:
+    var paths: [text] = [manifest.kernel.image_path]
+    for item in manifest.services: paths.push(item.image_path)
+    for item in manifest.runtime: paths.push(item.image_path)
+    for item in manifest.compiler: paths.push(item.image_path)
+    for item in manifest.providers: paths.push(item.artifact.image_path)
+    for item in manifest.symbols: paths.push(item.image_path)
+    paths
+
+fn _image_artifact_ids_unique_v1(manifest: SimpleOsImageManifestV1) -> bool:
+    val ids = _image_all_artifact_ids_v1(manifest)
+    var i = 0
+    while i < ids.len():
+        var j = 0
+        while j < i:
+            if ids[i] == ids[j]:
+                return false
+            j = j + 1
+        i = i + 1
+    true
+
+fn _image_artifact_paths_unique_v1(manifest: SimpleOsImageManifestV1) -> bool:
+    val paths = _image_all_artifact_paths_v1(manifest)
+    var i = 0
+    while i < paths.len():
+        var j = 0
+        while j < i:
+            if paths[i] == paths[j]:
+                return false
+            j = j + 1
+        i = i + 1
+    true
+
+fn _image_required_baseline_in_v1(
+    items: [SimpleOsImageArtifactV1], artifact_id: text
+) -> bool:
+    for item in items:
+        if item.artifact_id == artifact_id:
+            return item.required and item.baseline
+    false
+
+fn _image_volume_validate_v1(volume: SimpleOsImageVolumeV1) -> bool:
+    simpleos_image_identity_valid_v1(volume.volume_id) and
+        hash256_hex_valid(volume.digest) and volume.byte_length > 0u64
+
+fn _image_volumes_validate_v1(manifest: SimpleOsImageManifestV1) -> SimpleOsImageManifestErrorV1:
+    if manifest.volumes.len() == 0 or
+        manifest.volumes.len() > SIMPLEOS_IMAGE_MANIFEST_V1_MAX_VOLUMES:
+        return SimpleOsImageManifestErrorV1.InvalidVolume
+    var total = 0u64
+    var i = 0
+    while i < manifest.volumes.len():
+        val volume = manifest.volumes[i]
+        if not _image_volume_validate_v1(volume):
+            return SimpleOsImageManifestErrorV1.InvalidVolume
+        if i > 0 and manifest.volumes[i - 1].volume_id >= volume.volume_id:
+            return SimpleOsImageManifestErrorV1.DuplicateOrUnsortedVolume
+        if volume.byte_length > manifest.carrier.byte_length - total:
+            return SimpleOsImageManifestErrorV1.InvalidCarrier
+        total = total + volume.byte_length
+        i = i + 1
+    SimpleOsImageManifestErrorV1.None
+
+fn _image_volume_index_v1(manifest: SimpleOsImageManifestV1, volume_id: text) -> i64:
+    var i = 0
+    while i < manifest.volumes.len():
+        if manifest.volumes[i].volume_id == volume_id:
+            return i
+        i = i + 1
+    -1
+
+fn _image_root_validate_v1(manifest: SimpleOsImageManifestV1) -> bool:
+    if not simpleos_image_identity_valid_v1(manifest.root.volume_id) or
+        manifest.root.filesystem != SimpleOsImageFilesystemV1.Nvfs or
+        manifest.root.mount_point != "/":
+        return false
+    val root_index = _image_volume_index_v1(manifest, manifest.root.volume_id)
+    root_index >= 0 and
+        manifest.volumes[root_index].filesystem == manifest.root.filesystem and
+        manifest.volumes[root_index].role == SimpleOsImageVolumeRoleV1.System
+
+fn _image_snapshot_validate_v1(manifest: SimpleOsImageManifestV1) -> bool:
+    val snapshot = manifest.snapshot
+    if not snapshot.present:
+        return snapshot.snapshot_id == "" and snapshot.volume_id == "" and
+            snapshot.digest == "" and manifest.root.snapshot_id == ""
+    simpleos_image_identity_valid_v1(snapshot.snapshot_id) and
+        snapshot.volume_id == manifest.root.volume_id and
+        snapshot.snapshot_id == manifest.root.snapshot_id and
+        hash256_hex_valid(snapshot.digest)
+
+fn _image_overlay_validate_v1(manifest: SimpleOsImageManifestV1) -> bool:
+    val overlay = manifest.overlay
+    if not overlay.present:
+        return overlay.overlay_id == "" and overlay.base_snapshot_id == "" and
+            overlay.upper_volume_id == "" and overlay.digest == "" and
+            manifest.root.overlay_id == ""
+    if not manifest.snapshot.present or
+        not simpleos_image_identity_valid_v1(overlay.overlay_id) or
+        overlay.overlay_id != manifest.root.overlay_id or
+        overlay.base_snapshot_id != manifest.snapshot.snapshot_id or
+        not hash256_hex_valid(overlay.digest):
+        return false
+    val upper_index = _image_volume_index_v1(manifest, overlay.upper_volume_id)
+    upper_index >= 0 and overlay.upper_volume_id != manifest.root.volume_id and
+        manifest.volumes[upper_index].writable and
+        manifest.volumes[upper_index].role == SimpleOsImageVolumeRoleV1.Mutable
+
+fn _image_text_add_v1(total: i64, value: text) -> i64:
+    if total < 0 or value.len() > SIMPLEOS_IMAGE_MANIFEST_V1_MAX_PATH_BYTES or
+        total > SIMPLEOS_IMAGE_MANIFEST_V1_MAX_TOTAL_TEXT_BYTES - value.len():
+        return -1
+    total + value.len()
+
+fn _image_artifact_text_add_v1(total: i64, artifact: SimpleOsImageArtifactV1) -> i64:
+    var next = _image_text_add_v1(total, artifact.artifact_id)
+    next = _image_text_add_v1(next, artifact.image_path)
+    _image_text_add_v1(next, artifact.digest)
+
+fn _image_text_budget_valid_v1(manifest: SimpleOsImageManifestV1) -> bool:
+    var total = 0
+    total = _image_text_add_v1(total, manifest.target_id)
+    total = _image_text_add_v1(total, manifest.profile_id)
+    total = _image_text_add_v1(total, manifest.build_id)
+    total = _image_text_add_v1(total, manifest.source_id)
+    total = _image_text_add_v1(total, manifest.firmware_profile)
+    total = _image_text_add_v1(total, manifest.sosix_version)
+    total = _image_text_add_v1(total, manifest.entry.artifact_id)
+    total = _image_text_add_v1(total, manifest.entry.symbol)
+    total = _image_artifact_text_add_v1(total, manifest.kernel)
+    for item in manifest.services: total = _image_artifact_text_add_v1(total, item)
+    for item in manifest.runtime: total = _image_artifact_text_add_v1(total, item)
+    for item in manifest.compiler: total = _image_artifact_text_add_v1(total, item)
+    for item in manifest.providers:
+        total = _image_artifact_text_add_v1(total, item.artifact)
+        total = _image_text_add_v1(total, item.interface_id)
+    for item in manifest.symbols: total = _image_artifact_text_add_v1(total, item)
+    total = _image_text_add_v1(total, manifest.carrier.format_id)
+    total = _image_text_add_v1(total, manifest.carrier.digest)
+    total = _image_text_add_v1(total, manifest.root.volume_id)
+    total = _image_text_add_v1(total, manifest.root.mount_point)
+    total = _image_text_add_v1(total, manifest.root.snapshot_id)
+    total = _image_text_add_v1(total, manifest.root.overlay_id)
+    for item in manifest.volumes:
+        total = _image_text_add_v1(total, item.volume_id)
+        total = _image_text_add_v1(total, item.digest)
+    total = _image_text_add_v1(total, manifest.snapshot.snapshot_id)
+    total = _image_text_add_v1(total, manifest.snapshot.volume_id)
+    total = _image_text_add_v1(total, manifest.snapshot.digest)
+    total = _image_text_add_v1(total, manifest.overlay.overlay_id)
+    total = _image_text_add_v1(total, manifest.overlay.base_snapshot_id)
+    total = _image_text_add_v1(total, manifest.overlay.upper_volume_id)
+    total = _image_text_add_v1(total, manifest.overlay.digest)
+    total = _image_text_add_v1(total, manifest.baseline.kernel_artifact_id)
+    total = _image_text_add_v1(total, manifest.baseline.init_artifact_id)
+    total = _image_text_add_v1(total, manifest.baseline.loader_artifact_id)
+    total = _image_text_add_v1(total, manifest.baseline.selector_artifact_id)
+    total >= 0
+
+pub fn simpleos_image_manifest_validate_v1(
+    manifest: SimpleOsImageManifestV1
+) -> Result<(), SimpleOsImageManifestErrorV1>:
+    if manifest.schema_version != SIMPLEOS_IMAGE_MANIFEST_V1_SCHEMA:
+        return Err(SimpleOsImageManifestErrorV1.UnsupportedSchema)
+    if not simpleos_target_v1_is_userland_triple(manifest.target_id):
+        return Err(SimpleOsImageManifestErrorV1.InvalidTarget)
+    if not simpleos_image_profile_id_valid_v1(manifest.profile_id):
+        return Err(SimpleOsImageManifestErrorV1.InvalidProfile)
+    if not simpleos_image_identity_valid_v1(manifest.build_id) or
+        not simpleos_image_identity_valid_v1(manifest.source_id):
+        return Err(SimpleOsImageManifestErrorV1.InvalidIdentity)
+    if manifest.firmware_profile !=
+        simpleos_target_v1_firmware_for_triple(manifest.target_id):
+        return Err(SimpleOsImageManifestErrorV1.InvalidFirmware)
+    if not simpleos_image_identity_valid_v1(manifest.sosix_version):
+        return Err(SimpleOsImageManifestErrorV1.InvalidSosix)
+    if _image_total_artifact_count_v1(manifest) >
+        SIMPLEOS_IMAGE_MANIFEST_V1_MAX_TOTAL_ARTIFACTS:
+        return Err(SimpleOsImageManifestErrorV1.TotalArtifactLimitExceeded)
+
+    val kernel_check = _image_artifact_validate_v1(
+        manifest.kernel, SimpleOsImageArtifactRoleV1.Kernel)
+    if kernel_check != SimpleOsImageManifestErrorV1.None: return Err(kernel_check)
+    val services_check = _image_artifact_section_validate_v1(
+        manifest.services, SimpleOsImageArtifactRoleV1.Service)
+    if services_check != SimpleOsImageManifestErrorV1.None: return Err(services_check)
+    val runtime_check = _image_artifact_section_validate_v1(
+        manifest.runtime, SimpleOsImageArtifactRoleV1.Runtime)
+    if runtime_check != SimpleOsImageManifestErrorV1.None: return Err(runtime_check)
+    val compiler_check = _image_artifact_section_validate_v1(
+        manifest.compiler, SimpleOsImageArtifactRoleV1.Compiler)
+    if compiler_check != SimpleOsImageManifestErrorV1.None: return Err(compiler_check)
+    val provider_check = _image_provider_section_validate_v1(manifest.providers)
+    if provider_check != SimpleOsImageManifestErrorV1.None: return Err(provider_check)
+    val symbols_check = _image_artifact_section_validate_v1(
+        manifest.symbols, SimpleOsImageArtifactRoleV1.Symbols)
+    if symbols_check != SimpleOsImageManifestErrorV1.None: return Err(symbols_check)
+    for item in manifest.symbols:
+        if item.required or item.baseline:
+            return Err(SimpleOsImageManifestErrorV1.InvalidArtifactPolicy)
+    if not _image_artifact_ids_unique_v1(manifest):
+        return Err(SimpleOsImageManifestErrorV1.DuplicateOrUnsortedArtifact)
+    if not _image_artifact_paths_unique_v1(manifest):
+        return Err(SimpleOsImageManifestErrorV1.DuplicateArtifactPath)
+
+    if manifest.kernel.artifact_id != manifest.baseline.kernel_artifact_id or
+        not manifest.kernel.required or not manifest.kernel.baseline:
+        return Err(SimpleOsImageManifestErrorV1.MissingBaselineKernel)
+    if not _image_required_baseline_in_v1(
+        manifest.services, manifest.baseline.init_artifact_id):
+        return Err(SimpleOsImageManifestErrorV1.MissingBaselineInit)
+    if not _image_required_baseline_in_v1(
+        manifest.runtime, manifest.baseline.loader_artifact_id):
+        return Err(SimpleOsImageManifestErrorV1.MissingBaselineLoader)
+    if not _image_required_baseline_in_v1(
+        manifest.runtime, manifest.baseline.selector_artifact_id):
+        return Err(SimpleOsImageManifestErrorV1.MissingBaselineSelector)
+    if manifest.baseline.loader_artifact_id == manifest.baseline.selector_artifact_id:
+        return Err(SimpleOsImageManifestErrorV1.MissingBaselineSelector)
+    if manifest.entry.artifact_id != manifest.baseline.init_artifact_id or
+        not simpleos_image_identity_valid_v1(manifest.entry.symbol):
+        return Err(SimpleOsImageManifestErrorV1.InvalidEntry)
+
+    if not simpleos_image_identity_valid_v1(manifest.carrier.format_id) or
+        not hash256_hex_valid(manifest.carrier.digest) or
+        manifest.carrier.byte_length == 0u64:
+        return Err(SimpleOsImageManifestErrorV1.InvalidCarrier)
+    val volumes_check = _image_volumes_validate_v1(manifest)
+    if volumes_check != SimpleOsImageManifestErrorV1.None: return Err(volumes_check)
+    if not _image_root_validate_v1(manifest):
+        return Err(SimpleOsImageManifestErrorV1.InvalidRoot)
+    if not _image_snapshot_validate_v1(manifest):
+        return Err(SimpleOsImageManifestErrorV1.InvalidSnapshot)
+    if not _image_overlay_validate_v1(manifest):
+        return Err(SimpleOsImageManifestErrorV1.InvalidOverlay)
+    if not _image_text_budget_valid_v1(manifest):
+        return Err(SimpleOsImageManifestErrorV1.TextBudgetExceeded)
+    Ok(())
+
+fn _image_artifact_role_text_v1(role: SimpleOsImageArtifactRoleV1) -> text:
+    match role:
+        case SimpleOsImageArtifactRoleV1.Kernel: "kernel"
+        case SimpleOsImageArtifactRoleV1.Service: "service"
+        case SimpleOsImageArtifactRoleV1.Runtime: "runtime"
+        case SimpleOsImageArtifactRoleV1.Compiler: "compiler"
+        case SimpleOsImageArtifactRoleV1.Provider: "provider"
+        case SimpleOsImageArtifactRoleV1.Symbols: "symbols"
+
+fn _image_provider_tier_text_v1(tier: SimpleOsImageProviderTierV1) -> text:
+    match tier:
+        case SimpleOsImageProviderTierV1.Baseline: "baseline"
+        case SimpleOsImageProviderTierV1.Optimized: "optimized"
+
+fn _image_carrier_kind_text_v1(kind: SimpleOsImageCarrierKindV1) -> text:
+    match kind:
+        case SimpleOsImageCarrierKindV1.RawDiskImage: "raw_disk_image"
+        case SimpleOsImageCarrierKindV1.PartitionImage: "partition_image"
+
+fn _image_filesystem_text_v1(filesystem: SimpleOsImageFilesystemV1) -> text:
+    match filesystem:
+        case SimpleOsImageFilesystemV1.Fat32: "fat32"
+        case SimpleOsImageFilesystemV1.Dbfs: "dbfs"
+        case SimpleOsImageFilesystemV1.Nvfs: "nvfs"
+
+fn _image_volume_role_text_v1(role: SimpleOsImageVolumeRoleV1) -> text:
+    match role:
+        case SimpleOsImageVolumeRoleV1.Boot: "boot"
+        case SimpleOsImageVolumeRoleV1.System: "system"
+        case SimpleOsImageVolumeRoleV1.Mutable: "mutable"
+        case SimpleOsImageVolumeRoleV1.User: "user"
+
+fn _image_bool_text_v1(value: bool) -> text:
+    if value: "1" else: "0"
+
+class _SimpleOsImageCanonicalWriterV1:
+    pieces: [text]
+
+    me append_field(value: text):
+        self.pieces.push(value.len().to_text())
+        self.pieces.push(":")
+        self.pieces.push(value)
+
+    fn finish() -> text:
+        self.pieces.join("")
+
+fn _image_append_artifact_v1(
+    writer: _SimpleOsImageCanonicalWriterV1,
+    artifact: SimpleOsImageArtifactV1
+):
+    writer.append_field(artifact.artifact_id)
+    writer.append_field(_image_artifact_role_text_v1(artifact.role))
+    writer.append_field(artifact.image_path)
+    writer.append_field(artifact.digest)
+    writer.append_field(_image_bool_text_v1(artifact.required))
+    writer.append_field(_image_bool_text_v1(artifact.baseline))
+
+fn _image_manifest_canonical_build_v1(manifest: SimpleOsImageManifestV1) -> text:
+    var writer = _SimpleOsImageCanonicalWriterV1(pieces: [])
+    writer.append_field("simpleos-image-manifest-v1")
+    writer.append_field(manifest.schema_version.to_text())
+    writer.append_field(manifest.target_id)
+    writer.append_field(manifest.profile_id)
+    writer.append_field(manifest.build_id)
+    writer.append_field(manifest.source_id)
+    writer.append_field(manifest.firmware_profile)
+    writer.append_field(manifest.sosix_version)
+    _image_append_artifact_v1(writer, manifest.kernel)
+    writer.append_field(manifest.services.len().to_text())
+    for item in manifest.services: _image_append_artifact_v1(writer, item)
+    writer.append_field(manifest.runtime.len().to_text())
+    for item in manifest.runtime: _image_append_artifact_v1(writer, item)
+    writer.append_field(manifest.compiler.len().to_text())
+    for item in manifest.compiler: _image_append_artifact_v1(writer, item)
+    writer.append_field(manifest.providers.len().to_text())
+    for item in manifest.providers:
+        _image_append_artifact_v1(writer, item.artifact)
+        writer.append_field(item.interface_id)
+        writer.append_field(_image_provider_tier_text_v1(item.tier))
+    writer.append_field(manifest.symbols.len().to_text())
+    for item in manifest.symbols: _image_append_artifact_v1(writer, item)
+    writer.append_field(_image_carrier_kind_text_v1(manifest.carrier.kind))
+    writer.append_field(manifest.carrier.format_id)
+    writer.append_field(manifest.carrier.digest)
+    writer.append_field(manifest.carrier.byte_length.to_text())
+    writer.append_field(manifest.root.volume_id)
+    writer.append_field(_image_filesystem_text_v1(manifest.root.filesystem))
+    writer.append_field(manifest.root.mount_point)
+    writer.append_field(manifest.root.snapshot_id)
+    writer.append_field(manifest.root.overlay_id)
+    writer.append_field(manifest.volumes.len().to_text())
+    for item in manifest.volumes:
+        writer.append_field(item.volume_id)
+        writer.append_field(_image_volume_role_text_v1(item.role))
+        writer.append_field(_image_filesystem_text_v1(item.filesystem))
+        writer.append_field(item.digest)
+        writer.append_field(item.byte_length.to_text())
+        writer.append_field(_image_bool_text_v1(item.writable))
+    writer.append_field(_image_bool_text_v1(manifest.snapshot.present))
+    writer.append_field(manifest.snapshot.snapshot_id)
+    writer.append_field(manifest.snapshot.volume_id)
+    writer.append_field(manifest.snapshot.digest)
+    writer.append_field(_image_bool_text_v1(manifest.overlay.present))
+    writer.append_field(manifest.overlay.overlay_id)
+    writer.append_field(manifest.overlay.base_snapshot_id)
+    writer.append_field(manifest.overlay.upper_volume_id)
+    writer.append_field(manifest.overlay.digest)
+    writer.append_field(manifest.entry.artifact_id)
+    writer.append_field(manifest.entry.symbol)
+    writer.append_field(manifest.baseline.kernel_artifact_id)
+    writer.append_field(manifest.baseline.init_artifact_id)
+    writer.append_field(manifest.baseline.loader_artifact_id)
+    writer.append_field(manifest.baseline.selector_artifact_id)
+    writer.finish()
+
+pub fn simpleos_image_manifest_canonical_v1(
+    manifest: SimpleOsImageManifestV1
+) -> Result<text, SimpleOsImageManifestErrorV1>:
+    match simpleos_image_manifest_validate_v1(manifest):
+        case Err(error): return Err(error)
+        case Ok(_): ()
+    val canonical = _image_manifest_canonical_build_v1(manifest)
+    if canonical.len() > SIMPLEOS_IMAGE_MANIFEST_V1_MAX_CANONICAL_BYTES:
+        return Err(SimpleOsImageManifestErrorV1.CanonicalTooLarge)
+    Ok(canonical)
+
+pub fn simpleos_image_manifest_digest_v1(
+    manifest: SimpleOsImageManifestV1
+) -> Result<text, SimpleOsImageManifestErrorV1>:
+    match simpleos_image_manifest_canonical_v1(manifest):
+        case Ok(canonical): Ok(sha256_u8_hex(canonical.bytes()))
+        case Err(error): Err(error)
+
+export SimpleOsImageArtifactRoleV1, SimpleOsImageProviderTierV1
+export SimpleOsImageCarrierKindV1, SimpleOsImageFilesystemV1
+export SimpleOsImageVolumeRoleV1, SimpleOsImageManifestErrorV1
+export SimpleOsImageArtifactV1, SimpleOsImageProviderV1
+export SimpleOsImageCarrierV1, SimpleOsImageVolumeV1, SimpleOsImageRootV1
+export SimpleOsImageSnapshotV1, SimpleOsImageOverlayV1
+export SimpleOsImageBaselineV1, SimpleOsImageEntryV1, SimpleOsImageManifestV1
+export SIMPLEOS_IMAGE_MANIFEST_V1_SCHEMA
+export SIMPLEOS_IMAGE_MANIFEST_V1_MAX_IDENTITY_BYTES
+export SIMPLEOS_IMAGE_MANIFEST_V1_MAX_PATH_BYTES
+export SIMPLEOS_IMAGE_MANIFEST_V1_MAX_SECTION_ARTIFACTS
+export SIMPLEOS_IMAGE_MANIFEST_V1_MAX_TOTAL_ARTIFACTS
+export SIMPLEOS_IMAGE_MANIFEST_V1_MAX_VOLUMES
+export SIMPLEOS_IMAGE_MANIFEST_V1_MAX_TOTAL_TEXT_BYTES
+export SIMPLEOS_IMAGE_MANIFEST_V1_MAX_CANONICAL_BYTES
+export simpleos_image_identity_valid_v1, simpleos_image_profile_id_valid_v1
+export simpleos_image_manifest_validate_v1
+export simpleos_image_manifest_canonical_v1, simpleos_image_manifest_digest_v1

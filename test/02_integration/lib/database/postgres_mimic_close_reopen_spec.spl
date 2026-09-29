@@ -1,0 +1,30 @@
+use std.spec.{describe, it, expect, step}
+use std.io_runtime.{file_delete, getpid, time_now_unix_micros}
+use std.database.postgres_mimic.{PostgresMimicServer, PgResponseKind}
+
+fn _postgres_mimic_tmp_path() -> text:
+    "/tmp/simple_postgres_mimic_close_" + getpid().to_text() + "_" +
+        time_now_unix_micros().to_text() + ".sdb"
+
+describe "Postgres mimic mutation lifecycle":
+    it "creates, inserts, closes, reopens, and preserves the row":
+        step("creates, inserts, closes, reopens, and preserves the row")
+        val path = _postgres_mimic_tmp_path()
+        file_delete(path)
+        var first = PostgresMimicServer.open(path).unwrap()
+        val first_session = first.startup("simple", "app", "lifecycle").unwrap()
+        val created = first.simple_query(first_session, "CREATE TABLE calc (id INTEGER)")
+        expect(created.kind == PgResponseKind.CommandComplete).to_equal(true)
+        val inserted = first.simple_query(first_session, "INSERT INTO calc (id) VALUES (3)")
+        expect(inserted.kind == PgResponseKind.CommandComplete).to_equal(true)
+        expect(inserted.tag).to_start_with("INSERT")
+        first.close().unwrap()
+
+        var reopened = PostgresMimicServer.open(path).unwrap()
+        val second_session = reopened.startup("simple", "app", "lifecycle-reopen").unwrap()
+        val selected = reopened.simple_query(second_session, "SELECT (id) FROM calc")
+        expect(selected.kind == PgResponseKind.RowSet).to_equal(true)
+        expect(selected.rows.len()).to_equal(1)
+        expect(selected.rows[0].values[0].to_text()).to_equal("3")
+        reopened.close().unwrap()
+        file_delete(path)

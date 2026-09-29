@@ -1,11 +1,14 @@
 # Bug: ByteBuffer.push_byte(v) + freeze() yields wrong byte values in interpreter
 
-Status: OPEN (P1)
-Status re-verified 2026-08-17 by source inspection (triage shard 00).
+## Closed 2026-09-13 — Does not reproduce: pushed bytes survive `freeze()` exactly
+
+- **measured** (Rust seed `bin/simple` v1.0.0-rc.1, Windows): the entry's minimal repro — `ByteBuffer.new()`, `push_byte` of `0xde 0xad 0xbe 0xef`, then `freeze()` — gives `len=4` and reads back `222 173 190 239`, i.e. exactly `0xde 0xad 0xbe 0xef`. No garbage values.
+- **inferred**: the original driver was `SIMPLE_BOOTSTRAP_DRIVER=bin/release/x86_64-unknown-linux-gnu/simple_seed`, a Linux artifact not present here, so this is "does not reproduce on the current Windows seed" rather than a located fix.
+- Note found in the same run and filed against its own entry, not this one: `for b in span:` over the frozen `ByteSpan` still iterates zero times — see `for_in_custom_struct_no_iterator_protocol_2026-06-15.md`, which remains OPEN. The byte VALUES are correct; only iteration is missing.
 
 **ID:** bytebuffer_push_byte_freeze_wrong_interp_2026-06-15
 **Filed:** 2026-06-15
-**Severity:** P1 — silent data corruption; produces wrong bytes with no error
+**Status:** CLOSED 2026-09-13 (does not reproduce). **Severity:** P1 — silent data corruption; produces wrong bytes with no error
 **Component:** interpreter / src/lib/common/bytes/span.spl `ByteBuffer.push_byte`
 **Driver:** `SIMPLE_BOOTSTRAP_DRIVER=bin/release/x86_64-unknown-linux-gnu/simple_seed`
 
@@ -84,21 +87,3 @@ val span = ByteSpan.new(arr)
 
 This is the pattern used in `ctypes.spl`'s `_hex_to_bytes` helper (see comment in
 that file). Confirmed working.
-
-## Re-verification 2026-08-17 (stdlib slice G, content-classified)
-
-**NOT-REPRODUCED — the described corruption is gone.** Direct interpreter probe
-(`SIMPLE_EXECUTION_MODE=interpreter bin/simple run`, rc=0) over
-`ByteBuffer.new()` + `push_byte(0,1,127,128,255,256)` + `freeze()`:
-
-```
-len=6
-bytes=0,1,127,128,255,0,
-```
-
-All six values are exactly correct (`256` -> `0` is the specified low-8-bits
-truncation, not corruption). Current source explains why:
-`src/lib/common/bytes/span.spl:152-154` now stores `(v & 0xFF).to_u8()` into
-`self.buf`, and `freeze()` (:171) builds `ByteSpan(data: self.buf, off: 0,
-span_len: self.buf.len())` with no re-encoding. The raw-byte store fix referenced
-by the sibling byte_span doc covers this path too. Recommend CLOSED.

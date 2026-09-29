@@ -1,4 +1,8 @@
 # MIR merge retype retains earlier COW aliases
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -31,3 +35,4 @@ ownership transfer that demonstrably releases the temporary before retyping.
 Preserve instruction/terminator order, merge placeholder behavior, inferred
 type selection, spans, and result-match semantic markers. Add allocation/COW
 evidence before closing this bug.
+

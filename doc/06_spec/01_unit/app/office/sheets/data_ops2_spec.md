@@ -14,17 +14,21 @@
 ## Scenarios
 
 ### sheet_remove_duplicates: basic dedupe
-_Keeps FIRST occurrence per key combination; case-insensitive keys._
 
 #### removes case-insensitive duplicates and clears the tail
+
+- removes case-insensitive duplicates and clears the tail
+
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 57 lines folded for reproduction.
+Runnable source: 59 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("removes case-insensitive duplicates and clears the tail")
 # Ground truth: (a,1),(b,2),(a,3),(A,4) key col 0 ->
 # keeps (a,1),(b,2); A dup of a (case-insensitive); rows 3-4 cleared
 var sheet = Sheet.new("S1")
@@ -88,13 +92,18 @@ match b4.value:
 
 #### leaves a range with no duplicates unchanged
 
+- leaves a range with no duplicates unchanged
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("leaves a range with no duplicates unchanged")
 var sheet = Sheet.new("S2")
 sheet.set_value("A1", "x")
 sheet.set_value("A2", "y")
@@ -117,13 +126,18 @@ assert_true(a3_text == "z")
 
 #### preserves the header row when has_header is true
 
+- preserves the header row when has_header is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 33 lines folded for reproduction.
+Runnable source: 35 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("preserves the header row when has_header is true")
 var sheet = Sheet.new("S3")
 sheet.set_value("A1", "key")
 sheet.set_value("B1", "val")
@@ -166,13 +180,18 @@ _Multi-column keys, empty-cell keys, invalid key_cols._
 
 #### dedupes on multi-column keys
 
+- dedupes on multi-column keys
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 29 lines folded for reproduction.
+Runnable source: 31 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("dedupes on multi-column keys")
 # (a,1),(a,1),(a,2) keys "0,1" -> keeps (a,1),(a,2)
 var sheet = Sheet.new("S4")
 sheet.set_value("A1", "a")
@@ -208,13 +227,18 @@ match a3.value:
 
 #### treats empty key cells as equal keys
 
+- treats empty key cells as equal keys
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("treats empty key cells as equal keys")
 # A1 empty + B1=1, A2 empty + B2=2, key col 0 -> row 2 is a duplicate
 var sheet = Sheet.new("S5")
 sheet.set_value("B1", "1")
@@ -240,13 +264,18 @@ match b2.value:
 
 #### returns the sheet unchanged on invalid key_cols
 
+- returns the sheet unchanged on invalid key_cols
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("returns the sheet unchanged on invalid key_cols")
 var sheet = Sheet.new("S6")
 sheet.set_value("A1", "a")
 sheet.set_value("A2", "a")
@@ -271,13 +300,18 @@ _Split display text on delimiter into adjacent columns rightward._
 
 #### splits pieces into adjacent columns, first piece in place
 
+- splits pieces into adjacent columns, first piece in place
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 29 lines folded for reproduction.
+Runnable source: 31 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("splits pieces into adjacent columns, first piece in place")
 # Ground truth: ["x,y","p,q,r"] delim "," -> B gets y/q, C gets r
 var sheet = Sheet.new("T1")
 sheet.set_value("A1", "x,y")
@@ -313,13 +347,18 @@ match c1.value:
 
 #### leaves cells without the delimiter untouched
 
+- leaves cells without the delimiter untouched
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("leaves cells without the delimiter untouched")
 var sheet = Sheet.new("T2")
 sheet.set_value("A1", "hello")
 sheet.set_value("B1", "keep")
@@ -338,13 +377,18 @@ assert_true(b1_text == "keep")
 
 #### overwrites existing content in adjacent columns
 
+- overwrites existing content in adjacent columns
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("overwrites existing content in adjacent columns")
 var sheet = Sheet.new("T3")
 sheet.set_value("A1", "x,y")
 sheet.set_value("B1", "OLD")
@@ -360,13 +404,18 @@ assert_true(b1_text == "y")
 
 #### ignores multi-column ranges and empty delimiters
 
+- ignores multi-column ranges and empty delimiters
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("ignores multi-column ranges and empty delimiters")
 var sheet = Sheet.new("T4")
 sheet.set_value("A1", "x,y")
 sheet.set_value("B1", "keep")
@@ -394,13 +443,18 @@ _Group by display text (first-seen order); numeric sums per group._
 
 #### sums values per group with a grand total
 
+- sums values per group with a grand total
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("sums values per group with a grand total")
 # Ground truth: (east,10),(west,20),(east,5) ->
 # ["east: 15","west: 20","Grand Total: 35"]
 var sheet = Sheet.new("U1")
@@ -426,13 +480,18 @@ assert_true(l2 == "Grand Total: 35")
 
 #### excludes non-numeric values from sums
 
+- excludes non-numeric values from sums
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("excludes non-numeric values from sums")
 var sheet = Sheet.new("U2")
 sheet.set_value("A1", "east")
 sheet.set_value("B1", "abc")
@@ -452,13 +511,18 @@ assert_true(l1 == "Grand Total: 5")
 
 #### preserves first-seen group order
 
+- preserves first-seen group order
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("preserves first-seen group order")
 var sheet = Sheet.new("U3")
 sheet.set_value("A1", "gamma")
 sheet.set_value("B1", "1")
@@ -486,13 +550,18 @@ assert_true(l3 == "Grand Total: 10")
 
 #### returns [] for invalid column indexes or range
 
+- returns [] for invalid column indexes or range
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("returns [] for invalid column indexes or range")
 var sheet = Sheet.new("U4")
 sheet.set_value("A1", "east")
 sheet.set_value("B1", "10")
@@ -509,13 +578,18 @@ assert_true(bad_range.len() == 0)
 
 #### does not mutate the sheet
 
+- does not mutate the sheet
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("does not mutate the sheet")
 var sheet = Sheet.new("U5")
 sheet.set_value("A1", "east")
 sheet.set_value("B1", "10")
@@ -543,7 +617,7 @@ match b1.value:
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/office/sheets/data_ops2_spec.spl` |
-| Updated | 2026-08-18 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -566,3 +640,51 @@ Tests covering sheet_remove_duplicates: basic dedupe, sheet_remove_duplicates: k
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `c01db9a7d0f413d52ddd332e7bbd9115cc9ee9c4dd4f9c71975c566ca0d75489`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `c01db9a7d0f413d52ddd332e7bbd9115cc9ee9c4dd4f9c71975c566ca0d75489`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `c01db9a7d0f413d52ddd332e7bbd9115cc9ee9c4dd4f9c71975c566ca0d75489`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/01_unit/app/office/sheets/data_ops2_spec.spl
+mirror: doc/06_spec/01_unit/app/office/sheets/data_ops2_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/app/office/sheets/data_ops2_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/app/office/sheets/data_ops2_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/app/office/sheets/data_ops2_spec.spl:24:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'removes case-insensitive duplicates and clears the tail' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/office/sheets/data_ops2_spec.spl:85:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'leaves a range with no duplicates unchanged' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/office/sheets/data_ops2_spec.spl:105:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'preserves the header row when has_header is true' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

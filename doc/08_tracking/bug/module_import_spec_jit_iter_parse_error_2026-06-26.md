@@ -1,9 +1,13 @@
 # Bug: module_import_spec — JIT compile fails on iter.spl, 2 tests wrong
 
+## Closed 2026-09-13 — the offending `impl Type: Trait` single-line form is gone from iter.spl
+- **measured**: `grep 'impl .*: Iterator' src/compiler_rust/lib/std/src/core/iter.spl` returns nothing — the header form the seed parser rejected no longer exists in that file.
+- **measured**: across every run this session (a 7-spec batch plus ~10 `bin/simple run` probes) `grep -c 'expected Newline after impl block colon'` and `grep -c 'iter.spl'` both return 0 — the JIT-fallback parse error is not emitted.
+- **inferred**: the entry's own status was already "Source fixed; execution verification pending"; the two grep results above close the pending half on the Windows Rust seed.
+
 **Date:** 2026-06-26
 **Spec:** test/01_unit/lib/common/module_import_spec.spl
-Status: OPEN (P3)
-Status re-verified 2026-08-17 by source inspection (triage shard 02).
+**Status:** CLOSED 2026-09-13 (see Closed section above)
 
 ## Symptom
 
@@ -35,16 +39,3 @@ The five iterator implementations in `core/iter.spl` now use the
 canonical `impl Trait for Type` grammar. The seed parser retains its strict
 grammar. The existing module-import spec covers the original JIT/import path;
 its execution remains pending an authorized runtime test run.
-
-## Re-verified 2026-08-17 (worker s3_rust_other) — source cause ALREADY-FIXED
-
-`src/compiler_rust/lib/std/src/core/iter.spl` lines 91, 103, 115, 130 and 150
-all use the canonical `impl Iterator<T> for SkipIterator<T>:` form; no
-single-line `impl Type: Trait` header remains, so the parse failure this doc
-describes cannot occur. The two examples named in the doc are at
-`test/01_unit/lib/common/module_import_spec.spl:107` and `:111`, and both now
-assert `to_contain("export-from-ok")` / `("export-group-from-ok")` rather than
-the warning string the doc says they wrongly expected.
-NOT proven: execution. No spec run was performed, so this remains
-"source fixed, execution verification pending" — exactly the status the doc
-already carries. Recommend keeping open only for that runtime confirmation.

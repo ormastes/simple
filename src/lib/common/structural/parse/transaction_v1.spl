@@ -1,0 +1,138 @@
+"""Private speculative state with arena marks and overwrite journals.
+
+Choice records scalar lengths and a bounded call-stack copy. Appends are undone
+by truncation; edits to existing nodes or reused value slots are replayed in
+reverse order. Fuel remains outside checkpoints and no callbacks run.
+"""
+use std.common.structural.parse.program_output_v1.{
+    ParseProgramOutputV1, ParseProgramNodeV1, ParseProgramDiagnosticV1, parse_program_output_copy_v1
+}
+
+pub struct ParseNodeOverwriteV1:
+    index: i64
+    previous: ParseProgramNodeV1
+
+pub struct ParseValueOverwriteV1:
+    index: i64
+    previous: i64
+
+pub class ParseSemanticStateV1:
+    # Reference semantics are confined to one VM invocation.
+    nodes: [ParseProgramNodeV1]
+    children: [i64]
+    diagnostics: [ParseProgramDiagnosticV1]
+    values: [i64]
+    node_overwrites: [ParseNodeOverwriteV1]
+    value_overwrites: [ParseValueOverwriteV1]
+    journal_active: bool
+    value_count: i64
+    last_start: i64
+    last_count: i64
+    last_valid: bool
+
+pub struct ParseCallFrameV1:
+    return_pc: i64
+    rule: i64
+    choice_depth: i64
+
+pub struct ParseCheckpointV1:
+    resume_pc: i64
+    rule: i64
+    cursor: i64
+    calls: [ParseCallFrameV1]
+    node_count: i64
+    child_count: i64
+    diagnostic_count: i64
+    value_len: i64
+    value_count: i64
+    node_overwrite_count: i64
+    value_overwrite_count: i64
+    last_start: i64
+    last_count: i64
+    last_valid: bool
+
+pub fn parse_semantic_empty_v1() -> ParseSemanticStateV1:
+    ParseSemanticStateV1(nodes: [], children: [], diagnostics: [], values: [],
+        node_overwrites: [], value_overwrites: [], journal_active: false, value_count: 0,
+        last_start: 0, last_count: 0, last_valid: false)
+
+pub fn parse_semantic_roots_v1(state: ParseSemanticStateV1) -> [i64]:
+    var roots: [i64] = []
+    var i = 0
+    while i < state.value_count:
+        roots.push(state.values[i])
+        i = i + 1
+    roots
+
+pub fn parse_semantic_output_v1(state: ParseSemanticStateV1) -> ParseProgramOutputV1:
+    ParseProgramOutputV1(nodes: state.nodes, children: state.children,
+        diagnostics: state.diagnostics, roots: parse_semantic_roots_v1(state))
+
+pub fn parse_semantic_push_v1(mut state: ParseSemanticStateV1, value: i64):
+    # Capacity is checked by the action owner. Reuse popped stack storage.
+    if state.value_count < state.values.len():
+        if state.journal_active:
+            state.value_overwrites.push(ParseValueOverwriteV1(index: state.value_count,
+                previous: state.values[state.value_count]))
+        state.values[state.value_count] = value
+    else:
+        state.values.push(value)
+    state.value_count = state.value_count + 1
+
+pub fn parse_semantic_copy_v1(state: ParseSemanticStateV1) -> ParseSemanticStateV1:
+    val copied = parse_program_output_copy_v1(parse_semantic_output_v1(state))
+    ParseSemanticStateV1(nodes: copied.nodes, children: copied.children,
+        diagnostics: copied.diagnostics, values: copied.roots,
+        node_overwrites: [], value_overwrites: [], journal_active: false,
+        value_count: state.value_count,
+        last_start: state.last_start, last_count: state.last_count, last_valid: state.last_valid)
+
+pub fn parse_calls_prefix_v1(calls: [ParseCallFrameV1], count: i64) -> [ParseCallFrameV1]:
+    var out: [ParseCallFrameV1] = []
+    var i = 0
+    while i < count:
+        out.push(calls[i])
+        i = i + 1
+    out
+
+pub fn parse_checkpoint_v1(resume_pc: i64, rule: i64, cursor: i64,
+    calls: [ParseCallFrameV1], state: ParseSemanticStateV1) -> ParseCheckpointV1:
+    ParseCheckpointV1(resume_pc: resume_pc, rule: rule, cursor: cursor,
+        calls: parse_calls_prefix_v1(calls, calls.len()), node_count: state.nodes.len(),
+        child_count: state.children.len(), diagnostic_count: state.diagnostics.len(),
+        value_len: state.values.len(),
+        value_count: state.value_count, node_overwrite_count: state.node_overwrites.len(),
+        value_overwrite_count: state.value_overwrites.len(), last_start: state.last_start,
+        last_count: state.last_count, last_valid: state.last_valid)
+
+pub fn parse_semantic_rollback_v1(mut state: ParseSemanticStateV1,
+    checkpoint: ParseCheckpointV1):
+    while state.node_overwrites.len() > checkpoint.node_overwrite_count:
+        val entry = state.node_overwrites[state.node_overwrites.len() - 1]
+        state.nodes[entry.index] = entry.previous
+        state.node_overwrites.pop()
+    while state.value_overwrites.len() > checkpoint.value_overwrite_count:
+        val entry = state.value_overwrites[state.value_overwrites.len() - 1]
+        state.values[entry.index] = entry.previous
+        state.value_overwrites.pop()
+    while state.nodes.len() > checkpoint.node_count: state.nodes.pop()
+    while state.children.len() > checkpoint.child_count: state.children.pop()
+    while state.diagnostics.len() > checkpoint.diagnostic_count: state.diagnostics.pop()
+    while state.values.len() > checkpoint.value_len: state.values.pop()
+    state.value_count = checkpoint.value_count
+    state.last_start = checkpoint.last_start
+    state.last_count = checkpoint.last_count
+    state.last_valid = checkpoint.last_valid
+
+pub fn parse_semantic_clear_journal_v1(mut state: ParseSemanticStateV1):
+    state.node_overwrites = []
+    state.value_overwrites = []
+    state.journal_active = false
+
+export ParseSemanticStateV1, ParseCallFrameV1, ParseCheckpointV1, ParseNodeOverwriteV1
+export ParseValueOverwriteV1
+export parse_semantic_empty_v1, parse_semantic_copy_v1, parse_checkpoint_v1
+export parse_calls_prefix_v1
+export parse_semantic_rollback_v1, parse_semantic_clear_journal_v1
+
+export parse_semantic_roots_v1, parse_semantic_output_v1, parse_semantic_push_v1

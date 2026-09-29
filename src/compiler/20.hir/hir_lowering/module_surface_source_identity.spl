@@ -135,9 +135,30 @@ pub fn module_surface_index_for_source(registry: ModuleSurfacesByName, source: S
     # exact miss, not permission for an O(surface-count) compatibility scan.
     -1
 
+fn module_surface_strip_verbatim_prefix(path: text) -> text:
+    # Windows canonicalization (Rust `Path::canonicalize`) yields extended-length
+    # paths: `\\?\C:\...` / `\\?\UNC\server\share\...`. After the backslash
+    # replace they read `//?/C:/...` / `//?/UNC/...`, and the empty-segment
+    # collapse below would mangle them to `/?/C:/...`. Rewrite them to the plain
+    # `C:/...` / `//server/share/...` spellings so one file has one canonical
+    # identity. Tightly gated on the drive-letter/UNC shape: a Unix realpath
+    # never begins with `//?/`, so this is a byte-for-byte no-op there.
+    if not path.starts_with("//?/"):
+        return path
+    val rest = path.substring(4)
+    if rest.starts_with("UNC/"):
+        return "/" + rest.substring(3)
+    if rest.len() >= 2 and rest.char_code_at(1) == 58:
+        val drive = rest.char_code_at(0)
+        val is_alpha = (drive >= 65 and drive <= 90) or (drive >= 97 and drive <= 122)
+        if is_alpha and (rest.len() == 2 or rest.char_code_at(2) == 47):
+            return rest
+    path
+
 pub fn module_surface_canonical_path(path: text) -> text:
     val physical = rt_path_absolute(path)
-    val normalized = (if physical != "": physical else: path).replace("\\", "/")
+    val normalized = module_surface_strip_verbatim_prefix(
+        (if physical != "": physical else: path).replace("\\", "/"))
     val absolute = normalized.starts_with("/")
     var parts: [text] = []
     for part in normalized.split("/"):

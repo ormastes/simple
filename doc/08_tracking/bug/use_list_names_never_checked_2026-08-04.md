@@ -1,4 +1,8 @@
 # The braced name list in a `use` declaration was never checked
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** PARTIALLY FIXED — reporting landed, narrowing deliberately deferred
 **Filed:** 2026-08-04
@@ -255,3 +259,4 @@ startup warnings — which reads exactly like a clean corpus.
 4. **The `load_module_selective` fast path** (`module_loader_core.spl:417-426`) can mark a
    module loaded without reading it, when the braced names collide with names another
    module already registered. Untested and unmeasured.
+

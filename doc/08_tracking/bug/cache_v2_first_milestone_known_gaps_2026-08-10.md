@@ -151,3 +151,8 @@ lease.spl present in tree". Filesystem check:
 
 So the lease half of the milestone is not merely gapped, it does not exist. Row stays
 OPEN; the doc's own Status ("OPEN - recorded, not fixed") is accurate.
+
+## Triage 2026-09-13
+Reconfirmed: milestone-tracking record for cache v2 work (tier router,
+GC/leases, CompileInterfaceDigest, fixtures landed; other gaps tracked).
+Not a single fixable defect. Left as-is, no code change attempted.

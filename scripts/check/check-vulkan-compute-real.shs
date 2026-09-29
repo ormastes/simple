@@ -1,0 +1,57 @@
+#!/bin/sh
+# Fail when a binary advertises Vulkan but cannot actually do Vulkan compute.
+#
+# `default = []` in compiler/Cargo.toml means a normal build has no `vulkan`
+# feature. In that build `rt_vulkan_is_available` / `_init` / `_device_count`
+# still work -- they run over interpreter_extern/gpu.rs's own dlopen path,
+# independent of the feature -- while every buffer and dispatch entry point
+# compiles to a `#[cfg(not(feature = "vulkan"))]` stub returning 0.
+#
+# The result is the worst kind of failure: the probe is green, the device
+# enumerates, a buffer handle comes back non-zero, and every transfer silently
+# does nothing. bench_2d_vulkan.spl printed its banner and exited 0 on a host
+# where Vulkan is fully functional, which reads as a broken benchmark rather
+# than a binary that cannot do Vulkan. See
+# doc/08_tracking/bug/vulkan_feature_off_makes_gpu_benchmarks_silently_noop_2026-09-13.md
+#
+# Detection: a feature-enabled build links ash's real entry points. A
+# feature-disabled one does not. Verdict is the last line of stdout:
+#   PASS — vulkan compute is real in <binary>
+#   FAIL — <binary> advertises Vulkan but its compute path is stubbed
+#   ERROR — nothing was checked
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+bin=${VULKAN_CHECK_BINARY:-$root/src/compiler_rust/target/release/simple.exe}
+[ -f "$bin" ] || bin=$root/src/compiler_rust/target/release/simple
+
+nm=$(command -v llvm-nm || command -v nm || true)
+
+if [ ! -f "$bin" ]; then
+    echo "ERROR — nothing was checked (no built binary at $bin)"
+    exit 2
+fi
+if [ -z "$nm" ]; then
+    # Absence of a symbol reader is absence of evidence, never a pass.
+    echo "ERROR — nothing was checked (no llvm-nm/nm on PATH)"
+    exit 2
+fi
+
+syms=$("$nm" "$bin" 2>/dev/null || true)
+if [ -z "$syms" ]; then
+    echo "ERROR — nothing was checked (no symbols readable from $bin)"
+    exit 2
+fi
+
+# ash's device/instance loaders are present only in a --features vulkan build.
+ash_hits=$(printf '%s\n' "$syms" | grep -c -i "ash.*DeviceFn\|ash.*InstanceFn\|gpu_allocator" || true)
+
+if [ "${ash_hits:-0}" -lt 1 ]; then
+    echo "FAIL — $bin advertises Vulkan but its compute path is stubbed"
+    echo "       rebuild with: cargo build --release --bin simple --features vulkan"
+    echo "FAIL — vulkan compute is NOT real in this binary"
+    exit 1
+fi
+
+echo "PASS — vulkan compute is real in $bin"
+exit 0

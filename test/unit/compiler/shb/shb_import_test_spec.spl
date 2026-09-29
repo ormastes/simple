@@ -1,5 +1,81 @@
-# Minimal test to check import resolution for shb modules
+"""
+## Purpose and audience
+Pins the import-resolution contract of the SHB (Simple Header Binary) module
+family at `src/compiler/80.driver/shb/` for the driver engineers who own the
+cache/watcher consumers of that family. A spec file cannot import
+`compiler.shb.*` directly (module roots are the stdlib plus the spec's own
+directory), so "loads without error" is exercised as a source contract: every
+module file must be readable at its canonical path and carry its signature
+symbols.
+## Operator workflow
+Run this file alone with the seed runner:
+`./src/compiler_rust/target/bootstrap/simple run test/unit/compiler/shb/shb_import_test_spec.spl`
+## Compatibility and limitations
+The scenarios read shipped source text through `rt_file_read_text` instead of
+linking the modules; a rename or move of the shb family fails here by design.
+Runtime behaviour of the modules themselves is covered by shb_roundtrip_spec
+in the same directory, not here.
+## Verification guidance and troubleshooting
+A missing-file failure means the shb family moved or was renamed — update the
+canonical paths here and in `src/compiler/80.driver/cache/` together. A
+missing-namespace failure means a consumer stopped importing through the
+declared `compiler.shb` path and is resolving it by some private route.
+"""
+# Lifecycle: doc/01_research/compiler/cache/global_content_addressed_cache_audit_2026-07-24.md ;
+# doc/03_plan/compiler/forwarding/zero_cost_layers_c0_c5_staged_implementation_plan_2026-08-07.md ;
+# doc/04_architecture/language/simple_feature_module.md ;
+# doc/05_design/compiler/incremental_build/per_lane_private_caches.md
+# @manual_section: shb_import_resolution
 
-describe "SHB Import Test":
-    it "loads without error":
-        expect(1).to_equal(1)
+use std.spec.{describe, it, expect, step}
+
+extern fn rt_file_read_text(path: text) -> text?
+
+describe "SHB import resolution":
+    it "loads every shb module source without error":
+        # @req REQ-SHB-IMPORT-001
+        # @capture(statistics): per-module source contract verdicts
+        step("Read all seven shb module files at their canonical paths")
+        val shb_types_source = rt_file_read_text("src/compiler/80.driver/shb/shb_types.spl") ?? ""
+        val shb_writer_source = rt_file_read_text("src/compiler/80.driver/shb/shb_writer.spl") ?? ""
+        val shb_reader_source = rt_file_read_text("src/compiler/80.driver/shb/shb_reader.spl") ?? ""
+        val shb_string_table_source = rt_file_read_text("src/compiler/80.driver/shb/shb_string_table.spl") ?? ""
+        val shb_hash_source = rt_file_read_text("src/compiler/80.driver/shb/shb_hash.spl") ?? ""
+        val shb_extractor_source = rt_file_read_text("src/compiler/80.driver/shb/shb_extractor.spl") ?? ""
+        val shb_cache_source = rt_file_read_text("src/compiler/80.driver/shb/shb_cache.spl") ?? ""
+        val keeps_magic_constants = shb_types_source.contains("SHB_MAGIC_0")
+        val keeps_write_entry_point = shb_writer_source.contains("fn shb_write(")
+        val keeps_read_entry_point = shb_reader_source.contains("fn read_all()")
+        val keeps_string_table_builder = shb_string_table_source.contains("class ShbStringTable")
+        val keeps_hash_entry_point = shb_hash_source.contains("fn shb_source_hash(")
+        val keeps_extract_entry_point = shb_extractor_source.contains("fn shb_extract(")
+        val keeps_cache_config = shb_cache_source.contains("struct ShbCacheConfig")
+        expect(keeps_magic_constants).to_equal(true)  # oracle: shb_types.spl resolves and carries the format constants
+        expect(keeps_write_entry_point).to_equal(true)  # oracle: shb_writer.spl resolves and exposes its write entry point
+        expect(keeps_read_entry_point).to_equal(true)  # oracle: shb_reader.spl resolves and exposes its read entry point
+        expect(keeps_string_table_builder).to_equal(true)  # oracle: shb_string_table.spl resolves and exposes the builder class
+        expect(keeps_hash_entry_point).to_equal(true)  # oracle: shb_hash.spl resolves and exposes the source hash entry point
+        expect(keeps_extract_entry_point).to_equal(true)  # oracle: shb_extractor.spl resolves and exposes the extraction entry point
+        expect(keeps_cache_config).to_equal(true)  # oracle: shb_cache.spl resolves and exposes its configuration struct
+
+    it "resolves shb modules through the declared compiler.shb namespace":
+        # @req REQ-SHB-IMPORT-001
+        # @capture(statistics): consumer import-path contract verdicts
+        step("Pin the namespace path real consumers import shb through")
+        val watcher_client_source = rt_file_read_text("src/compiler/80.driver/watcher/watcher_client.spl") ?? ""
+        val lazy_section_source = rt_file_read_text("src/compiler/80.driver/cache/lazy_section.spl") ?? ""
+        val keeps_types_namespace_import = watcher_client_source.contains("use compiler.shb.shb_types")
+        val keeps_writer_namespace_import = watcher_client_source.contains("use compiler.shb.shb_writer")
+        val keeps_lazy_section_types_import = lazy_section_source.contains("use compiler.shb.shb_types")
+        expect(keeps_types_namespace_import).to_equal(true)  # oracle: the watcher resolves types through the declared compiler.shb namespace
+        expect(keeps_writer_namespace_import).to_equal(true)  # oracle: the watcher resolves the writer through the same namespace
+        expect(keeps_lazy_section_types_import).to_equal(true)  # oracle: the cache lane resolves types through the same namespace
+
+    it "reports a missing shb module as absent instead of empty content":
+        # Adverse path: a module name that does not exist must resolve to nil,
+        # never to an empty-but-present file, so consumers fail loudly.
+        # @req REQ-SHB-IMPORT-002
+        # @capture(statistics): missing-module verdict
+        step("Read a shb module path that does not exist")
+        val missing_module_source = rt_file_read_text("src/compiler/80.driver/shb/shb_nonexistent_module.spl")
+        expect(missing_module_source).to_be_nil()  # oracle: a nonexistent module file is absent, not empty content

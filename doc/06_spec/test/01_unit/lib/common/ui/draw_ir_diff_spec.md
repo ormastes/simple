@@ -28,7 +28,7 @@ draw_ir_diff_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 3 | 3 | 0 | 0 |
+| 2 | 2 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -166,14 +166,6 @@ expect(json).to_contain("\"state\":\"removed\"")
 
 </details>
 
-#### reports shaped glyph-run-only changes
-
-- baseline and current commands keep text, geometry, color, and font style
-- glyph IDs, x/y positions, clusters, validity, and unequal lengths mutate one
-  at a time
-   - Expected: every isolated mutation yields `changed_count == 1`
-   - Expected: node state equals `changed` while `text_changed` remains false
-
 ## At a Glance
 
 | Field | Value |
@@ -181,8 +173,8 @@ expect(json).to_contain("\"state\":\"removed\"")
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/01_unit/lib/common/ui/draw_ir_diff_spec.spl` |
-| Updated | 2026-07-25 |
-| Generator | Manually synchronized; executable docgen refresh pending |
+| Updated | 2026-06-01 |
+| Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
@@ -193,8 +185,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 3 |
-| Active scenarios | 3 |
+| Total scenarios | 2 |
+| Active scenarios | 2 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

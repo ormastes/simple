@@ -1,7 +1,8 @@
 # Bootstrap erased-text `rfind` loses Optional not-found semantics
+## Open 2026-09-16 — needs owner triage
 
-Status: OPEN (P2)
-Status re-verified 2026-08-17 by source inspection (triage shard 00).
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -24,17 +25,3 @@ the canonical Optional representation. Add executable found and missing-needle
 coverage before removing TODO 559. Do not add a second runtime string-search
 owner or a caller-specific constant.
 
-## 2026-08-17 content triage (w0001 ZCLAIMED, source-inspection only)
-
-Verdict: STALE-REF
-
-The cited file `src/compiler/50.mir/mir_lowering_stmts.spl` (2782 lines) contains
-no occurrence of `rfind`. The `rfind` lowering now lives in:
-
-```
-src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl
-src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl
-```
-
-Re-verify the Optional not-found ABI claim against those two files.
-Owner path: src/compiler/50.mir/**.

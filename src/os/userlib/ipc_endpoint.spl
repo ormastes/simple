@@ -1,0 +1,131 @@
+# Typed userspace ABI for named SimpleOS IPC endpoints.
+#
+# Endpoint names are copied by the kernel and checked against concrete
+# IpcListen/IpcConnect capabilities.  These helpers intentionally expose no
+# anonymous or hash-based port creation interface.
+
+use os.userlib.syscall_raw.{syscall}
+
+extern fn rt_string_data(s: text) -> i64
+
+pub val IPC_CREATE_PORT: u64 = 22u64
+pub val IPC_CONNECT: u64 = 23u64
+pub val IPC_SEND_OWNED_V1: u64 = 132u64
+pub val IPC_RECV_OWNED_V1: u64 = 133u64
+pub val IPC_ENDPOINT_NAME_MAX_BYTES: u64 = 63u64
+pub val IPC_OWNED_V1_MAX_PAYLOAD_BYTES: u64 = 4096u64
+pub val IPC_OWNED_V1_HEADER_BYTES: u64 = 32u64
+pub val IPC_OWNED_V1_REPLY_HEADER_FLAG: u32 = 3u32
+# The syscall ABI has five argument registers after the syscall ID.  The
+# transport therefore encodes reply intent in the method word; the kernel
+# strips this bit before publishing the message method and writes Reply|Async
+# into the copied header flags.
+pub val IPC_OWNED_V1_REPLY_METHOD_FLAG: u32 = 0x80000000u32
+
+fn _valid_endpoint_name(name: text) -> bool:
+    name.len() > 0 and name.len() <= IPC_ENDPOINT_NAME_MAX_BYTES
+
+pub fn ipc_create_named_port(name: text) -> Result<u64, text>:
+    """Create the exact endpoint named in a service's IpcListen grant."""
+    if not _valid_endpoint_name(name):
+        return Err("IPC endpoint name must contain 1..63 bytes")
+    val result = syscall(IPC_CREATE_PORT, rt_string_data(name) as u64, name.len() as u64, 0u64, 0u64, 0u64)
+    if result < 0:
+        return Err("IPC create endpoint failed with code {result}")
+    Ok(result as u64)
+
+pub fn ipc_connect_named_port(name: text) -> Result<u64, text>:
+    """Resolve an endpoint after the kernel checks IpcConnect(name)."""
+    if not _valid_endpoint_name(name):
+        return Err("IPC endpoint name must contain 1..63 bytes")
+    val result = syscall(IPC_CONNECT, rt_string_data(name) as u64, name.len() as u64, 0u64, 0u64, 0u64)
+    if result < 0:
+        return Err("IPC connect endpoint failed with code {result}")
+    Ok(result as u64)
+
+pub fn ipc_send_owned_v1(destination: u64, method: u32, payload: [u8], source: u64) -> Result<bool, text>:
+    """Send a bounded copied request from an endpoint owned by this task.
+
+    The kernel authenticates the sender against its current task and copies
+    payload bytes before returning. `source` must be a port previously created
+    by this task; it is never a caller-supplied process identity.
+    """
+    if destination == 0u64 or source == 0u64:
+        return Err("IPC owned send requires source and destination endpoints")
+    if payload.len() as u64 > IPC_OWNED_V1_MAX_PAYLOAD_BYTES:
+        return Err("IPC payload exceeds the v1 4096-byte limit")
+    val result = syscall(
+        IPC_SEND_OWNED_V1, destination, method as u64, payload.ptr() as u64,
+        payload.len() as u64, source
+    )
+    if result < 0:
+        return Err("IPC owned send failed with code {result}")
+    Ok(true)
+
+pub fn ipc_reply_owned_v1(destination: u64, method: u32, payload: [u8], source: u64) -> Result<bool, text>:
+    """Send a copied reply which consumes a kernel-issued reply permit.
+
+    A reply cannot substitute for a general endpoint connection: the kernel
+    accepts it only after this endpoint received a request from `destination`.
+    The flag also prevents reply receipt from minting another permit.
+    """
+    if destination == 0u64 or source == 0u64:
+        return Err("IPC owned reply requires source and destination endpoints")
+    if payload.len() as u64 > IPC_OWNED_V1_MAX_PAYLOAD_BYTES:
+        return Err("IPC reply payload exceeds the v1 4096-byte limit")
+    if (method & IPC_OWNED_V1_REPLY_METHOD_FLAG) != 0u32:
+        return Err("IPC reply method uses reserved transport flag")
+    val encoded_method = method | IPC_OWNED_V1_REPLY_METHOD_FLAG
+    val result = syscall(
+        IPC_SEND_OWNED_V1, destination, encoded_method as u64, payload.ptr() as u64,
+        payload.len() as u64, source
+    )
+    if result < 0:
+        return Err("IPC owned reply failed with code {result}")
+    Ok(true)
+
+pub fn ipc_recv_owned_v1(endpoint: u64) -> Result<[u8], text>:
+    """Receive one nonblocking copied IPC record for an endpoint we own.
+
+    A successful result contains the fixed 32-byte v1 header followed by the
+    payload. An empty queue reports an error code from the kernel, so callers
+    can yield or wait without treating absence as a fabricated message.
+    """
+    if endpoint == 0u64:
+        return Err("IPC owned receive requires an endpoint")
+    var buffer: [u8] = []
+    var i: u64 = 0u64
+    while i < IPC_OWNED_V1_HEADER_BYTES + IPC_OWNED_V1_MAX_PAYLOAD_BYTES:
+        buffer.push(0u8)
+        i = i + 1u64
+    val result = syscall(
+        IPC_RECV_OWNED_V1, endpoint, buffer.ptr() as u64, buffer.len() as u64,
+        0u64, 0u64
+    )
+    if result < 0:
+        return Err("IPC owned receive failed with code {result}")
+    if result as u64 > buffer.len() as u64:
+        return Err("IPC owned receive returned an invalid byte count")
+    Ok(buffer.slice(0u64, result as u64))
+
+pub fn ipc_recv_owned_v1_into(endpoint: u64, buffer: [u8]) -> Result<u64, text>:
+    """Receive one copied record into caller-owned storage.
+
+    Services that dispatch directly from a fixed receive arena use this form
+    to avoid a second copy after the kernel's bounded queue copy. The buffer
+    must hold at least the 32-byte v1 header and is never retained by the
+    kernel.
+    """
+    if endpoint == 0u64:
+        return Err("IPC owned receive requires an endpoint")
+    if buffer.len() as u64 < IPC_OWNED_V1_HEADER_BYTES:
+        return Err("IPC owned receive buffer is smaller than the v1 header")
+    val result = syscall(
+        IPC_RECV_OWNED_V1, endpoint, buffer.ptr() as u64, buffer.len() as u64,
+        0u64, 0u64
+    )
+    if result < 0:
+        return Err("IPC owned receive failed with code {result}")
+    if result as u64 > buffer.len() as u64:
+        return Err("IPC owned receive returned an invalid byte count")
+    Ok(result as u64)

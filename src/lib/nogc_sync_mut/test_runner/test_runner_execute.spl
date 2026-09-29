@@ -14,13 +14,15 @@
 #   - test_runner_execute.spl (this file): core execution modes (interpreter, SMF, native, safe)
 
 use std.test_runner.test_runner_types.{TestFileResult, TestOptions, TEST_OUTPUT_CAPTURE_BYTES}
+export use std.nogc_sync_mut.test_runner.resource_policy.{safe_mode_caps}
+use compiler.frontend.core.source_facts.{simple_code_lines, simple_string_continuation_lines}
 use std.test_runner.test_runner_files.{strip_ansi, read_file_content}
 use std.test_runner.test_runner_fork.{run_test_file_fork}
 use std.test_runner.test_runner_coverage.{record_coverage_sdn, record_compiler_decision_manifest_sdn}
 use std.test_runner.test_runner_metrics.{test_resource_class, test_execution_cohort_id}
-use std.io.{file_exists, file_write, file_delete}
-use std.io.{env_set, env_get}
-use std.io.{random_hex}
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_write, file_delete}
+use std.nogc_sync_mut.io.env_ops.{env_set, env_get}
+use nogc_sync_mut.io.crypto_sffi.{random_hex as test_runner_random_hex}
 use std.common.crypto.sha256.{sha256_text}
 use std.nogc_sync_mut.io.file_ops.{file_size_raw, file_modified_time}
 use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
@@ -61,7 +63,9 @@ fn _run_scoped_child(resource_class: ExecutionResourceClass, cmd: text, args: [t
     val effective_memory = if memory_bytes > 0: memory_bytes elif enforce_class_defaults: defaults.max_tree_charge_bytes else: 0
     val effective_cpu = if cpu_ms > 0: cpu_ms elif enforce_class_defaults: defaults.max_cpu_ms else: 0
     val effective_fds = if max_fds > 0: max_fds elif enforce_class_defaults: defaults.max_fds else: 0
-    val effective_pids = if max_pids > 0: max_pids elif enforce_class_defaults: defaults.max_pids else: 0
+    # The caller has already resolved the process policy. Zero means inherit
+    # the host limit, including when the other class defaults remain enabled.
+    val effective_pids = max_pids
     val budget = ResourceBudget(
         max_wall_ms: timeout_ms, max_cpu_ms: effective_cpu,
         max_tree_charge_bytes: effective_memory, max_direct_child_rss_bytes: effective_memory,
@@ -204,6 +208,7 @@ fn run_test_file_interpreter(file_path: text, options: TestOptions) -> TestFileR
     # Session setup phase — not counted toward test duration
     val setup_start = time_now_unix_micros()
     val binary = find_simple_binary()
+    print "[diag] resolved child binary = " + binary
     # Child `run <file>` must execute in interpreter mode to load BDD test
     # intrinsics (`describe`/`it`/`expect`). Without this, `simple test
     # --mode=interpreter` can still dispatch a child in compile mode,
@@ -471,6 +476,8 @@ fn spipe_inline_helpers() -> text:
     "    expect false\n\n" +
     "fn fail_test(message: text):\n" +
     "    fail_assertion(message)\n\n" +
+    "fn fail(message: text):\n" +
+    "    fail_assertion(message)\n\n" +
     "fn assert_eq(a, b):\n" +
     "    expect a == b\n\n" +
     "fn assert_ne(a, b):\n" +
@@ -649,6 +656,41 @@ fn spipe_brace_delta(line: text) -> i64:
         i = i + 1
     delta
 
+fn spipe_open_bracket_delta(line: text) -> i64:
+    """Net count of unclosed `[`/`(`/`{` on one line.
+
+    String literals and `#` comments are skipped so a bracket inside spec
+    prose (e.g. `it "matrix[0] is zero":`) does not shift the depth.
+    Used to keep a multi-line top-level declaration such as
+    `val XS: [text] = [` ... `]` whole at module scope: without it the
+    closing `]` (at column 0, and not itself a declaration keyword) was
+    swept into the generated `fn main()`, leaving the module-scope list
+    literal unterminated -> "parse: expected RBracket, found Val".
+    """
+    var delta = 0
+    var i = 0
+    var in_str = false
+    var quote = ""
+    while i < line.len():
+        val ch = line.slice(i, i + 1)
+        if in_str:
+            if ch == "\\":
+                i = i + 2
+                continue
+            if ch == quote:
+                in_str = false
+        elif ch == "\"" or ch == "'":
+            in_str = true
+            quote = ch
+        elif ch == "#":
+            break
+        elif ch == "[" or ch == "(" or ch == "{":
+            delta = delta + 1
+        elif ch == "]" or ch == ")" or ch == "}":
+            delta = delta - 1
+        i = i + 1
+    delta
+
 fn spipe_is_top_level_start(trimmed: text) -> bool:
     trimmed.starts_with("fn ") or
     trimmed.starts_with("async fn ") or
@@ -667,7 +709,7 @@ fn spipe_is_top_level_start(trimmed: text) -> bool:
 fn spipe_helpers_used(body: text, top_level: text) -> bool:
     val helper_names: [text] = [
         "step", "pending", "skip", "skip_it", "check", "check_msg",
-        "fail_assertion", "fail_test", "assert_eq", "assert_ne",
+        "fail_assertion", "fail_test", "fail", "assert_eq", "assert_ne",
         "assert_true", "assert_false", "assert_nil", "assert_not_nil",
         "pending_on", "pending_skip", "expect"
     ]
@@ -710,14 +752,28 @@ fn preprocess_spipe_file(file_path: text) -> text:
     var import_parts: [text] = []
     var top_level_parts: [text] = []
     var body_parts: [text] = []
-    var in_docstring = false
+    # Element i pairs with lines[i]. Replaces a docstring flag that toggled on
+    # ANY line starting with `"""`, so a one-line docstring switched it on and
+    # nothing ever switched it off: every later import and top-level
+    # declaration was pushed verbatim into the main body (1,657 spec files
+    # carry a one-line docstring; measured 2026-09-06).
+    val string_continuation = simple_string_continuation_lines(content)
+    val code_lines = simple_code_lines(content)
     var in_top_fn = false
     var top_fn_indent = 0
     var in_import_block = false
     var import_brace_depth = 0
     var skipping_spec_import = false
+    # Unclosed bracket depth of the top-level declaration currently being
+    # collected (a multi-line `val XS: [text] = [` ... `]`). Non-zero keeps
+    # collecting into top_level_parts regardless of indentation.
+    var top_decl_depth = 0
 
-    for raw_line in lines:
+    var line_index = 0
+    while line_index < lines.len():
+        val raw_line = lines[line_index]
+        val fact_index = line_index
+        line_index = line_index + 1
         val infix_line = spipe_rewrite_infix_expect_line(raw_line)
         val line = spipe_rewrite_method_expect_line(infix_line)
         val trimmed = line.trim()
@@ -738,26 +794,11 @@ fn preprocess_spipe_file(file_path: text) -> text:
             continue
 
         # Track multi-line docstrings (""")
-        if trimmed.starts_with("\"\"\""):
-            # Toggle docstring state. A line with """ toggles in/out.
-            # If we see """ at start of line and we're NOT in a function body,
-            # treat docstrings at top level as body (they'll go into main).
-            if in_docstring:
-                in_docstring = false
-                if in_top_fn:
-                    top_level_parts.push(line)
-                else:
-                    body_parts.push("    " + line)
-                continue
-            else:
-                in_docstring = true
-                if in_top_fn:
-                    top_level_parts.push(line)
-                else:
-                    body_parts.push("    " + line)
-                continue
-
-        if in_docstring:
+         # Docstring lines pass through verbatim: a line inside a string opened
+        # earlier, or a line that is itself only a string (opener, closer, or a
+        # one-liner). Fixture-string interiors pass through too, instead of
+        # being classified as declarations.
+        if string_continuation[fact_index] or code_lines[fact_index].trim() == "\"\"":
             if in_top_fn:
                 top_level_parts.push(line)
             else:
@@ -766,13 +807,25 @@ fn preprocess_spipe_file(file_path: text) -> text:
 
         # Import/use statements go before fn main()
         if trimmed.starts_with("import ") or trimmed.starts_with("use "):
-            if trimmed.starts_with("import std.spec") or trimmed.starts_with("use std.spec"):
+            # `std.spec` is the interpreter-only BDD harness and is replaced by
+            # the inline helpers below, so its imports are dropped. The
+            # `std.spec.scenario_governance` module is a plain library, and
+            # `build_coverage_wrapper` injects `use std.spec.scenario_governance
+            # .{scenario_governance_mcdc_exclusions_reset, ..._snapshot}` while
+            # its generated MC/DC dump code calls both — dropping that line
+            # left every MC/DC-lane spec at `Undefined("undefined identifier:
+            # scenario_governance_mcdc_exclusions_snapshot")`.
+            val is_spec_harness_import = (trimmed.starts_with("import std.spec") or
+                trimmed.starts_with("use std.spec")) and
+                not trimmed.starts_with("use std.spec.scenario_governance") and
+                not trimmed.starts_with("import std.spec.scenario_governance")
+            if is_spec_harness_import:
                 val delta = spipe_brace_delta(line)
                 if delta > 0:
                     skipping_spec_import = true
                     import_brace_depth = delta
                 continue
-            import_parts.push(line)
+            import_parts.push(trimmed)
             val delta = spipe_brace_delta(line)
             if delta > 0:
                 in_import_block = true
@@ -786,12 +839,23 @@ fn preprocess_spipe_file(file_path: text) -> text:
                 if spipe_is_top_level_start(trimmed):
                     in_top_fn = true
                     top_fn_indent = 0
+                    top_decl_depth = spipe_open_bracket_delta(line)
+                    if top_decl_depth < 0:
+                        top_decl_depth = 0
                     top_level_parts.push(line)
                     continue
 
         # If we're inside a top-level function definition, keep collecting
         # lines until we see a line at the same or lesser indentation (not blank)
         if in_top_fn:
+            # A declaration whose first line left brackets open continues at
+            # column 0 (the closing `]`), so indentation alone cannot end it.
+            if top_decl_depth > 0:
+                top_decl_depth = top_decl_depth + spipe_open_bracket_delta(line)
+                if top_decl_depth < 0:
+                    top_decl_depth = 0
+                top_level_parts.push(line)
+                continue
             if trimmed.len() == 0:
                 top_level_parts.push("")
                 continue
@@ -805,6 +869,9 @@ fn preprocess_spipe_file(file_path: text) -> text:
                 if current_indent == 0 and spipe_is_top_level_start(trimmed):
                     in_top_fn = true
                     top_fn_indent = 0
+                    top_decl_depth = spipe_open_bracket_delta(line)
+                    if top_decl_depth < 0:
+                        top_decl_depth = 0
                     top_level_parts.push(line)
                     continue
                 # Fall through to body processing
@@ -823,7 +890,7 @@ fn preprocess_spipe_file(file_path: text) -> text:
     if coverage_source_marker != "":
         wrapped = coverage_source_marker + "\n" + wrapped
     val safe_name = file_path.replace("/", "_").replace("\\", "_").replace(":", "_")
-    val tmp_path = _tp_get_temp_dir() + "/spipe_wrapped_" + safe_name[0:safe_name.len() - 4] + "_native.spl"
+    val tmp_path = _tp_get_temp_dir() + "/spipe_wrapped_" + getpid().to_text() + "_" + safe_name[0:safe_name.len() - 4] + "_native.spl"
     file_write(tmp_path, wrapped)
     tmp_path
 
@@ -835,6 +902,148 @@ fn cleanup_native_generated_files(smf_path: text, source_path: text, wrapped_pat
     cleanup_native_generated_file(smf_path, original_path, "", keep_artifacts)
     cleanup_native_generated_file(source_path, original_path, wrapped_path, keep_artifacts)
     cleanup_native_generated_file(cleanup_path, original_path, "", keep_artifacts)
+
+# Graceful MC/DC-on / coverage-on degradation path: run the spec directly via
+# the interpreter (no coverage/MC/DC wrapper, no native SMF compile) when the
+# governance-mandated always-on MC/DC mode -- or the coverage instrumentation
+# wrapper (build_coverage_wrapper) -- cannot get this spec through a
+# standalone compile. This covers BOTH the original "interpreter-only
+# constructs" case (TryOperator, PatternMatch, CollectionLiteral, ...) and the
+# separate class where the WRAPPED/relocated copy itself fails to compile
+# (root-relative imports and indentation/backtick-literal reproduction can
+# break when the instrumented source is written out as a fresh temp file) --
+# both are structural incompatibilities of the instrumentation path, not real
+# test failures, and neither may fail the spec outright. The verdict below is
+# a REAL pass/fail from actually executing the ORIGINAL (unwrapped) spec --
+# this never fabricates a pass and never silently swallows a real failure.
+# `mcdc_skip_reason` is always populated so callers/reporters can surface that
+# instrumentation was skipped for this spec, per-spec, rather than implying it
+# was collected.
+fn run_test_file_mcdc_interpreter_fallback(file_path: text, options: TestOptions, start: i64, fallback_tag: text, reason: text, degrade_token: text = "") -> TestFileResult:
+    val binary = find_simple_binary()
+    val timeout_ms = options.timeout * 1000
+    var run_args: [text] = ["run", file_path]
+    if options.gc_log:
+        run_args.push("--gc-log")
+    if options.gc_off:
+        run_args.push("--gc=off")
+    val scoped_child = _run_scoped_child(test_resource_class(file_path), binary, run_args, timeout_ms, 0, 0, 0, if options.no_limits: 0 else: options.max_procs, not options.no_limits)
+    val stdout = scoped_child.result.stdout
+    val stderr = scoped_child.result.stderr
+    val exit_code = scoped_child.result.exit_code
+    val end = time_now_unix_micros()
+    val duration_ms = (end - start) / 1000
+    print "[{fallback_tag}] {file_path}: {reason}"
+    val base_result = make_result_from_output(file_path, stdout, stderr, exit_code, duration_ms, options.timeout)
+    val evidenced = _attach_scope_evidence(base_result, scoped_child.usage, scoped_child.budget_status, file_path, options, 0, duration_ms)
+    TestFileResult(
+        path: evidenced.path, passed: evidenced.passed, failed: evidenced.failed,
+        skipped: evidenced.skipped, pending: evidenced.pending,
+        duration_ms: evidenced.duration_ms, setup_ms: evidenced.setup_ms,
+        error: evidenced.error, timed_out: evidenced.timed_out, cached: evidenced.cached,
+        in_development: evidenced.in_development, mcdc_evidence_v1: "",
+        blocked: evidenced.blocked, unsupported: evidenced.unsupported,
+        omission_evidence: evidenced.omission_evidence,
+        compile_ms: 0, execution_ms: duration_ms,
+        resource_usage: evidenced.resource_usage, resource_class: evidenced.resource_class,
+        cohort_id: evidenced.cohort_id, budget_status: evidenced.budget_status,
+        anomaly_status: evidenced.anomaly_status,
+        mcdc_skip_reason: reason,
+        degraded_reason: degrade_token
+    )
+
+# --- coverage fail-closed gate (2026-08-31) -------------------------------
+# A coverage run whose instrumented wrapper will not compile has NOT executed
+# what the operator asked for. Reporting the unwrapped interpreter run as a
+# normal pass made every green `--coverage` verdict unevidenced. Per the
+# repo-wide `ERROR — nothing was checked` convention that is an ERROR, not a
+# pass. Both helpers are pure so the behaviour can be pinned by a spec without
+# driving a real native build.
+
+# Only the exact opt-in value re-enables the (loud, non-evidence) degrade.
+# Unset, empty, "1", "true" and every other value fail closed.
+pub fn coverage_interpreter_fallback_opted_in(env_value: text) -> bool:
+    env_value == "interpreter"
+
+pub fn coverage_wrapper_abort_error(diagnostic: text) -> text:
+    "ABORTED BEFORE EXECUTION — coverage instrumentation wrapper failed to compile; the spec was NEVER run under the requested coverage path, so this is NOT a test result. Compiler diagnostic: " + diagnostic + " (set SIMPLE_COVERAGE_FALLBACK=interpreter to explicitly accept an UNINSTRUMENTED interpreter run instead)"
+
+# First NON-EMPTY line. `compile_output` is `stdout + "\n" + stderr`, so when
+# the compiler wrote nothing to stdout the string starts with "\n" and a
+# naive first-line take yields an empty diagnostic (observed: the printed
+# "Compiler diagnostic:" was blank for every real fallback).
+fn first_line(text_value: text) -> text:
+    # Prefer the first line that actually names an error; the compile output is
+    # dominated by seed banners and lint warnings, and taking line 1 verbatim
+    # masked the real diagnostic in every fail-closed/degrade message.
+    var first_non_noise = ""
+    for line in text_value.split("\n"):
+        val trimmed = line.trim()
+        # The seed binary prints a two-line "bootstrap seed only" banner on
+        # every invocation. Taking it as "the compiler diagnostic" masked the
+        # real error in every fail-closed/degrade message.
+        if trimmed == "" or
+            trimmed.starts_with("WARNING: this Rust-built Simple binary") or
+            trimmed.starts_with("Build and use the pure-Simple"):
+            continue
+        if trimmed.contains("error") or trimmed.contains("Error"):
+            return trimmed
+        if first_non_noise == "":
+            first_non_noise = trimmed
+    first_non_noise
+
+# --- SMF-compile degrade token (2026-09-12) --------------------------------
+# The `degraded=` value recorded on a file's `SPEC FILE VERDICT:` line when its
+# standalone-SMF compile failed and the file was run on the interpreter
+# instead. A degrade that is not stated on the verdict line is invisible to
+# every sweep that parses those lines, which is how three same-day bug records
+# (macro_contracts / gpu_lighting3d / devhub print_raw) each read as an
+# ordinary red rather than "this file never compiled".
+#
+# Two kinds, deliberately distinguished rather than merged:
+#   smf-interpreter-only-constructs  the SOFT failure the runner already
+#                                    degraded on ("N function(s) contain
+#                                    constructs that require the interpreter")
+#   smf-compile-error                every OTHER compile failure -- the HARD
+#                                    ones (`Undefined(...)`,
+#                                    `HIR lowering: Unsupported feature`) that
+#                                    used to lose the whole file
+#
+# Pure, so the token can be pinned by a spec without driving a real compile.
+pub fn smf_compile_degrade_token(compile_output: text) -> text:
+    val kind = if compile_output.contains("cannot compile to standalone SMF"):
+            "smf-interpreter-only-constructs"
+        else:
+            "smf-compile-error"
+    val diagnostic = verdict_degrade_token_field(first_line(compile_output))
+    if diagnostic == "": kind else: kind + ":" + diagnostic
+
+# A verdict line is whitespace-separated `key=value` tokens, so the diagnostic
+# must carry no spaces and no quotes or a reader splitting on whitespace sees a
+# truncated value followed by garbage tokens. Long diagnostics are trimmed from
+# the FRONT, never the back: the cause ("undefined identifier: print_raw") is
+# at the END of a compile diagnostic, behind a temp path that can be longer
+# than the whole budget on its own.
+val _DEGRADE_TOKEN_MAX: i64 = 160
+
+fn verdict_degrade_token_field(diagnostic: text) -> text:
+    # A compile diagnostic reads
+    #   error: compile failed (<temp path>): semantic: <temp path>: <cause>
+    # so more than two thirds of it is a wrapped-copy temp path that is
+    # different on every run and says nothing. Keep only what follows the LAST
+    # source path, which is the cause for both the hard
+    # (`Undefined("undefined identifier: print_raw")`) and the soft
+    # (`cannot compile to standalone SMF: N function(s) ...`) forms. When the
+    # shape is unrecognised the whole line is kept rather than guessed at.
+    val marker = ".spl: "
+    val cause = if diagnostic.contains(marker):
+            diagnostic[diagnostic.last_index_of(marker) + marker.len():diagnostic.len()]
+        else:
+            diagnostic
+    val flat = cause.trim().replace(" ", "_").replace("\t", "_").replace("\"", "")
+    if flat.len() <= _DEGRADE_TOKEN_MAX:
+        return flat
+    "~" + flat[flat.len() - _DEGRADE_TOKEN_MAX:flat.len()]
 
 fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult:
     val binary = find_simple_binary()
@@ -878,6 +1087,96 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
     val compile_output = compile_stdout + "\n" + compile_stderr
 
     if compile_exit != 0:
+        # MC/DC-forced standalone-SMF compilation is impossible for specs
+        # that use interpreter-only constructs (TryOperator, PatternMatch,
+        # CollectionLiteral, ...) -- "cannot compile to standalone SMF: N
+        # function(s) contain constructs that require the interpreter" is a
+        # structural incompatibility, not a real test failure, and must not
+        # fail the spec. Degrade to direct interpreter execution of the
+        # ORIGINAL (unwrapped) source -- the wrapper's MC/DC scaffolding
+        # itself depends on the same native-only path, so it cannot be
+        # salvaged here -- and record truthfully that MC/DC instrumentation
+        # was skipped for this spec rather than silently reporting a green
+        # run with implied (but never collected) coverage evidence.
+        #
+        # WIDENED 2026-09-12 from "interpreter-only constructs" to EVERY
+        # compile failure on this lane. The old condition also required
+        # `uncompilable_construct`, so a SOFT failure degraded and ran while a
+        # HARD one -- `semantic: Undefined("undefined identifier: X")`,
+        # `HIR lowering: Unsupported feature` -- fell through to the
+        # "Compilation failed" return below and reported
+        # `executed=1 passed=0 failed=1`, losing EVERY example in the file.
+        # Three same-day bug records share exactly that shape
+        # (macro_contracts_module_unresolvable_in_compiled_spec_lane,
+        # gpu_lighting3d_spec_asserts_stale_light_buf_field, devhub
+        # print_raw). The distinction never held: both are properties of the
+        # standalone-SMF compile of a WRAPPED copy, neither is evidence about
+        # the spec's assertions, and the runner compiles at all here only
+        # because MC/DC asked it to -- the spec itself was never asked to be
+        # natively compilable.
+        #
+        # This cannot hide a real failure. The fallback runs the ORIGINAL,
+        # unwrapped spec through the interpreter and reports ITS real
+        # pass/fail; a spec that is genuinely broken (bad syntax, unresolvable
+        # import, failing assertion) fails there too and that failure is the
+        # verdict. `make_result_from_output` separately refuses to synthesise a
+        # pass from output with no parseable summary, so a file that produces
+        # nothing stays red.
+        #
+        # Scope is deliberately unchanged in both other directions: an explicit
+        # `--coverage` run still fails closed below (a degrade there would be
+        # unevidenced coverage), and a non-MC/DC `--mode=native`/`--mode=compile`
+        # run still reports the compile failure, because THERE compiling is the
+        # thing the operator asked for.
+        val wrapper_active = cleanup_path != ""
+        val uncompilable_construct = compile_output.contains("cannot compile to standalone SMF")
+        if mcdc_enabled and not options.coverage:
+            cleanup_native_generated_files(smf_path, source_path, wrapped_path, cleanup_path, file_path, options.keep_artifacts)
+            val diagnostic = first_line(compile_output)
+            val reason = if uncompilable_construct:
+                    "MC/DC instrumentation skipped: spec cannot compile to standalone SMF (interpreter-only constructs); degraded to plain interpreter execution. Compiler diagnostic: " + diagnostic
+                else:
+                    "MC/DC instrumentation skipped: spec failed to compile to standalone SMF; degraded to plain interpreter execution, which reports this file's REAL pass/fail. Compiler diagnostic: " + diagnostic
+            return run_test_file_mcdc_interpreter_fallback(file_path, options, start, "mcdc-fallback", reason,
+                smf_compile_degrade_token(compile_output))
+        # FAIL CLOSED (2026-08-31): a coverage run whose instrumented wrapper
+        # will not compile has NOT executed what the operator asked for. The
+        # old behaviour ran the unwrapped spec on the interpreter and returned
+        # its pass counts as a normal pass, so `--coverage` reported green over
+        # a build that never happened. Per the repo-wide
+        # `ERROR — nothing was checked` convention that is an ERROR, not a
+        # pass. The degrade stays available, but only when the operator asks
+        # for it explicitly via SIMPLE_COVERAGE_FALLBACK=interpreter, and even
+        # then it is loudly tagged and never presented as coverage evidence.
+        if options.coverage and wrapper_active and not coverage_interpreter_fallback_opted_in(env_get("SIMPLE_COVERAGE_FALLBACK") ?? ""):
+            val end_abort = time_now_unix_micros()
+            cleanup_native_generated_files(smf_path, source_path, wrapped_path, cleanup_path, file_path, options.keep_artifacts)
+            return TestFileResult(
+                path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
+                duration_ms: (end_abort - start) / 1000, setup_ms: 0,
+                error: coverage_wrapper_abort_error(first_line(compile_output)),
+                timed_out: false, cached: false,
+                compile_ms: compile_ms, resource_usage: compile_scoped.usage,
+                resource_class: test_resource_class(file_path),
+                cohort_id: test_execution_cohort_id(file_path, options),
+                budget_status: compile_scoped.budget_status,
+                anomaly_status: "incomplete",
+                mcdc_skip_reason: "coverage-abort: wrapper failed to compile"
+            )
+        if options.coverage and wrapper_active:
+            # The coverage wrapper (build_coverage_wrapper) writes an
+            # instrumented copy of the spec to a fresh temp file and compiles
+            # THAT. Whatever the specific diagnostic (unresolved root-relative
+            # import from the relocated copy, a parse break in the rewritten
+            # indentation/backtick-literal reproduction, or an interpreter-only
+            # construct), a failure here is a property of the instrumentation
+            # copy, not evidence the spec itself is broken -- the fallback
+            # below runs the REAL, unwrapped spec and reports its real
+            # pass/fail, so this cannot mask a genuine defect.
+            cleanup_native_generated_files(smf_path, source_path, wrapped_path, cleanup_path, file_path, options.keep_artifacts)
+            val reason = "COVERAGE NOT COLLECTED (explicit SIMPLE_COVERAGE_FALLBACK=interpreter opt-in): wrapped spec failed to compile standalone; degraded to plain interpreter execution of the original source. Compiler diagnostic: " + first_line(compile_output)
+            return run_test_file_mcdc_interpreter_fallback(file_path, options, start, "coverage-fallback", reason,
+                smf_compile_degrade_token(compile_output))
         val end = time_now_unix_micros()
         val duration_ms = (end - start) / 1000
         val error_msg = "Compilation failed: {compile_stderr}"
@@ -911,9 +1210,13 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
                 timed_out: false, cached: false
             )
 
+    # Both values cross the conditional extraction/persistence region and are
+    # consumed when the child argv is assembled. Keep their lexical owner at
+    # function scope; branch-local tuple bindings cannot be loaded afterward.
+    var mcdc_manifest = ""
     var mcdc_manifest_path = ""
     if mcdc_enabled:
-        val (mcdc_manifest, mcdc_manifest_valid) =
+        val (extracted_mcdc_manifest, mcdc_manifest_valid) =
             extract_compiler_mcdc_obligation_manifest(compile_output)
         if not mcdc_manifest_valid:
             cleanup_native_generated_files(smf_path, source_path, wrapped_path,
@@ -925,12 +1228,13 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
                 error: "test-runner: missing or malformed MC/DC obligation manifest",
                 timed_out: false, cached: false
             )
+        mcdc_manifest = extracted_mcdc_manifest
         # O_EXCL rejects pre-existing files (including symlinks). A fresh CSPRNG
         # name in the private runner temp directory prevents tested code from
         # predicting the handoff path before creation.
         var manifest_attempt = 0
         while manifest_attempt < 4 and mcdc_manifest_path == "":
-            val nonce = random_hex(16)
+            val nonce = test_runner_random_hex(16) ?? ""
             if nonce != nil:
                 val candidate = _tp_get_temp_dir() + "/mcdc-" + nonce.unwrap() + ".obligations.sdn"
                 if rt_file_create_excl(candidate, mcdc_manifest):
@@ -957,10 +1261,8 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
         run_args.push("--gc-log")
     if options.gc_off and not options.coverage:
         run_args.push("--gc=off")
-    if mcdc_manifest_path != "":
-        run_args.push("--simple-mcdc-manifest={mcdc_manifest_path}")
-        run_args.push("--simple-mcdc-manifest-length={mcdc_manifest.len()}")
-        run_args.push("--simple-mcdc-manifest-sha256={sha256_text(mcdc_manifest)}")
+    for manifest_arg in mcdc_manifest_transport_args(mcdc_manifest_path, mcdc_manifest):
+        run_args.push(manifest_arg)
 
     var stdout = ""
     var stderr = ""
@@ -1006,6 +1308,15 @@ fn run_test_file_compile(file_path: text, options: TestOptions) -> TestFileResul
     Delegates to run_test_file_native which already does compile-then-run."""
     run_test_file_native(file_path, options)
 
+fn mcdc_manifest_transport_args(path: text, manifest: text) -> [text]:
+    if path == "":
+        return []
+    [
+        "--simple-mcdc-manifest={path}",
+        "--simple-mcdc-manifest-length={manifest.len()}",
+        "--simple-mcdc-manifest-sha256={sha256_text(manifest)}",
+    ]
+
 # =========================================================================
 # G1: Safe mode execution with resource limits
 # =========================================================================
@@ -1014,10 +1325,11 @@ fn run_test_file_safe_mode(file_path: text, options: TestOptions) -> TestFileRes
     val binary = find_simple_binary()
     val start = time_now_unix_micros()
     val timeout_ms = options.timeout * 1000
-    val memory_bytes = 512 * 1024 * 1024
-    val cpu_seconds = 30
-    val max_fds = 256
-    val max_procs = 64
+    val caps = safe_mode_caps(options.no_limits, options.max_procs)
+    val memory_bytes = caps.0
+    val cpu_seconds = caps.1
+    val max_fds = caps.2
+    val max_procs = caps.3
 
     var run_args: [text] = [file_path]
     if options.gc_log:
@@ -1025,7 +1337,7 @@ fn run_test_file_safe_mode(file_path: text, options: TestOptions) -> TestFileRes
     if options.gc_off:
         run_args.push("--gc=off")
 
-    val scoped_child = _run_scoped_child(ExecutionResourceClass.System, binary, run_args, timeout_ms, memory_bytes, cpu_seconds * 1000, max_fds, max_procs, true)
+    val scoped_child = _run_scoped_child(ExecutionResourceClass.System, binary, run_args, timeout_ms, memory_bytes, cpu_seconds * 1000, max_fds, max_procs, not options.no_limits)
     val result = scoped_child.result
     val end = time_now_unix_micros()
     val duration_ms = (end - start) / 1000
@@ -1063,3 +1375,5 @@ export use std.test_runner.test_executor_parsing.{find_simple_binary, find_simpl
 
 # Exports from this file
 export run_test_file_interpreter, run_test_file_smf, run_test_file_native, run_test_file_safe, preprocess_spipe_file
+export mcdc_manifest_transport_args
+export smf_compile_degrade_token

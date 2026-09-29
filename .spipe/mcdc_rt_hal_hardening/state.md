@@ -177,3 +177,7 @@ verification-blocked-stage3-surface-freeze-segv
   The three-cycle cap is exhausted; the release-blocking evidence and unblock
   condition are recorded in
   `doc/08_tracking/bug/stage3_surface_freeze_segv_blocks_mcdc_rt_hal_verification_2026-08-25.md`.
+- doc/wiki refactor: refreshed the MC/DC/RT/HAL guide, system-test plan, V3
+  provider/environment manuals, canonical typed-exit design, SPipe skill, and
+  feature-expert wiki. Runtime/docgen evidence remains unverified pending an
+  admitted self-hosted executable; no blocked row was converted to a skip.

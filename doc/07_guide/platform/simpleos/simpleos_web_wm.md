@@ -8,7 +8,7 @@ Current runtime identity:
 
 - page title: `SimpleOS Web WM`
 - fixture: `examples/06_io/ui/simpleos_web_wm.ui.sdn`
-- canonical theme: `aetheric_dark` (`glass_obsidian_dark` is a compatibility alias)
+- theme: `glass_obsidian_dark`
 - default window set: `Terminal`, `Editor`, `Browser`, `File Manager`
 
 ---
@@ -17,13 +17,13 @@ Current runtime identity:
 
 The standard entry is:
 
-- [examples/06_io/ui/web_wm.spl](../../../../examples/06_io/ui/web_wm.spl)
+- [examples/06_io/ui/web_wm.spl](../../../examples/06_io/ui/web_wm.spl)
 
 That entry routes into:
 
-- [src/app/ui.web/server.spl](../../../../src/app/ui.web/server.spl)
-- [src/app/ui.web/html.spl](../../../../src/app/ui.web/html.spl)
-- [src/app/ui.web/ws_handler.spl](../../../../src/app/ui.web/ws_handler.spl)
+- [src/app/ui.web/server.spl](../../../src/app/ui.web/server.spl)
+- [src/app/ui.web/html.spl](../../../src/app/ui.web/html.spl)
+- [src/app/ui.web/ws_handler.spl](../../../src/app/ui.web/ws_handler.spl)
 
 ---
 
@@ -72,38 +72,22 @@ Expected runtime truth for a healthy first load:
 
 ## Theme Path
 
-The package/snapshot model is the sole Web WM visual authority. The repaired
-canonical adapter retains structural layout and interaction selectors while
-Aetheric package CSS owns paint and material values. Source review is accepted;
-live parser/Draw-IR/pixel/event evidence remains **RUNTIME UNVERIFIED**. See the
-[dated verification handoff](../../../08_tracking/bug/web_css_package_authority_adapter_2026-07-27.md).
+The Web WM does not keep a separate visual palette.
 
 Theme flow:
 
-1. `config/themes/theme.sdn` selects `aetheric_dark`; legacy Glass/Obsidian
-   IDs resolve through its alias table.
-2. `nogc_sync_mut.ui.theme_package` resolves the family/package CSS and icons,
-   then creates the immutable `ThemeRenderSnapshot`.
-3. `src/app/ui.web/html.spl::generate_css()` consumes the resolved package CSS.
-   The adapter supplies structure and package-variable references, not a second
-   visual authority.
+1. `examples/06_io/ui/simpleos_web_wm.ui.sdn` selects `glass_obsidian_dark`
+2. `src/app/ui.web/html.spl::generate_css()` derives CSS from the shared glass
+   token path
+3. window chrome, taskbar, borders, and traffic-light buttons are generated
+   from the shared theme/token layer
 4. Simple Web app-window HTML is wrapped by
    `src/os/compositor/simple_web_window_renderer.spl` with the same generated CSS
 5. `src/lib/gc_async_mut/gpu/browser_engine/style_block.spl` applies embedded
    `<style>` blocks and resolves CSS variables before pixel rendering
-6. The HTML layout renderer records canonical CPU/solid material entries from
-   loop-local computed style before the freestanding `[Style]` array boundary;
-   animated material nodes remain unverified and therefore emit no receipt.
 
-For the full production theme workflow, see
-[stitch_simple_os_theme.md](../../ui/stitch_simple_os_theme.md). The legacy
-numeric/text Glass tokens and `GlassConfig` presets are compatibility APIs,
-not this runtime's theme-authoring authority.
-
-The active WM glass implementation and evidence boundaries are documented in
-[the architecture/detail design](../../../05_design/wm_glass_theme_host_simpleos.md),
-[system-test plan](../../../03_plan/sys_test/wm_glass_theme_host_simpleos.md),
-and [agent plan](../../../03_plan/agent_tasks/wm_glass_theme_host_simpleos.md).
+For the full theme/token architecture, see
+[stitch_simple_os_theme.md](../theme/stitch_simple_os_theme.md).
 
 ---
 
@@ -112,11 +96,8 @@ and [agent plan](../../../03_plan/agent_tasks/wm_glass_theme_host_simpleos.md).
 The practical runtime path today is source execution:
 
 ```bash
-bin/simple run examples/06_io/ui/web_wm.spl
+src/compiler_rust/target/bootstrap/simple examples/06_io/ui/web_wm.spl
 ```
-
-Use an admitted self-hosted `bin/simple`; the Rust bootstrap seed is not a
-product runner or acceptable evidence source.
 
 Then open:
 
@@ -164,6 +145,6 @@ Expected non-fatal noise:
 
 ## Related Tooling
 
-- [app/ui/wm_compare.md](../../app/ui/wm_compare.md)
-- [app/ui/wm_ui_snapshot.md](../../app/ui/wm_ui_snapshot.md)
+- [tooling/wm_compare.md](../tooling/wm_compare.md)
+- [tooling/wm_ui_snapshot.md](../tooling/wm_ui_snapshot.md)
 - [platform/simpleos_dev_guide.md](simpleos_dev_guide.md)

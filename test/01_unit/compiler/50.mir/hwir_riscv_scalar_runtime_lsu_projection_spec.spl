@@ -1,0 +1,133 @@
+use std.spec.*
+use compiler.mir.hwir.types.{CoreConfig}
+use compiler.mir.hwir.host_evaluator.{HwHostEvaluation, HwHostInput,
+    prepare_strict_comb_hwir}
+use compiler.mir.hwir.riscv_lsu_config.{LsuConfig}
+use compiler.mir.hwir.riscv_scalar_decoder.{strict_riscv_scalar_decoder_hwir}
+use compiler.mir.hwir.riscv_scalar_decoded_uop_interface.{strict_hw_scalar_decoded_uop_interface}
+use compiler.mir.hwir.riscv_scalar_runtime_lsu_projection.{strict_riscv_scalar_runtime_lsu_projection}
+use lib.hardware.riscv_common.isa.scalar_database.{RiscvScalarDecoderPlan,
+    riscv_scalar_decoder_plan, riscv_scalar_lookup_profile, riscv_scalar_semantic_opcode}
+
+fn runtime_lsu_row(plan: RiscvScalarDecoderPlan, instruction: u32) -> i64:
+    var index = 0
+    for entry in plan.entries:
+        if (instruction & entry.encoding_mask) == entry.encoding_value: return index + 1
+        index = index + 1
+    0
+
+fn runtime_lsu_eval(instruction: u32, rs1_value: i64, rs2_value: i64,
+    valid: i64 = 1, legal: i64 = 1, class_delta: i64 = 0,
+    row_delta: i64 = 0, semantic_delta: i64 = 0, effect_delta: i64 = 0,
+    width_delta: i64 = 0, rd_delta: i64 = 0, rs1_delta: i64 = 0,
+    rs2_delta: i64 = 0, canonical_delta: i64 = 0) -> HwHostEvaluation:
+    val config = CoreConfig.rv64()
+    val plan = riscv_scalar_decoder_plan(config.isa_profile, config.xlen as u32).unwrap()
+    val decoder = strict_riscv_scalar_decoder_hwir("runtime_lsu_eval_decoder", config, plan).unwrap()
+    val decoded = strict_hw_scalar_decoded_uop_interface(config, plan, decoder).unwrap()
+    val module = strict_riscv_scalar_runtime_lsu_projection("runtime_lsu_eval", config,
+        LsuConfig.rv64_product_default(), decoded, decoder, plan).unwrap()
+    val entry = riscv_scalar_lookup_profile(instruction, config.isa_profile).unwrap()
+    val effect = if entry.memory_effect == "load": 1 else: 2
+    val width32 = if entry.operand_width_bits == 32: 1 else: 0
+    val rd = ((instruction >> 7) & 31) as i64
+    val rs1 = ((instruction >> 15) & 31) as i64
+    val rs2 = ((instruction >> 20) & 31) as i64
+    prepare_strict_comb_hwir(module).unwrap().evaluate([
+        HwHostInput.bits("uop_valid", valid), HwHostInput.bits("decode_legal", legal),
+        HwHostInput.bits("decoded_row_index", runtime_lsu_row(plan, instruction) + row_delta),
+        HwHostInput.bits("decoded_execution_class", 3 + class_delta),
+        HwHostInput.bits("decoded_memory_effect", effect + effect_delta),
+        HwHostInput.bits("decoded_semantic_opcode",
+            riscv_scalar_semantic_opcode(entry.semantic_operation) + semantic_delta),
+        HwHostInput.bits("decoded_declared_operand_width_is_32", width32 + width_delta),
+        HwHostInput.bits("canonical_instruction", instruction as i64 + canonical_delta),
+        HwHostInput.bits("instruction_rd_field", rd + rd_delta),
+        HwHostInput.bits("instruction_rs1_field", rs1 + rs1_delta),
+        HwHostInput.bits("instruction_rs2_field", rs2 + rs2_delta),
+        HwHostInput.bits("rs1_value", rs1_value), HwHostInput.bits("rs2_value", rs2_value)]).unwrap()
+
+fn expect_idle(result: HwHostEvaluation):
+    expect(result.value_of("projection_valid").unwrap()).to_equal(0)
+    expect(result.value_of("protocol_fault").unwrap()).to_equal(0)
+    expect(result.value_of("local_fault").unwrap()).to_equal(0)
+    expect(result.value_of("effective_address").unwrap()).to_equal(0)
+    expect(result.value_of("request_byte_mask").unwrap()).to_equal(0)
+    expect(result.value_of("request_write_data").unwrap()).to_equal(0)
+
+fn expect_protocol_fault(result: HwHostEvaluation):
+    expect(result.value_of("protocol_fault").unwrap()).to_equal(1)
+    expect(result.value_of("local_fault").unwrap()).to_equal(0)
+    expect(result.value_of("projection_valid").unwrap()).to_equal(0)
+    expect(result.value_of("request_byte_mask").unwrap()).to_equal(0)
+    expect(result.value_of("request_write_data").unwrap()).to_equal(0)
+
+describe "plan-bound runtime scalar LSU projection":
+    it "evaluates negative I and S immediates, shifted lanes, and signed metadata":
+        val load = runtime_lsu_eval(0xFFF10083, 0x102, 0) # lb x1,-1(x2)
+        expect(load.value_of("projection_valid").unwrap()).to_equal(1)
+        expect(load.value_of("effective_address").unwrap()).to_equal(0x101)
+        expect(load.value_of("access_size_bytes").unwrap()).to_equal(1)
+        expect(load.value_of("access_signed_load").unwrap()).to_equal(1)
+        expect(load.value_of("access_rd_index").unwrap()).to_equal(1)
+        expect(load.value_of("request_write").unwrap()).to_equal(0)
+        expect(load.value_of("request_byte_mask").unwrap()).to_equal(2)
+        val store = runtime_lsu_eval(0xFE310FA3, 0x102, 0xAB) # sb x3,-1(x2)
+        expect(store.value_of("projection_valid").unwrap()).to_equal(1)
+        expect(store.value_of("effective_address").unwrap()).to_equal(0x101)
+        expect(store.value_of("request_write").unwrap()).to_equal(1)
+        expect(store.value_of("request_byte_mask").unwrap()).to_equal(2)
+        expect(store.value_of("request_write_data").unwrap()).to_equal(0xAB00)
+        expect(store.value_of("access_signed_load").unwrap()).to_equal(0)
+
+    it "preserves x0/raw binding and separates PA and alignment faults":
+        val x0 = runtime_lsu_eval(0xFFF10003, 0x102, 0) # lb x0,-1(x2)
+        expect(x0.value_of("projection_valid").unwrap()).to_equal(1)
+        expect(x0.value_of("access_rd_index").unwrap()).to_equal(0)
+        val alignment = runtime_lsu_eval(0xFFF11083, 0x102, 0) # lh x1,-1(x2)
+        expect(alignment.value_of("local_fault").unwrap()).to_equal(1)
+        expect(alignment.value_of("protocol_fault").unwrap()).to_equal(0)
+        expect(alignment.value_of("local_cause").unwrap()).to_equal(4)
+        expect(alignment.value_of("local_tval").unwrap()).to_equal(0x101)
+        expect(alignment.value_of("request_byte_mask").unwrap()).to_equal(0)
+        val pa = runtime_lsu_eval(0x00010083, 0x0100000000000000, 0) # lb x1,0(x2)
+        expect(pa.value_of("local_fault").unwrap()).to_equal(1)
+        expect(pa.value_of("local_cause").unwrap()).to_equal(5)
+
+    it "normalizes hostile source values for canonically encoded x0 operands":
+        val load = runtime_lsu_eval(0x00700083, 0x7FFF, 0) # lb x1,7(x0)
+        expect(load.value_of("projection_valid").unwrap()).to_equal(1)
+        expect(load.value_of("effective_address").unwrap()).to_equal(7)
+        val store = runtime_lsu_eval(0x000100A3, 0x101, 0xDEADBEEF) # sb x0,1(x2)
+        expect(store.value_of("projection_valid").unwrap()).to_equal(1)
+        expect(store.value_of("effective_address").unwrap()).to_equal(0x102)
+        expect(store.value_of("request_byte_mask").unwrap()).to_equal(4)
+        expect(store.value_of("request_write_data").unwrap()).to_equal(0)
+
+    it "is idle outside its valid legal LSU domain":
+        expect_idle(runtime_lsu_eval(0xFFF10083, 0x102, 0, valid: 0))
+        expect_idle(runtime_lsu_eval(0xFFF10083, 0x102, 0, legal: 0))
+        expect_idle(runtime_lsu_eval(0xFFF10083, 0x102, 0, class_delta: -2))
+
+    it "faults independently for every admitted identity mutation":
+        val instruction = 0xFFF10083u32
+        expect_protocol_fault(runtime_lsu_eval(instruction, 0x102, 0, row_delta: 1))
+        expect_protocol_fault(runtime_lsu_eval(instruction, 0x102, 0, semantic_delta: 1))
+        expect_protocol_fault(runtime_lsu_eval(instruction, 0x102, 0, effect_delta: 1))
+        expect_protocol_fault(runtime_lsu_eval(instruction, 0x102, 0, width_delta: 1))
+        expect_protocol_fault(runtime_lsu_eval(instruction, 0x102, 0, rd_delta: 1))
+        expect_protocol_fault(runtime_lsu_eval(instruction, 0x102, 0, rs1_delta: 1))
+        expect_protocol_fault(runtime_lsu_eval(instruction, 0x102, 0, rs2_delta: 1))
+        expect_protocol_fault(runtime_lsu_eval(instruction, 0x102, 0, canonical_delta: 1))
+
+    it "freezes the combinational shape and rejects a narrow LSU bus":
+        val config = CoreConfig.rv64()
+        val plan = riscv_scalar_decoder_plan(config.isa_profile, config.xlen as u32).unwrap()
+        val decoder = strict_riscv_scalar_decoder_hwir("runtime_lsu_shape_decoder", config, plan).unwrap()
+        val decoded = strict_hw_scalar_decoded_uop_interface(config, plan, decoder).unwrap()
+        val module = strict_riscv_scalar_runtime_lsu_projection("runtime_lsu_shape", config,
+            LsuConfig.rv64_product_default(), decoded, decoder, plan).unwrap()
+        expect(module.summary.register_count).to_equal(0)
+        expect(module.port_width("protocol_fault")).to_equal(1)
+        expect(strict_riscv_scalar_runtime_lsu_projection("runtime_lsu_narrow", config,
+            LsuConfig.rv32_product_default(), decoded, decoder, plan).is_err()).to_be(true)

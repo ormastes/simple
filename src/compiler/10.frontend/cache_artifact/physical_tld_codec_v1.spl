@@ -1,0 +1,69 @@
+# Frontend-owned physical .tld index adapter.
+#
+# The common contract owns the wire codec and canonical section table.  This
+# adapter only adds frontend bounds and role/index checks; it never constructs
+# a trusted header from caller-filled counters.
+
+use compiler.common.cache_contract.physical_tld_v1.{
+    PhysicalTldHeaderV1, PhysicalTldObjectV1, TldSectionRefV1, TldPayloadRoleV1,
+    physical_tld_object_decode_bounded_v1, physical_tld_object_encode_v1,
+    physical_tld_object_valid_v1,
+}
+
+pub struct PhysicalTldDecodeBoundsV1:
+    max_index_bytes: i64
+    max_sections: i64
+    max_decoded_bytes: i64
+
+fn _sections_equal_v1(left: TldSectionRefV1, right: TldSectionRefV1) -> bool:
+    left.role == right.role and left.section_index == right.section_index and
+        left.kind == right.kind and left.semantic_object_digest == right.semantic_object_digest and
+        left.offset == right.offset and left.stored_bytes == right.stored_bytes and
+        left.decoded_bytes == right.decoded_bytes and
+        left.encoding_profile == right.encoding_profile
+
+pub fn encode_physical_tld_v1(
+    header: PhysicalTldHeaderV1,
+    canonical_sections: [[u8]],
+) -> Result<[u8], text>:
+    val value = PhysicalTldObjectV1(header: header, canonical_sections: canonical_sections)
+    if not physical_tld_object_valid_v1(value):
+        return Err("noncanonical_physical_tld_object")
+    val bytes = physical_tld_object_encode_v1(value)
+    if bytes.len() == 0: return Err("physical_tld_header_encode_failed")
+    Ok(bytes)
+
+pub fn decode_physical_tld_index_v1(
+    bytes: [u8],
+    bounds: PhysicalTldDecodeBoundsV1,
+) -> Result<PhysicalTldHeaderV1, text>:
+    if bounds.max_index_bytes <= 0 or bounds.max_sections < 0 or bounds.max_decoded_bytes < 0:
+        return Err("invalid_physical_tld_decode_bounds")
+    if bytes.len() > bounds.max_index_bytes:
+        return Err("physical_tld_envelope_bounds_exceeded")
+    val decoded = physical_tld_object_decode_bounded_v1(
+        bytes, bounds.max_sections, bounds.max_decoded_bytes)
+    if not decoded.ok:
+        return Err(decoded.error)
+    val object = match decoded.value:
+        case Some(value): value
+        case nil: return Err("physical_tld_envelope_missing_object")
+    val header = object.header
+    if not physical_tld_object_valid_v1(object) or header.sections.len() > bounds.max_sections:
+        return Err("noncanonical_physical_tld_envelope")
+    if object.canonical_sections.len() != header.sections.len():
+        return Err("physical_tld_body_count_mismatch")
+    var index: i64 = 0
+    for section in header.sections:
+        val body = object.canonical_sections[index]
+        if section.decoded_bytes > bounds.max_decoded_bytes or
+                section.stored_bytes != body.len() or section.decoded_bytes != body.len() or
+                not _sections_equal_v1(section, header.sections[index]):
+            return Err("physical_tld_section_decode_bounds_exceeded")
+        match section.role:
+            case TldPayloadRoleV1.PriorModuleTld: pass
+            case TldPayloadRoleV1.PackageInitTld: pass
+        index = index + 1
+    Ok(header)
+
+export PhysicalTldDecodeBoundsV1, encode_physical_tld_v1, decode_physical_tld_index_v1

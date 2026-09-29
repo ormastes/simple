@@ -1,4 +1,9 @@
 # SFFI boundary: per-call allocations and an unfreed runtime string (2026-08-21)
+## Closed 2026-09-16 — 4 defects fixed with measured RSS/cargo evidence; validation green; boundary scope only
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 Audit of the SFFI/extern boundary for per-call allocation, leaks, zero-slack
 growth, and cross-boundary collection copies. The self-hosted compiler crosses
@@ -51,3 +56,4 @@ mechanism.
 - `cargo test -p simple-runtime --release --lib` — no new failures vs the 10-failure baseline.
 - Specs: `import_admission_critical`, `enum_payload_capture`, `multiline_lambda_body`, `non_optional_nil_return_contract`, `duplicate_typed_arg_signature_nil_miss`. **Scope caveat, stated rather than glossed:** `bin/simple` is the deployed JIT'd seed and was deliberately NOT redeployed, so these specs exercise a binary that does not contain these fixes. They are a tree-level regression check, not validation of this change; validation of the change itself is the cargo evidence above.
 - `sh scripts/check/check-non-optional-nil-return.shs` — PASS.
+

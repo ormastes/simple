@@ -22,6 +22,7 @@ rungs 3-6. Status as of 2026-07-27: **authored, not yet executed**
 |---|---|---|---|
 | 3 | `/LLD.ELF` starts via ordinary FS-exec and prints its version | step 7, "rung3" | `LLD <version>` in serial log after `ssh ... /LLD.ELF -flavor gnu --version` |
 | 4 | lld links the guest-generated object into an ELF | step 7, "rung4" | `[oo-nvme] persist ...HELLO.ELF -> OK` in serial log after `ssh ... /LLD.ELF -flavor gnu -T /SIMPLEOS.LD -o /HELLO.ELF /CRT0.O /HELLO.O /LIBC.A` |
+| 4b (added 2026-09-18) | Once the mold-MDSOC++ internal engine owns SimpleOS: guest `simple link` links the same inputs into `/HELLO.ELF` | not yet authored | mirrors rung 4's evidence line, produced by the internal engine instead of `/LLD.ELF`; rung 4 (external `ld.lld`) stays the proof rung until then — see `doc/05_design/compiler/linker/mold_mdsocpp_linker_design.md` §10 row 4 |
 | 5 | The resulting ELF starts from the filesystem | step 7, "rung5" | `[fs-exec] heap:stream-open-ok path=/HELLO.ELF` in serial log after `ssh ... /HELLO.ELF` |
 | 6 | It returns an expected status and output | step 7, "rung6" | `returned rc=0` (or the chosen expected code) in serial log + matching SSH channel output |
 

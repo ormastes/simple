@@ -28,3 +28,16 @@ callability, and query stability checks remain useful fail-closed checks.
 
 Do not paper over this with a second path hash after `dynlib_open`; that is
 diagnostic only and cannot undo already executed load-time code.
+
+## Triage 2026-09-13
+
+Reconfirmed via source inspection: `src/os/smf/provider_loader.spl` still
+hashes bytes read from the declared path and calls `dynlib_open(path, ...)`
+as a separate, later step (`dynlib_open` imported from
+`DynLibKind, dynlib_open, ...` at line 9; `provider_artifact_digest_v1`
+hashes bytes at line 183). No immutable-handle open API exists yet in this
+tree (`grep -rn "dynlib_open_handle\|dynlib_open_fd"  src/os/` — no hits).
+The unblock condition (owner API that opens without following a mutable
+path, returning a handle) is genuinely unbuilt design/API work spanning the
+OS dynlib loader, not a single-file fix. Left OPEN, no code change
+attempted.

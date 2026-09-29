@@ -117,10 +117,7 @@ function fail(reason) {
     weighted_checksum: 0,
     mismatch_count: 0,
     blur_or_tolerance_used: false,
-    captured_argb_path: outputPath,
     captured_argb_written: false,
-    geometry_path: geometryOutputPath,
-    geometry_written: false,
   };
   if (proofPath) fs.writeFileSync(proofPath, JSON.stringify(proof));
   console.log(`chrome_capture_status=unavailable`);
@@ -216,7 +213,7 @@ function decodePngRgba(buffer) {
 function checksum(pixels) {
   let sum = 0n;
   for (const pixel of pixels) sum += BigInt(pixel >>> 0);
-  return sum.toString();
+  return Number(sum);
 }
 
 function weightedChecksum(pixels) {
@@ -224,7 +221,7 @@ function weightedChecksum(pixels) {
   for (let i = 0; i < pixels.length; i += 1) {
     sum += BigInt(pixels[i] >>> 0) * BigInt(i + 1);
   }
-  return sum.toString();
+  return Number(sum);
 }
 
 function websocketAcceptKey(key) {
@@ -398,28 +395,19 @@ async function fetchPageTarget(endpoint, timeoutMs) {
 function geometryExpression() {
   return `
     (() => {
-      const candidates = Array.from(document.querySelectorAll("[data-geom-label]"));
-      const nodes = candidates.length > 0
-        ? candidates
-        : Array.from(document.body ? document.body.querySelectorAll("*") : []);
+      const nodes = Array.from(document.querySelectorAll("[data-geom-label]"));
       const px = value => Math.round(Number.parseFloat(String(value || "0"))) || 0;
       const rectPx = value => Number(value).toFixed(3);
       return {
         producer: "chrome-headless-geometry",
         viewport: { width: window.innerWidth, height: window.innerHeight },
-        items: nodes
-        .filter((el) => {
-          const tag = el.tagName.toLowerCase();
-          return tag !== "script" && tag !== "style" && tag !== "template";
-        })
-        .slice(0, 128)
-        .map((el, index) => {
+        items: nodes.map((el, index) => {
           const rect = el.getBoundingClientRect();
           const style = window.getComputedStyle(el);
           const text = String(el.textContent || "").replace(/\\s+/g, " ").trim();
           return {
             index,
-            label: String(el.getAttribute("data-geom-label") || el.className || el.id || ""),
+            label: String(el.getAttribute("data-geom-label") || ""),
             tag: el.tagName.toLowerCase(),
             x: Math.round(rect.left),
             y: Math.round(rect.top),
@@ -449,81 +437,6 @@ function geometryExpression() {
           };
         })
       };
-    })()
-  `;
-}
-
-function eventProofExpression() {
-  return `
-    (() => {
-      const button = document.querySelector("button");
-      const input = document.querySelector("input, textarea, [contenteditable='true']");
-      const state = {
-        proof_source: "tools/chrome-live-bitmap/capture_html_argb.js",
-        focus_count: 0,
-        keyboard_count: 0,
-        input_count: 0,
-        pointer_down_count: 0,
-        pointer_up_count: 0,
-        click_count: 0,
-        sequence: [],
-        button_rect: null,
-        input_rect: null,
-        input_value_before: input ? String(input.value || input.textContent || "") : "",
-        input_value_after: "",
-      };
-      const record = name => {
-        state.sequence.push(name);
-        if (name === "focus") state.focus_count += 1;
-        if (name === "keydown" || name === "keyup") state.keyboard_count += 1;
-        if (name === "input") state.input_count += 1;
-        if (name === "pointerdown" || name === "mousedown") state.pointer_down_count += 1;
-        if (name === "pointerup" || name === "mouseup") state.pointer_up_count += 1;
-        if (name === "click") state.click_count += 1;
-      };
-      for (const name of ["focus", "keydown", "keyup", "input", "pointerdown", "pointerup", "mousedown", "mouseup", "click"]) {
-        document.addEventListener(name, () => record(name), true);
-      }
-      if (button) {
-        const rect = button.getBoundingClientRect();
-        state.button_rect = { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2, width: rect.width, height: rect.height };
-      }
-      if (input) {
-        const rect = input.getBoundingClientRect();
-        state.input_rect = { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2, width: rect.width, height: rect.height };
-      }
-      window.__simpleCaptureEventProof = state;
-      return {
-        button_found: Boolean(button),
-        input_found: Boolean(input),
-        button_rect: state.button_rect,
-        input_rect: state.input_rect,
-      };
-    })()
-  `;
-}
-
-function readEventProofExpression() {
-  return `
-    (() => {
-      const state = window.__simpleCaptureEventProof || {};
-      const input = document.querySelector("input, textarea, [contenteditable='true']");
-      state.input_value_after = input ? String(input.value || input.textContent || "") : "";
-      const focusPass = Number(state.focus_count || 0) >= 1;
-      const keyboardPass = Number(state.keyboard_count || 0) >= 2;
-      const inputPass = Number(state.input_count || 0) >= 1 && String(state.input_value_after || "").includes("X");
-      const pointerPass = Number(state.pointer_down_count || 0) >= 1 && Number(state.pointer_up_count || 0) >= 1;
-      const clickPass = Number(state.click_count || 0) >= 1;
-      state.button_found = Boolean(state.button_rect);
-      state.input_found = Boolean(state.input_rect);
-      state.focus_pass = focusPass;
-      state.keyboard_pass = keyboardPass;
-      state.input_pass = inputPass;
-      state.pointer_pass = pointerPass;
-      state.click_pass = clickPass;
-      state.status = focusPass && keyboardPass && inputPass && pointerPass && clickPass ? "pass" : "fail";
-      state.reason = state.status === "pass" ? "pass" : "event-contract-missing";
-      return state;
     })()
   `;
 }
@@ -570,14 +483,11 @@ async function captureViaDevTools(fileUrl) {
   let browserConn;
   try {
     let gpuInfo = null;
-    let browserVersion = null;
     try {
       browserConn = await connectWebSocket(endpoint);
-      browserVersion = await cdpSend(browserConn, 1, "Browser.getVersion");
-      gpuInfo = await cdpSend(browserConn, 2, "SystemInfo.getInfo");
+      gpuInfo = await cdpSend(browserConn, 1, "SystemInfo.getInfo");
     } catch (err) {
       gpuInfo = { error: err && err.message ? err.message : "system-info-unavailable" };
-      if (!browserVersion) browserVersion = { error: err && err.message ? err.message : "browser-version-unavailable" };
     }
     const page = await fetchPageTarget(endpoint, timeoutMs);
     conn = await connectWebSocket(page.webSocketDebuggerUrl);
@@ -592,39 +502,6 @@ async function captureViaDevTools(fileUrl) {
     });
     await cdpSend(conn, id++, "Page.navigate", { url: fileUrl });
     await new Promise(resolve => setTimeout(resolve, Number(process.env.CHROME_CAPTURE_SETTLE_MS || 250)));
-    const eventSetup = await cdpSend(conn, id++, "Runtime.evaluate", {
-      expression: eventProofExpression(),
-      returnByValue: true,
-      awaitPromise: true,
-    });
-    const eventSetupValue = eventSetup.result ? eventSetup.result.value : null;
-    let eventProof = {
-      status: "fail",
-      reason: "missing-visible-button-or-input",
-      button_found: Boolean(eventSetupValue && eventSetupValue.button_found),
-      input_found: Boolean(eventSetupValue && eventSetupValue.input_found),
-    };
-    if (eventSetupValue && eventSetupValue.button_found && eventSetupValue.input_found && eventSetupValue.button_rect && eventSetupValue.input_rect) {
-      const button = eventSetupValue.button_rect;
-      await cdpSend(conn, id++, "Input.dispatchMouseEvent", { type: "mouseMoved", x: Math.round(button.x), y: Math.round(button.y) });
-      await cdpSend(conn, id++, "Input.dispatchMouseEvent", { type: "mousePressed", x: Math.round(button.x), y: Math.round(button.y), button: "left", clickCount: 1 });
-      await cdpSend(conn, id++, "Input.dispatchMouseEvent", { type: "mouseReleased", x: Math.round(button.x), y: Math.round(button.y), button: "left", clickCount: 1 });
-      await cdpSend(conn, id++, "Runtime.evaluate", {
-        expression: `document.querySelector("input, textarea, [contenteditable='true']").focus()`,
-        returnByValue: true,
-        awaitPromise: true,
-      });
-      await cdpSend(conn, id++, "Input.dispatchKeyEvent", { type: "keyDown", key: "X", code: "KeyX", windowsVirtualKeyCode: 88, nativeVirtualKeyCode: 88 });
-      await cdpSend(conn, id++, "Input.dispatchKeyEvent", { type: "char", text: "X", unmodifiedText: "X", key: "X", code: "KeyX", windowsVirtualKeyCode: 88, nativeVirtualKeyCode: 88 });
-      await cdpSend(conn, id++, "Input.dispatchKeyEvent", { type: "keyUp", key: "X", code: "KeyX", windowsVirtualKeyCode: 88, nativeVirtualKeyCode: 88 });
-      await new Promise(resolve => setTimeout(resolve, 100));
-      const eventRead = await cdpSend(conn, id++, "Runtime.evaluate", {
-        expression: readEventProofExpression(),
-        returnByValue: true,
-        awaitPromise: true,
-      });
-      eventProof = eventRead.result ? eventRead.result.value : eventProof;
-    }
     const geomEval = await cdpSend(conn, id++, "Runtime.evaluate", {
       expression: geometryExpression(),
       returnByValue: true,
@@ -633,7 +510,7 @@ async function captureViaDevTools(fileUrl) {
     const geometry = geomEval.result ? geomEval.result.value : null;
     const shot = await cdpSend(conn, id++, "Page.captureScreenshot", { format: "png", fromSurface: true });
     const elapsedUs = Number((process.hrtime.bigint() - start) / 1000n);
-    return { png: Buffer.from(shot.data || "", "base64"), geometry, gpuInfo, browserVersion, elapsedUs, eventProof };
+    return { png: Buffer.from(shot.data || "", "base64"), geometry, gpuInfo, elapsedUs };
   } finally {
     if (conn) conn.socket.destroy();
     if (browserConn) browserConn.socket.destroy();
@@ -652,17 +529,13 @@ const fileUrl = `file://${path.resolve(htmlPath)}`;
 let pngBuffer = null;
 let geometry = null;
 let gpuInfo = null;
-let browserVersion = null;
 let elapsedUs = 0;
-let eventProof = { status: "not-run", reason: "requires-devtools-capture" };
 if (geometryOutputPath) {
   captureViaDevTools(fileUrl).then(capture => {
     pngBuffer = capture.png;
     geometry = capture.geometry;
     gpuInfo = capture.gpuInfo;
-    browserVersion = capture.browserVersion;
     elapsedUs = capture.elapsedUs;
-    eventProof = capture.eventProof || eventProof;
     finish();
   }).catch(err => fail(`chrome-devtools-capture-failed:${err.message || "error"}`));
 } else {
@@ -728,34 +601,17 @@ const proof = {
   reason: "pass",
   width,
   height,
-  proof_source: "tools/chrome-live-bitmap/capture_html_argb.js",
   checksum: actualChecksum,
   expected_checksum: expectedChecksum,
   weighted_checksum: actualWeighted,
   expected_weighted_checksum: expectedWeighted,
   mismatch_count: mismatchCount,
   frame_us: elapsedUs,
-  captured_argb_path: outputPath,
   captured_argb_written: Boolean(outputPath),
-  geometry_path: geometryOutputPath,
   geometry_written: Boolean(geometryOutputPath && geometry),
-  capture_mode: geometryOutputPath ? "chrome-devtools-screenshot" : "chrome-headless-screenshot",
   blur_or_tolerance_used: false,
   chrome_bin: chromeBin,
-  chrome_user_agent: browserVersion && browserVersion.userAgent ? browserVersion.userAgent : "",
-  chrome_product: browserVersion && browserVersion.product ? browserVersion.product : "",
-  chrome_protocol_version: browserVersion && browserVersion.protocolVersion ? browserVersion.protocolVersion : "",
   gpu_info: gpuInfo,
-  event_proof: eventProof,
-  event_status: eventProof.status,
-  event_reason: eventProof.reason,
-  event_sequence: Array.isArray(eventProof.sequence) ? eventProof.sequence.join(",") : "",
-  focus_event_count: eventProof.focus_count || 0,
-  keyboard_event_count: eventProof.keyboard_count || 0,
-  input_event_count: eventProof.input_count || 0,
-  pointer_down_event_count: eventProof.pointer_down_count || 0,
-  pointer_up_event_count: eventProof.pointer_up_count || 0,
-  click_event_count: eventProof.click_count || 0,
 };
 if (proofPath) fs.writeFileSync(proofPath, JSON.stringify(proof));
 console.log(`chrome_capture_status=pass`);

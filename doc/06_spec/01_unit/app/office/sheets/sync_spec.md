@@ -20,7 +20,7 @@ Office sheets diff/apply sync spec.
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/office/sheets/sync_spec.spl` |
-| Updated | 2026-08-18 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 Office sheets diff/apply sync spec.
@@ -39,13 +39,18 @@ sets merge cleanly; overlapping ops record a conflict).
 
 #### returns an empty diff for identical sheets
 
+- returns an empty diff for identical sheets
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("returns an empty diff for identical sheets")
 val a = base_fixture()
 val b = base_fixture()
 val ops = sheet_diff(a, b)
@@ -56,13 +61,18 @@ assert_equal(ops.len(), 0)
 
 #### emits a set op for an added cell
 
+- emits a set op for an added cell
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("emits a set op for an added cell")
 var base = Sheet.new("s")
 var cur = Sheet.new("s")
 cur.set_value("A1", "10")
@@ -78,13 +88,18 @@ assert_equal(op.text, "10")
 
 #### emits a set op with the new raw text for a changed cell
 
+- emits a set op with the new raw text for a changed cell
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("emits a set op with the new raw text for a changed cell")
 var base = Sheet.new("s")
 base.set_value("A1", "10")
 var cur = Sheet.new("s")
@@ -100,13 +115,18 @@ assert_equal(op.text, "20")
 
 #### emits formula SOURCE, not cached display, for formula cells
 
+- emits formula SOURCE, not cached display, for formula cells
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("emits formula SOURCE, not cached display, for formula cells")
 var base = Sheet.new("s")
 var cur = Sheet.new("s")
 cur.set_value("A1", "=SUM(1,2)")
@@ -121,13 +141,18 @@ assert_equal(op.text, "=SUM(1,2)")
 
 #### emits a clear op for a deleted cell
 
+- emits a clear op for a deleted cell
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("emits a clear op for a deleted cell")
 var base = Sheet.new("s")
 base.set_value("A1", "10")
 var cur = Sheet.new("s")
@@ -142,13 +167,18 @@ assert_equal(op.ref, "A1")
 
 #### orders cell ops row-major regardless of insertion order
 
+- orders cell ops row-major regardless of insertion order
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("orders cell ops row-major regardless of insertion order")
 var base = Sheet.new("s")
 var cur = Sheet.new("s")
 cur.set_value("C1", "c1")
@@ -173,13 +203,18 @@ assert_equal(op3.ref, "A2")
 
 #### emits a hide op for a newly hidden row
 
+- emits a hide op for a newly hidden row
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("emits a hide op for a newly hidden row")
 var base = Sheet.new("s")
 var cur = Sheet.new("s")
 cur.hide_row(3)
@@ -194,13 +229,18 @@ assert_equal(op.ref, "3")
 
 #### emits an unhide op for a newly unhidden row
 
+- emits an unhide op for a newly unhidden row
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("emits an unhide op for a newly unhidden row")
 var base = Sheet.new("s")
 base.hide_row(2)
 var cur = Sheet.new("s")
@@ -217,13 +257,18 @@ assert_equal(op.ref, "2")
 
 #### applies a set op
 
+- applies a set op
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("applies a set op")
 var sh = Sheet.new("s")
 sh = sheet_apply(sh, [SheetOp(ref: "A1", kind: "set", text: "42")])
 assert_equal(cell_display_text(sh.get_cell("A1")), "42")
@@ -233,13 +278,18 @@ assert_equal(cell_display_text(sh.get_cell("A1")), "42")
 
 #### applies a clear op
 
+- applies a clear op
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("applies a clear op")
 var sh = Sheet.new("s")
 sh.set_value("A1", "9")
 sh = sheet_apply(sh, [SheetOp(ref: "A1", kind: "clear", text: "")])
@@ -250,13 +300,18 @@ assert_equal(is_empty_cell(sh, "A1"), true)
 
 #### applies hide and unhide ops
 
+- applies hide and unhide ops
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("applies hide and unhide ops")
 var sh = Sheet.new("s")
 sh = sheet_apply(sh, [SheetOp(ref: "4", kind: "hide", text: "")])
 assert_equal(sh.is_row_hidden(4), true)
@@ -268,13 +323,18 @@ assert_equal(sh.is_row_hidden(4), false)
 
 #### recalculates formulas when a set op carries formula text
 
+- recalculates formulas when a set op carries formula text
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("recalculates formulas when a set op carries formula text")
 var sh = Sheet.new("s")
 var ops: [SheetOp] = []
 ops.push(SheetOp(ref: "A1", kind: "set", text: "2"))
@@ -290,13 +350,18 @@ assert_equal(cell_display_text(sh.get_cell("C1")), "5")
 
 #### apply(base, diff(base, current)) has an empty diff vs current
 
+- apply(base, diff(base, current)) has an empty diff vs current
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("apply(base, diff(base, current)) has an empty diff vs current")
 var base = base_fixture()
 var cur = base_fixture()
 cur.set_value("B1", "99")
@@ -325,13 +390,18 @@ assert_equal(replayed.is_row_hidden(5), true)
 
 #### formats each op as op|kind|ref|text
 
+- formats each op as op|kind|ref|text
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("formats each op as op|kind|ref|text")
 val ops = [SheetOp(ref: "A1", kind: "set", text: "=A1+B1")]
 val lines = ops_to_lines(ops)
 assert_equal(lines.len(), 1)
@@ -342,13 +412,18 @@ assert_equal(lines[0], "op|set|A1|=A1+B1")
 
 #### round-trips ops through lines, including pipes in cell text
 
+- round-trips ops through lines, including pipes in cell text
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("round-trips ops through lines, including pipes in cell text")
 var ops: [SheetOp] = []
 ops.push(SheetOp(ref: "A1", kind: "set", text: "a|b"))
 ops.push(SheetOp(ref: "B2", kind: "clear", text: ""))
@@ -372,13 +447,18 @@ assert_equal(b2.ref, "3")
 
 #### skips lines that are not ops
 
+- skips lines that are not ops
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("skips lines that are not ops")
 val lines = ["not an op", "op|set|A1|9"]
 val back = lines_to_ops(lines)
 assert_equal(back.len(), 1)
@@ -393,13 +473,18 @@ assert_equal(b0.text, "9")
 
 #### disjoint op sets merge with zero conflicts and both edits present
 
+- disjoint op sets merge with zero conflicts and both edits present
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("disjoint op sets merge with zero conflicts and both edits present")
 val base = base_fixture()
 var mine = base_fixture()
 mine = sheet_apply(mine, [SheetOp(ref: "D1", kind: "set", text: "left")])
@@ -416,13 +501,18 @@ assert_equal(cell_display_text(result.merged.get_cell("E1")), "right")
 
 #### overlapping ops on the same cell record a conflict (mine wins)
 
+- overlapping ops on the same cell record a conflict (mine wins)
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("overlapping ops on the same cell record a conflict (mine wins)")
 val base = base_fixture()
 var mine = base_fixture()
 mine = sheet_apply(mine, [SheetOp(ref: "B1", kind: "set", text: "mine-b1")])
@@ -452,3 +542,54 @@ assert_equal(cell_display_text(result.merged.get_cell("B1")), "mine-b1")
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `7bb91925744758c79912f56c1619be50231c2293a401e1d7181a06d32070cc01`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `7bb91925744758c79912f56c1619be50231c2293a401e1d7181a06d32070cc01`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `7bb91925744758c79912f56c1619be50231c2293a401e1d7181a06d32070cc01`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **91/100**; effective score: **91/100**; blockers: **0**.
+
+SSpec documentization score: 91/100
+source: test/01_unit/app/office/sheets/sync_spec.spl
+mirror: doc/06_spec/01_unit/app/office/sheets/sync_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=55
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/app/office/sheets/sync_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/app/office/sheets/sync_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/app/office/sheets/sync_spec.spl:1:1: advice SSDOC-MNT-001 [maintainability] (-15): multiple scenarios form a flat, unfolded presentation
+  why: Long flat dumps obscure the primary workflow.
+  improve: Group secondary detail and keep the primary workflow visible.
+test/01_unit/app/office/sheets/sync_spec.spl:46:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'returns an empty diff for identical sheets' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/office/sheets/sync_spec.spl:54:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'emits a set op for an added cell' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/office/sheets/sync_spec.spl:67:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'emits a set op with the new raw text for a changed cell' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

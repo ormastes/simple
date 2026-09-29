@@ -461,3 +461,92 @@ fn fat32_rename(core: Fat32Core, old_path: text, new_path: text) -> Result<(), t
     if not placed:
         return Err("destination directory full")
     Ok(())
+
+fn fat32_sync_entry_size(core: Fat32Core, start_cluster: u32, size: i64) -> Result<bool, text>:
+    """Write `size` back to the 32-bit size field of the directory entry whose
+    first cluster is `start_cluster`, and flush that directory cluster.
+
+    `fat32_write`/`fat32_close` track a file's length only in the in-memory
+    `OpenFile`; without this the on-disk entry keeps the 0 that `create_file`
+    stamped, and a later `open` builds a handle with size 0 so every read
+    returns empty even though the data clusters hold the bytes.
+
+    A cluster chain belongs to exactly one file in a valid FAT32 volume, so the
+    first cluster identifies the entry unambiguously and no parent-directory
+    bookkeeping has to be threaded through `OpenFile`. Subdirectories are
+    searched breadth-first via an explicit worklist.
+
+    Returns `Ok(false)` when no entry references the chain -- the lazy-allocation
+    case, where `fat32_write` allocated the first cluster itself and the entry
+    still records cluster 0.
+    """
+    if not core.mounted:
+        return Err("filesystem not mounted")
+    if start_cluster < 2:
+        return Ok(false)
+    if size < 0 or size > 4294967295:
+        return Err("file size out of FAT32 range")
+    val epc = (core.bytes_per_sector * core.sectors_per_cluster) / FAT32_DIR_ENTRY_SIZE
+    var worklist: [u32] = [core.root_cluster]
+    var wi = 0
+    while wi < worklist.len():
+        val dir_cluster = worklist[wi]
+        wi = wi + 1
+        val chain_rc = core.follow_chain(dir_cluster)
+        if chain_rc.is_err():
+            return match chain_rc:
+                Ok(_): Err("failed to follow directory chain")
+                Err(err): Err(err)
+        val chain = match chain_rc:
+            Ok(value): value
+            Err(err): return Err(err)
+        var ci = 0
+        var dir_done = false
+        while ci < chain.len() and not dir_done:
+            val cdata_rc = core.read_cluster(chain[ci])
+            if cdata_rc.is_err():
+                return match cdata_rc:
+                    Ok(_): Err("failed to read directory cluster")
+                    Err(err): Err(err)
+            var cdata = match cdata_rc:
+                Ok(value): value
+                Err(err): return Err(err)
+            var ei: u32 = 0
+            while ei < epc:
+                val off = (ei * FAT32_DIR_ENTRY_SIZE).to_i32()
+                val fb = cdata[off]
+                if fb == 0x00:
+                    dir_done = true
+                    ei = epc
+                    continue
+                if fb == 0xE5:
+                    ei = ei + 1
+                    continue
+                val attr = cdata[off + 11]
+                if attr == FAT32_ATTR_LONG_NAME:
+                    ei = ei + 1
+                    continue
+                val entry_cluster: u32 = cdata[off + 26].to_u32() |
+                    (cdata[off + 27].to_u32() << 8) |
+                    (cdata[off + 20].to_u32() << 16) |
+                    (cdata[off + 21].to_u32() << 24)
+                if (attr & FAT32_ATTR_DIRECTORY) != 0u8:
+                    if entry_cluster >= 2 and fb != 0x2E:
+                        worklist.push(entry_cluster)
+                    ei = ei + 1
+                    continue
+                if entry_cluster == start_cluster:
+                    cdata[off + 28] = (size & 0xFF).to_u8()
+                    cdata[off + 29] = ((size >> 8) & 0xFF).to_u8()
+                    cdata[off + 30] = ((size >> 16) & 0xFF).to_u8()
+                    cdata[off + 31] = ((size >> 24) & 0xFF).to_u8()
+                    val wrc = core.write_cluster(chain[ci], cdata)
+                    if wrc.is_err():
+                        return match wrc:
+                            Ok(_): Err("failed to write directory cluster")
+                            Err(err): Err(err)
+                    core.invalidate_dentry_cache()
+                    return Ok(true)
+                ei = ei + 1
+            ci = ci + 1
+    Ok(false)

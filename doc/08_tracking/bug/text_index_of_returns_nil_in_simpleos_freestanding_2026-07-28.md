@@ -1,4 +1,8 @@
 # `text.index_of` yields the `??` default for a genuine index of 3
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Filed:** 2026-07-28
 - **Root cause corrected:** 2026-07-28 (original "missing `rt_index_of` symbol"
@@ -284,3 +288,4 @@ runtime search symbol. All 75 repo-wide `text_index_of(` sites (55 `src/lib`,
 `simple_web_html_layout_renderer_core.spl`. Only the method form
 `<receiver>.index_of(...)` was ever exposed, and only where the receiver type
 was erased.
+

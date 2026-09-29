@@ -12,7 +12,7 @@ three pipeline shapes (JIT, VHDL, AOT) — not AOT-only.
 ## Pipeline Links
 
 - [verify skill](../../../../.claude/skills/verify/SKILL.md)
-- [impl skill](../../../../.claude/skills/impl/IMPL.md)
+- [impl skill](../../../../.claude/skills/impl.md)
 
 ## Layer Links
 

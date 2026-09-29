@@ -1,7 +1,10 @@
 # Examples-check invalid options could report false success — 2026-07-23
+## Open 2026-09-16 — needs owner triage
 
-Status: FIXED
-Status re-verified 2026-08-17 by source inspection (triage shard 01).
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
+
+**Status:** SOURCE FIXED / FOCUSED BOOTSTRAP CONTRACT PASS / PURE-SIMPLE QUALIFICATION PENDING
 
 ## Reproduction
 
@@ -18,3 +21,4 @@ error channel. `examples_check_option_error` now validates the documented
 forms before discovery and returns usage status 2 for unknown, missing, or
 empty options. The focused contract covers the default-mode typo, missing and
 option-token values, empty equals values, and documented valid forms.
+

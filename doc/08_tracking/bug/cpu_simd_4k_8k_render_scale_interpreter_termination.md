@@ -1,7 +1,9 @@
 # CPU-SIMD 4K/8K render-scale evidence terminates in interpreter path
+## Closed 2026-09-16 — Status: fixed; render-scale contract passes in native mode at 4K/8K
 
-Status: FIXED
-Status re-verified 2026-08-17 by source inspection (triage shard 00).
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
 
@@ -31,3 +33,4 @@ too expensive for this lane; the canonical evidence path is native mode.
 ## Required Fix
 
 No remaining action for this bug.
+

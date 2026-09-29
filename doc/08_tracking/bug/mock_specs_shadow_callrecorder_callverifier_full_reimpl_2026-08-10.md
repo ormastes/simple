@@ -102,3 +102,11 @@ imports from `std.spec.mock`. `grep` for a `class CallRecorder` / `class
 CallVerifier` declaration in either twin returns nothing, so the real
 `src/compiler_rust/lib/std/src/spec/mock.spl` is now the code under test.
 Recommend CLOSE.
+
+## Triage 2026-09-13
+
+Test-only dedup/refactor (two mock-framework twins duplicate the real
+CallRecorder/CallVerifier product API rather than importing it) --
+not a functional bug, a cleanup task across two ~600-line files.
+Leaving OPEN, out of this lane's per-item scope.
+

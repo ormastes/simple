@@ -1,4 +1,8 @@
 # `self.error(...)` used where `self.error_fatal(...)` was intended — family sweep
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Date: 2026-08-08
 
@@ -404,3 +408,4 @@ after the edit tool reported success). The edits were redone and committed
 immediately afterward with no further gap between edit and commit, per the
 standing shared-WC guidance in `.claude/rules/vcs.md` and this repo's
 memory notes on write-tool/edit clobbering.
+

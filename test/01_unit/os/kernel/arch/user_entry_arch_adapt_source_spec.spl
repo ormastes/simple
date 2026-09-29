@@ -4,6 +4,44 @@
 use std.spec.{describe, it, expect, step}
 use app.io.mod.{file_read_text}
 
+# @req: REQ-SSPEC-OS — behavior under test holds under execution.
+"""
+## Purpose and audience
+
+Executable source-contract specification for the compile-time user-entry
+architecture adapter: the adapter file must remain an allocation-free
+two-symbol re-export boundary, and every syscall and filesystem-exec
+consumer must import it rather than the concrete architecture owner.
+Audience: kernel ABI and loader owners confirming the boundary holds
+before a change lands.
+
+## Operator workflow
+
+1. Run `bin/simple test test/01_unit/os/kernel/arch/user_entry_arch_adapt_source_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the user-entry boundary.
+
+## Compatibility and limitations
+
+Known defect (2026-09-05): the loader consumers still import
+os.kernel.arch.user_entry_bridge directly instead of the adapter, so the
+consumer-routing scenario fails; the spec is kept RED until the loaders
+migrate. These are source-contract scenarios — they read file text, not
+runtime behavior.
+
+## Verification guidance and troubleshooting
+
+Re-run the single file to reproduce; a failing scenario names the
+boundary rule violated. The exact-whole-file scenario fails loudly on
+any adapter edit so drift cannot land silently.
+"""
+# Lifecycle:
+# doc/01_research/domain/sspec_documentization_maintenance.md
+# doc/03_plan/sspec_modernization_plan.md
+# doc/04_architecture/sspec_documentization_maintenance.md
+# doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+# @manual_section: user-entry-adapter-contract
+# @manual: primary
+
 val ADAPTER_PATH = "src/os/kernel/arch_adapt/user_entry.spl"
 val CONCRETE_OWNER = "os.kernel.arch.user_entry_bridge"
 val ADAPTER_OWNER = "os.kernel.arch_adapt.user_entry"
@@ -37,33 +75,52 @@ val HANDOFF_CONSUMERS = [
 
 describe "user-entry compile-time architecture adapter":
     it "is exactly the allocation-free whole-file forwarding contract":
+        # @req REQ-SSPEC-OS
+        # @capture(statistics): adapter source bytes against the frozen contract text
         step("Read the complete adapter source")
         val source = file_read_text(ADAPTER_PATH)
 
         step("Require the exact two-symbol public re-export and nothing else")
         expect(source).to_equal(EXACT_ADAPTER_SOURCE)
-        expect(source.count("pub use ")).to_equal(1)
-        expect(source.count(CONCRETE_OWNER)).to_equal(1)
+        expect(source.count("pub use ")).to_equal(1)  # oracle: the adapter re-exports exactly one pub-use block
+        expect(source.count(CONCRETE_OWNER)).to_equal(1)  # oracle: the concrete owner is named exactly once, in that block
 
         step("Exclude runtime dispatch, state, allocation, and foreign aliases")
-        expect(source.contains("fn ")).to_equal(false)
-        expect(source.contains("match ")).to_equal(false)
-        expect(source.contains("var ")).to_equal(false)
-        expect(source.contains("new ")).to_equal(false)
-        expect(source.contains("extern fn")).to_equal(false)
-        expect(source.contains("rt_")).to_equal(false)
+        val declares_functions = source.contains("fn ")
+        val dispatches_with_match = source.contains("match ")
+        val declares_mutable_state = source.contains("var ")
+        val constructs_values = source.contains("new ")
+        val declares_externs = source.contains("extern fn")
+        val calls_runtime_directly = source.contains("rt_")
+        expect(declares_functions).to_equal(false)  # oracle: a compile-time adapter declares no functions
+        expect(dispatches_with_match).to_equal(false)  # oracle: a compile-time adapter dispatches nothing
+        expect(declares_mutable_state).to_equal(false)  # oracle: a compile-time adapter holds no mutable state
+        expect(constructs_values).to_equal(false)  # oracle: a compile-time adapter allocates nothing
+        expect(declares_externs).to_equal(false)  # oracle: a compile-time adapter declares no externs
+        expect(calls_runtime_directly).to_equal(false)  # oracle: a compile-time adapter never calls the runtime directly
 
     it "routes every syscall and filesystem-exec consumer through the adapter":
+        # NOTE (legitimately RED, 2026-09-05): the loader consumers
+        # (src/os/kernel/loader/*_fs_exec_spawn.spl) still import
+        # os.kernel.arch.user_entry_bridge directly instead of the
+        # os.kernel.arch_adapt.user_entry adapter. Unblock: migrate the six
+        # loader files to the adapter import.
+        # @req REQ-SSPEC-OS
+        # @capture(statistics): per-consumer import audit across both consumer families
         step("Require both syscall consumers to import only the adapter")
         for path in ENTER_CONSUMERS:
             val source = file_read_text(path)
-            expect(source.contains(ENTER_IMPORT)).to_equal(true)
-            expect(source.count(ADAPTER_OWNER)).to_equal(1)
-            expect(source.contains(CONCRETE_OWNER)).to_equal(false)
+            val imports_adapter_enter = source.contains(ENTER_IMPORT)
+            expect(imports_adapter_enter).to_equal(true)  # oracle: every syscall consumer must enter user mode through the adapter
+            expect(source.count(ADAPTER_OWNER)).to_equal(1)  # oracle: the adapter owner is imported exactly once per consumer
+            val bypasses_with_concrete = source.contains(CONCRETE_OWNER)
+            expect(bypasses_with_concrete).to_equal(false)  # oracle: no consumer may reach past the adapter to the concrete owner
 
         step("Require every target filesystem-exec consumer to import only the adapter")
         for path in HANDOFF_CONSUMERS:
             val source = file_read_text(path)
-            expect(source.contains(HANDOFF_IMPORT)).to_equal(true)
-            expect(source.count(ADAPTER_OWNER)).to_equal(1)
-            expect(source.contains(CONCRETE_OWNER)).to_equal(false)
+            val imports_adapter_handoff = source.contains(HANDOFF_IMPORT)
+            expect(imports_adapter_handoff).to_equal(true)  # oracle: every fs-exec consumer must hand off through the adapter
+            expect(source.count(ADAPTER_OWNER)).to_equal(1)  # oracle: the adapter owner is imported exactly once per consumer
+            val bypasses_with_concrete = source.contains(CONCRETE_OWNER)
+            expect(bypasses_with_concrete).to_equal(false)  # oracle: no consumer may reach past the adapter to the concrete owner

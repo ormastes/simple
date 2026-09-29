@@ -1,3 +1,17 @@
+## Closed 2026-09-13 — prior in-body resolution, carried forward (NOT re-verified this pass)
+
+Reviewed in the 2026-05-and-earlier bug/todo tracking sweep. This entry already
+recorded its own resolution before this pass; the header exists so the closure is
+visible at the top rather than buried in the body. First status line found:
+
+> Status: RESOLVED 2026-05-29 (pure-Simple event loop + proper .app bundle; no Rust-seed change — see "RESOLVED 2026-05-29" section below). Status line reconciled 2026-06-25. Discovered 2026-05-28 while verifying the pure-Simple web renderer + Engine2D
+
+This is a closure marker, not a new claim: the repro was **not** re-run in this
+sweep. The original evidence in the body stands on its own. Re-open with a fresh
+dated repro if the symptom returns — do not treat this header as verification.
+
+---
+
 # macOS interpreter-driven winit window never displays - 2026-05-28
 
 Status: RESOLVED 2026-05-29 (pure-Simple event loop + proper .app bundle; no Rust-seed change — see "RESOLVED 2026-05-29" section below). Status line reconciled 2026-06-25. Discovered 2026-05-28 while verifying the pure-Simple web renderer + Engine2D

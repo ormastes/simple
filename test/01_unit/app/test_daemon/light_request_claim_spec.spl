@@ -1,0 +1,114 @@
+"""
+## Purpose and audience
+Purpose: Verify that a test-daemon request is claimed before it is executed, so
+a run killed at its budget is attempted exactly once and never relaunched.
+Audience: compiler and tooling engineers who maintain the light test daemon.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines;
+a failing scenario pinpoints the behavior that regressed.
+## Compatibility and limitations
+Covers the claim protocol only; the fixture request directory is local to this
+spec and is removed as it goes.
+# @manual: primary
+REQ-APP-TESTRUNNERNE-001
+"""
+# @req: REQ-APP-TESTRUNNERNE-001
+
+"""A killed run must not be retried — the claim protocol is what bounds it.
+
+Why this spec exists: two GPU showcase specs never reached a verdict. The
+runner started each one, killed it at roughly 900s, and started it AGAIN,
+indefinitely; the process tree's elapsed time reset over and over while no
+`N examples, M failures` line was ever written. The failure mode is the real
+defect: an over-budget spec must FAIL, visibly and once. Relaunching hides it
+as "still running", which is indistinguishable from a slow-but-healthy run, and
+two separate investigations mistook the loop for slowness.
+
+The cause was a request that stayed pollable for the whole run: `<id>.req` was
+deleted only AFTER the response was written, so a worker (or the daemon itself)
+killed at the budget left the request re-servable, and the next poll — or a
+successor daemon spawned by another client — started the same spec again.
+
+The similar-problem generalisation is CLAIM BEFORE EXECUTE: any work item taken
+from a shared directory must leave the pollable name space before the work
+starts, not after it finishes, or every crash becomes an infinite retry.
+Bug: doc/08_tracking/bug/web_showcase_slow_specs_relaunch_loop_at_900s_cap_2026-09-13.md
+
+# @req: REQ-SSPEC-APP
+"""
+
+use std.spec.step
+
+use std.spec.*
+
+use app.test_daemon.light_protocol.{
+    light_request_inflight_path,
+    light_request_is_pollable
+}
+
+use std.io_runtime.{dir_create_all}
+use std.io_runtime.{dir_list}
+use std.io_runtime.{file_delete}
+use std.io_runtime.{file_exists}
+use std.io_runtime.{file_rename}
+use std.io_runtime.{file_write}
+
+fn pollable_count(entries: [text]) -> i64:
+    var n = 0
+    for e in entries:
+        if light_request_is_pollable(e):
+            n = n + 1
+    n
+
+describe "A test-daemon request is claimed before its spec is executed":
+
+    it "renames a killed run out of the pollable name space, so it is attempted once":
+        # @req: REQ-APP-TESTRUNNERNE-001
+        # @req: REQ-SSPEC-APP
+        step("Verify: a run killed at its budget is never re-served")
+        """This is the reproducing case, replayed on the real filesystem with
+        the daemon's own helpers: claim the request, then simulate the kill by
+        simply never writing a response, and confirm a successor poll finds
+        nothing to serve."""
+
+        step("A fresh request directory holding exactly one request")
+        val dir = ".build/test_daemon_claim_spec"
+        val req_path = "{dir}/probe-001.req"
+        val inflight = light_request_inflight_path(req_path)
+        file_delete(req_path)
+        file_delete(inflight)
+        dir_create_all(dir)
+        expect(file_write(req_path, "probe")).to_equal(true)  # oracle: true — the fixture request was written
+        expect(pollable_count(dir_list(dir))).to_equal(1)  # oracle: 1 — exactly one servable request before the claim
+
+        step("Claim it, as the daemon now does BEFORE executing the spec")
+        expect(file_rename(req_path, inflight)).to_equal(true)  # oracle: true — the claim is a rename, which is atomic
+        expect(file_exists(req_path)).to_equal(false)  # oracle: false — the pollable name is gone the moment the run starts
+
+        step("The worker is killed: no response is ever written")
+        step("A successor poll finds nothing to serve — the retry count is bounded at one")
+        expect(pollable_count(dir_list(dir))).to_equal(0)  # oracle: 0 — a claimed run is never re-served, which is what stops the relaunch loop
+        expect(file_exists(inflight)).to_equal(true)  # oracle: true — the attempt is still on record, so the kill is auditable rather than silent
+
+        step("Leave the fixture directory clean")
+        file_delete(inflight)
+        file_delete(req_path)
+
+    it "counts only unclaimed requests as pollable":
+        # @req: REQ-APP-TESTRUNNERNE-001
+        # @req: REQ-SSPEC-APP
+        step("Verify: the poll filter separates requests from claims and temporaries")
+        """The filter is the whole guard: if a claimed name were pollable again
+        the rename would buy nothing, and if the atomic-write temporary were
+        pollable the daemon would serve a half-written request."""
+
+        step("An unclaimed request is servable")
+        expect(light_request_is_pollable("probe-001.req")).to_equal(true)  # oracle: true — an ordinary request
+
+        step("A claimed request is not, and neither is an in-flight write or a response")
+        expect(light_request_is_pollable(light_request_inflight_path("probe-001.req"))).to_equal(false)  # oracle: false — already attempted
+        expect(light_request_is_pollable("probe-001.req.tmp")).to_equal(false)  # oracle: false — a half-written request
+        expect(light_request_is_pollable("probe-001.req.resp")).to_equal(false)  # oracle: false — a response, not a request
+
+        step("The claimed name is derived from the request name, never guessed")
+        expect(light_request_inflight_path("a/b/c.req")).to_equal("a/b/c.req.inflight")  # oracle: "a/b/c.req.inflight" — the derived claim name

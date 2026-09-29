@@ -1,4 +1,4 @@
 import CacheProtocol.Generated.Model
-import CacheProtocol.Generated.Visibility
+import CacheProtocol.Generated.FieldTheorems
 import CacheProtocol.Generated.Golden
-import CacheProtocol.Theorems.Manual
+import CacheProtocol.Theorems.Identity

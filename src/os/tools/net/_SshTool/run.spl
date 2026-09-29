@@ -69,16 +69,13 @@ use os.apps.sshd.ssh_channel.{
     DEFAULT_WINDOW_SIZE,
     DEFAULT_MAX_PACKET
 }
-use std.io.signature_sffi.{verify_host_key_checked}
-use std.common.string_core.{text_to_bytes}
+use std.io.signature_sffi.{verify_host_key}
 
 extern fn rt_stdin_read_line() -> text?
-@unsafe(reason: "raw connected descriptor; negative sentinel means connect failed", capabilities: [ffi])
+extern fn rt_string_to_byte_array(s: text) -> [u8]
 extern fn rt_io_tcp_connect(addr: text) -> i64
-@unsafe(reason: "raw nullable TCP bytes; nil is read failure and empty is EOF", capabilities: [ffi])
-extern fn rt_io_tcp_read(fd: i64, size: i64) -> [u8]?
+extern fn rt_io_tcp_read(fd: i64, size: i64) -> [u8]
 extern fn rt_io_tcp_write(fd: i64, data: [u8]) -> i64
-@unsafe(reason: "raw descriptor close consumes one live descriptor; false means close failed", capabilities: [ffi])
 extern fn rt_io_tcp_close(fd: i64) -> bool
 
 fn run_ssh(args: [text]) -> Result<bool, text>:
@@ -103,8 +100,7 @@ fn run_ssh(args: [text]) -> Result<bool, text>:
     print "ssh: connecting to {user}@{host}:{port}..."
 
     val addr_text = "{host}:{port}"
-    val fd = unsafe(capabilities: [ffi]):
-        rt_io_tcp_connect(addr_text)
+    val fd = rt_io_tcp_connect(addr_text)
     if fd < 0:
         return Err("ssh: connect failed: {addr_text}")
     val sock = ClientSocket(fd: fd)
@@ -243,11 +239,8 @@ fn run_ssh(args: [text]) -> Result<bool, text>:
     )
 
     # Verify host key signature over exchange hash H
-    val sig_result = verify_host_key_checked(
-        host_key_type, host_pubkey, exchange_hash, host_signature)
-    if sig_result.is_err():
-        return Err("ssh: host key verifier error: {sig_result.unwrap_err()}")
-    if not sig_result.unwrap():
+    var sig_valid: bool = verify_host_key(host_key_type, host_pubkey, exchange_hash, host_signature)
+    if not sig_valid:
         return Err("ssh: host key verification failed")
     print "ssh: host key verified ({host_key_type})"
 
@@ -415,7 +408,7 @@ fn run_ssh(args: [text]) -> Result<bool, text>:
             running = false
         else:
             var line: text = line_opt
-            var line_bytes: [u8] = text_to_bytes(line)
+            var line_bytes: [u8] = rt_string_to_byte_array(line)
             # Append newline
             line_bytes.push(0x0A)
             var data_pkt: [u8] = ssh_build_channel_data(remote_ch_id, line_bytes)

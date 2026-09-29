@@ -1,4 +1,8 @@
 # JIT/HIR: `Some(x)` binding double-unwraps when the optional's payload is itself an enum
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-24
 **Severity:** HIGH (silent wrong value, no crash)
@@ -344,3 +348,4 @@ this record must not be read as "deployed". Verified only against a locally
 built binary at `/mnt/data/cargo-target-jitfix/release/simple`
 (60359136 bytes, 2026-08-24 21:38 UTC); the shared `bin/simple` was deliberately
 NOT replaced, since other lanes' runs are bracketed against it.
+

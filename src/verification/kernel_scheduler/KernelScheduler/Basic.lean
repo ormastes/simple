@@ -140,7 +140,7 @@ def GreenTask.unpark (t : GreenTask) (waker_cpu : Nat) : WakeDecision :=
     Assigned CPU is preserved on the first completion. -/
 def GreenTask.complete (t : GreenTask) (result : Int) : GreenTask :=
   if t.state = .done then t
-  else { t with state := .done, result_val := result }
+  else { t with state := .done, park_reason := "", result_val := result }
 
 -- ============================================================
 -- § 6  CPU affinity helper

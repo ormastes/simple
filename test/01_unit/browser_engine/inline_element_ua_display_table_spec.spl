@@ -1,0 +1,107 @@
+"""
+A non-replaced element whose UA display is `inline` must shrink-wrap to the sum
+of its inline content advances (plus its own padding and border), never to the
+container's content width.
+
+CSS 2.1 §9.2.2 / §10.3.1: an inline, non-replaced box has no computed width;
+its width is its content's. §10.6.1 gives its content area the font's height,
+not the line box's. This renderer already implements both — the inline branch
+of `layout_with_style` calls `intrinsic_text_width` (which adds the element's
+own padding and border) and clamps the height with `inline_content_area_height`.
+
+The defect was upstream of that branch and was not in the layout code at all:
+`display` comes from a hardcoded UA tag table, `is_inline_tag`
+(`simple_web_html_layout_renderer_style.spl`), applied at
+`simple_web_html_layout_renderer_declarations.spl:1269`. Twelve phrasing-content
+tags were missing from it, so each fell through to the BLOCK path, took the
+container's content width, and got a line box's height. Measured against
+headless Chrome (`--headless=new --window-size=900,20000`, Chrome 152) on the
+`html` catalog page, the row that names the cluster:
+
+    Chrome   path:0/0/4/2/8/1/0 | bdi | x=106 | w=86
+    diff     path:0/0/4/2/8/1/0 | bdi | inline | dx=0 dy=2 dw=642 dh=6
+
+Simple reported 728 — the `<li>`'s full content width. Ten such ROOT rows on
+that page alone (`bdi`, `bdo`, `cite`, `data`, `del`, `dfn`, `ins`, `q`, `s`,
+`u`), each with an inherited ladder beneath it.
+
+The tag list added here is not read off the HTML specification: it is the set
+Chrome actually reports `display=inline` for across the eight catalog pages,
+minus the tags the table already carried, minus the replaced media elements
+(`audio`/`video`/`canvas`), which are a different mechanism and are covered by
+`replaced_element_default_intrinsic_box_spec.spl`.
+
+SABOTAGE (run before landing): remove `tag == "bdi"` from `is_inline_tag` and
+AC-1 fails at 728 while AC-3 (`<span>`, always in the table) and AC-4
+(`<p>`, block, must stay 728) both still pass — so the spec is measuring the UA
+table entry and not the fixture.
+
+STATED RESIDUE, not asserted here: Chrome's UA stylesheet gives `<q>` open and
+close quotation marks through `::before`/`::after`. This renderer generates no
+such content, so `<q>` shrink-wraps to the right mechanism but stays about two
+characters narrow. That is recorded rather than faked with hardcoded quotes.
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-INLINE-006 — every tag the UA stylesheet gives `display: inline` resolves to inline, and an inline non-replaced box shrink-wraps to its content width with a font-height content area.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_style.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{
+    is_inline_tag
+}
+
+val VW: i32 = 900
+val VH: i32 = 20000
+val HEAD: text = "<html><head><style>*{box-sizing:border-box}body{margin:0;font:16px/1.5 sans-serif}div{width:728px;margin:0;padding:0}</style></head><body><div>"
+
+fn probe(inner: text, prop: text) -> text:
+    simple_web_layout_debug_layout_by_id(
+        HEAD + inner + "</div></body></html>", VW, VH, "x", prop)
+
+fn wrapped(tag: text, prop: text) -> text:
+    probe("<" + tag + " id=\"x\">hello</" + tag + "> tail", prop)
+
+describe "the UA inline-tag table covers all phrasing content":
+    it "AC-1: <bdi> shrink-wraps to its text, not to the 728 px container":
+        step("the html-page cluster row: Chrome 86 against Simple's 728")
+        expect(wrapped("bdi", "w")).to_equal("34")
+
+    it "AC-2: an inline box's content area is the font height, not the line box":
+        step("CSS 2.1 §10.6.1 — 18 px content area under a 24 px line box")
+        expect(wrapped("bdi", "h")).to_equal("18")
+
+    it "AC-3 (control): <span> was already in the table and must not move":
+        step("same markup, a tag the table always carried — the reference width")
+        expect(wrapped("span", "w")).to_equal("34")
+
+    it "AC-4 (control): <p> is block and must still take the full container width":
+        step("a fix that shrink-wrapped everything would break this row")
+        expect(probe("<p id=\"x\">hello</p>", "w")).to_equal("728")
+
+    it "AC-5: <bdi> and <span> agree, which is what 'same display' means":
+        step("the table entry is the only difference between them")
+        expect(wrapped("bdi", "w")).to_equal(wrapped("span", "w"))
+
+    it "AC-6: every tag added this round resolves inline in the UA table":
+        step("the measured Chrome display=inline set for the 8-page catalog")
+        var missing = ""
+        for t in ["bdi", "bdo", "cite", "data", "del", "dfn", "ins", "output", "q", "s", "u", "wbr"]:
+            if not is_inline_tag(t):
+                missing = missing + t + " "
+        expect(missing).to_equal("")
+
+    it "AC-7 (control): a block tag must NOT have been swept into the table":
+        step("the guard against widening the table until everything is inline")
+        var wrong = ""
+        for t in ["p", "div", "li", "section", "ul", "table"]:
+            if is_inline_tag(t):
+                wrong = wrong + t + " "
+        expect(wrong).to_equal("")
+
+    it "AC-8: <bdo> and <del>, two more of the ten root rows, shrink-wrap too":
+        step("one row is an anecdote; the cluster is the claim")
+        expect(wrapped("bdo", "w") + "/" + wrapped("del", "w")).to_equal("34/34")

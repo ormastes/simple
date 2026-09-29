@@ -1,6 +1,6 @@
 # STM32WB Remote JIT End-to-End
 
-> End-to-end JIT test on real STM32WB hardware via unified adapter pattern. Uses Stm32WbAdapter (OpenOCD + GDB MI) + CompilerBridge for compile-upload-execute.
+> End-to-end JIT test on real STM32WB hardware via unified adapter pattern. Uses Stm32WbAdapter (OpenOCD + GDB MI) plus the compiler-owned ARM32 adapter.
 
 <!-- sdn-diagram:id=stm32wb_jit_e2e_spec.arch -->
 <details class="sdn-source">
@@ -34,7 +34,7 @@ stm32wb_jit_e2e_spec -> std
 
 # STM32WB Remote JIT End-to-End
 
-End-to-end JIT test on real STM32WB hardware via unified adapter pattern. Uses Stm32WbAdapter (OpenOCD + GDB MI) + CompilerBridge for compile-upload-execute.
+End-to-end JIT test on real STM32WB hardware via unified adapter pattern. Uses Stm32WbAdapter (OpenOCD + GDB MI) plus the compiler-owned ARM32 adapter.
 
 ## At a Glance
 
@@ -51,7 +51,7 @@ End-to-end JIT test on real STM32WB hardware via unified adapter pattern. Uses S
 ## Overview
 
 End-to-end JIT test on real STM32WB hardware via unified adapter pattern.
-Uses Stm32WbAdapter (OpenOCD + GDB MI) + CompilerBridge for compile-upload-execute.
+Uses Stm32WbAdapter (OpenOCD + GDB MI) plus the compiler-owned ARM32 adapter.
 
 Requires STM32WB Nucleo board with ST-Link connected (USB 0483:).
 
@@ -132,7 +132,7 @@ adapter.disconnect()
 2. print "[skip] connect failed: {conn err
 3. print "[skip] manager failed: {manager result err
 4. adapter disconnect
-5. print "[skip] compile failed: {compile result err
+5. print "[fail] compile failed: {compile result err
 6. adapter disconnect
 7. var manager = manager result ok unwrap
 8. adapter disconnect
@@ -164,9 +164,10 @@ else:
         else:
             val source = "fn main() -> i64:\n    0\n"
             val limits = MemoryMap.stm32wb()
-            val compile_result = CompilerBridge.compile(source, Architecture.Arm32, limits.code_start)
+            val compile_result = compile_remote_arm32_binary(source, limits.code_start)
             if compile_result.is_err():
-                print "[skip] compile failed: {compile_result.err().unwrap()}"
+                print "[fail] compile failed: {compile_result.err().unwrap()}"
+                expect(compile_result.is_ok()).to_equal(true)
                 adapter.disconnect()
             else:
                 var manager = manager_result.ok.unwrap()
@@ -196,7 +197,7 @@ else:
 2. print "[skip] connect failed: {conn err
 3. print "[skip] manager failed: {manager result err
 4. adapter disconnect
-5. print "[skip] compile failed: {compile result err
+5. print "[fail] compile failed: {compile result err
 6. adapter disconnect
 7. var manager = manager result ok unwrap
 8. adapter disconnect
@@ -228,9 +229,10 @@ else:
         else:
             val source = "fn main() -> i64:\n    42\n"
             val limits = MemoryMap.stm32wb()
-            val compile_result = CompilerBridge.compile(source, Architecture.Arm32, limits.code_start)
+            val compile_result = compile_remote_arm32_binary(source, limits.code_start)
             if compile_result.is_err():
-                print "[skip] compile failed: {compile_result.err().unwrap()}"
+                print "[fail] compile failed: {compile_result.err().unwrap()}"
+                expect(compile_result.is_ok()).to_equal(true)
                 adapter.disconnect()
             else:
                 var manager = manager_result.ok.unwrap()

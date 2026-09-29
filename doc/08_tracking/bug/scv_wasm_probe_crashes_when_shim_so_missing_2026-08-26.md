@@ -1,4 +1,9 @@
 # SCV wasm availability probe crashed (E-SFFI-001) when build/libspl_wasmtime.so is absent (2026-08-26, FIXED)
+## Closed 2026-09-16 — FIXED: existence pre-check; spec 2/9 -> 9/9 post-fix evidence
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Found by:** W4 + Wave-1 closeout lane. `scv_incremental_parse_spec.spl` went
 9/9 -> 2/9 mid-session with
@@ -24,3 +29,4 @@ mismatch (raise vs return <=0) in the runtime; any other `DynLib.load` on a
 possibly-missing path is the same class. `src/lib/scv` callers were swept —
 `wasm_executor.spl` was the only unguarded probe. The runtime-side contract
 fix is filed here as follow-up, not silently normalized.
+

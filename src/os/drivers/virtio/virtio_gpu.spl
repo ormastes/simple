@@ -14,7 +14,7 @@
 #   desc[0] = request (device-readable), desc[1] = response (device-writable).
 #
 # All DMA buffers are allocated via syscall 84 (AllocDma).
-# BAR0 is mapped via syscall 83 (MapBar).
+# PCI memory BAR subwindows are mapped via authorized syscalls 88/89.
 
 use os.kernel.types.device_mem_types.{DeviceGrant}
 use os.kernel.boot.mmio.{mmio_read8, mmio_read16, mmio_read32, mmio_write8, mmio_write16, mmio_write32, mmio_write64, mmio_read64}
@@ -38,6 +38,9 @@ use os.drivers.virtio.virtio_common.{VIRTQ_DESC_F_NEXT, VIRTQ_DESC_F_WRITE}
 use os.userlib.device.{DeviceDmaDescriptor, DMA_CACHE_COHERENT}
 use os.kernel.log.klog_api.{log_init, log_info, log_warn, log_error, log_raw, log_raw_println}
 use os.drivers.virtio.virtio_gpu_init.{virtio_gpu_init_from_grant, virtio_gpu_init_legacy}
+use os.drivers.virtio.virtio_gpu_bar_mapping_plan.{
+    VirtioGpuPciCapabilityWindow, virtio_gpu_plan_bar_windows,
+    virtio_gpu_capability_user_addr}
 use os.drivers.virtio.virtio_gpu_ops.{
     virtio_gpu_cmd_get_display_info,
     virtio_gpu_cmd_resource_create_2d_raw, virtio_gpu_cmd_resource_attach_backing_raw, virtio_gpu_cmd_set_scanout_raw,
@@ -45,8 +48,7 @@ use os.drivers.virtio.virtio_gpu_ops.{
     virtio_gpu_cmd_resource_detach_backing, virtio_gpu_cmd_resource_unref,
     virtio_gpu_flush, virtio_gpu_flush_rect,
     virtio_gpu_put_pixel, virtio_gpu_fill_rect, virtio_gpu_clear,
-    virtio_gpu_draw_hline, virtio_gpu_draw_vline, virtio_gpu_draw_rect,
-    virtio_gpu_cmd_get_display_info_with_recovery, virtio_gpu_cmd_set_scanout_with_recovery
+    virtio_gpu_draw_hline, virtio_gpu_draw_vline, virtio_gpu_draw_rect
 }
 use os.drivers.virtio.virtio_gpu_regs.{
     VIRTIO_PCI_HOST_FEATURES, VIRTIO_PCI_GUEST_FEATURES, VIRTIO_PCI_QUEUE_PFN,
@@ -72,7 +74,6 @@ use os.drivers.virtio.virtio_gpu_regs.{
 }
 
 extern fn rt_alloc(size: u64) -> u64
-extern fn unsafe_addr_of(ref: any) -> u64
 extern fn rt_memory_barrier()
 extern fn rt_mmio_read_u32(addr: u64) -> u32
 extern fn rt_mmio_read_u64(addr: u64) -> u64
@@ -99,8 +100,6 @@ struct GpuDmaAllocResult:
     device: u64
     size: u64
     cache_policy: u8
-    allocation_id: u64
-    owner_device: u64
     ok: bool
 
 impl GpuDmaAllocResult:
@@ -116,9 +115,6 @@ impl GpuDmaAllocResult:
     fn unwrap_device() -> u64:
         self.device
 
-    fn unwrap_allocation_id() -> u64:
-        self.allocation_id
-
     fn into_descriptor() -> DeviceDmaDescriptor:
         DeviceDmaDescriptor(
             virt_addr: self.virt,
@@ -127,8 +123,8 @@ impl GpuDmaAllocResult:
             size_bytes: self.size,
             cache_policy: self.cache_policy,
             owner_task: 0,
-            owner_device: self.owner_device,
-            allocation_id: self.allocation_id
+            owner_device: 0x1050,
+            allocation_id: 0
         )
 
 struct VirtioGpuCapabilities:
@@ -136,9 +132,6 @@ struct VirtioGpuCapabilities:
     flush_mode: text
     cache_policy: text
     dma_accelerated: bool
-    backing_registered: bool
-    physical_migration: bool
-    migration_reason: text
 
 pub struct VirtioGpuInitResult:
     """Returned by virtio_gpu_init_from_grant and virtio_gpu_init_legacy.
@@ -244,12 +237,43 @@ impl VirtioGpuDriver:
         self = r.driver
         Ok(true)
 
-    me init_legacy_from_bar0(bar0_phys: u64, bar0_size: u64, notif_id: u64) -> Result<bool, text>:
-        val r = virtio_gpu_init_legacy(self, bar0_phys, bar0_size, notif_id)
+    me init_legacy_from_bar0(device_bdf: u64, bar0_phys: u64,
+            bar0_size: u64, notif_id: u64) -> Result<bool, text>:
+        val r = virtio_gpu_init_legacy(self, device_bdf, bar0_phys,
+            bar0_size, notif_id)
         if not r.ok:
             return Err(r.err_msg)
         self = r.driver
         Ok(true)
+
+    me set_notification_id(value: u64):
+        self.notif_id = value
+
+    me set_io_transport(is_io: bool, bar_phys: u64, bar_virt: u64):
+        self.is_io_bar = is_io
+        self.bar0_port = if is_io: (bar_phys & 0xFFFC).to_u16() else: 0
+        self.bar0_virt = bar_virt
+
+    me set_command_dma(cmd_virt: u64, cmd_phys: u64, cmd_allocation_id: u64, resp_virt: u64, resp_phys: u64, resp_allocation_id: u64):
+        self.cmd_buf_virt = cmd_virt
+        self.cmd_buf_phys = cmd_phys
+        self.cmd_buf_allocation_id = cmd_allocation_id
+        self.resp_buf_virt = resp_virt
+        self.resp_buf_phys = resp_phys
+        self.resp_buf_allocation_id = resp_allocation_id
+
+    me set_resource_ids(resource_id: u32, next_resource_id: u32):
+        self.resource_id = resource_id
+        self.next_resource_id = next_resource_id
+
+    me set_framebuffer_dma(virt: u64, phys: u64, size: u64, allocation_id: u64):
+        self.fb_virt = virt
+        self.fb_phys = phys
+        self.fb_size = size
+        self.fb_allocation_id = allocation_id
+
+    me set_initialized(value: bool):
+        self.initialized = value
 
     me try_map_modern_pci_caps(grant: DeviceGrant) -> bool:
         """Probe PCI vendor capabilities for the modern common/notify/isr windows."""
@@ -259,39 +283,75 @@ impl VirtioGpuDriver:
             pci_write_config(grant.pci_bus, grant.pci_dev, grant.pci_func, 0x04, cmd_enabled)
             log_info("[virtio] " + "[virtio-gpu] enabled PCI memory+bus-master cmd=0x{cmd_enabled}")
 
-        val cap_ptr0 = self.pci_cfg_read8(grant, 0x34)
-        var cap_ptr = cap_ptr0
+        var cap_types: [u8] = []
+        var cap_ptrs: [u8] = []
+        var capabilities: [VirtioGpuPciCapabilityWindow] = []
+        var cap_ptr = self.pci_cfg_read8(grant, 0x34)
         while cap_ptr >= 0x40 and cap_ptr != 0xFF:
             val cap_id = self.pci_cfg_read8(grant, cap_ptr)
             val next_ptr = self.pci_cfg_read8(grant, cap_ptr + 1)
             if cap_id == PCI_CAP_ID_VENDOR_SPECIFIC:
                 val cfg_type = self.pci_cfg_read8(grant, cap_ptr + 3)
                 val bar = self.pci_cfg_read8(grant, cap_ptr + 4)
-                val offset = self.pci_cfg_read32(grant, cap_ptr + 8)
-                val length = self.pci_cfg_read32(grant, cap_ptr + 12)
-                val bar_phys = self.pci_bar_phys(grant, bar)
-                log_info("[virtio] " + "[virtio-gpu] cap cfg_type={cfg_type} bar={bar} bar_phys=0x{bar_phys} off=0x{offset} len=0x{length}")
-                if bar_phys != 0 and length > 0:
-                    # These capability windows sit inside the same page-aligned
-                    # BAR aperture. Use bitwise OR instead of `+` here: this
-                    # lane has shown corrupted large-address addition results
-                    # when composing BAR4 phys bases with small page offsets.
-                    val mapped = bar_phys | offset.to_u64()
-                    log_info("[virtio] " + "[virtio-gpu] cap mapped=0x{mapped}")
-                    if mapped != 0:
-                        if cfg_type == VIRTIO_PCI_CAP_COMMON_CFG:
-                            self.modern_common_virt = mapped
-                            val probe_feat = mmio_read32(mapped + 4)
-                            val probe_qsize = mmio_read16(mapped + MODERN_COMMON_QUEUE_SIZE)
-                            log_info("[virtio] " + "[virtio-gpu] common probe feat=0x{probe_feat} qsize=0x{probe_qsize}")
-                        elif cfg_type == VIRTIO_PCI_CAP_NOTIFY_CFG:
-                            self.modern_notify_virt = mapped
-                            self.modern_notify_multiplier = self.pci_cfg_read32(grant, cap_ptr + 16)
-                        elif cfg_type == VIRTIO_PCI_CAP_ISR_CFG:
-                            self.modern_isr_virt = mapped
+                val offset = self.pci_cfg_read32(grant, cap_ptr + 8).to_u64()
+                val length = self.pci_cfg_read32(grant, cap_ptr + 12).to_u64()
+                if bar < 6u8 and length > 0u64 and offset + length >= offset:
+                    cap_types.push(cfg_type)
+                    cap_ptrs.push(cap_ptr)
+                    capabilities.push(VirtioGpuPciCapabilityWindow(
+                        cfg_type: cfg_type, bar: bar, offset: offset,
+                        len: length, config_ptr: cap_ptr))
             if next_ptr == 0 or next_ptr == cap_ptr:
                 break
             cap_ptr = next_ptr
+
+        # Map one combined window per BAR. This prevents two capabilities in
+        # the same page from requesting overlapping VMAs.
+        var mapped_lengths: [u64] = []
+        var mapped_users: [u64] = []
+        val map_plan = virtio_gpu_plan_bar_windows(capabilities)
+        if not map_plan.ok:
+            return false
+        for window in map_plan.windows:
+            val mapped = syscall(88, self.device_bdf, window.bar.to_u64(),
+                window.offset, window.len, 0u64)
+            if mapped <= 0:
+                log_info("[virtio] " +
+                    "[virtio-gpu] authorized BAR{window.bar} map failed: {mapped}")
+                var rollback: i64 = 0
+                while rollback < mapped_users.len():
+                    _ = syscall(89, mapped_users[rollback],
+                        mapped_lengths[rollback], 0u64, 0u64, 0u64)
+                    rollback = rollback + 1
+                return false
+            mapped_lengths.push(window.len)
+            mapped_users.push(mapped.to_u64())
+
+        var cap_index: i64 = 0
+        while cap_index < cap_types.len():
+            val mapped = virtio_gpu_capability_user_addr(
+                capabilities[cap_index], map_plan.windows, mapped_users)
+            if mapped == 0u64:
+                var rollback: i64 = 0
+                while rollback < mapped_users.len():
+                    _ = syscall(89, mapped_users[rollback],
+                        mapped_lengths[rollback], 0u64, 0u64, 0u64)
+                    rollback = rollback + 1
+                return false
+            val cfg_type = cap_types[cap_index]
+            if cfg_type == VIRTIO_PCI_CAP_COMMON_CFG:
+                self.modern_common_virt = mapped
+                val probe_feat = mmio_read32(mapped + 4u64)
+                val probe_qsize = mmio_read16(mapped + MODERN_COMMON_QUEUE_SIZE)
+                log_info("[virtio] " +
+                    "[virtio-gpu] common probe feat=0x{probe_feat} qsize=0x{probe_qsize}")
+            elif cfg_type == VIRTIO_PCI_CAP_NOTIFY_CFG:
+                self.modern_notify_virt = mapped
+                self.modern_notify_multiplier = self.pci_cfg_read32(grant,
+                    cap_ptrs[cap_index] + 16u8)
+            elif cfg_type == VIRTIO_PCI_CAP_ISR_CFG:
+                self.modern_isr_virt = mapped
+            cap_index = cap_index + 1
 
         self.is_modern_pci = self.modern_common_virt != 0 and self.modern_notify_virt != 0
         if self.is_modern_pci:
@@ -325,13 +385,10 @@ impl VirtioGpuDriver:
 
         self.ctrl_desc_virt = desc_dma.unwrap_virt()
         self.ctrl_desc_phys = desc_dma.unwrap_device()
-        self.ctrl_desc_allocation_id = desc_dma.unwrap_allocation_id()
         self.ctrl_avail_virt = avail_dma.unwrap_virt()
         self.ctrl_avail_phys = avail_dma.unwrap_device()
-        self.ctrl_avail_allocation_id = avail_dma.unwrap_allocation_id()
         self.ctrl_used_virt = used_dma.unwrap_virt()
         self.ctrl_used_phys = used_dma.unwrap_device()
-        self.ctrl_used_allocation_id = used_dma.unwrap_allocation_id()
 
         var i: u16 = 0
         while i < qsize - 1:
@@ -438,7 +495,6 @@ impl VirtioGpuDriver:
             return Err("DMA alloc for controlq failed")
         val ring_virt = ring_dma.unwrap_virt()
         val ring_phys = ring_dma.unwrap_device()
-        self.ctrl_ring_allocation_id = ring_dma.unwrap_allocation_id()
 
         # Compute sub-region offsets
         self.ctrl_desc_virt = ring_virt
@@ -479,17 +535,17 @@ impl VirtioGpuDriver:
     # ========================================================================
 
     fn alloc_dma(size: u64) -> GpuDmaAllocResult:
-        """Allocate managed DMA in SimpleOS or raw aligned wrapper memory."""
-        if self.kernel_dma_available:
-            var result_pair: [u64; 2] = [0; 2]
-            val result = syscall(84, size, unsafe_addr_of(result_pair), self.device_bdf, DMA_CACHE_COHERENT as u64, 0)
-            if result <= 0 or result_pair[0] == 0 or result_pair[1] == 0:
-                return GpuDmaAllocResult(virt: 0, phys: 0, device: 0, size: 0, cache_policy: DMA_CACHE_COHERENT, allocation_id: 0, owner_device: self.device_bdf, ok: false)
-            return GpuDmaAllocResult(virt: result as u64, phys: result_pair[0], device: result_pair[0], size: size, cache_policy: DMA_CACHE_COHERENT, allocation_id: result_pair[1], owner_device: self.device_bdf, ok: true)
+        """Allocate page-aligned DMA memory from the baremetal wrapper heap.
+
+        In the SYS-GUI-008 wrapper lane, syscall 84 resolves to the direct
+        baremetal stub path and does not provide the kernel alloc_dma contract.
+        Use the raw aligned allocator instead so device-visible addresses are
+        stable and page-aligned under the identity-map assumption.
+        """
         val aligned = rt_alloc_page_aligned(size)
         if aligned == 0:
-            return GpuDmaAllocResult(virt: 0, phys: 0, device: 0, size: 0, cache_policy: DMA_CACHE_COHERENT, allocation_id: 0, owner_device: 0, ok: false)
-        GpuDmaAllocResult(virt: aligned, phys: aligned, device: aligned, size: size, cache_policy: DMA_CACHE_COHERENT, allocation_id: 0, owner_device: 0, ok: true)
+            return GpuDmaAllocResult(virt: 0, phys: 0, device: 0, size: 0, cache_policy: DMA_CACHE_COHERENT, ok: false)
+        GpuDmaAllocResult(virt: aligned, phys: aligned, device: aligned, size: size, cache_policy: DMA_CACHE_COHERENT, ok: true)
 
     # ========================================================================
     # Register Access Helpers (I/O port for legacy VirtIO, MMIO otherwise)
@@ -552,22 +608,6 @@ impl VirtioGpuDriver:
         """
         rt_virtio_gpu_write_ctrl_hdr(self.cmd_buf_virt, cmd_type.to_u64())
 
-    me _sync_allocation_for_device(allocation_id: u64) -> bool:
-        if allocation_id == 0:
-            return true
-        syscall(86, allocation_id, self.device_bdf, 0, 0, 0) >= 0
-
-    me _sync_allocation_for_cpu(allocation_id: u64) -> bool:
-        if allocation_id == 0:
-            return true
-        syscall(87, allocation_id, self.device_bdf, 0, 0, 0) >= 0
-
-    me framebuffer_sync_for_device() -> bool:
-        self._sync_allocation_for_device(self.fb_allocation_id)
-
-    me framebuffer_sync_for_cpu() -> bool:
-        self._sync_allocation_for_cpu(self.fb_allocation_id)
-
     me _send_command(cmd_size: u64, resp_size: u64) -> u32:
         """Submit a command via controlq and wait for response.
 
@@ -593,12 +633,6 @@ impl VirtioGpuDriver:
 
         # Barrier: ensure descriptor writes are visible to device before avail ring update
         rt_memory_barrier()
-
-        if not self._sync_allocation_for_device(self.cmd_buf_allocation_id):
-            return 0
-        if not self._sync_allocation_for_device(self.resp_buf_allocation_id):
-            val _ = self._sync_allocation_for_cpu(self.cmd_buf_allocation_id)
-            return 0
 
         # Add d0 to available ring
         val avail_idx = ram_read16(self.ctrl_avail_virt + 2)
@@ -643,12 +677,6 @@ impl VirtioGpuDriver:
             log_info("[virtio] " + "[virtio-gpu] send_command complete used_idx={used_idx}")
         else:
             log_info("[virtio] " + "[virtio-gpu] send_command timeout")
-            return 0
-
-        if not self._sync_allocation_for_cpu(self.resp_buf_allocation_id):
-            return 0
-        if not self._sync_allocation_for_cpu(self.cmd_buf_allocation_id):
-            return 0
 
         # Acknowledge ISR
         val isr = self.read_isr()
@@ -685,26 +713,6 @@ impl VirtioGpuDriver:
     me cmd_set_scanout(scanout_id: u32, res_id: u32, w: u32, h: u32) -> Result<bool, text>:
         virtio_gpu_cmd_set_scanout(self, scanout_id, res_id, w, h)
 
-    # ========================================================================
-    # GPU Commands — recovery-wrapped callers (bounded retry / re-negotiate)
-    # ========================================================================
-    # These are the recovery-aware counterparts of cmd_get_display_info()
-    # and cmd_set_scanout() above: instead of propagating the first Err to
-    # a caller that ignores it, they retry transient failures and, for a
-    # hard SET_SCANOUT failure, re-negotiate (RESOURCE_CREATE_2D +
-    # SET_SCANOUT) once before giving up. See virtio_gpu_ops.spl's
-    # "Error Recovery / Re-negotiation" section for the decision logic.
-
-    me cmd_get_display_info_recover() -> Result<bool, text>:
-        val r = virtio_gpu_cmd_get_display_info_with_recovery(self)
-        if r.is_ok():
-            self.width = 1280
-            self.height = 800
-        r
-
-    me cmd_set_scanout_recover(scanout_id: u32, res_id: u32, w: u32, h: u32) -> Result<bool, text>:
-        virtio_gpu_cmd_set_scanout_with_recovery(self, scanout_id, res_id, w, h)
-
     me cmd_resource_detach_backing(res_id: u32) -> Result<bool, text>:
         virtio_gpu_cmd_resource_detach_backing(self, res_id)
 
@@ -715,7 +723,7 @@ impl VirtioGpuDriver:
     # Framebuffer + Pixel Drawing — delegated to virtio_gpu_ops.spl
     # ========================================================================
 
-    me flush():
+    me flush() -> bool:
         virtio_gpu_flush(self)
 
     me flush_rect(x: u32, y: u32, w: u32, h: u32):
@@ -759,6 +767,21 @@ impl VirtioGpuDriver:
     fn get_fb_size() -> u64:
         self.fb_size
 
+    fn get_cmd_buf_virt() -> u64:
+        self.cmd_buf_virt
+
+    fn get_resp_buf_virt() -> u64:
+        self.resp_buf_virt
+
+    fn get_bar0_virt() -> u64:
+        self.bar0_virt
+
+    fn get_bar0_port() -> u16:
+        self.bar0_port
+
+    fn get_resource_id() -> u32:
+        self.resource_id
+
     fn is_initialized() -> bool:
         self.initialized
 
@@ -767,10 +790,7 @@ impl VirtioGpuDriver:
             backend_kind: if self.initialized: "virtio-gpu-dma" else: "virtio-gpu-unavailable",
             flush_mode: "dirty-rect",
             cache_policy: "coherent",
-            dma_accelerated: self.initialized,
-            backing_registered: self.fb_allocation_id != 0,
-            physical_migration: false,
-            migration_reason: "migration-unavailable"
+            dma_accelerated: self.initialized
         )
 
 impl VirtioGpu2DSurface for VirtioGpuDriver:

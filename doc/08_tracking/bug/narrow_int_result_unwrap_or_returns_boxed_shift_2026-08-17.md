@@ -1,6 +1,6 @@
 # `Result<u8>.unwrap_or` returns 222<<3; `(u8?)` via `!` returns the nil tag
 
-Status: OPEN (P1)
+Status: CLOSED (2026-09-13) — not reproducible on a6450c9d6f5
 **Found:** 2026-08-17 — interpreter, `bin/simple run` probe (no daemon involved)
 
 ## Symptom
@@ -98,3 +98,27 @@ bug.
 **Not fixed here** either way: every candidate site is in the Rust bootstrap
 seed, so it is out of scope for a pure-Simple fix, and the record's root cause
 is still unlocated — deliberately not guessed at.
+
+## Re-check 2026-09-13
+
+`bin/simple run <fixture>` with the exact `r4.spl`-shape reconstruction from
+the 2026-08-17 re-verification (`okv() -> Result<u8, text>` / `optv() -> u8?`
+/ an `i64` control), on the interpreter (seed sha256 prefix `3d120a6f9ab5704b`,
+base `a6450c9d6f5`):
+
+```
+res_u8_unwrap_or: 222
+res_i64_unwrap_or: 222
+opt_u8_bang: 222
+```
+
+Matches the prior lane's finding exactly: neither `1776` nor `3` reproduces.
+This is now the second independent attempt to reproduce the originally filed
+symptom with no success, and the record itself has no minimal repro tying the
+symptom to a located line — the prior investigator explicitly offered
+"close it as unreproducible" as an acceptable outcome. Closing per
+`.claude/rules/testing.md` / this lane's guide step 1. The unrelated adjacent
+JIT-only finding (`xs.first().unwrap_or(0u8)` -> `<value:0xde>`) is not this
+bug and is already cross-referenced to
+`coalesce_optional_accessor_sentinel_value_eaten_jit_2026-08-17.md`; not
+re-triaged here.

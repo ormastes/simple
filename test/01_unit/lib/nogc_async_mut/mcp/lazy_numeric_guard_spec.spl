@@ -1,22 +1,74 @@
+"""
+## Purpose and audience
+For MCP tooling maintainers who route free-text query parameters into numeric
+context windows. Documents the source-contract guarantee that lazy MCP tool
+modules never hand a raw, unvalidated string straight to `int(...)`, which
+would crash the MCP server process on a malformed client request instead of
+degrading to a zero-based default.
+## Operator workflow
+Run this spec after touching any `main_lazy_*` MCP tool module or
+`outline_renderer.spl`: `bin/simple test
+test/01_unit/lib/nogc_async_mut/mcp/lazy_numeric_guard_spec.spl`. Each
+scenario reads the shipped module source and checks it still calls the
+guarded numeric helper instead of a bare `int(...)` conversion.
+## Compatibility and limitations
+This is a source-contract check, not a runtime behavior check: there is no
+public runtime API that exposes "did this handler guard its int conversion",
+so the only observable evidence is the shipped source text of the three
+guarded modules. A passing result proves the guard call sites are present; it
+does not execute the MCP tool handlers.
+## Verification guidance and troubleshooting
+A failure names the missing guarded call or a reintroduced bare `int(...)`
+call. Re-open the failing module, restore the `_debug_log_int_or_zero` /
+`outline_line_selector_or_zero` guard call, and re-run this file.
+"""
+# Lifecycle: doc/01_research/app/mcp/mcp_cli_gap_analysis.md ;
+# doc/03_plan/app/mcp/mcp_scenario_manual_quality.md ;
+# doc/04_architecture/app/mcp/mcp_lsp_dap_index.md ;
+# doc/05_design/app/mcp/mcpgdb.md
+# @manual_section: mcp_lazy_numeric_guards
+
 extern fn rt_file_read_text(path: text) -> text
 
 describe "nogc_async_mut mcp lazy numeric guards":
     it "guards debug log query numeric filters":
-        val source = rt_file_read_text("src/lib/nogc_async_mut/mcp/main_lazy_debug_log_tools.spl") ?? ""
-
-        expect(source).to_contain("_debug_log_int_or_zero(since_str)")
-        expect(source).to_contain("_debug_log_int_or_zero(extract_field(e, \"id\"))")
-        expect(source.contains("int(since_str)")).to_equal(false)
+        # @req REQ-MCP-LAZY-001
+        # @capture(statistics): boolean guard-presence checks for the debug-log tool module
+        step("Read the lazy debug-log tools module source")
+        val debug_log_tools_source = rt_file_read_text("src/lib/nogc_async_mut/mcp/main_lazy_debug_log_tools.spl") ?? ""
+        step("Confirm the since-timestamp filter routes through the guarded conversion")
+        val guards_since_filter = debug_log_tools_source.contains("_debug_log_int_or_zero(since_str)")
+        step("Confirm the id-field filter routes through the guarded conversion")
+        val guards_id_field = debug_log_tools_source.contains("_debug_log_int_or_zero(extract_field(e, \"id\"))")
+        step("Confirm the unguarded bare int() conversion was not reintroduced")
+        val still_has_bare_int_on_since = debug_log_tools_source.contains("int(since_str)")
+        expect(guards_since_filter).to_equal(true)
+        expect(guards_id_field).to_equal(true)
+        expect(still_has_bare_int_on_since).to_equal(false)
 
     it "guards terminal numeric params":
-        val source = rt_file_read_text("src/lib/nogc_async_mut/mcp/main_lazy_terminal_tools.spl") ?? ""
-
-        expect(source).to_contain("val trimmed = s.trim()")
-        expect(source).to_contain("int(trimmed)")
-        expect(source.contains("int(s)")).to_equal(false)
+        # @req REQ-MCP-LAZY-002
+        # @capture(statistics): boolean guard-presence checks for the terminal tools module
+        step("Read the lazy terminal tools module source")
+        val terminal_tools_source = rt_file_read_text("src/lib/nogc_async_mut/mcp/main_lazy_terminal_tools.spl") ?? ""
+        step("Confirm the numeric parameter is trimmed before conversion")
+        val trims_before_convert = terminal_tools_source.contains("val trimmed = s.trim()")
+        step("Confirm the trimmed value, not the raw parameter, is converted")
+        val converts_trimmed_value = terminal_tools_source.contains("int(trimmed)")
+        step("Confirm the unguarded raw-parameter conversion was not reintroduced")
+        val still_converts_raw_param = terminal_tools_source.contains("int(s)")
+        expect(trims_before_convert).to_equal(true)
+        expect(converts_trimmed_value).to_equal(true)
+        expect(still_converts_raw_param).to_equal(false)
 
     it "guards outline line selectors":
-        val source = rt_file_read_text("src/lib/nogc_async_mut/mcp/outline_renderer.spl") ?? ""
-
-        expect(source).to_contain("outline_line_selector_or_zero(selector)")
-        expect(source.contains("val target_line = int(")).to_equal(false)
+        # @req REQ-MCP-LAZY-003
+        # @capture(statistics): boolean guard-presence checks for the outline renderer module
+        step("Read the outline renderer module source")
+        val outline_renderer_source = rt_file_read_text("src/lib/nogc_async_mut/mcp/outline_renderer.spl") ?? ""
+        step("Confirm the line selector routes through the guarded conversion")
+        val guards_line_selector = outline_renderer_source.contains("outline_line_selector_or_zero(selector)")
+        step("Confirm the unguarded direct int() conversion was not reintroduced")
+        val still_has_bare_int_target_line = outline_renderer_source.contains("val target_line = int(")
+        expect(guards_line_selector).to_equal(true)
+        expect(still_has_bare_int_target_line).to_equal(false)

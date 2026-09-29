@@ -1,4 +1,8 @@
 # Stage54 hosted entry-closure symbol ownership gaps
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Observed evidence
 
@@ -26,3 +30,4 @@ captures qualified `use` resolution and package-facade bare exports, followed
 by either function-level reachability pruning or explicit backend feature
 gating for unused GPU modules. That work is intentionally outside the minimal
 native-all/core-C archive composition fix.
+

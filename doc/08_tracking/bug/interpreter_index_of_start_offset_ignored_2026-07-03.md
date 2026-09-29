@@ -1,9 +1,43 @@
 # Interpreter `run` path: text.index_of(needle, start) ignores the start offset
 
+## Re-verified 2026-09-13 — seed lane clean; pure-Simple lane still unverified (LEFT OPEN)
+
+**Lane caveat (added in the same 2026-09-13 pass, after review):** this entry is
+filed against the **pure-Simple / self-hosted** lane, which the run recorded
+below does NOT exercise. No self-hosted binary is deployed on this host —
+`bin/release/simple.exe`, `bin/release/x86_64-pc-windows-msvc/simple.exe` and
+`bin/release/x86_64-pc-windows-gnu/simple.exe` all print the Rust
+bootstrap-seed banner. Running the repro through the pure-Simple CLI on the
+seed (`simple run src/app/cli/main.spl -- run <repro>`) emitted only lint
+diagnostics and never executed the program, so that substitute lane does not
+work either. The seed result below therefore shows only that the **seed** does
+not exhibit the defect; it does NOT discharge the pure-Simple fix.
+**This entry stays OPEN pending a deployed self-hosted binary.**
+
+Verification engine: pinned copy of `src/compiler_rust/target/release/simple.exe`
+(Simple Language v1.0.1-beta.1, 39,267,840 bytes, sha256 prefix `1b62a1a42755774fc087`,
+built 2026-09-13 on this host). Windows 11 / Git Bash, default `run` lane
+(seed JIT with interpreter fallback). This is the **Rust bootstrap seed**, not a
+deployed pure-Simple self-hosted binary — the self-hosted lane remains unverified
+on this host.
+
+Ran the exact repro from the entry header:
+
+```spl
+fn main():
+    val s = "a\nb\nc"
+    print(s.index_of("\n", 2) ?? -1)
+```
+
+Result: prints `3` — the expected value. The reported wrong answer `1`
+(start offset ignored) does not reproduce, so offset scan loops no longer
+hang. The Resolution (2026-07-16) note said "executable self-host
+verification remains pending"; that is now discharged on the seed lane
+(measured). The pure-Simple self-hosted lane is still unverified here.
+
 - **Date:** 2026-07-03
 - **Severity:** P2 (silent wrong result; turns scan loops into infinite loops)
-- Status: FIXED
-- Status re-verified 2026-08-17 by source inspection (triage shard 02).
+- **Status:** source fixed in the active pure-Simple evaluator; execution pending
 - **Repro:**
 
 ```spl
@@ -38,38 +72,3 @@ host string search. One-argument behavior is unchanged and missing matches
 normalize to `-1`. Focused behavior and source-owner contracts cover offsets
 before, between, and after matches. Executable self-host verification remains
 pending under the current no-build restriction.
-
-## Recurrence (2026-07-18): directory-mode `test` hang, same deployed-seed gap
-
-Hit again independently while root-causing a genuine indefinite hang in
-`simple test <directory>` on the FRESH bootstrap seed
-(`src/compiler_rust/target/bootstrap/simple`, and the `bin/release/simple`
-subprocess it spawns for each test file) — see
-[[test_runner_fresh_seed_silent_noop_2026-07-17]]. `parse_test_output` /
-`extract_error_message` / `output_has_zero_pass_summary` /
-`extract_coverage_sdn` / `strip_coverage_blocks` in
-`src/lib/nogc_sync_mut/test_runner/test_executor_parsing.spl` all used the
-`while pos <= len(): next = output.index_of("\n", pos); ...; pos = next + 1`
-scan pattern this doc describes. Minimal repro against the deployed seed
-confirmed the exact symptom again:
-
-```spl
-val s = "aa\nbb\ncc\ndd"
-var pos = 3
-print s.index_of("\n", pos) ?? -1   # prints 2 (first match), not 5 — pos never advances
-```
-
-Confirms the 2026-07-16 source fix has **not reached the deployed
-`bin/release/x86_64-unknown-linux-gnu/simple` binary** (it still prints the
-"this Rust-built Simple binary is a bootstrap seed only" warning on every
-invocation, i.e. the "release" binary in this checkout is itself an
-undeployed seed copy, not a rebuilt self-hosted binary) — this is the same
-redeploy-wall class as other 2026-07-17 bugs
-(`host_toolchain_seed_pinned_lint_fmt_doccov_unrunnable_2026-07-17`). Applied
-the same `.split("\n")` workaround already used in
-`test_runner_single.spl::bdd_summary_counts` to all five functions in
-`test_executor_parsing.spl`. Left `checkpoint.spl`'s
-`parse_quoted_field`-style single-shot `line.index_of("\"", first_quote + 1)`
-call unfixed (not in a scan loop, so it silently returns `""` instead of
-hanging — lower severity, out of scope for the hang fix, flagged here for
-whoever redeploys the interpreter fix).

@@ -16,3 +16,12 @@ evidence for system driving.
 
 Errors are visible and return nonzero in headless mode. A live window remains
 responsive until close/Escape.
+# Production Electron launch resolution
+
+Caret and DevHub use the shared `app.ui.electron.app_launcher` capsule. The
+capsule fails closed unless both the managed Electron package manifest and an
+executable are present, always supplies the resolved application directory to
+Electron, and searches at most six executable ancestors after checking the
+current workspace. A process spawn alone is not rendering proof; the live GUI
+system gate must still validate Caret-specific visible text and trusted input
+delivery.

@@ -1,0 +1,227 @@
+"""
+## Purpose and audience
+
+Purpose: prove that the tabbed web-renderer showcase uses the production
+inventory, hosted browser DOM, layout hit testing, and native tab bridge.
+Audience: renderer and hosted-shell engineers reviewing accessible input and
+DOM-state preservation before physical Vulkan acceptance is attempted.
+
+## Operator workflow
+
+Open the composed showcase, select every tab by its real layout hit target,
+then exercise Arrow/Home/End focus movement and Enter/Space activation.
+
+## Verification guidance
+
+The captured HTML is the live BrowserSession serialization. Selected tabs,
+focused tabs, visible panels, and document generation are asserted separately.
+
+## Recovery and troubleshooting
+
+If a hit target is missing, inspect the captured HTML and layout id. If a DOM
+update fails, preserve the returned production error and verify atomicity.
+
+research: doc/01_research/local/web_renderer_vulkan_4k_showcase_hardening.md
+plan: doc/03_plan/sys_test/web_renderer_vulkan_4k_showcase_hardening.md
+architecture: doc/04_architecture/web_renderer_vulkan_4k_showcase_hardening.md
+design: doc/05_design/web_renderer_vulkan_4k_showcase_hardening.md
+"""
+
+# @evidence-display: links
+
+use std.spec.*
+use std.io_runtime.{read_file}
+use std.common.spec.scenario_helpers.{capture_html_text}
+use os.hosted.hosted_web_content_session.{HostedWebContentSession}
+use os.hosted.web_showcase_native_tabs.{
+    web_showcase_native_pointer, web_showcase_native_key}
+use std.gc_async_mut.gpu.browser_engine.web_showcase_tabs.{
+    WebShowcaseState, web_showcase_state}
+use std.gc_async_mut.web.browser_session_runtime.*
+use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
+    be_dom_find_by_tag, be_dom_get_attr, be_dom_has_attr}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id}
+use std.gc_async_mut.gpu.browser_engine.web_renderable_feature_inventory.{
+    web_renderable_feature_inventory, web_renderable_feature_inventory_apply_to_showcase}
+
+val SHOWCASE_WIDTH: i32 = 3840
+val SHOWCASE_HEIGHT: i32 = 2160
+
+fn native_tab_session() -> HostedWebContentSession:
+    val source = read_file("examples/06_io/ui/browser_common_elements_showcase.html")
+    val fixture = web_renderable_feature_inventory_apply_to_showcase(
+        source, web_renderable_feature_inventory())
+    HostedWebContentSession.create_document(
+        71, "simple-showcase://web/standards", fixture,
+        SHOWCASE_WIDTH, SHOWCASE_HEIGHT)
+
+fn selected_native_tab(session: HostedWebContentSession) -> text:
+    for node in be_dom_find_by_tag(session.browser.dom_root(), "button"):
+        if be_dom_get_attr(node, "aria-selected") == "true":
+            return be_dom_get_attr(node, "id")
+    ""
+
+fn focused_native_tab(session: HostedWebContentSession) -> text:
+    for node in be_dom_find_by_tag(session.browser.dom_root(), "button"):
+        if (be_dom_get_attr(node, "role") == "tab" and
+                be_dom_get_attr(node, "tabindex") == "0"):
+            return be_dom_get_attr(node, "id")
+    ""
+
+fn active_native_panel(session: HostedWebContentSession) -> text:
+    var active = ""
+    for node in be_dom_find_by_tag(session.browser.dom_root(), "section"):
+        if (be_dom_get_attr(node, "role") == "tabpanel" and
+                not be_dom_has_attr(node, "hidden")):
+            if active != "":
+                return "multiple-active-panels"
+            active = be_dom_get_attr(node, "id")
+    active
+
+fn require_showcase_state(result: Result<WebShowcaseState, text>) -> WebShowcaseState:
+    match result:
+        Ok(value): value
+        Err(message): fail("native showcase tab update failed: " + message)
+
+fn press_native_tab(
+    session: HostedWebContentSession, state: WebShowcaseState, id: text
+) -> WebShowcaseState:
+    val html = session.browser.render_html_document()
+    val x = simple_web_layout_debug_layout_by_id(
+        html, SHOWCASE_WIDTH, SHOWCASE_HEIGHT, id, "x").parse_i64() ?? -100
+    val y = simple_web_layout_debug_layout_by_id(
+        html, SHOWCASE_WIDTH, SHOWCASE_HEIGHT, id, "y").parse_i64() ?? -100
+    val width = simple_web_layout_debug_layout_by_id(
+        html, SHOWCASE_WIDTH, SHOWCASE_HEIGHT, id, "w").parse_i64() ?? 0
+    val height = simple_web_layout_debug_layout_by_id(
+        html, SHOWCASE_WIDTH, SHOWCASE_HEIGHT, id, "h").parse_i64() ?? 0
+    expect(width).to_be_greater_than(0)
+    expect(height).to_be_greater_than(0)
+    val px = (x + width / 2).to_i32()
+    val py = (y + height / 2).to_i32()
+    val down = session.dispatch_pointer_at(1, px, py, true)
+    val released = session.dispatch_pointer_at(2, px, py, false)
+    expect(down.semantic_target_id).to_equal(id)
+    expect(released.semantic_target_id).to_equal(id)
+    require_showcase_state(web_showcase_native_pointer(
+        session, state, released.semantic_target_id, true))
+
+fn key_native_tab(
+    session: HostedWebContentSession, state: WebShowcaseState, key: i64
+) -> WebShowcaseState:
+    val dispatched = session.dispatch_key(3, key, true)
+    require_showcase_state(web_showcase_native_key(
+        session, state, dispatched.semantic_target_id, key, true))
+
+# @manual_section: Production pointer routing
+describe "Native web showcase pointer tabs":
+    # @capture(html)
+    it "should activate every panel through production layout hit testing":
+        # @req REQ-WEB4K-003 REQ-WEB4K-008
+        step("Open the inventory-composed showcase in HostedWebContentSession")
+        var session = native_tab_session()
+        var state = web_showcase_state()
+        expect(session.failure_reason).to_equal("")
+        val generation = session.browser.document_generation().value
+
+        step("Select every tab through its production layout hit target")
+        for id in [
+            "html", "css-layout", "css-paint", "forms-media",
+            "animation", "evidence", "overview"
+        ]:
+            state = press_native_tab(session, state, "tab-" + id)
+            expect(selected_native_tab(session)).to_equal("tab-" + id)
+            expect(active_native_panel(session)).to_equal("panel-" + id)
+            expect(session.browser.document_generation().value).to_equal(generation)
+
+        step("Capture the live DOM after the final pointer activation")
+        val evidence = capture_html_text(
+            "Native pointer-selected showcase",
+            session.browser.render_html_document(),
+            "build/test-artifacts/02_integration/rendering/web_showcase_native_tabs/pointer.html")
+        expect(evidence.mime).to_equal("text/html")
+        expect(evidence.body).to_contain("Feature examples and support")
+        session.close()
+
+# @manual_section: Production keyboard routing
+describe "Native web showcase keyboard tabs":
+    # @capture(html)
+    it "should keep focus distinct until Enter or Space activates a tab":
+        # @req REQ-WEB4K-003 REQ-WEB4K-008
+        step("Focus the Overview tab through the production pointer route")
+        var session = native_tab_session()
+        var state = web_showcase_state()
+        expect(session.failure_reason).to_equal("")
+        state = press_native_tab(session, state, "tab-overview")
+
+        step("Move focus with ArrowRight without changing selection")
+        state = key_native_tab(session, state, 39)
+        expect(focused_native_tab(session)).to_equal("tab-html")
+        expect(selected_native_tab(session)).to_equal("tab-overview")
+
+        step("Activate the focused HTML tab with Enter")
+        state = key_native_tab(session, state, 13)
+        expect(selected_native_tab(session)).to_equal("tab-html")
+        expect(active_native_panel(session)).to_equal("panel-html")
+
+        step("Move to End and activate the Evidence tab with Space")
+        state = key_native_tab(session, state, 35)
+        expect(selected_native_tab(session)).to_equal("tab-html")
+        state = key_native_tab(session, state, 32)
+        val _ = session.dispatch_key(7, 32, false)
+        expect(selected_native_tab(session)).to_equal("tab-evidence")
+        expect(active_native_panel(session)).to_equal("panel-evidence")
+
+        step("Move Home then ArrowLeft to prove bounded wraparound")
+        state = key_native_tab(session, state, 36)
+        expect(focused_native_tab(session)).to_equal("tab-overview")
+        state = key_native_tab(session, state, 37)
+        expect(focused_native_tab(session)).to_equal("tab-evidence")
+        expect(selected_native_tab(session)).to_equal("tab-evidence")
+
+        step("Capture the live DOM after keyboard navigation")
+        val evidence = capture_html_text(
+            "Native keyboard-selected showcase",
+            session.browser.render_html_document(),
+            "build/test-artifacts/02_integration/rendering/web_showcase_native_tabs/keyboard.html")
+        expect(evidence.mime).to_equal("text/html")
+        expect(evidence.body).to_contain("aria-selected")
+        session.close()
+
+# @manual_section: Atomic DOM publication
+describe "Native web showcase publication safety":
+    # @capture(html)
+    it "should reject an invalid attribute batch without applying its valid prefix":
+        # @req REQ-WEB4K-003 REQ-WEB4K-008
+        step("Open the showcase and retain its live DOM serialization")
+        var session = native_tab_session()
+        val index = match session.browser.current_dom_identity_index():
+            Some(value): value
+            nil: fail("showcase DOM identity index is missing")
+        val route = match index.route_for_author_id("tab-overview"):
+            Some(value): value
+            nil: fail("Overview tab route is missing")
+        val before = session.browser.render_html_document()
+
+        step("Submit one valid and one forbidden presentation attribute atomically")
+        val applied = session.browser.apply_dom_presentation_attributes([
+            BrowserDomPresentationAttribute(
+                route: route, name: "aria-selected", value: Some("false")),
+            BrowserDomPresentationAttribute(
+                route: route, name: "id", value: Some("true"))
+        ])
+        match applied:
+            Ok(_): fail("forbidden identity mutation was accepted")
+            Err(message):
+                expect(message).to_equal("unsupported-presentation-attribute")
+
+        step("Capture and compare the unchanged live DOM")
+        val after = session.browser.render_html_document()
+        val evidence = capture_html_text(
+            "Atomic publication rejection",
+            after,
+            "build/test-artifacts/02_integration/rendering/web_showcase_native_tabs/atomic-rejection.html")
+        expect(after).to_equal(before)
+        expect(evidence.mime).to_equal("text/html")
+        session.close()

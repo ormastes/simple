@@ -1,0 +1,105 @@
+"""LinkExecutionPolicyV1 — the resource-budget knob for a link job (design §6.2, §8, D8).
+
+`mode` selects between the fast (resident) and bounded (windowed/spilled)
+compositions from design §8; `Auto` records the decision at plan time rather
+than picking a `ResolveMode` discriminant (design §6.1, R-doc R04).
+"""
+
+use std.common.kernel_plugin.schema_header.{KpfSchemaHeaderV1, KpfSchemaRequirementV1, kpf_validate_schema_header_v1}
+
+pub enum LinkExecutionModeV1:
+    Fast
+    Bounded
+    Auto
+
+impl LinkExecutionModeV1:
+    pub fn name() -> text:
+        match self:
+            case Fast: "Fast"
+            case Bounded: "Bounded"
+            case Auto: "Auto"
+
+pub fn link_execution_mode_v1_from_code(code: i64) -> Option<LinkExecutionModeV1>:
+    """Total decoder: any code outside {0,1,2} is rejected, never coerced."""
+    if code == 0:
+        return Some(LinkExecutionModeV1.Fast)
+    if code == 1:
+        return Some(LinkExecutionModeV1.Bounded)
+    if code == 2:
+        return Some(LinkExecutionModeV1.Auto)
+    nil
+
+export LinkExecutionModeV1, link_execution_mode_v1_from_code
+
+pub struct LinkExecutionPolicyV1:
+    header: KpfSchemaHeaderV1
+    mode: LinkExecutionModeV1
+    job_memory_limit_bytes: u64
+    scratch_limit_bytes: u64
+    max_workers: u32
+    allowed_placements: u64
+    enforcement_requirement: u32
+
+export LinkExecutionPolicyV1
+
+pub struct LinkExecutionDecisionV1:
+    requested_mode: LinkExecutionModeV1
+    selected_mode: LinkExecutionModeV1
+    estimated_resident_bytes: u64
+    admitted_limit_bytes: u64
+    reason: text
+
+export LinkExecutionDecisionV1
+
+pub fn link_policy_resolve_mode_v1(policy: LinkExecutionPolicyV1,
+        estimated_resident_bytes: u64) -> LinkExecutionDecisionV1:
+    """Resolve Auto before execution and retain a falsifiable decision reason."""
+    if policy.mode == LinkExecutionModeV1.Fast:
+        return LinkExecutionDecisionV1(requested_mode: policy.mode,
+            selected_mode: LinkExecutionModeV1.Fast,
+            estimated_resident_bytes: estimated_resident_bytes,
+            admitted_limit_bytes: policy.job_memory_limit_bytes,
+            reason: "explicit-fast")
+    if policy.mode == LinkExecutionModeV1.Bounded:
+        return LinkExecutionDecisionV1(requested_mode: policy.mode,
+            selected_mode: LinkExecutionModeV1.Bounded,
+            estimated_resident_bytes: estimated_resident_bytes,
+            admitted_limit_bytes: policy.job_memory_limit_bytes,
+            reason: "explicit-bounded")
+    if policy.enforcement_requirement == 1:
+        return LinkExecutionDecisionV1(requested_mode: policy.mode,
+            selected_mode: LinkExecutionModeV1.Bounded,
+            estimated_resident_bytes: estimated_resident_bytes,
+            admitted_limit_bytes: policy.job_memory_limit_bytes,
+            reason: "auto-enforcement-required")
+    if policy.job_memory_limit_bytes > 0 and
+            estimated_resident_bytes > policy.job_memory_limit_bytes:
+        return LinkExecutionDecisionV1(requested_mode: policy.mode,
+            selected_mode: LinkExecutionModeV1.Bounded,
+            estimated_resident_bytes: estimated_resident_bytes,
+            admitted_limit_bytes: policy.job_memory_limit_bytes,
+            reason: "auto-estimate-exceeds-limit")
+    LinkExecutionDecisionV1(requested_mode: policy.mode,
+        selected_mode: LinkExecutionModeV1.Fast,
+        estimated_resident_bytes: estimated_resident_bytes,
+        admitted_limit_bytes: policy.job_memory_limit_bytes,
+        reason: if estimated_resident_bytes == 0: "auto-no-estimate-fast" else: "auto-estimate-within-limit")
+
+export link_policy_resolve_mode_v1
+
+pub fn link_policy_v1_validate(policy: LinkExecutionPolicyV1, requirement: KpfSchemaRequirementV1) -> text:
+    """Return "" when `policy` is well-formed against `requirement`, else the rejection reason."""
+    val header_status = kpf_validate_schema_header_v1(policy.header, requirement)
+    if not header_status.accepted():
+        return "schema header invalid: code={header_status.code()}"
+    if policy.max_workers < 1:
+        return "max_workers must be >= 1"
+    if policy.enforcement_requirement > 1:
+        return "enforcement_requirement must be 0 or 1"
+    val requires_limit = policy.mode == LinkExecutionModeV1.Bounded or
+        (policy.mode == LinkExecutionModeV1.Auto and policy.enforcement_requirement == 1)
+    if requires_limit and policy.job_memory_limit_bytes == 0:
+        return "Bounded or enforced Auto mode requires job_memory_limit_bytes > 0"
+    ""
+
+export link_policy_v1_validate

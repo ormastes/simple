@@ -1,7 +1,9 @@
 # Bootstrap Stage 3 runtime authority root symlink
+## Closed 2026-09-16 — State fixed and regression-covered; validation bootstrap_stage3_runtime_authority_root=true
 
-Status: FIXED
-Status re-verified 2026-08-17 by source inspection (triage shard 00).
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
 
@@ -43,3 +45,4 @@ Validation (run once):
 ```text
 bootstrap_stage3_runtime_authority_root=true
 ```
+

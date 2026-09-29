@@ -1,0 +1,235 @@
+use common.kernel_plugin.ids.{KpfId128, KpfDigest256, kpf_digest256_equal, kpf_id128_equal}
+use common.kernel_plugin.contracts.*
+use std.mdsocpp.*
+use tooling_kernel.contract.model.ToolingStatusV1
+use tooling_kernel.plugin_adapter.adapter.{ToolingAnalysisRequestV1, ToolingAnalysisReceiptV1, tooling_adapter_receipt_v1}
+
+pub const IDE_PILOT_CAP_DOCUMENT_READ: u64 = 1
+pub const IDE_PILOT_CAP_DOCUMENT_EDIT: u64 = 2
+pub const IDE_PILOT_CAP_DIAGNOSTIC_PUBLISH: u64 = 4
+pub const IDE_PILOT_CAP_PROCESS_EXECUTE: u64 = 8
+pub const IDE_PILOT_CAP_NETWORK: u64 = 16
+pub const IDE_PILOT_CAPABILITIES_LOCAL: u64 = 15
+pub const IDE_PILOT_CAPABILITIES_ALL: u64 = 31
+
+pub enum IdeToolingPilotUpgradeStatusV1:
+    Accepted
+    ActiveGenerationInvalid
+    CandidateSealRejected
+    GenerationNotSuccessor
+    CompositionUnchanged
+    MigrationMissing
+    MigrationIncompatible
+
+    fn accepted() -> bool: self == IdeToolingPilotUpgradeStatusV1.Accepted
+
+pub struct IdeToolingPilotGenerationV1:
+    capsules: [CapsuleDescriptorV1]
+    policy: MdsocppSealPolicyV1
+    document_schema_major: u32
+    document_schema_minor: u32
+
+pub struct IdeToolingPilotDeploymentV1:
+    generation: IdeToolingPilotGenerationV1
+    seal: MdsocppSealResultV1
+
+pub struct IdeToolingPilotUpgradeReceiptV1:
+    status: IdeToolingPilotUpgradeStatusV1
+    active_generation: u64
+    candidate_generation: u64
+    published_generation: u64
+    restored_generation: u64
+    candidate_seal_status: MdsocppSealStatus
+    active_composition_digest: KpfDigest256
+    candidate_composition_digest: KpfDigest256
+    rolled_back: bool
+
+fn pilot_id(value: u64) -> KpfId128: KpfId128(hi: 0x4d44534f435050, lo: value)
+
+fn pilot_memory(persistent: u64, sessions: u32, inflight: u32) -> KpfMemoryContractV1:
+    KpfMemoryContractV1(
+        memory_class: KPF_MEMORY_NOGC_BOUNDED,
+        initialization_bytes: 16,
+        persistent_bytes_per_instance: persistent,
+        bytes_per_session: 16,
+        bytes_per_inflight_request: 8,
+        input_alignment: 8,
+        output_alignment: 8,
+        maximum_sessions: sessions,
+        maximum_inflight_per_session: inflight,
+        maximum_batch_items: 32,
+        may_allocate_after_activation: KPF_FLAG_FALSE,
+        reserved0: 0,
+    )
+
+fn pilot_concurrency(calls: u32) -> KpfConcurrencyContractV1:
+    KpfConcurrencyContractV1(
+        mode: KPF_CONCURRENCY_SNAPSHOT_READ_PARALLEL,
+        reentrancy: KPF_REENTRANCY_SIGNAL_ONLY,
+        maximum_concurrent_calls: calls,
+        deterministic_completion: KPF_FLAG_TRUE,
+        reserved0: 0,
+    )
+
+fn offer(value: u64) -> MdsocppFacetOfferV1:
+    MdsocppFacetOfferV1(facet_id: pilot_id(value))
+
+fn require(value: u64, optional: bool = false) -> MdsocppFacetRequirementV1:
+    MdsocppFacetRequirementV1(facet_id: pilot_id(value), optional: optional)
+
+fn migration(from_major: u32, from_minor: u32, to_major: u32, to_minor: u32) -> MdsocppStateMigrationV1:
+    val kind = if from_major == to_major: MdsocppMigrationKind.Additive else: MdsocppMigrationKind.Custom
+    val operation = if kind == MdsocppMigrationKind.Custom: pilot_id(901) else: pilot_id(0)
+    MdsocppStateMigrationV1(
+        state_schema_id: pilot_id(801),
+        from_major: from_major,
+        from_minor: from_minor,
+        to_major: to_major,
+        to_minor: to_minor,
+        kind: kind,
+        migration_operation_id: operation,
+    )
+
+fn document_capsule(previous_major: u32, previous_minor: u32, schema_major: u32, schema_minor: u32) -> CapsuleDescriptorV1:
+    var migrations: [MdsocppStateMigrationV1] = []
+    if previous_major != schema_major or previous_minor != schema_minor:
+        migrations.push(migration(previous_major, previous_minor, schema_major, schema_minor))
+    CapsuleDescriptorV1(
+        capsule_id: pilot_id(10), closure: MdsocppClosure.Static,
+        provided_facets: [offer(101)], required_facets: [],
+        required_capability_bits: IDE_PILOT_CAP_DOCUMENT_READ | IDE_PILOT_CAP_DOCUMENT_EDIT,
+        memory: pilot_memory(256, 4, 4), concurrency: pilot_concurrency(4),
+        uses_ecs: false, state_migrations: migrations,
+    )
+
+fn workspace_capsule() -> CapsuleDescriptorV1:
+    CapsuleDescriptorV1(
+        capsule_id: pilot_id(20), closure: MdsocppClosure.Static,
+        provided_facets: [offer(102)], required_facets: [require(101)],
+        required_capability_bits: IDE_PILOT_CAP_DOCUMENT_READ,
+        memory: pilot_memory(192, 2, 2), concurrency: pilot_concurrency(2),
+        uses_ecs: false, state_migrations: [],
+    )
+
+fn analysis_capsule() -> CapsuleDescriptorV1:
+    CapsuleDescriptorV1(
+        capsule_id: pilot_id(40), closure: MdsocppClosure.Complete,
+        provided_facets: [offer(103), offer(104)], required_facets: [require(101), require(102)],
+        required_capability_bits: IDE_PILOT_CAP_DOCUMENT_READ | IDE_PILOT_CAP_DIAGNOSTIC_PUBLISH,
+        memory: pilot_memory(512, 4, 8), concurrency: pilot_concurrency(8),
+        uses_ecs: false, state_migrations: [],
+    )
+
+fn test_capsule() -> CapsuleDescriptorV1:
+    CapsuleDescriptorV1(
+        capsule_id: pilot_id(50), closure: MdsocppClosure.Complete,
+        provided_facets: [offer(105)], required_facets: [require(102)],
+        required_capability_bits: IDE_PILOT_CAP_PROCESS_EXECUTE,
+        memory: pilot_memory(128, 2, 2), concurrency: pilot_concurrency(2),
+        uses_ecs: false, state_migrations: [],
+    )
+
+fn ai_capsule() -> CapsuleDescriptorV1:
+    CapsuleDescriptorV1(
+        capsule_id: pilot_id(45), closure: MdsocppClosure.Complete,
+        provided_facets: [offer(106)], required_facets: [require(101), require(103)],
+        required_capability_bits: IDE_PILOT_CAP_DOCUMENT_READ | IDE_PILOT_CAP_NETWORK,
+        memory: pilot_memory(384, 2, 4), concurrency: pilot_concurrency(4),
+        uses_ecs: true, state_migrations: [],
+    )
+
+fn shell_capsule() -> CapsuleDescriptorV1:
+    CapsuleDescriptorV1(
+        capsule_id: pilot_id(60), closure: MdsocppClosure.Static,
+        provided_facets: [offer(107)],
+        required_facets: [require(101), require(104), require(105), require(106, optional: true)],
+        required_capability_bits: IDE_PILOT_CAP_DOCUMENT_READ | IDE_PILOT_CAP_DOCUMENT_EDIT,
+        memory: pilot_memory(160, 1, 1), concurrency: pilot_concurrency(1),
+        uses_ecs: false, state_migrations: [],
+    )
+
+pub fn ide_tooling_pilot_generation_v1(
+    generation: u64,
+    composition_digest: KpfDigest256,
+    granted_capability_bits: u64,
+    memory_budget_bytes: u64,
+    include_ai: bool,
+    previous_schema_major: u32,
+    previous_schema_minor: u32,
+    document_schema_major: u32,
+    document_schema_minor: u32,
+) -> IdeToolingPilotGenerationV1:
+    var capsules = [
+        shell_capsule(), test_capsule(), analysis_capsule(), workspace_capsule(),
+        document_capsule(previous_schema_major, previous_schema_minor, document_schema_major, document_schema_minor),
+    ]
+    if include_ai: capsules.push(ai_capsule())
+    IdeToolingPilotGenerationV1(
+        capsules: capsules,
+        policy: MdsocppSealPolicyV1(
+            profile: MdsocppProfile.Userland,
+            critical: false,
+            granted_capability_bits: granted_capability_bits,
+            memory_budget_bytes: memory_budget_bytes,
+            maximum_concurrent_calls: 8,
+            generation: generation,
+            composition_digest: composition_digest,
+        ),
+        document_schema_major: document_schema_major,
+        document_schema_minor: document_schema_minor,
+    )
+
+pub fn ide_tooling_pilot_seal_v1(generation: IdeToolingPilotGenerationV1) -> IdeToolingPilotDeploymentV1:
+    val seal = mdsocpp_seal_v1(generation.capsules, generation.policy)
+    IdeToolingPilotDeploymentV1(generation: generation, seal: seal)
+
+pub fn ide_tooling_pilot_analysis_receipt_v1(request: ToolingAnalysisRequestV1, completed_fact_bits: u64, status: ToolingStatusV1) -> ToolingAnalysisReceiptV1:
+    tooling_adapter_receipt_v1(request, completed_fact_bits, status)
+
+fn migration_matches(active: IdeToolingPilotDeploymentV1, candidate: IdeToolingPilotGenerationV1) -> bool:
+    if active.generation.document_schema_major == candidate.document_schema_major and active.generation.document_schema_minor == candidate.document_schema_minor:
+        return true
+    for capsule in candidate.capsules:
+        if kpf_id128_equal(capsule.capsule_id, pilot_id(10)):
+            for value in capsule.state_migrations:
+                if kpf_id128_equal(value.state_schema_id, pilot_id(801)) and value.from_major == active.generation.document_schema_major and value.from_minor == active.generation.document_schema_minor and value.to_major == candidate.document_schema_major and value.to_minor == candidate.document_schema_minor:
+                    if value.kind == MdsocppMigrationKind.Additive:
+                        return value.from_major == value.to_major and value.to_minor >= value.from_minor
+                    if value.kind == MdsocppMigrationKind.Custom:
+                        return not kpf_id128_equal(value.migration_operation_id, pilot_id(0))
+    false
+
+fn upgrade_receipt(
+    status: IdeToolingPilotUpgradeStatusV1,
+    active: IdeToolingPilotDeploymentV1,
+    candidate: IdeToolingPilotGenerationV1,
+    candidate_status: MdsocppSealStatus,
+    published_generation: u64,
+    rolled_back: bool,
+) -> IdeToolingPilotUpgradeReceiptV1:
+    IdeToolingPilotUpgradeReceiptV1(
+        status: status,
+        active_generation: active.generation.policy.generation,
+        candidate_generation: candidate.policy.generation,
+        published_generation: published_generation,
+        restored_generation: if rolled_back: active.generation.policy.generation else: 0,
+        candidate_seal_status: candidate_status,
+        active_composition_digest: active.generation.policy.composition_digest,
+        candidate_composition_digest: candidate.policy.composition_digest,
+        rolled_back: rolled_back,
+    )
+
+pub fn ide_tooling_pilot_try_upgrade_v1(active: IdeToolingPilotDeploymentV1, candidate: IdeToolingPilotGenerationV1) -> IdeToolingPilotUpgradeReceiptV1:
+    if not active.seal.status.accepted():
+        return upgrade_receipt(IdeToolingPilotUpgradeStatusV1.ActiveGenerationInvalid, active, candidate, MdsocppSealStatus.Ok, active.generation.policy.generation, true)
+    if candidate.policy.generation != active.generation.policy.generation + 1:
+        return upgrade_receipt(IdeToolingPilotUpgradeStatusV1.GenerationNotSuccessor, active, candidate, MdsocppSealStatus.Ok, active.generation.policy.generation, true)
+    if kpf_digest256_equal(candidate.policy.composition_digest, active.generation.policy.composition_digest):
+        return upgrade_receipt(IdeToolingPilotUpgradeStatusV1.CompositionUnchanged, active, candidate, MdsocppSealStatus.Ok, active.generation.policy.generation, true)
+    val candidate_seal = mdsocpp_seal_v1(candidate.capsules, candidate.policy)
+    if not candidate_seal.status.accepted():
+        return upgrade_receipt(IdeToolingPilotUpgradeStatusV1.CandidateSealRejected, active, candidate, candidate_seal.status, active.generation.policy.generation, true)
+    if not migration_matches(active, candidate):
+        val status = if candidate.document_schema_major < active.generation.document_schema_major or (candidate.document_schema_major == active.generation.document_schema_major and candidate.document_schema_minor < active.generation.document_schema_minor): IdeToolingPilotUpgradeStatusV1.MigrationIncompatible else: IdeToolingPilotUpgradeStatusV1.MigrationMissing
+        return upgrade_receipt(status, active, candidate, candidate_seal.status, active.generation.policy.generation, true)
+    upgrade_receipt(IdeToolingPilotUpgradeStatusV1.Accepted, active, candidate, candidate_seal.status, candidate.policy.generation, false)

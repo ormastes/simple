@@ -1,4 +1,8 @@
 # Persistent native-build cache has no GC and a key that has rendered corrupt
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **ID**: native_build_cache_scope_key_renders_corrupt_persistent_cache_2026-08-08
 - Status: OPEN (P2)
@@ -335,3 +339,4 @@ design change (retention policy, LRU vs size cap, concurrency against the live
 bootstrap writing into `build/bootstrap/native_cache/<lane>/`), not a bug fix,
 and this lane was instructed not to touch `build/bootstrap/**`.
 Not proven: actual disk consumption was not measured this session.
+

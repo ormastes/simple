@@ -64,17 +64,20 @@ sync error, or readback mismatch to SKIP.
 
 ## TODO
 
-- [ ] Implement explicit PASS/SKIP/FAIL in the CUDA readback wrapper.
-- [ ] Distinguish missing library, init failure, zero devices, inaccessible
-  assignment, and required-runner provisioning failure.
+- [x] Readback gate emits an explicit tri-state `cuda_generated_2d_readback_status=pass|fail|unavailable` (SKIP is spelled `unavailable`), and the test-runner lane honours `CUDA_LIVE_REQUIRED=1` via `gpu_live_required()` — verified scripts/check/check-cuda-generated-2d-readback.shs:44 `emit_unavailable`, :280 `status=fail`, :300 `status=pass`; src/lib/nogc_sync_mut/test_runner/gpu_lane_common.spl:64 `CUDA_LIVE_REQUIRED`, :72 `gpu_live_required`
+  - divergence: planned one wrapper reading `CUDA_LIVE_REQUIRED`; shipped the gate script (no `CUDA_LIVE_REQUIRED` read, `unavailable` never escalates to FAIL) plus the runner-side `gpu_live_required()` predicate in a separate module.
+- [x] Gate distinguishes reasons `missing-c-compiler`, `cuda-driver-compile-failed` (missing libcuda/headers), `cuInit-failed`, `cuDeviceGetCount-failed`, `cuda-readback-run-failed` — verified scripts/check/check-cuda-generated-2d-readback.shs:843 `cuInit-failed`, :857 `cuDeviceGetCount-failed`, :1158-1172 `emit_unavailable`
+  - divergence: planned separate "zero devices", "inaccessible assignment" and "required-runner provisioning" reasons; shipped zero-devices folded into `cuDeviceGetCount-failed` (:857 `device_count < 1`) and no assignment/provisioning reason.
 - [ ] Use `cuModuleLoadDataEx`; archive bounded JIT logs.
 - [ ] Emit CUDA numeric code plus name/string for every API failure.
 - [ ] Add generated shared-memory/barrier PTX and exact CPU oracle.
 - [ ] Add malformed PTX, missing symbol, launch-limit, async-fault, and guard
   negative tests.
-- [ ] Add the labelled live CUDA job with `CUDA_LIVE_REQUIRED=1`.
-- [ ] Keep portable intensive CUDA tests on every platform.
-- [ ] Record device/JIT/artifact provenance in the report schema.
+- [ ] Add the labelled live CUDA job with `CUDA_LIVE_REQUIRED=1`. (Partial: `.github/workflows/gpu-lane-tests.yml:175` declares a `cuda-live` job on `[self-hosted, cuda-live]`, but it sets no `CUDA_LIVE_REQUIRED` and yml:17 states the runner is not provisioned — the contract lane is still open.)
+- [x] Portable intensive CUDA backend contract spec lives in the unit tree and the gpu-lane workflow runs a ubuntu/macOS/Windows matrix — verified test/01_unit/compiler/codegen/cuda_backend_intensive_contract_spec.spl:167 `rejects malformed and unsupported CUDA unary operations`, .github/workflows/gpu-lane-tests.yml:94 `runs-on: ${{ matrix.os }}`
+  - divergence: the matrix job runs named A1-D2 lane specs, not the intensive contract spec explicitly; that spec is covered by the general `bin/simple test` unit run.
+- [x] Report schema records device count/identity, PTX SHA-256 before/after, emitter/compiler/toolchain artifact SHA-256 and helper exit status — verified scripts/check/check-cuda-generated-2d-readback.shs:186-201 `cuda_generated_2d_readback_ptx_*_sha256`/`helper_exit_status`, doc/09_report/cuda_generated_2d_readback_2026-07-14.md:9-43 `device_identity`/`ptx_sha256_before`
+  - divergence: planned JIT log + driver version in the schema; shipped no JIT log field (`grep -i jit` on the gate → 0 hits) and `cuModuleLoadData` (no `Ex` log buffers).
 - [ ] Require highest-capability review of the first fresh live report.
 
 Completion requires a fresh dedicated-host report proving the generated PTX
@@ -82,3 +85,9 @@ hash, device identity, JIT/symbol success, HtoD and DtoH, all four 2D kernels
 plus shared-memory execution, synchronization, exact checksum equality, zero
 element/guard mismatches, and stage-specific negative errors. Portable CI must
 also prove a non-CUDA host reports live SKIP while compiler/PTX tests pass.
+
+## Acceptance
+
+Runnable oracles for the remaining open boxes: `test/03_system/plan_acceptance/cuda_host_validation_spec.spl`
+(tagged `@tag:in-development`; one `it` per open box — see
+`doc/03_plan/agent_tasks/plan_remains_acceptance_2026-09-05.md`).

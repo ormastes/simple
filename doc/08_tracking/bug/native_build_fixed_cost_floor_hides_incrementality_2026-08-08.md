@@ -1,4 +1,8 @@
 # `native-build` pays a ~209 s fixed cost per invocation regardless of input size, and emits no reuse receipt
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **ID:** native_build_fixed_cost_floor_hides_incrementality_2026-08-08
 - **Date:** 2026-08-08
@@ -101,3 +105,4 @@ arose.
 - [[reference_lint_startup_tax_383_modules_no_cache]] — same shape, smaller scale
 - `doc/08_tracking/bug/plain_parse_loop_never_checks_par_had_error_silent_swallow_2026-08-08.md`
   — the collect-all-errors half of the same "default build behaviour" campaign
+

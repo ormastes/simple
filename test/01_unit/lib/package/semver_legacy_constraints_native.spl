@@ -1,0 +1,83 @@
+# Focused native regression for the exported Result-based legacy package API.
+# Run with an explicitly admitted Stage2+ native-build producer, no stub fallback.
+use std.nogc_async_mut.package.types.{Version, VersionConstraint}
+use std.nogc_async_mut.package.semver_old.{parse_constraint, parse_range_constraint, parse_int_component, satisfies, constraint_to_string, version_greater}
+use std.nogc_async_mut.package.semver.{satisfies as modern_satisfies}
+
+fn version(major: i64, minor: i64, patch: i64) -> Version:
+    Version(major: major, minor: minor, patch: patch, prerelease: nil, build: nil)
+
+fn accepts(constraint: text, candidate: Version, expected: bool) -> bool:
+    match parse_constraint(constraint):
+        Ok(parsed): satisfies(candidate, parsed) == expected
+        Err(message):
+            print "unexpected parse error: {message}"
+            false
+
+fn rejected_range(constraint: text) -> bool:
+    match parse_range_constraint(constraint):
+        Ok(_): false
+        Err(_): true
+
+fn failed(case_id: i64, value: bool) -> i64:
+    if value:
+        return 0
+    print "failed assertion {case_id}"
+    1
+
+fn rejected_component(component: text) -> bool:
+    match parse_int_component(component):
+        Ok(_): false
+        Err(_): true
+
+fn main() -> i64:
+    var failures = 0
+    failures = failures + failed(1, accepts("*", version(4, 5, 6), true))
+    failures = failures + failed(2, accepts("1.2.3", version(1, 2, 3), true))
+    failures = failures + failed(3, accepts("1.2.3", version(1, 2, 4), false))
+    failures = failures + failed(4, accepts(">=1.2.3", version(1, 2, 3), true))
+    failures = failures + failed(5, accepts(">=1.2.3", version(1, 2, 2), false))
+    failures = failures + failed(6, accepts("<2.0.0", version(1, 9, 9), true))
+    failures = failures + failed(7, accepts("<2.0.0", version(2, 0, 0), false))
+    failures = failures + failed(8, accepts(">=1.0.0, <2.0.0", version(1, 0, 0), true))
+    failures = failures + failed(9, accepts(">=1.0.0, <2.0.0", version(2, 0, 0), false))
+    failures = failures + failed(10, accepts(">=1.0.0, <2.0.0", version(0, 9, 9), false))
+    failures = failures + failed(11, accepts("^1.2.3", version(1, 9, 0), true))
+    failures = failures + failed(12, accepts("^1.2.3", version(2, 0, 0), false))
+    failures = failures + failed(13, accepts("^0.2.3", version(0, 2, 4), true))
+    failures = failures + failed(14, accepts("^0.2.3", version(0, 3, 0), false))
+    failures = failures + failed(15, accepts("^0.0.3", version(0, 0, 4), false))
+    failures = failures + failed(16, accepts("~1.2.3", version(1, 2, 9), true))
+    failures = failures + failed(17, accepts("~1.2.3", version(1, 3, 0), false))
+    failures = failures + failed(18, rejected_range(">=2.0.0, <1.0.0"))
+    failures = failures + failed(19, rejected_range(">=1.0.0, <1.0.0"))
+    failures = failures + failed(20, rejected_range(">1.0.0, <2.0.0"))
+    failures = failures + failed(21, constraint_to_string(VersionConstraint.Range(version(1, 0, 0), version(2, 0, 0))) == ">=1.0.0, <2.0.0")
+    failures = failures + failed(22, satisfies(version(1, 0, 1), VersionConstraint.Greater(version(1, 0, 0))))
+    failures = failures + failed(23, not satisfies(version(1, 0, 0), VersionConstraint.Greater(version(1, 0, 0))))
+    failures = failures + failed(24, satisfies(version(1, 0, 0), VersionConstraint.LessEqual(version(1, 0, 0))))
+    failures = failures + failed(25, not satisfies(version(1, 0, 1), VersionConstraint.LessEqual(version(1, 0, 0))))
+    failures = failures + failed(26, constraint_to_string(VersionConstraint.Greater(version(1, 0, 0))) == ">1.0.0")
+    failures = failures + failed(27, constraint_to_string(VersionConstraint.LessEqual(version(1, 0, 0))) == "<=1.0.0")
+    val range = VersionConstraint.Range(version(1, 0, 0), version(2, 0, 0))
+    failures = failures + failed(28, modern_satisfies(version(1, 0, 0), range))
+    failures = failures + failed(29, not modern_satisfies(version(0, 9, 9), range))
+    failures = failures + failed(30, not modern_satisfies(version(2, 0, 0), range))
+    failures = failures + failed(31, rejected_component(""))
+    failures = failures + failed(32, rejected_component("-1"))
+    failures = failures + failed(33, rejected_component("1x"))
+    failures = failures + failed(34, rejected_component("999999999999999999999999"))
+    val stable = version(1, 0, 0)
+    val alpha = Version(major: 1, minor: 0, patch: 0, prerelease: Some("alpha"), build: nil)
+    val beta = Version(major: 1, minor: 0, patch: 0, prerelease: Some("beta"), build: nil)
+    failures = failures + failed(35, not version_greater(stable, stable))
+    failures = failures + failed(36, version_greater(stable, alpha))
+    failures = failures + failed(37, not version_greater(alpha, stable))
+    failures = failures + failed(38, not version_greater(alpha, alpha))
+    failures = failures + failed(39, not version_greater(alpha, beta))
+    failures = failures + failed(40, version_greater(beta, alpha))
+    if failures != 0:
+        print "legacy-constraint-native=FAIL failures={failures} assertions=40"
+        return 1
+    print "legacy-constraint-native=PASS assertions=40"
+    0

@@ -1,21 +1,30 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
 ## Spec for src/os/kernel/loader/stack_builder.spl
 ##
 ## Verifies:
 ##   * compute_stack_size() clamps image-size-scaled values between 8 MB
 ##     and 128 MB.
-##   * build_initial_stack() produces a 16-byte-aligned sp, the argc
+##   * build_initial_stack_checked() produces a 16-byte-aligned sp, the argc
 ##     header, and argv pointers in ascending order pointing into the
 ##     string pool region at the top of the stack.
 ##
 ## Run:
 ##   bin/simple test test/unit/os/kernel/loader/stack_builder_spec.spl
 
+use std.spec.step
+
 use std.spec
+extern fn rt_file_read_text(path: text) -> text
 use os.kernel.loader.stack_builder.{
+
     AuxEntry,
+    StackBuildError,
     DEFAULT_USER_STACK_SIZE,
     MAX_USER_STACK_SIZE,
-    build_initial_stack,
+    build_initial_stack_checked,
     compute_stack_size
 }
 
@@ -29,28 +38,45 @@ fn _read_u64_le(bytes: [u8], off: i64) -> u64:
         i = i - 1
     v
 
+fn _test_entropy(n: i64) -> [u8]:
+    var out: [u8] = []
+    var i: i64 = 0
+    while i < n:
+        out.push((i + 1) as u8)
+        i = i + 1
+    out
+
 describe "kernel.loader.stack_builder.compute_stack_size":
+    # @manual scenario evidence
     """Image-size-to-stack-size scaling."""
 
     it "returns 8 MB for zero-sized images":
+        # @req REQ-SSPEC-UNIT
+        step("returns 8 MB for zero-sized images")
         val sz = compute_stack_size(0)
         expect(sz).to_equal(DEFAULT_USER_STACK_SIZE)
 
     it "returns 8 MB (floor) for small images":
+        # @req REQ-SSPEC-UNIT
+        step("returns 8 MB (floor) for small images")
         val sz = compute_stack_size(1024)
         expect(sz).to_equal(DEFAULT_USER_STACK_SIZE)
 
     it "caps at 128 MB for huge images (clang-class binaries)":
+        # @req REQ-SSPEC-UNIT
+        step("caps at 128 MB for huge images (clang-class binaries)")
         val sz = compute_stack_size(1_000_000_000 as u64)
         expect(sz).to_equal(MAX_USER_STACK_SIZE)
 
     it "scales by image_size/8 between the floor and the cap":
+        # @req REQ-SSPEC-UNIT
+        step("scales by image_size/8 between the floor and the cap")
         # 80 MB binary -> 10 MB stack (above 8 MB floor, below 128 MB cap)
         val sz = compute_stack_size(80 * 1024 * 1024)
         expect(sz).to_equal(10 * 1024 * 1024)
 
-describe "kernel.loader.stack_builder.build_initial_stack":
-    """SysV initial stack frame layout."""
+describe "kernel.loader.stack_builder.build_initial_stack_checked":
+    """Bounded and fallible SysV initial stack construction."""
 
     it "writes argc=1 as the first u64 for a one-arg invocation":
         val result = build_initial_stack(STACK_TOP, ["/bin/x"], [], [])

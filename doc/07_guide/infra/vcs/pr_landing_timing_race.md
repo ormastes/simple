@@ -1,0 +1,159 @@
+# Landing a PR on `main` is a timing race, not a checklist
+
+The mechanics of opening and merging a protected PR are already written down and
+are not repeated here:
+
+- `.claude/rules/vcs.md` § Push/land — the push/`gh pr create`/`gh pr merge`
+  recipe, the two required checks, the `opened`-is-not-in-`pull_request_target`
+  trap, and the "push only YOUR commit" scope rule.
+- `.claude/skills/spipe.md` — the `gh workflow run review-admission.yml`
+  dispatch, the two admission traps (a byte-identical `--body-file` fires no
+  `edited` event; repeated edits cancel the workflow's own in-flight run), and
+  the user-authorized emergency ruleset bypass.
+
+This page covers only what those two do not: **why a correct recipe still fails
+repeatedly, and the loop that gets around it.**
+
+**A pending PR is not waiting for review — diagnose before waiting (2026-09-27).**
+`spipe-vcs-v3-main` sets `required_approving_review_count: 0`, and every PR
+here is self-authored, so no provider approval will ever arrive and none is
+needed. When a PR sits `BLOCKED`, read the cause instead of waiting:
+`gh api repos/ormastes/simple/rulesets/21573643 --jq '.rules[]|select(.type=="pull_request").parameters.required_approving_review_count'`,
+`gh pr view <n> --json reviewDecision,statusCheckRollup` — a required context
+`QUEUED` means runner starvation (cancel
+in-progress runs whose PR is already merged or closed), a missing `SPipe Self Review Admission` means do the
+self review: a **higher model than the authoring session** (Fable/Opus, effort
+`high`+) reviews the exact head, posts it as `gh pr review --comment`, and on
+zero P0/P1 dispatches the admission. Never park a self-authored PR "awaiting
+review".
+
+**Resolve your own PR — the author lands it; nobody else will.** PR approval is
+impossible here (every PR is self-authored as `ormastes`; `gh pr review
+--approve` always fails) and not required (count 0). So the agent that opened a
+PR owns it until it is merged or closed:
+1. Review the exact head at high effort with a higher model than the author
+   (`claude -p --model claude-fable-5-1 "review PR #<n> ..."`); fix every P0/P1
+   on the branch; post the review with `gh pr review <n> --comment`.
+2. Draft -> `gh pr ready <n>`. Superseded/duplicate -> `gh pr close <n>
+   --comment "superseded by #<m>"`.
+3. Bring the branch up to date with `origin/main` (merge, keep both sides).
+4. Fire the admission check: `gh pr edit <n> --body-file <f>` with a body that
+   really differs (identical body = no event = no check-run).
+5. Poll `gh pr view <n> --json mergeable,mergeStateStatus` every 20 s; merge
+   with `gh pr merge <n> --merge --delete-branch` once `MERGEABLE` and
+   `CLEAN|UNSTABLE`; on "base advanced" repeat 3-5.
+6. Verify with `git ls-remote origin main`. Never end a session with your PR
+   parked "awaiting review".
+
+## Why it is a race
+
+Three properties compose into one:
+
+1. **The ruleset requires two checks with strict up-to-date.** `Code Idiom &
+   Structural Ratchet Gates` (`.github/workflows/repo-hygiene.yml`) runs
+   automatically on `pull_request`. `SPipe Self Review Admission`
+   (`.github/workflows/review-admission.yml`) does **not** — on a
+   `pull_request` its job is skipped, and the dispatch path is
+   `workflow_dispatch` only.
+
+   Per `.claude/rules/vcs.md` and `.claude/skills/spipe.md`, the *normal* path
+   is that a genuine `edited`/`synchronize` event creates the check-run as
+   **skipped**, and GitHub's rollup accepts a skipped required check — that is
+   how PRs land routinely. Measured 2026-09-06 that did not happen: the gate
+   sat `expected`/`queued` with no satisfying run, and only a dispatch cleared
+   it. So do not assume either behaviour. Read `gh pr checks <n>`: if admission
+   is already skipped or successful, you need no dispatch; if it shows
+   `expected` with no run, dispatch it (step 2 below).
+2. **Strict up-to-date means every advance of `main` invalidates your branch.**
+   You must update-branch again, which pushes a new head, which re-runs check 1
+   and re-invalidates check 2 (`review-admission.yml`'s `pull_request_target`
+   job "Reset same-head admission immediately" exists precisely to do that on
+   `synchronize`).
+3. **`main` advances continuously and the runner queue is deep.** Measured
+   2026-09-06: `main` advanced roughly every 5-10 minutes, 75 jobs were queued
+   across 9 branches, and one PR's required gate sat `queued` for 17+ minutes.
+
+So the window in which your branch is simultaneously up-to-date and has both
+checks green is often shorter than the time it takes to earn them.
+
+## What does not get you out of it
+
+- **Auto-merge is disabled repo-wide.** You cannot queue the merge and walk away.
+- **`--admin` alone does not bypass a *ruleset*** — only a listed bypass actor
+  does (measured 2026-09-06 with `bypass_actors: []`: `Required status check
+  "SPipe Self Review Admission" is expected.`). **Since 2026-09-28 the owner is
+  listed with `bypass_mode: pull_request`**, so `gh pr merge <n> --admin --merge`
+  now lands a reviewed PR and skips this whole loop; direct push stays rejected.
+  Recipe and rules: `.claude/rules/vcs.md` § "Force-landing a PR". The loop below
+  remains the non-admin path.
+
+## The loop that works
+
+Ordering is mechanical, not stylistic — dispatching before update-branch wastes
+the dispatch, because the update-branch push resets the admission.
+
+1. **Update branch** to the current `main` (`gh pr update-branch <n>`, or rebuild
+   your commit on `origin/main` per the scope rule in `.claude/rules/vcs.md`).
+2. **Dispatch admission — only if `gh pr checks` shows it `expected` with no
+   run.** If an `edited`/`synchronize` event already produced a skipped
+   check-run, skip this step. Otherwise dispatch, only after step 1 has landed a new head, and only
+   with the user's explicit instruction, since `self_attestation` is a claim in
+   the repo owner's name:
+
+   ```bash
+   gh workflow run review-admission.yml --ref main \
+     -f pull_request_number=<n> -f session_id=<session-label> \
+     -f reviewer_model=<model> -f reviewer_effort=high -f self_attestation=PASS:0:0
+   ```
+
+   The dispatching actor must be the PR author.
+3. **Poll BOTH checks**, not just the one you dispatched. `gh pr checks <n>` /
+   `gh pr view <n> --json mergeStateStatus`. A green admission with a still-queued
+   ratchet gate is not mergeable, and vice versa.
+4. **Merge the instant both are green.** The published admission decision is
+   short-lived — `doc/07_guide/infra/software_release.md` § Protected PR scoped
+   self-review admission describes it as a ten-minute check that any push,
+   retarget, ruleset change, diff drift, or expiry invalidates. Do not batch this
+   step behind other work.
+5. **On "base advanced", go back to step 1.** This is the expected outcome, not
+   an error to investigate. Budget several full cycles.
+
+## PR-path CI is required checks only (2026-09-27)
+
+Outside the owner's admin PR merge, the two required contexts must report
+fast. They used to wait hours behind ~300 queued runs because every PR push
+fanned out to ~35 heavy workflows. Now:
+
+- On a PR, only the required jobs run by default: `fast-gates` in its own
+  one-job workflow `required-gates.yml` ("Required Gates") and the
+  `review-admission.yml` broker. Every other `pull_request` /
+  `pull_request_target` workflow listens for `types: [labeled]` ONLY, so an
+  ordinary PR push (opened / synchronize / reopened) creates no run for it at
+  all -- not even a skipped one. Its jobs also carry
+  `if: github.event_name != '<event>' || contains(github.event.pull_request.labels.*.name, 'ci:full')`
+  so adding some other label does not fire the matrix. `repo-hygiene.yml` has
+  no PR trigger at all any more (main push + dispatch only).
+- **Label `ci:full`** opts a PR into the full matrix (extended ratchet lane,
+  bootstrap, platform tests, ...). Adding the label fires a `labeled` event,
+  so the heavy lanes start without a push. They do NOT re-run on a later push
+  to the PR: remove and re-add the label to re-run them. Path filters still
+  apply to the labelled run.
+- Every heavy lane still runs on push to `main` (PR-only workflows gained a
+  `push: branches: [main]` trigger with the same `paths:`), so nothing is
+  unenforced — it is enforced post-merge instead of pre-merge. The four
+  workflows whose `push:` had no branch filter (aot-lane-fences, rtl-toolchain,
+  rust-bootstrap-multiplatform, windows-build) now push-trigger on `main` only,
+  so pushing a `work/*` branch no longer queues them twice.
+- Every PR/push workflow has `concurrency` keyed on PR number or ref; test
+  lanes use `cancel-in-progress: true` (latest commit wins, also on `main`),
+  writers (`cache-main-writer`, `cache-promotion`, `release`,
+  `t32-tools-release`, `candidate`, `macos-phase23-evidence`) keep `false`.
+
+## Notes
+
+- Run the loop detached from anything slow. Every minute spent between step 3
+  going green and step 4 is a minute in which `main` can move.
+- `publish` is not a required check and fails on every PR; `UNSTABLE` is
+  mergeable. See `.claude/rules/vcs.md`.
+- A red job that is red for everyone is not yours. Diff your PR's failing job
+  names against a recently merged PR before investigating.

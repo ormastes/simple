@@ -13,6 +13,15 @@ use compiler.common.diagnostics.span.{Span}
 use compiler.traits.traits.*
 use compiler.semantics.resolve.{MethodResolver, ResolveError}
 use compiler.hir.{MethodResolution}
+use compiler.common.cache.reverse_reference_facts.{
+    reverse_reference_owner_mark_known_v1,
+    reverse_reference_register_unresolved_method_v1
+}
+
+pub fn resolve_strategies_publish_unresolved_method_v1(subject: text,
+        consumer: text, evidence: text):
+    reverse_reference_owner_mark_known_v1("unresolved-method-candidate")
+    reverse_reference_register_unresolved_method_v1(subject, consumer, evidence)
 
 impl MethodResolver:
     me resolve_method(receiver: HirExpr, method: text, args: [HirCallArg]) -> MethodResolution:
@@ -24,6 +33,8 @@ impl MethodResolver:
         3. Free function where receiver becomes first argument
         """
         if receiver.type_ == nil:
+            resolve_strategies_publish_unresolved_method_v1(
+                method, "unknown-receiver", "receiver-type-unknown")
             self.add_error(
                 ("cannot resolve method '{method}': receiver type is unknown. " +
                 "Ensure the receiver expression has a valid type."),
@@ -32,6 +43,8 @@ impl MethodResolver:
             return MethodResolution.Unresolved
         val ty = receiver.type_ ?? HirType(kind: HirTypeKind.Error, span: receiver.span)
         val type_name = self.format_type(ty)
+        resolve_strategies_publish_unresolved_method_v1(
+            method, type_name, "method-candidate:{method}:{type_name}:{args.len()}")
 
         # Priority 1: Instance method on receiver's type
         val instance_result = self.try_instance_method(ty, method)
@@ -39,7 +52,7 @@ impl MethodResolver:
             return result
 
         # Priority 2: Trait method
-        val trait_result = self.try_trait_method(ty, method)
+        val trait_result = self.try_trait_method(ty, method, args.len())
         if val result = trait_result:
             return result
 
@@ -137,7 +150,21 @@ impl MethodResolver:
                 return MethodResolution.InstanceMethod(type_id, method_id)
         nil
 
-    me try_trait_method(receiver_type: HirType, method: text) -> MethodResolution?:
+    fn trait_method_accepts_explicit_arity(method_id: SymbolId, explicit_arg_count: i64) -> bool:
+        """Reject same-named trait methods whose declared call shape cannot
+        accept this method call. Method symbol signatures include the implicit
+        receiver at slot zero, while explicit_arg_count does not."""
+        if val method_symbol = self.symbols.get_symbol(method_id):
+            if val method_type = method_symbol.type_:
+                match method_type.kind:
+                    case Function(params, _, _):
+                        return params.len() == explicit_arg_count + 1
+                    case _: ()
+        # Imported/erased symbols can lack a complete callable type. Preserve
+        # the existing resolution path when there is no arity fact to check.
+        true
+
+    me try_trait_method(receiver_type: HirType, method: text, explicit_arg_count: i64) -> MethodResolution?:
         """Try to find a trait method implemented by the receiver's type.
 
         Uses enhanced TraitSolver for:
@@ -161,26 +188,28 @@ impl MethodResolver:
                     for trait_id in prim_traits:
                         val prim_method_sym = self.symbols.lookup_trait_method_raw(trait_id.id, method)
                         if val symbol = prim_method_sym:
-                            return MethodResolution.TraitMethod(trait_id, symbol)
-            return self.try_trait_method_with_solver(receiver_type, method)
+                            if self.trait_method_accepts_explicit_arity(symbol, explicit_arg_count):
+                                return MethodResolution.TraitMethod(trait_id, symbol)
+            return self.try_trait_method_with_solver(receiver_type, method, explicit_arg_count)
         val resolved_type_id = type_id.id
 
         # LEGACY PATH: Use simple trait_impls map as fallback
         # This handles impls that were registered before TraitSolver integration
         if not self.trait_impls.contains_key(resolved_type_id):
             # Try enhanced TraitSolver path for generic impls
-            return self.try_trait_method_with_solver(receiver_type, method)
+            return self.try_trait_method_with_solver(receiver_type, method, explicit_arg_count)
 
         val traits = self.trait_impls[resolved_type_id]
         for trait_id in traits:
             val method_sym = self.symbols.lookup_trait_method_raw(trait_id.id, method)
             if val symbol = method_sym:
-                return MethodResolution.TraitMethod(trait_id, symbol)
+                if self.trait_method_accepts_explicit_arity(symbol, explicit_arg_count):
+                    return MethodResolution.TraitMethod(trait_id, symbol)
 
         # If legacy lookup failed, try enhanced solver
-        self.try_trait_method_with_solver(receiver_type, method)
+        self.try_trait_method_with_solver(receiver_type, method, explicit_arg_count)
 
-    me try_trait_method_with_solver(receiver_type: HirType, method: text) -> MethodResolution?:
+    me try_trait_method_with_solver(receiver_type: HirType, method: text, explicit_arg_count: i64) -> MethodResolution?:
         """Enhanced trait method resolution using TraitSolver.
 
         This path handles:
@@ -224,7 +253,8 @@ impl MethodResolver:
                     # (50.mir) and by the interpreter backend (70.backend).
                     # Return the TraitMethod variant instead.
                     if val method_sym = self.symbols.lookup_trait_method_raw(trait_name.id.id, method):
-                        return Some(MethodResolution.TraitMethod(trait_name.id, method_sym))
+                        if self.trait_method_accepts_explicit_arity(method_sym, explicit_arg_count):
+                            return Some(MethodResolution.TraitMethod(trait_name.id, method_sym))
                     # Trait declares the method but no symbol backs it; keep
                     # scanning the remaining candidate traits.
                     continue
@@ -338,7 +368,7 @@ impl MethodResolver:
             )
             return MethodResolution.Unresolved
 
-        val type_id = type_sym_id
+        val type_id: SymbolId = type_sym_id!
 
         # Look for static method in the type's definition
         val method_sym = self.symbols.lookup_static_method_raw(type_id.id, method)

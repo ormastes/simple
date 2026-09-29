@@ -4,8 +4,6 @@ The pure-Simple GUI lane is verified by **three canonical check apps**, one per
 rendering surface. After any GUI / engine2d / web-render change, run all three
 and verify the **framebuffer** (not the screenshot — see the oracle rule below).
 
-**Host-interface rule:** All per-OS rendering difference lives in `CompositorBackend` implementations and optional capability traits (e.g., `as_glass_capable()`), never as branches in app code. See `doc/04_architecture/os/one_app_host_interface_rule.md`.
-
 On macOS the pure-Simple lane = **Engine2D CPU/NEON** (aarch64) + **Metal** (GPU).
 
 > **Linux Vulkan-backed browser lane IS available (verified 2026-06-25).** Do not
@@ -28,31 +26,6 @@ On macOS the pure-Simple lane = **Engine2D CPU/NEON** (aarch64) + **Metal** (GPU
 | 2 | **GUI widgets** | `examples/06_io/ui/widget_showcase_gui.spl` | the full widget catalog (button, checkbox, radio, input, dropdown, slider, switch, list, table, tree, tabs, progress, card, …) with legible labels |
 | 3 | **HTML/web rendering** | `examples/06_io/ui/web_render_file_gui.spl <file.html>` | real HTML+CSS (header/nav, hero, flex two-column main+sidebar, form, footer) via the pure-Simple web layout → Engine2D |
 
-Canonical app IDs are `graphics_2d_showcase`, `web_standards_showcase`, and
-`gui_widget_showcase`. Their canonical launch surfaces are `standalone`,
-`host_wm`, and `simpleos_wm`; platform adapters must not invent alternate IDs.
-
-### Canonical showcase manual
-
-For each supported app/surface pair:
-
-1. Launch the app by canonical ID and select the named surface.
-2. Capture a UI snapshot and find the app or control by canonical ID, visible
-   text, or semantic role.
-3. Act on a semantic control. For the widget showcase, exercise at least one
-   stateful control such as button, checkbox, switch, or slider.
-4. Read action history and assert the dispatched target and local coordinates
-   where relevant; snapshot again and assert the semantic state changed.
-5. Capture the framebuffer and assert it is nonblank. Record drawing backend,
-   processing/offload backend, device/handle provenance, and fallback state from
-   the same run.
-
-Fail the scenario for dummy or blank frames, source-assertion-only evidence,
-synthetic handles claimed as real devices/backends, action logs without a
-post-action semantic-state assertion, or backend labels without same-run
-provenance. A screenshot is supplemental layout evidence, not a replacement for
-snapshot/find/act/history plus semantic state and framebuffer checks.
-
 Backend-specific 2D variants (same scene, different backend) for parity work:
 `engine2d_cpu_simd_gui.spl` (CPU-NEON) and `engine2d_metal_gui.spl` (Metal).
 
@@ -62,52 +35,6 @@ Backend-specific 2D variants (same scene, different backend) for parity work:
 > draw primitives directly — fine for a primitives/widget-catalog demo, but NOT a
 > template for building an interactive app.) For a real interactive app, do NOT
 > hand-draw one. See the next section.
-
-## Showcase apps — files, surfaces, and honest verification
-
-Each canonical app has a standalone source + `_gui` window wrapper, launchable
-on **3 surfaces** (standalone / host-WM / SimpleOS WM):
-
-| App (canonical ID) | Standalone / `_gui` source | Host-WM adapter |
-|---|---|---|
-| `graphics_2d_showcase` | `examples/06_io/ui/graphics_2d_showcase.spl` + `graphics_2d_showcase_gui.spl` | `wm_graphics_2d_showcase_gui.spl` |
-| `web_standards_showcase` | `web_standards_showcase_gui.spl` / `web_render_page_ppm.spl` rendering `browser_common_elements_showcase.html` | `wm_web_standards_showcase_gui.spl` |
-| `gui_widget_showcase` | `widget_showcase_gui.spl` | `wm_widget_showcase_gui.spl` |
-
-SimpleOS WM surface: no showcase is accepted into the installed launcher yet —
-`simpleos_wm_ready` is `false` for all three.
-
-**Verified headless run recipe** — fresh-seed binary (`bin/simple` traps on
-dict-heavy compiles for these apps; see
-`doc/08_tracking/bug/stage4_compiled_dict_no_growth_2026-07-11.md`):
-
-```bash
-SIMPLE_LIB=src SHOWCASE_RESOLUTION=320x240 \
-  src/compiler_rust/target/bootstrap/simple run examples/06_io/ui/graphics_2d_showcase.spl
-SHOWCASE_PPM=/tmp/widgets.ppm SIMPLE_LIB=src SHOWCASE_RESOLUTION=1280x720 SIMPLE_TIMEOUT_SECONDS=1200 \
-  src/compiler_rust/target/bootstrap/simple run examples/06_io/ui/widget_showcase_gui.spl
-```
-
-`SHOWCASE_RESOLUTION` defaults to 4K (3840x2160), `SHOWCASE_DPI` to 300. Full
-4K/8K is **compiled-lane-gated** (interpreter throughput ~5k px/s) — verify at
-a small explicit rung (e.g. `320x240`) rather than trusting the 4K default to
-finish under the interpreter within `SIMPLE_TIMEOUT_SECONDS`.
-
-**Honest verification — analyze the PPM, never trust file size.** Decode the
-P6 PPM and count distinct colors / nonzero pixels: a uniform background-color
-frame (the interpreter-budget-wall failure mode seen at 4K on the web
-showcase) has a large file size but near-zero distinct colors.
-`graphics_2d_showcase` additionally self-gates: it computes
-`nonzero`/`checksum`/`semantic_differences` (5 independently rendered
-primitive samples that must differ pairwise) from a real
-`read_pixels_with_source()` device readback and exits 1 if any check fails —
-treat that exit code as an anti-fake gate, not just a crash check.
-
-**Lane reality:** the interpreter is the only lane currently reaching these
-apps; full 4K and the web-standards showcase both time out / degrade at full
-resolution — do not claim a 4K or web-showcase PASS without a same-run
-small-rung result or an explicit budget-fix citation. Full per-app lane
-status and all 3 surfaces: `doc/07_guide/ui/showcase_apps.md`.
 
 ## Interactive GUI (the REAL pipeline) — do NOT hand-draw a new one
 
@@ -136,11 +63,6 @@ rendering **Simple Web MDI app content** through `HostedWinitBufferBackend`
 `comp.pointer_move(x, y)`, `comp.handle_left_button(pressed)` (click-focus,
 titlebar drag, close-X) and keyboard Tab/W/M/R/Esc. (Known bug: its render-on-dirty
 loop leaves content blank on macOS — needs the continuous re-present above.)
-For selected-font claims, this hosted lane is still a compatibility path:
-`HostCompositor.render_frame` lowers through direct backend/pixel-buffer
-renderers. Do not call it canonical until the real frame owner executes
-`SharedWmScene -> DrawIrComposition -> Engine2D`; do not add a private font
-loader, renderer, atlas, or cache to the platform backend.
 
 **The real widget → pixels pipeline** (used by the office apps word/sheets/mail/
 planner and the WM — model app `src/app/wm_compare/production_gui_web_renderer_parity.spl`):

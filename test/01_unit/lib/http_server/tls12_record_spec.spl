@@ -1,0 +1,24 @@
+use std.spec.*
+use std.http_server.worker.{
+    build_gcm_explicit_nonce_hex,
+    build_aead_aad_hex
+}
+
+extern fn rt_file_read_text(path: text) -> text?
+
+describe "HTTP TLS 1.2 AES-GCM application records":
+    it "uses the sequence as the eight-byte explicit nonce and plaintext length in AAD":
+        expect(build_gcm_explicit_nonce_hex(66051) == "0000000000010203").to_equal(true)
+        expect(build_aead_aad_hex(66051, 23, 771, 5) == "00000000000102031703030005").to_equal(true)
+
+    it "keeps explicit nonce, tag overhead, and fail-closed authentication in the worker contract":
+        val source = rt_file_read_text("src/lib/nogc_async_mut/http_server/worker.spl") ?? ""
+        expect(source).to_contain("if record_len < 24 or record_len > TLS_MAX_FRAGMENT_LENGTH + 24:")
+        expect(source).to_contain("val plaintext_len = ciphertext_len - 16")
+        expect(source).to_contain("val nonce_hex = iv_hex + explicit_nonce_hex")
+        expect(source).to_contain("val record_len = 8 + ciphertext_len")
+        expect(source).to_contain("if pt_hex == nil:")
+        expect(source).to_contain("if rec.len() == 0:")
+        expect(source).to_contain("if rec_len < 24 or rec_len > TLS_MAX_FRAGMENT_LENGTH + 24:")
+        expect(source).to_contain("RFC 5246 requires a bad_record_mac failure")
+        expect(source).to_contain("self.close_connection(fd)")

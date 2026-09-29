@@ -1,7 +1,8 @@
 # Deployed self-hosted binary: interpret-mode extern registration + baked module table constraints
+## Open 2026-09-16 — needs owner triage
 
-Status: OPEN (P3)
-Status re-verified 2026-08-17 by source inspection (triage shard 00).
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 Documented (platform facts, not a single fixable bug) — informs how new
@@ -84,3 +85,4 @@ the same change.
 - `src/lib/gc_async_mut/gpu/engine2d/backend_metal.spl` — both the
   `SIMPLE_ONE_CALL_UPLOAD` split-gate fix and the inline `spl_gpu_transfer`
   bridge live here.
+

@@ -1,11 +1,25 @@
 # Interpreter state corruption around interpreted parse_module (hex-literal conversion)
 
+## Not closed 2026-09-13 — left open; seed-interpreter defect, and the fix surface is off limits
+
+- **inferred** The entry isolates the trigger precisely (`parse_module(src, name)` fails iff
+  `name` is a path to a REAL existing file, dying on the `0xff` hex literal in
+  `src/lib/bitwise_utils.spl` with `cannot parse 'f' as i64`), and locates it in the Rust
+  seed interpreter, not in `.spl` code.
+- **measured** The referenced source still exists and still contains the hex literal, so the
+  entry is not stale by removed code.
+- **inferred** Its own repro harnesses (`tmp/site12/name_matrix.spl`,
+  `tmp/site12/lean_parse_sweep.spl`) are gone from this tree, so the isolation cannot be
+  replayed as written without rebuilding them.
+- Left OPEN: the fix is in `src/compiler_rust`, which must not be edited while a bootstrap
+  is running; the documented fake-module-name workaround remains valid.
+
+
 - **ID:** interp_state_corruption_parse_module
 - **Severity:** P2
 - **Date:** 2026-06-12
 - **Component:** Rust seed interpreter (`src/compiler_rust`), interpreted execution of the lean frontend
-- Status: OPEN (P2)
-- Status re-verified 2026-08-17 by source inspection (triage shard 02).
+- **Status:** OPEN (workarounds in harnesses; root cause in seed not investigated per fix-.spl-first rule)
 
 ## Symptom
 
@@ -38,30 +52,3 @@ crashing — this affects only the seed-interpreted lean parser.
 
 Pass a fake module name to parse_module and keep the real path only for
 reporting. See `tmp/site12/lean_parse_sweep.spl`.
-
-## 2026-08-17 (lane w04) — NOT VERIFIED this round
-
-Attempted a direct reproduction of the doc's decisive test (same source, fake
-module name vs. real existing path) as a standalone script. It could not be run:
-`parse_module` is not reachable as a free function from an ordinary script —
-
-```
-error[E1002]: function `parse_module` not found
-```
-
-— and the lean-frontend import path that exposes it was not identified within
-this lane's budget. **Status unchanged: neither reproduced nor cleared.**
-
-What was confirmed: the hex literal this doc blames is still present and
-unchanged at `src/lib/bitwise_utils.spl:11` (`(n >> (pos * 8)) & 0xff`, in
-`fn get_byte`). Note the doc cites `:8`; the line has moved but the construct is
-the same.
-
-`src/lib/bitwise_utils.spl` is INPUT DATA for this bug, not its cause — the
-defect is in the seed interpreter's handling of `parse_module` when the module
-name argument resolves to a real file. Nothing in that file was modified, and
-nothing in it should be.
-
-Next step for whoever picks this up: find the correct import for the lean
-frontend's `parse_module` (it is exercised by the sweep harnesses this doc
-mentions), then re-run the fake-name/real-name matrix.

@@ -1,4 +1,9 @@
 # Module-level `fn` silently shadowed by an interpreter builtin of the same name
+## Closed 2026-09-16 — ..., so the fix belongs in the seed. ## Fix location + exact diff (NOT applied — seed build/d
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - Date: 2026-08-21
 - Status: FIX IMPLEMENTED — VERIFICATION PENDING (deploy pending)
@@ -137,11 +142,3 @@ codegen gate is a no-op for any name absent from the alias table).
 
 Unblock condition: seed rebuild + deploy to `bin/release/<triple>/simple`.
 
-## Independent re-verification 2026-08-21 (still deploy-pending)
-
-Re-ran the 4 specs on a seed freshly built from committed `main` content
-(`src/compiler_rust/target/release/simple`, built for the `admit`/`assume`
-contextual-keyword lane): `Results: 4 total, 4 passed, 0 failed`. The fix is
-committed and correct; the deployed `bin/simple` is still the older seed, so
-the remaining unblock condition is unchanged — a seed rebuild + deploy to
-`bin/release/<triple>/simple`.

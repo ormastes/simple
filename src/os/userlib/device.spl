@@ -1,10 +1,8 @@
 # Device enumeration via raw syscalls.
 
 use os.userlib.syscall_raw
-use os.kernel.types.device_info_types.{new_device_info_buf}
+use os.kernel.types.syscall_types.{new_device_info_buf}
 use os.kernel.types.device_mem_types.{new_device_grant}
-
-extern fn unsafe_addr_of(ref: any) -> u64
 
 class DeviceEntry:
     bus: u8
@@ -25,7 +23,7 @@ fn enumerate_devices() -> Result<[DeviceEntry], text>:
     var i: u64 = 0
     while i < count:
         var buf = new_device_info_buf()
-        val info_result = syscall(80, 1, i, unsafe_addr_of(buf), 0, 0)
+        val info_result = syscall(80, 1, i, &buf as u64, 0, 0)
         if info_result >= 0:
             devices.push(DeviceEntry(
                 bus: buf.bus,
@@ -43,7 +41,7 @@ fn enumerate_devices() -> Result<[DeviceEntry], text>:
 fn get_device_info(bus: u8, dev: u8, func: u8) -> Result<DeviceEntry, text>:
     var buf = new_device_info_buf()
     val bdf = (bus as u64) << 16 | (dev as u64) << 8 | (func as u64)
-    val result = syscall(81, bdf, unsafe_addr_of(buf), 0, 0, 0)
+    val result = syscall(81, bdf, &buf as u64, 0, 0, 0)
     if result < 0:
         return Err("get_device_info failed with code {result}")
     Ok(DeviceEntry(
@@ -104,7 +102,6 @@ fn device_class_name(class_code: u8, subclass: u8) -> text:
 struct DmaAllocResult:
     virt_addr: u64    # Virtual address for CPU access
     phys_addr: u64    # Physical address for device DMA
-    allocation_id: u64
 
 val DMA_CACHE_COHERENT: u8 = 0
 val DMA_CACHE_FLUSH_REQUIRED: u8 = 1
@@ -141,8 +138,7 @@ impl DeviceDmaDescriptor:
     fn into_dma_result() -> DmaAllocResult:
         DmaAllocResult(
             virt_addr: self.virt_addr,
-            phys_addr: self.phys_addr,
-            allocation_id: self.allocation_id
+            phys_addr: self.phys_addr
         )
 
     fn owner_bus() -> u8:
@@ -186,8 +182,7 @@ impl SharedDmaBuffer:
     fn into_dma_result() -> DmaAllocResult:
         DmaAllocResult(
             virt_addr: self.virt_addr,
-            phys_addr: self.phys_addr,
-            allocation_id: self.allocation_id
+            phys_addr: self.phys_addr
         )
 
     fn into_descriptor() -> DeviceDmaDescriptor:
@@ -210,7 +205,7 @@ fn request_device_grant(bus: u8, dev: u8, func: u8) -> Result<DeviceGrant, text>
     """
     val bdf = (bus as u64) << 16 | (dev as u64) << 8 | (func as u64)
     var grant = new_device_grant()
-    val result = syscall(82, bdf, unsafe_addr_of(grant), 0, 0, 0)
+    val result = syscall(82, bdf, &grant as u64, 0, 0, 0)
     if result < 0:
         return Err("DeviceGrant failed: error {result}")
     Ok(grant)
@@ -233,6 +228,28 @@ fn map_bar_at(phys_addr: u64, size: u64, vaddr_hint: u64) -> Result<u64, text>:
         return Err("MapBar failed: error {result}")
     Ok(result as u64)
 
+fn map_device_bar_window(bdf: u64, bar_index: u8, byte_offset: u64,
+        byte_len: u64, vaddr_hint: u64 = 0u64) -> Result<u64, text>:
+    """Map an authorized PCI BAR subwindow through syscall 88.
+
+    Authority is checked by the kernel against the caller's live capability
+    generation and exact BDF/BAR tuple. Physical coordinates are never supplied
+    by userspace.
+    """
+    val result = syscall(88, bdf, bar_index.to_u64(), byte_offset,
+        byte_len, vaddr_hint)
+    if result <= 0:
+        return Err("MapDeviceBar failed: error {result}")
+    Ok(result.to_u64())
+
+fn unmap_device_bar_window(user_addr: u64,
+        requested_len: u64) -> Result<bool, text>:
+    """Release one exact syscall-88 mapping through syscall 89."""
+    val result = syscall(89, user_addr, requested_len, 0u64, 0u64, 0u64)
+    if result < 0:
+        return Err("UnmapDeviceBar failed: error {result}")
+    Ok(true)
+
 fn alloc_dma(size: u64) -> Result<DmaAllocResult, text>:
     """Allocate a contiguous DMA buffer.
 
@@ -240,13 +257,12 @@ fn alloc_dma(size: u64) -> Result<DmaAllocResult, text>:
     (for device DMA). In a no-IOMMU system, device_addr == phys_addr.
     """
     var result_buf: [u64; 2] = [0, 0]
-    val result = syscall(84, size, unsafe_addr_of(result_buf), 0, 0, 0)
+    val result = syscall(84, size, &result_buf as u64, 0, 0, 0)
     if result <= 0:
         return Err("AllocDma failed: error {result}")
     Ok(DmaAllocResult(
         virt_addr: result as u64,
-        phys_addr: result_buf[0],
-        allocation_id: result_buf[1]
+        phys_addr: result_buf[0]
     ))
 
 fn alloc_shared_dma(size: u64) -> Result<SharedDmaBuffer, text>:
@@ -266,7 +282,7 @@ fn alloc_shared_dma(size: u64) -> Result<SharedDmaBuffer, text>:
                 cache_policy: DMA_CACHE_COHERENT,
                 owner_task: 0,
                 owner_device: 0,
-                allocation_id: dma.allocation_id
+                allocation_id: 0
             ))
         Err(msg):
             Err("AllocSharedDma failed: {msg}")
@@ -274,7 +290,7 @@ fn alloc_shared_dma(size: u64) -> Result<SharedDmaBuffer, text>:
 fn alloc_device_dma(size: u64, cache_policy: u8, owner_device: u64) -> Result<DeviceDmaDescriptor, text>:
     """Allocate a canonical DMA descriptor for drivers that need metadata."""
     var result_buf: [u64; 2] = [0, 0]
-    val result = syscall(84, size, unsafe_addr_of(result_buf), owner_device, cache_policy as u64, 0)
+    val result = syscall(84, size, &result_buf as u64, owner_device, cache_policy as u64, 0)
     if result <= 0:
         return Err("AllocDeviceDma failed: error {result}")
     Ok(DeviceDmaDescriptor(
@@ -288,21 +304,17 @@ fn alloc_device_dma(size: u64, cache_policy: u8, owner_device: u64) -> Result<De
         allocation_id: result_buf[1]
     ))
 
-fn dma_sync_cpu_to_device(desc: DeviceDmaDescriptor) -> Result<bool, text>:
+fn dma_sync_cpu_to_device(_desc: DeviceDmaDescriptor) -> Result<bool, text>:
     """Synchronize CPU writes before device DMA reads.
 
-    The kernel validates allocation identity and records device ownership.
+    Current no-IOMMU/coherent lanes do not require explicit cache maintenance,
+    but keeping this helper in the API prevents drivers from baking in that
+    assumption.
     """
-    val result = syscall(86, desc.allocation_id, desc.owner_device, 0, 0, 0)
-    if result < 0:
-        return Err("DmaSyncForDevice failed: error {result}")
     Ok(true)
 
-fn dma_sync_device_to_cpu(desc: DeviceDmaDescriptor) -> Result<bool, text>:
+fn dma_sync_device_to_cpu(_desc: DeviceDmaDescriptor) -> Result<bool, text>:
     """Synchronize device DMA writes before CPU reads."""
-    val result = syscall(87, desc.allocation_id, desc.owner_device, 0, 0, 0)
-    if result < 0:
-        return Err("DmaSyncForCpu failed: error {result}")
     Ok(true)
 
 fn free_dma(virt_addr: u64, size: u64) -> Result<bool, text>:

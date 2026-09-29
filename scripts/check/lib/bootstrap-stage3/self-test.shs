@@ -1,4 +1,10 @@
 bootstrap_stage3_provenance_self_test() {
+    ! bootstrap_stage3_windows_msvc_candidate_path \
+        /c/dev/tool/msys2/mingw64/bin/clang-cl.exe || return 1
+    ! bootstrap_stage3_windows_msvc_candidate_path \
+        /c/dev/tool/mingw64/bin/clang-cl.exe || return 1
+    bootstrap_stage3_windows_msvc_candidate_path \
+        /c/dev/install/llvm/bin/clang-cl.exe || return 1
     # A missing/relative root used to be accepted silently: every path below
     # became an absolute /repo/... write that failed outside the temp root, and
     # the function returned non-zero with no explanation -- the same
@@ -29,6 +35,70 @@ bootstrap_stage3_provenance_self_test() {
         "$bootstrap_stage3_test_root/canonical/real" \
         "$bootstrap_stage3_test_root/env-home" \
         "$bootstrap_stage3_test_root/env-tmp"
+
+    # Comparator binding fixtures. The first one is the macOS regression: a
+    # package-manager `cmp` shim is ALWAYS a symlink, and requiring
+    # candidate == canonical refused to bind on every such host, killing the
+    # bootstrap before Stage 1. The suite only ever saw a direct `cmp` before,
+    # which is exactly why that shipped. See
+    # doc/08_tracking/bug/bootstrap_stage3_comparator_rejects_homebrew_symlinked_cmp_on_macos_2026-09-12.md
+    bootstrap_stage3_test_cmp_root="$bootstrap_stage3_test_root/comparator"
+    mkdir -p "$bootstrap_stage3_test_cmp_root/real" \
+        "$bootstrap_stage3_test_cmp_root/bin" \
+        "$bootstrap_stage3_test_cmp_root/empty" \
+        "$bootstrap_stage3_test_cmp_root/wrap" || return 1
+    bootstrap_stage3_test_cmp_src=$(command -v cmp 2>/dev/null) || return 1
+    bootstrap_stage3_test_cmp_src=$(bootstrap_stage3_resolve_symlinks \
+        "$bootstrap_stage3_test_cmp_src") || return 1
+    cp "$bootstrap_stage3_test_cmp_src" \
+        "$bootstrap_stage3_test_cmp_root/real/cmp" || return 1
+    ln -s ../real/cmp "$bootstrap_stage3_test_cmp_root/bin/cmp" || return 1
+
+    # 1/4 a symlinked cmp on PATH binds, and binds to the PHYSICAL target.
+    bootstrap_stage3_test_cmp_expect=$(bootstrap_stage3_resolve_symlinks \
+        "$bootstrap_stage3_test_cmp_root/real/cmp") || return 1
+    bootstrap_stage3_test_cmp_bound=$(
+        unset BOOTSTRAP_STAGE3_COMPARE_TOOL BOOTSTRAP_STAGE3_COMPARE_TOOL_SHA256
+        PATH="$bootstrap_stage3_test_cmp_root/bin:$PATH"
+        export PATH
+        bootstrap_stage3_compare_bind >/dev/null 2>&1 || exit 1
+        printf '%s\n' "$BOOTSTRAP_STAGE3_COMPARE_TOOL"
+    ) || return 1
+    [ "$bootstrap_stage3_test_cmp_bound" = \
+        "$bootstrap_stage3_test_cmp_expect" ] || return 1
+
+    # 2/4 no comparator at all is ERROR (2), never a pass.
+    (
+        unset BOOTSTRAP_STAGE3_COMPARE_TOOL BOOTSTRAP_STAGE3_COMPARE_TOOL_SHA256
+        PATH="$bootstrap_stage3_test_cmp_root/empty"
+        export PATH
+        bootstrap_stage3_compare_bind >/dev/null 2>&1
+        [ "$?" -eq 2 ]
+    ) || return 1
+
+    # 3/4 a shell-script wrapper is REFUSED, not receipted: the trust model is a
+    # byte-hash pin of the bound file, and a wrapper's own bytes do not
+    # determine what actually runs, so hashing it would pin nothing.
+    printf '#!/bin/sh\nexec %s "$@"\n' "$bootstrap_stage3_test_cmp_src" \
+        >"$bootstrap_stage3_test_cmp_root/wrap/cmp" || return 1
+    chmod +x "$bootstrap_stage3_test_cmp_root/wrap/cmp" || return 1
+    (
+        unset BOOTSTRAP_STAGE3_COMPARE_TOOL BOOTSTRAP_STAGE3_COMPARE_TOOL_SHA256
+        PATH="$bootstrap_stage3_test_cmp_root/wrap:$PATH"
+        export PATH
+        bootstrap_stage3_compare_bind >/dev/null 2>&1
+        [ "$?" -eq 2 ]
+    ) || return 1
+
+    # 4/4 an explicit pin that the ambient cmp shadows is still refused, so
+    # accepting a symlink has not weakened the shadowing check.
+    (
+        BOOTSTRAP_STAGE3_COMPARE_TOOL="$bootstrap_stage3_test_cmp_root/real/cmp"
+        export BOOTSTRAP_STAGE3_COMPARE_TOOL
+        unset BOOTSTRAP_STAGE3_COMPARE_TOOL_SHA256
+        bootstrap_stage3_compare_bind >/dev/null 2>&1
+        [ "$?" -eq 2 ]
+    ) || return 1
     bootstrap_stage3_test_write_driver_manifest() {
         printf '%s\n' '[package]' 'name = "driver"' 'version = "0.0.0"' \
             '[dependencies]' \
@@ -67,7 +137,7 @@ bootstrap_stage3_provenance_self_test() {
     bootstrap_stage3_test_tool_path=
     for bootstrap_stage3_test_tool_name in \
         cargo rustc cc clang ld ar ranlib sh env perl sed file \
-        shasum openssl; do
+        sha256sum; do
         bootstrap_stage3_test_tool_requested=$(
             command -v "$bootstrap_stage3_test_tool_name"
         ) || return 1
@@ -101,6 +171,8 @@ bootstrap_stage3_provenance_self_test() {
         "$bootstrap_stage3_test_tool_nightly" \
         "$bootstrap_stage3_test_tool_path" \
         "$bootstrap_stage3_test_root/repo" || return 1
+    grep -q '^tool=sha256sum|' "$bootstrap_stage3_test_tool_stable" || return 1
+    ! grep -q '^tool=shasum|' "$bootstrap_stage3_test_tool_stable" || return 1
     cmp -s "$bootstrap_stage3_test_tool_stable" \
         "$bootstrap_stage3_test_tool_nightly" || return 1
     if bootstrap_stage3_seed_inputs_fingerprint \
@@ -237,7 +309,20 @@ bootstrap_stage3_provenance_self_test() {
     bootstrap_stage3_test_fake_bin="$bootstrap_stage3_test_root/fake-bin"
     bootstrap_stage3_test_fake_prefix="$bootstrap_stage3_test_root/fake-llvm"
     mkdir -p "$bootstrap_stage3_test_fake_bin" \
+        "$bootstrap_stage3_test_fake_prefix/bin" \
         "$bootstrap_stage3_test_fake_prefix/lib"
+    bootstrap_stage3_test_llvm_windows=0
+    bootstrap_stage3_test_llvm_version=99.88.77-simple-path-fixture
+    case "$(uname -s 2>/dev/null || echo unknown)" in
+        MSYS*|MINGW*|CYGWIN*)
+            bootstrap_stage3_test_llvm_windows=1
+            bootstrap_stage3_test_llvm_version=23.1.1
+            printf 'fixture LLVM-C import library bytes\n' \
+                >"$bootstrap_stage3_test_fake_prefix/lib/LLVM-C.lib"
+            printf 'fixture LLVM-C runtime bytes\n' \
+                >"$bootstrap_stage3_test_fake_prefix/bin/LLVM-C.dll"
+            ;;
+    esac
     bootstrap_stage3_test_llvm_archive_a=\
 "$bootstrap_stage3_test_fake_prefix/lib/libLLVMFixtureA.a"
     bootstrap_stage3_test_llvm_archive_b=\
@@ -261,7 +346,7 @@ bootstrap_stage3_provenance_self_test() {
         >"$bootstrap_stage3_test_llvm_system_libs"
     printf '%s\n' '#!/bin/sh' \
         'case "$*" in' \
-        '  --version) echo 99.88.77-simple-path-fixture ;;' \
+        "  --version) echo '$bootstrap_stage3_test_llvm_version' ;;" \
         "  --prefix) printf '%s\\n' '$bootstrap_stage3_test_fake_prefix' ;;" \
         "  --libdir) printf '%s\\n' '$bootstrap_stage3_test_fake_prefix/lib' ;;" \
         "  '--link-static --libfiles') IFS= read -r line <'$bootstrap_stage3_test_llvm_libfiles'; printf '%s\\n' \"\$line\" ;;" \
@@ -278,29 +363,45 @@ bootstrap_stage3_provenance_self_test() {
     printf '%s\n' "$bootstrap_stage3_test_llvm_authority" |
         grep -q '^llvm-build-status=enabled$' || return 1
     printf '%s\n' "$bootstrap_stage3_test_llvm_authority" |
-        grep -q "^llvm-major=99$" || return 1
+        grep -q "^llvm-version=$bootstrap_stage3_test_llvm_version$" ||
+        return 1
     printf '%s\n' "$bootstrap_stage3_test_llvm_authority" |
         grep -q "^llvm-prefix=$bootstrap_stage3_test_fake_prefix$" ||
         return 1
-    printf '%s\n' "$bootstrap_stage3_test_llvm_authority" |
-        grep -q '^llvm-static-lib-count=2$' || return 1
-    printf '%s\n' "$bootstrap_stage3_test_llvm_authority" |
-        grep -q "^llvm-static-lib-0001-path=$bootstrap_stage3_test_llvm_archive_a$" ||
-        return 1
-    printf '%s\n' "$bootstrap_stage3_test_llvm_authority" |
-        grep -q "^llvm-static-lib-0002-path=$bootstrap_stage3_test_llvm_archive_b$" ||
-        return 1
-    printf '%s\n' "$bootstrap_stage3_test_llvm_authority" |
-        grep -q '^llvm-system-lib-count=1$' || return 1
-    printf '%s\n' "$bootstrap_stage3_test_llvm_authority" |
-        grep -q "^llvm-system-lib-0001-path=$bootstrap_stage3_test_llvm_system$" ||
-        return 1
-    printf '%s\n' "-L$bootstrap_stage3_test_fake_prefix/unbound" \
-        >"$bootstrap_stage3_test_llvm_system_libs"
-    if bootstrap_stage3_resolve_llvm_build_authority \
-        "$bootstrap_stage3_test_producer_path" '--features llvm' \
-        >/dev/null 2>&1; then
-        return 1
+    if [ "$bootstrap_stage3_test_llvm_windows" -eq 1 ]; then
+        printf '%s\n' "$bootstrap_stage3_test_llvm_authority" |
+            grep -q '^llvm-major=23$' || return 1
+        printf '%s\n' "$bootstrap_stage3_test_llvm_authority" |
+            grep -q '^llvm-link-kind=dynamic-c-api$' || return 1
+        printf '%s\n' "$bootstrap_stage3_test_llvm_authority" |
+            grep -q "^llvm-c-import-lib-path=$bootstrap_stage3_test_fake_prefix/lib/LLVM-C.lib$" ||
+            return 1
+        printf '%s\n' "$bootstrap_stage3_test_llvm_authority" |
+            grep -q "^llvm-c-runtime-dll-path=$bootstrap_stage3_test_fake_prefix/bin/LLVM-C.dll$" ||
+            return 1
+    else
+        printf '%s\n' "$bootstrap_stage3_test_llvm_authority" |
+            grep -q '^llvm-major=99$' || return 1
+        printf '%s\n' "$bootstrap_stage3_test_llvm_authority" |
+            grep -q '^llvm-static-lib-count=2$' || return 1
+        printf '%s\n' "$bootstrap_stage3_test_llvm_authority" |
+            grep -q "^llvm-static-lib-0001-path=$bootstrap_stage3_test_llvm_archive_a$" ||
+            return 1
+        printf '%s\n' "$bootstrap_stage3_test_llvm_authority" |
+            grep -q "^llvm-static-lib-0002-path=$bootstrap_stage3_test_llvm_archive_b$" ||
+            return 1
+        printf '%s\n' "$bootstrap_stage3_test_llvm_authority" |
+            grep -q '^llvm-system-lib-count=1$' || return 1
+        printf '%s\n' "$bootstrap_stage3_test_llvm_authority" |
+            grep -q "^llvm-system-lib-0001-path=$bootstrap_stage3_test_llvm_system$" ||
+            return 1
+        printf '%s\n' "-L$bootstrap_stage3_test_fake_prefix/unbound" \
+            >"$bootstrap_stage3_test_llvm_system_libs"
+        if bootstrap_stage3_resolve_llvm_build_authority \
+            "$bootstrap_stage3_test_producer_path" '--features llvm' \
+            >/dev/null 2>&1; then
+            return 1
+        fi
     fi
     printf '%s\n' '-lfixture-system' \
         >"$bootstrap_stage3_test_llvm_system_libs"
@@ -309,8 +410,15 @@ bootstrap_stage3_provenance_self_test() {
             "$bootstrap_stage3_test_root/repo" cranelift '--features llvm' \
             "$bootstrap_stage3_test_producer_path"
     ) || return 1
-    printf 'fixture archive B mutated bytes\n' \
-        >"$bootstrap_stage3_test_llvm_archive_b"
+    if [ "$bootstrap_stage3_test_llvm_windows" -eq 1 ]; then
+        bootstrap_stage3_test_llvm_mutated=\
+"$bootstrap_stage3_test_fake_prefix/lib/LLVM-C.lib"
+    else
+        bootstrap_stage3_test_llvm_mutated=\
+"$bootstrap_stage3_test_llvm_archive_b"
+    fi
+    printf 'fixture mutated bytes\n' \
+        >"$bootstrap_stage3_test_llvm_mutated"
     bootstrap_stage3_test_seed_static_bytes_changed=$(
         bootstrap_stage3_seed_inputs_fingerprint \
             "$bootstrap_stage3_test_root/repo" cranelift '--features llvm' \
@@ -318,8 +426,13 @@ bootstrap_stage3_provenance_self_test() {
     ) || return 1
     [ "$bootstrap_stage3_test_seed_static_before" != \
         "$bootstrap_stage3_test_seed_static_bytes_changed" ] || return 1
-    printf 'fixture archive B bytes\n' \
-        >"$bootstrap_stage3_test_llvm_archive_b"
+    if [ "$bootstrap_stage3_test_llvm_windows" -eq 1 ]; then
+        printf 'fixture LLVM-C import library bytes\n' \
+            >"$bootstrap_stage3_test_llvm_mutated"
+    else
+        printf 'fixture archive B bytes\n' \
+            >"$bootstrap_stage3_test_llvm_mutated"
+    fi
     bootstrap_stage3_test_seed_static_restored=$(
         bootstrap_stage3_seed_inputs_fingerprint \
             "$bootstrap_stage3_test_root/repo" cranelift '--features llvm' \
@@ -327,19 +440,21 @@ bootstrap_stage3_provenance_self_test() {
     ) || return 1
     [ "$bootstrap_stage3_test_seed_static_before" = \
         "$bootstrap_stage3_test_seed_static_restored" ] || return 1
-    printf '%s %s\n' "$bootstrap_stage3_test_llvm_archive_b" \
-        "$bootstrap_stage3_test_llvm_archive_a" \
-        >"$bootstrap_stage3_test_llvm_libfiles"
-    bootstrap_stage3_test_seed_static_order_changed=$(
-        bootstrap_stage3_seed_inputs_fingerprint \
-            "$bootstrap_stage3_test_root/repo" cranelift '--features llvm' \
-            "$bootstrap_stage3_test_producer_path"
-    ) || return 1
-    [ "$bootstrap_stage3_test_seed_static_before" != \
-        "$bootstrap_stage3_test_seed_static_order_changed" ] || return 1
-    printf '%s %s\n' "$bootstrap_stage3_test_llvm_archive_a" \
-        "$bootstrap_stage3_test_llvm_archive_b" \
-        >"$bootstrap_stage3_test_llvm_libfiles"
+    if [ "$bootstrap_stage3_test_llvm_windows" -eq 0 ]; then
+        printf '%s %s\n' "$bootstrap_stage3_test_llvm_archive_b" \
+            "$bootstrap_stage3_test_llvm_archive_a" \
+            >"$bootstrap_stage3_test_llvm_libfiles"
+        bootstrap_stage3_test_seed_static_order_changed=$(
+            bootstrap_stage3_seed_inputs_fingerprint \
+                "$bootstrap_stage3_test_root/repo" cranelift '--features llvm' \
+                "$bootstrap_stage3_test_producer_path"
+        ) || return 1
+        [ "$bootstrap_stage3_test_seed_static_before" != \
+            "$bootstrap_stage3_test_seed_static_order_changed" ] || return 1
+        printf '%s %s\n' "$bootstrap_stage3_test_llvm_archive_a" \
+            "$bootstrap_stage3_test_llvm_archive_b" \
+            >"$bootstrap_stage3_test_llvm_libfiles"
+    fi
     bootstrap_stage3_test_path_transcript=\
 "$bootstrap_stage3_test_root/path-command.transcript"
     bootstrap_stage3_write_command_transcript \
@@ -487,6 +602,50 @@ bootstrap_stage3_provenance_self_test() {
         "$bootstrap_stage3_test_transcript" "$bootstrap_stage3_test_root" \
         "RUST_LOG=error" "SIMPLE_BOOTSTRAP=1" -- \
         /bin/sh -c 'exit 0' || return 1
+    (
+        bootstrap_stage3_test_procfd_dir="$bootstrap_stage3_test_root/procfd-transcript"
+        mkdir "$bootstrap_stage3_test_procfd_dir" || exit 1
+        cp "$bootstrap_stage3_test_transcript" \
+            "$bootstrap_stage3_test_procfd_dir/transcript" || exit 1
+        chmod 500 "$bootstrap_stage3_test_procfd_dir" || exit 1
+        exec 9<"$bootstrap_stage3_test_procfd_dir/transcript" || exit 1
+        exec 8<"$bootstrap_stage3_test_procfd_dir" || exit 1
+        BOOTSTRAP_STAGE3_VERIFIER_SCRATCH_PREFIX=\
+"$bootstrap_stage3_test_root/procfd-verify"
+        export BOOTSTRAP_STAGE3_VERIFIER_SCRATCH_PREFIX
+        bootstrap_stage3_verify_command_transcript /proc/$$/fd/9 \
+            "$bootstrap_stage3_test_root" \
+            "RUST_LOG=error" "SIMPLE_BOOTSTRAP=1" -- \
+            /bin/sh -c 'exit 0' || exit 1
+        [ ! -e "${BOOTSTRAP_STAGE3_VERIFIER_SCRATCH_PREFIX}.transcript-expected" ] &&
+            [ ! -e "${BOOTSTRAP_STAGE3_VERIFIER_SCRATCH_PREFIX}.transcript-host" ] || exit 1
+        bootstrap_stage3_verify_command_transcript \
+            /proc/$$/fd/8/transcript "$bootstrap_stage3_test_root" \
+            "RUST_LOG=error" "SIMPLE_BOOTSTRAP=1" -- \
+            /bin/sh -c 'exit 0' || exit 1
+        for bootstrap_stage3_test_bad_procfd_transcript in \
+            /proc/$$/fd/8/a/b /proc/$$/fd/8/../transcript \
+            /proc/$$/fd/8/.hidden /proc/$$/fd/8/bad+leaf \
+            /proc/$$/fd/08/transcript /proc/999999999/fd/1; do
+            if bootstrap_stage3_verify_command_transcript \
+                "$bootstrap_stage3_test_bad_procfd_transcript" \
+                "$bootstrap_stage3_test_root" \
+                "RUST_LOG=error" "SIMPLE_BOOTSTRAP=1" -- \
+                /bin/sh -c 'exit 0'; then
+                exit 1
+            fi
+        done
+        [ ! -e "${BOOTSTRAP_STAGE3_VERIFIER_SCRATCH_PREFIX}.transcript-expected" ] &&
+            [ ! -e "${BOOTSTRAP_STAGE3_VERIFIER_SCRATCH_PREFIX}.transcript-host" ] || exit 1
+        if bootstrap_stage3_verify_command_transcript /proc/$$/fd/9 \
+            "$bootstrap_stage3_test_root" \
+            "RUST_LOG=error" "SIMPLE_BOOTSTRAP=1" -- \
+            /bin/sh -c 'exit 1'; then
+            exit 1
+        fi
+        [ ! -e "${BOOTSTRAP_STAGE3_VERIFIER_SCRATCH_PREFIX}.transcript-expected" ] &&
+            [ ! -e "${BOOTSTRAP_STAGE3_VERIFIER_SCRATCH_PREFIX}.transcript-host" ] || exit 1
+    ) || return 1
     if bootstrap_stage3_write_command_transcript \
         "$bootstrap_stage3_test_transcript.duplicate" \
         "$bootstrap_stage3_test_root" \
@@ -571,11 +730,49 @@ poison"; then
         >"$bootstrap_stage3_test_candidate"
     chmod 700 "$bootstrap_stage3_test_candidate"
     candidate_frontend_smoke() {
-        printf 'frontend-ok\n'
+        :
     }
-    bootstrap_stage3_test_frontend="$bootstrap_stage3_test_root/frontend.log"
-    candidate_frontend_smoke "$bootstrap_stage3_test_candidate" \
-        >"$bootstrap_stage3_test_frontend"
+    bootstrap_stage3_test_sanity="$bootstrap_stage3_test_root/sanity.env"
+    bootstrap_stage3_test_frontend="${bootstrap_stage3_test_sanity}.frontend-driver.log"
+    : >"$bootstrap_stage3_test_frontend"
+    for bootstrap_stage3_test_frontend_mode in 0 1; do
+        bootstrap_stage3_test_frontend_mode_log=\
+"${bootstrap_stage3_test_sanity}.frontend-bootstrap-${bootstrap_stage3_test_frontend_mode}.log"
+        bootstrap_stage3_test_frontend_mode_status=\
+"${bootstrap_stage3_test_sanity}.frontend-bootstrap-${bootstrap_stage3_test_frontend_mode}.status.env"
+        candidate_frontend_smoke "$bootstrap_stage3_test_candidate" \
+            >"$bootstrap_stage3_test_frontend_mode_log"
+        for bootstrap_stage3_test_probe in p2_add stage2_mir_retention stage2_module_path_naming hello_world_positional; do
+            case "$bootstrap_stage3_test_probe" in p2_add) bootstrap_stage3_test_probe_log=$bootstrap_stage3_test_frontend_mode_log ;; *) bootstrap_stage3_test_probe_log=$bootstrap_stage3_test_frontend_mode_log.$(printf '%s' "$bootstrap_stage3_test_probe" | tr _ -) ;; esac
+            printf 'probe=%s mode=%s\n' "$bootstrap_stage3_test_probe" "$bootstrap_stage3_test_frontend_mode" >"$bootstrap_stage3_test_probe_log"
+            bootstrap_stage3_test_probe_sha=$(bootstrap_stage3_hash_file "$bootstrap_stage3_test_probe_log")
+            {
+                echo schema=simple-bounded-process-log-v1; echo status=complete
+                echo reason=child-exit; echo raw_status=0; echo max_bytes=4194304
+                echo bytes_captured="$(wc -c <"$bootstrap_stage3_test_probe_log")"; echo timeout_seconds="${COMPILER_BUILD_TIMEOUT_SECONDS:-180}"
+                echo term_grace_seconds=1; echo combined_stream=stdout-stderr
+                echo process_group=setsid; echo artifact_limit=none
+                echo log_leaf="${bootstrap_stage3_test_probe_log##*/}"; echo log_sha256="$bootstrap_stage3_test_probe_sha"
+            } >"$bootstrap_stage3_test_probe_log.bounded.env"
+        done
+        {
+            echo schema=simple-candidate-frontend-status-v2
+            echo result=pass
+            echo probe=complete
+            echo raw_status=0
+            echo bootstrap_mode="$bootstrap_stage3_test_frontend_mode"
+            echo backend=cranelift
+            echo log_path="$bootstrap_stage3_test_frontend_mode_log"
+            for bootstrap_stage3_test_probe in p2_add stage2_mir_retention stage2_module_path_naming hello_world_positional; do
+                case "$bootstrap_stage3_test_probe" in p2_add) bootstrap_stage3_test_probe_log=$bootstrap_stage3_test_frontend_mode_log ;; *) bootstrap_stage3_test_probe_log=$bootstrap_stage3_test_frontend_mode_log.$(printf '%s' "$bootstrap_stage3_test_probe" | tr _ -) ;; esac
+                echo "${bootstrap_stage3_test_probe}_log_path=$bootstrap_stage3_test_probe_log"
+                echo "${bootstrap_stage3_test_probe}_log_sha256=$(bootstrap_stage3_hash_file "$bootstrap_stage3_test_probe_log")"
+                echo "${bootstrap_stage3_test_probe}_collector_receipt_path=$bootstrap_stage3_test_probe_log.bounded.env"
+                echo "${bootstrap_stage3_test_probe}_collector_receipt_sha256=$(bootstrap_stage3_hash_file "$bootstrap_stage3_test_probe_log.bounded.env")"
+                echo "${bootstrap_stage3_test_probe}_raw_status=0"
+            done
+        } >"$bootstrap_stage3_test_frontend_mode_status"
+    done
     bootstrap_stage3_test_unsupported=$(
         "$bootstrap_stage3_test_candidate" run fixture 2>&1
     ) || bootstrap_stage3_test_unsupported_status=$?
@@ -583,7 +780,6 @@ poison"; then
     bootstrap_stage3_test_candidate_sha=$(
         bootstrap_stage3_hash_file "$bootstrap_stage3_test_candidate"
     ) || return 1
-    bootstrap_stage3_test_sanity="$bootstrap_stage3_test_root/sanity.env"
     {
         echo "schema=simple-bootstrap-sanity-evidence-v1"
         echo "status=pass"
@@ -598,17 +794,34 @@ poison"; then
             "$bootstrap_stage3_test_unsupported" | \
             bootstrap_stage3_hash_stream)"
         echo "frontend_smoke_status=0"
+        echo "frontend_smoke_backend=cranelift"
         echo "frontend_smoke_bootstrap_mode_status=0"
+        echo "frontend_smoke_bootstrap0_raw_status=0"
+        echo "frontend_smoke_bootstrap0_log_path=${bootstrap_stage3_test_sanity}.frontend-bootstrap-0.log"
+        echo "frontend_smoke_bootstrap0_log_sha256=$(bootstrap_stage3_hash_file "${bootstrap_stage3_test_sanity}.frontend-bootstrap-0.log")"
+        echo "frontend_smoke_bootstrap0_status_path=${bootstrap_stage3_test_sanity}.frontend-bootstrap-0.status.env"
+        echo "frontend_smoke_bootstrap0_status_sha256=$(bootstrap_stage3_hash_file "${bootstrap_stage3_test_sanity}.frontend-bootstrap-0.status.env")"
+        echo "frontend_smoke_bootstrap1_ran=true"
+        echo "frontend_smoke_bootstrap1_raw_status=0"
+        echo "frontend_smoke_bootstrap1_log_path=${bootstrap_stage3_test_sanity}.frontend-bootstrap-1.log"
+        echo "frontend_smoke_bootstrap1_log_sha256=$(bootstrap_stage3_hash_file "${bootstrap_stage3_test_sanity}.frontend-bootstrap-1.log")"
+        echo "frontend_smoke_bootstrap1_status_path=${bootstrap_stage3_test_sanity}.frontend-bootstrap-1.status.env"
+        echo "frontend_smoke_bootstrap1_status_sha256=$(bootstrap_stage3_hash_file "${bootstrap_stage3_test_sanity}.frontend-bootstrap-1.status.env")"
         echo "frontend_smoke_output_sha256=$(bootstrap_stage3_hash_file \
+            "$bootstrap_stage3_test_frontend")"
+        echo "frontend_smoke_driver_log_path=$bootstrap_stage3_test_frontend"
+        echo "frontend_smoke_driver_log_sha256=$(bootstrap_stage3_hash_file \
             "$bootstrap_stage3_test_frontend")"
         echo "candidate_sha256_after=$bootstrap_stage3_test_candidate_sha"
     } >"$bootstrap_stage3_test_sanity" || return 1
     bootstrap_stage3_verify_sanity_evidence_receipt \
         "$bootstrap_stage3_test_sanity" \
+        "$bootstrap_stage3_test_sanity" "$(dirname -- "$bootstrap_stage3_test_sanity")" \
         "$bootstrap_stage3_test_candidate" \
         "$bootstrap_stage3_test_root/repo" || return 1
     bootstrap_stage3_verify_sanity_evidence \
-        "$bootstrap_stage3_test_sanity" "$bootstrap_stage3_test_candidate" \
+        "$bootstrap_stage3_test_sanity" "$bootstrap_stage3_test_sanity" \
+        "$(dirname -- "$bootstrap_stage3_test_sanity")" "$bootstrap_stage3_test_candidate" \
         "$bootstrap_stage3_test_root/repo" cranelift \
         "$bootstrap_stage3_test_root/env-home" \
         "$bootstrap_stage3_test_root/env-tmp" "/usr/bin:/bin" || return 1
@@ -617,12 +830,14 @@ poison"; then
     printf '# candidate tamper\n' >>"$bootstrap_stage3_test_candidate"
     if bootstrap_stage3_verify_sanity_evidence_receipt \
         "$bootstrap_stage3_test_sanity" \
+        "$bootstrap_stage3_test_sanity" "$(dirname -- "$bootstrap_stage3_test_sanity")" \
         "$bootstrap_stage3_test_candidate" \
         "$bootstrap_stage3_test_root/repo"; then
         return 1
     fi
     if bootstrap_stage3_verify_sanity_evidence \
-        "$bootstrap_stage3_test_sanity" "$bootstrap_stage3_test_candidate" \
+        "$bootstrap_stage3_test_sanity" "$bootstrap_stage3_test_sanity" \
+        "$(dirname -- "$bootstrap_stage3_test_sanity")" "$bootstrap_stage3_test_candidate" \
         "$bootstrap_stage3_test_root/repo" cranelift \
         "$bootstrap_stage3_test_root/env-home" \
         "$bootstrap_stage3_test_root/env-tmp" "/usr/bin:/bin"; then
@@ -635,23 +850,27 @@ poison"; then
     }
     bootstrap_stage3_verify_sanity_evidence_receipt \
         "$bootstrap_stage3_test_sanity" \
+        "$bootstrap_stage3_test_sanity" "$(dirname -- "$bootstrap_stage3_test_sanity")" \
         "$bootstrap_stage3_test_candidate" \
         "$bootstrap_stage3_test_root/repo" || return 1
     if bootstrap_stage3_verify_sanity_evidence \
-        "$bootstrap_stage3_test_sanity" "$bootstrap_stage3_test_candidate" \
+        "$bootstrap_stage3_test_sanity" "$bootstrap_stage3_test_sanity" \
+        "$(dirname -- "$bootstrap_stage3_test_sanity")" "$bootstrap_stage3_test_candidate" \
         "$bootstrap_stage3_test_root/repo" cranelift \
         "$bootstrap_stage3_test_root/env-home" \
         "$bootstrap_stage3_test_root/env-tmp" "/usr/bin:/bin"; then
         return 1
     fi
     candidate_frontend_smoke() {
-        printf 'frontend-ok\n'
+        :
     }
     sed 's/^frontend_smoke_status=0$/frontend_smoke_status=1/' \
         "$bootstrap_stage3_test_sanity" \
         >"$bootstrap_stage3_test_sanity.status-tampered" || return 1
     if bootstrap_stage3_verify_sanity_evidence \
         "$bootstrap_stage3_test_sanity.status-tampered" \
+        "$bootstrap_stage3_test_sanity.status-tampered" \
+        "$(dirname -- "$bootstrap_stage3_test_sanity")" \
         "$bootstrap_stage3_test_candidate" \
         "$bootstrap_stage3_test_root/repo" cranelift \
         "$bootstrap_stage3_test_root/env-home" \
@@ -663,6 +882,8 @@ poison"; then
         >"$bootstrap_stage3_test_sanity.tampered" || return 1
     if bootstrap_stage3_verify_sanity_evidence \
         "$bootstrap_stage3_test_sanity.tampered" \
+        "$bootstrap_stage3_test_sanity.tampered" \
+        "$(dirname -- "$bootstrap_stage3_test_sanity")" \
         "$bootstrap_stage3_test_candidate" \
         "$bootstrap_stage3_test_root/repo" cranelift \
         "$bootstrap_stage3_test_root/env-home" \
@@ -691,16 +912,16 @@ poison"; then
             "$bootstrap_stage3_test_receiver_log")"
     } >"$bootstrap_stage3_test_receiver" || return 1
     bootstrap_stage3_verify_receiver_evidence_receipt \
-        "$bootstrap_stage3_test_receiver" \
-        "$bootstrap_stage3_test_candidate" \
-        "$bootstrap_stage3_test_runtime_snapshot" \
-        "$bootstrap_stage3_test_receiver_log" || return 1
+        "$bootstrap_stage3_test_receiver" "$bootstrap_stage3_test_receiver" \
+        "$bootstrap_stage3_test_candidate" "$bootstrap_stage3_test_candidate" \
+        "$bootstrap_stage3_test_runtime_snapshot" "$bootstrap_stage3_test_runtime_snapshot" \
+        "$bootstrap_stage3_test_receiver_log" "$bootstrap_stage3_test_receiver_log" || return 1
     printf 'receiver tampered\n' >>"$bootstrap_stage3_test_receiver_log"
     if bootstrap_stage3_verify_receiver_evidence_receipt \
-        "$bootstrap_stage3_test_receiver" \
-        "$bootstrap_stage3_test_candidate" \
-        "$bootstrap_stage3_test_runtime_snapshot" \
-        "$bootstrap_stage3_test_receiver_log"; then
+        "$bootstrap_stage3_test_receiver" "$bootstrap_stage3_test_receiver" \
+        "$bootstrap_stage3_test_candidate" "$bootstrap_stage3_test_candidate" \
+        "$bootstrap_stage3_test_runtime_snapshot" "$bootstrap_stage3_test_runtime_snapshot" \
+        "$bootstrap_stage3_test_receiver_log" "$bootstrap_stage3_test_receiver_log"; then
         return 1
     fi
     printf 'receiver PASS\n' >"$bootstrap_stage3_test_receiver_log"
@@ -708,10 +929,10 @@ poison"; then
         "$bootstrap_stage3_test_receiver" \
         >"$bootstrap_stage3_test_receiver.status-tampered" || return 1
     if bootstrap_stage3_verify_receiver_evidence_receipt \
-        "$bootstrap_stage3_test_receiver.status-tampered" \
-        "$bootstrap_stage3_test_candidate" \
-        "$bootstrap_stage3_test_runtime_snapshot" \
-        "$bootstrap_stage3_test_receiver_log"; then
+        "$bootstrap_stage3_test_receiver.status-tampered" "$bootstrap_stage3_test_receiver.status-tampered" \
+        "$bootstrap_stage3_test_candidate" "$bootstrap_stage3_test_candidate" \
+        "$bootstrap_stage3_test_runtime_snapshot" "$bootstrap_stage3_test_runtime_snapshot" \
+        "$bootstrap_stage3_test_receiver_log" "$bootstrap_stage3_test_receiver_log"; then
         return 1
     fi
 
@@ -787,4 +1008,34 @@ poison"; then
 "$bootstrap_stage3_test_root/canonical/parent-link/input"
     [ "$(bootstrap_stage3_canonical_file "$bootstrap_stage3_test_alias")" != \
         "$bootstrap_stage3_test_alias" ] || return 1
+
+    # Clang-only policy (2026-09-24): a GCC-flavoured CC must be rejected on
+    # the Linux (default arm) and FreeBSD arms of
+    # bootstrap_stage3_target_c_compiler, and a Clang-flavoured CC must be
+    # accepted on both.
+    bootstrap_stage3_test_clangonly_bin="$bootstrap_stage3_test_root/clang-only-bin"
+    mkdir -p "$bootstrap_stage3_test_clangonly_bin" || return 1
+    printf '%s\n' '#!/bin/sh' 'echo "gcc (fixture) 13.2.0"' \
+        >"$bootstrap_stage3_test_clangonly_bin/fake-gcc"
+    chmod 700 "$bootstrap_stage3_test_clangonly_bin/fake-gcc"
+    printf '%s\n' '#!/bin/sh' 'echo "clang version 23.1.0 (fixture)"' \
+        >"$bootstrap_stage3_test_clangonly_bin/fake-clang"
+    chmod 700 "$bootstrap_stage3_test_clangonly_bin/fake-clang"
+    if CC="$bootstrap_stage3_test_clangonly_bin/fake-gcc" \
+        bootstrap_stage3_target_c_compiler x86_64-unknown-linux-gnu \
+        >/dev/null 2>&1; then
+        return 1
+    fi
+    if CC="$bootstrap_stage3_test_clangonly_bin/fake-gcc" \
+        bootstrap_stage3_target_c_compiler x86_64-unknown-freebsd \
+        >/dev/null 2>&1; then
+        return 1
+    fi
+    [ "$(CC="$bootstrap_stage3_test_clangonly_bin/fake-clang" \
+        bootstrap_stage3_target_c_compiler x86_64-unknown-linux-gnu)" = \
+        "$bootstrap_stage3_test_clangonly_bin/fake-clang" ] || return 1
+    [ "$(CC="$bootstrap_stage3_test_clangonly_bin/fake-clang" \
+        bootstrap_stage3_target_c_compiler x86_64-unknown-freebsd)" = \
+        "$bootstrap_stage3_test_clangonly_bin/fake-clang" ] || return 1
+
 }

@@ -1,0 +1,31 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+matrix="$root/scripts/bootstrap/stage4-tooling-matrix.shs"
+
+fail() {
+  echo "stage4_tooling_named_suites_contract: $*" >&2
+  exit 1
+}
+
+for row in spipe_suite devhub_suite caret_suite; do
+  grep -Fq "printf '$row\\trequired\\t" "$matrix" || fail "$row is not a required matrix row"
+  grep -Eq "^[[:space:]]+$row\)" "$matrix" || fail "$row has no frozen input fingerprint branch"
+  [ "$(grep -Ec "^[[:space:]]+$row\)" "$matrix")" -eq 2 ] || \
+    fail "$row must have exactly one fingerprint and one execution branch"
+  grep -Fq "make_suite_manifest \"\$gate_task\"" "$matrix" || fail "named suites do not freeze an exact manifest"
+  grep -Fq "run_manifest_test_task \"\$gate_task\" -" "$matrix" || fail "named suites do not use exact manifest execution"
+done
+
+grep -Fq 'schema=Stage4MatrixTaskReceiptV1' "$matrix" || fail "task receipt schema missing"
+for binding in matrix_hash config_hash compiler_manifest_hash identity_before_hash identity_after_hash \
+  input_fingerprint_before input_fingerprint_after support_status unsupported_reason \
+  command_executed test_executed executed_test_count pass_marker; do
+  grep -Fq "echo \"$binding=" "$matrix" || fail "receipt binding missing: $binding"
+done
+
+grep -Fq 'BLOCKED_UPSTREAM identity-drift-before' "$matrix" || fail "identity drift does not fail closed"
+grep -Fq 'BLOCKED_UPSTREAM required-predecessor' "$matrix" || fail "predecessor failure does not fail closed"
+
+echo "stage4_tooling_named_suites_contract: PASS"

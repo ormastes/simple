@@ -1,10 +1,13 @@
 # `gc_async_mut` tier missing facade wrapper modules for several subsystems (`compression`, `database.sql`, ...)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-20
 **Found by:** whole-suite `test/unit/` triage campaign, cluster
 `test/unit/lib/gc_async_mut/**`
-Status: OPEN (P2)
-Status re-verified 2026-08-17 by source inspection (triage shard 01).
+**Status:** open — same defect class as the already-FIXED
 `dbfs_checkpoint_facade_spec_self_not_found_2026-06-11.md` "Defect 2", but a
 different/newer set of subsystems; needs the same treatment (or the earlier
 fix regressed — not distinguished here, see Regression note).
@@ -109,3 +112,4 @@ API-shape drift unrelated to the facade-module-resolution defect this doc is
 about — GENUINE-BUG, needs its own investigation of the dbfs_engine
 checkpoint/pager call chain, not filed as a separate doc here since it was
 only spot-checked, not root-caused.
+

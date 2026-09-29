@@ -111,6 +111,10 @@ implementation-blocked-by-bootstrap-authority
 - perf-fix: The dispatcher skips an exact canonical guard duplicated in
   `pre-push.local`, preventing the bounded must-check from running twice while
   continuing to chain any non-identical local hook.
+- bootstrap-cycle-1: The receipt-free Stage-2 trust-root lane failed in the
+  Rust authority build with E0433 because `dispatch_profile.rs` was again
+  undeclared. Restored exactly one owner and wired the existing millisecond
+  guard into the pushed-ref tier so this defect fails before Cargo/bootstrap.
 - artifacts: Added user-selected feature/NFR requirements and the missing
   executable `test/03_system/check/must_check_tiering_spec.spl`. Its manual is
   source-reviewed, but Stage-4 execution/docgen remains pending because this
@@ -194,6 +198,65 @@ implementation-blocked-by-bootstrap-authority
   PASS evidence. Bootstrap automation accepts only an explicit final PASS
   verdict, and Sdoctest bootstrap evidence requires independently nonzero green
   Markdown and source-comment lanes.
+- fix: The fresh Stage-2 build exposed a partially integrated callable-signature
+  projection: its consumer referenced `ModuleSurface.signature_names`, but the
+  fields, producer, registry helper, and live consumers never landed. Removed
+  that dead partial path and added a source contract rejecting undeclared scalar
+  signature consumers; the reference-semantic callable lookup remains the
+  coherent owner pending an atomic replacement.
+- blocker: The third and final cache-preserving Stage-2 cycle cleared the
+  undeclared `ModuleSurface.signature_names` HIR failure, then failed at link:
+  `module_surface_declarations` calls the missing global owners
+  `module_surface_projected_type_shape` and
+  `module_surface_projected_type_name`. Strict bootstrap refused seed fallback.
+  The session verification cap is exhausted, so no fourth bootstrap or Stage-2
+  PASS is claimed. Evidence is in `build/bootstrap/logs/x86_64-unknown-linux-gnu/stage2-native-build.log`.
+- verify: After rebasing onto the missing projection-owner fix, a fresh
+  source-bound four-core Stage 2 completed, passed sanity/receiver proofs, and
+  published an immutable admitted parent. The canonical planner-admission-v2
+  producer authorized the one-thread Stage 3 recovery lane.
+- blocker: Stage 3 parsed/promoted/released all 687 surfaces in 458,677 ms and
+  entered HIR, proving the former surface crash fixed. RSS then rose from
+  638,492 KiB during late parsing to 3,599,144 KiB at HIR 1/687 and 7,341 MiB;
+  host `earlyoom` sent SIGTERM at 13:08:44 UTC when available memory fell below
+  10%. Exit 143 is resource-unavailable, not PASS or a compiler diagnostic.
+  The existing Pure-Simple immortal-allocation bug record now carries this
+  measured evidence; Stage 3/4, optimizer, SPipe/docgen, deployment, and ledger
+  publication remain pending.
+- perf-review: The owned compiler edit removes an unreachable projection method
+  and unused import, adding no hot-path loop, allocation, copy, data-layout, or
+  dispatch work and preserving the existing Pure-Simple callable API. The
+  meaningful remaining regression is the measured Stage-3 HIR RSS blocker
+  above; no C/Rust substitution is accepted.
+- verify-post-rebase: The single final focused batch passed the real interpreter
+  owner guard selftest/local/ref paths (13/13 modules each) and the complete
+  must-check tiering contract. Push selftest took 4s, committed-ref validation
+  1s, and installed-hook validation 0s; the combined batch took 14.13s with
+  108,288 KiB peak RSS. Each push path independently satisfies the 10-second
+  NFR. The Simple optimizer was not run because Stage 4 remains unavailable;
+  the admitted Stage 2 artifact is not general optimizer/SPipe evidence.
+- docs-audit: Operator manual, guide, feature expert, bootstrap layer expert,
+  glossary, Unix/Windows installers, and `doc/06_spec` layout are present; the
+  layout scan found zero executable `*_spec.spl` files under `doc/06_spec`.
+- harden-exact-ref: Fixed the ledger consumer to hash regular evidence blobs
+  from the exact pushed revision rather than the live worktree. Bootstrap now
+  retains compiler and automated evidence in a commit-ready tracking path and
+  refuses production recording when fingerprinted inputs differ from `HEAD`.
+- harden-todo-pass: Added explicit `--record-gate-pass <id> --evidence <path>`
+  promotion for receipt-backed TODO rows. The first timestamp persists across
+  fingerprints only while the identical committed receipt/hash remains;
+  source-sensitive automated results still invalidate normally.
+- evidence-honesty: Split mock-backed Caret argv/process coverage from real
+  installed-provider execution; the latter remains the actionable
+  `caret-installed-provider-launches` TODO. Sdoctest bootstrap now runs named
+  Markdown and source-comment fixtures and rejects skipped lane results.
+- verify-cycle-1: Focused exact-ref/TODO-transition/two-ref/hook contract PASS
+  in 8.73s (`selftest=2s`, `ref-path=1s`, `two-ref=0s`, `installed-hook=1s`).
+- verify-cycle-2: Updated Sdoctest parser self-test PASS and must-check contract
+  PASS in 8.25s (`selftest=2s`, other measured paths 0s). Generated Stage-4
+  SPipe execution/docgen and fresh Stage 1-4 ledger publication remain pending.
+  `doc/01_research/domain/must_check_tiering.md` remains missing and must be
+  produced through the required domain-research tooling before goal completion.
 - verify: Updated push/bootstrap/tiering self-tests passed; the real ref fixture
   remained within the ten-second budget. Full bootstrap remains blocked by the
   unchanged Stage-3 imported-type cascade after the third bounded cycle.
@@ -314,3 +377,65 @@ implementation-blocked-by-bootstrap-authority
   RSS. This is no material improvement over the diagnostic baseline (+240864
   ms at module 5, 776960 KiB RSS). The three-cycle cap is exhausted; Stage 4,
   deployment, lightweight pre-push, and GitHub push remain refused.
+- hook-fix: Reproduced the shared-worktree installer defect with two linked
+  worktrees: installation from the first made the second fail because the
+  common pre-push hook resolved into the first checkout. Both installers now
+  use a stable worktree-resolving launcher; legacy dispatchers are replaced
+  rather than preserved recursively. The focused contract passed with
+  `selftest=4s ref-path=0s installed-hook=1s` after rebase. The real shared
+  hook was then installed and both installer freshness and production wiring
+  checks passed.
+- doc-refactor: Updated the operator manual, tooling guide, feature expert,
+  bootstrap layer expert, SPipe/Codex workflow skills, and the bug record.
+  `.agents/skills`, `.claude/agents/spipe`, `.claude/commands`, and
+  `.gemini/commands` are N/A for this narrow installation mechanism because
+  none names or implements must-check hook installation.
+- research: Added the previously missing domain research with primary Git,
+  in-toto, SLSA, TUF, NIST, Bazel, GitHub, GitLab, and pre-commit references.
+  The selected requirements remain unchanged; no option-selection cycle was
+  reopened.
+- cross-host-audit: Added `windows-hook-installation` as an explicit
+  bootstrap-tier TODO with tooling-team ownership and the native Windows
+  two-worktree install/check resume command. PowerShell source parity is not
+  counted as native Windows PASS. The updated focused contract passed with
+  `selftest=5s ref-path=0s installed-hook=0s` and reported the TODO visibly.
+- bootstrap-identity-fix: Reproduced that completion validated an exact Stage 4
+  candidate but launched automated gates without binding `SIMPLE_BINARY` or
+  the established `SIMPLE_BIN` compatibility name, so a
+  stale deployment could supply false evidence. The recorder now canonicalizes
+  the candidate only after all four phase proofs pass and overrides ambient
+  both identities for every automated row. The focused self-test passed its
+  third and final cycle with intentionally conflicting ambient paths; the bug
+  record is resolved. The existing interpreter/JIT/native engine differential
+  is now bootstrap-automated instead of an inert TODO.
+- latest-bootstrap-evidence: A source-matched four-core Stage 2 producer passed
+  in 1:11:20 with 2,794,780 KiB peak RSS and no swap. Canonical Stage 3 released
+  all 687 surfaces but grew from 11.4 GiB to a measured 26,419,744 KiB peak at
+  HIR import processing; the owned child was safely terminated with exit 143.
+  Stage 3/4, optimizer, SPipe/docgen execution, and ledger PASS publication
+  remain blocked on the tracked recursive HIR/SymbolTable promotion leak.
+- automated-gate-contract-fix: The predicate-parser native checker previously
+  ignored the admitted Stage 4 identity and preferred an ambient legacy Stage 2
+  path; its constant-space resolver now prioritizes explicit diagnostics,
+  `SIMPLE_BINARY`, `SIMPLE_BIN`, legacy Stage 2, then the deployed default, with
+  all branches self-tested. The essential-tools producer now ends with the
+  explicit PASS verdict required by the fail-closed ledger consumer.
+- push-performance-review: The canonical push chain remains behaviorally
+  bounded only for small outgoing ranges. The completed first slice adds a
+  push-only tip mode: it retains all final-tree structural checks, skips the
+  exhaustive fixture campaign, avoids revision-list materialization, and uses
+  a count-only parent reference. The same 12-commit range measured 25.79s
+  before and 1.29s after at 79,872 KiB peak RSS. Multi-ref deduplication and
+  evidence-file bounds remain tracked follow-up work.
+- push-bound-follow-up: Identical ref updates are now deduplicated, invocations
+  above two unique updates fail closed with split-push guidance, and committed
+  PASS evidence must remain under the canonical repository root within a
+  64 MiB aggregate hashing budget. The exhaustive 24-fixture tree campaign is
+  now a bootstrap automated row; interactive push retains bounded tip structure
+  checks. The complete focused contract passed in 7.14s at 71,168 KiB peak RSS;
+  committed-ref and installed-hook paths reported 1s and 0s respectively.
+- committed-rules-fix: The quick rules gate now extracts `rules.sdl` from the
+  exact pushed ref and fingerprints it in both producer and consumer. A dirty
+  hostile `sleep 30` registry was ignored in favor of the committed passing
+  policy. The updated focused contract passed in 7.61s at 71,936 KiB peak RSS;
+  ref and installed-hook paths reported 0s and 1s.

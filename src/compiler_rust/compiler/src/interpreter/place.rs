@@ -272,7 +272,28 @@ pub(crate) fn write_place(env: &mut Env, place: &Place, value: Value) -> bool {
 
 /// Mirror a mutated root back into MODULE_GLOBALS when it is a module-level
 /// binding, matching what the identifier and two-level paths already do.
-fn sync_module_global(env: &Env, root: &str) {
+fn sync_module_global(env: &mut Env, root: &str) {
+    // A global with owner provenance publishes to its defining owner's store,
+    // which is what reads resolve through. The flat map's entry under this
+    // bare name may be an unrelated module's, so an import never writes it.
+    if !env.is_local(root) {
+        if let Some((owner, source_name)) = env.global_binding(root) {
+            let foreign = env.scope().map_or(true, |scope| *scope.owner() != owner);
+            if let Some(value) = env.get(root).cloned() {
+                let scoped = env.scope().is_some();
+                if scoped {
+                    env.release_scope();
+                }
+                crate::interpreter::set_owned_global(&owner, &source_name, value, false);
+                if scoped {
+                    env.refresh_scope(crate::interpreter::owned_globals_snapshot());
+                }
+            }
+            if foreign {
+                return;
+            }
+        }
+    }
     MODULE_GLOBALS.with(|cell| {
         // Peek before the write borrow: borrow_mut() on this generation-tracked
         // cell invalidates every owned-env template (2026-08-21 stall record).
@@ -303,6 +324,32 @@ pub(crate) fn updated_root(env: &Env, place: &Place, value: Value) -> Option<Val
         return None;
     }
     Some(root)
+}
+
+/// Borrow the storage the place designates, **without** touching ownership.
+///
+/// Read-only on purpose: a caller that only wants to know what KIND of value
+/// sits at the leaf (an array? a dict? an object with this method?) must not
+/// pay a copy-on-write isolation just to look. Pairs with `place_slot_mut`,
+/// which is the same walk with `Arc::make_mut` once the caller has committed.
+pub(crate) fn place_slot_ref<'a>(env: &'a Env, place: &Place) -> Option<&'a Value> {
+    let mut slot = env.get(&place.root)?;
+    for projection in &place.projections {
+        slot = step_ref(slot, projection)?;
+    }
+    Some(slot)
+}
+
+/// Mutably borrow the storage the place designates, isolating exactly the
+/// containers on the path (`Arc::make_mut` per hop) and nothing else.
+///
+/// This is the O(depth) counterpart of `updated_root`, which clones the root
+/// value FIRST and therefore aliases every Arc along the path — making each hop's
+/// `Arc::make_mut` a deep copy. Callers that mutate the leaf in place (a
+/// mutating method on `self.inner.xs`, `rows[i]`, `self.d`) must use this.
+pub(crate) fn place_slot_mut<'a>(env: &'a mut Env, place: &Place) -> Option<&'a mut Value> {
+    let root_slot = env.get_mut(&place.root)?;
+    project_mut(root_slot, &place.projections)
 }
 
 /// Read-only counterpart of `step_mut`.

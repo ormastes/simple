@@ -1,4 +1,8 @@
 //! Attribution trace for `.spl` source reads (default OFF).
+//!
+//! `SIMPLE_READ_TRACE=1` prints one `[read] <file>:<line> <path>` line per
+//! source read, so a redundant-read count measured with `strace` can be tied to
+//! the call site issuing it. Off-path cost is one relaxed atomic load.
 use std::sync::atomic::{AtomicU8, Ordering};
 
 static STATE: AtomicU8 = AtomicU8::new(0);

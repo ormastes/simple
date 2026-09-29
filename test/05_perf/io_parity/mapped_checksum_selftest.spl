@@ -1,0 +1,84 @@
++"""Native branch-coverage probe for the mapped checksum helper."""
+
+use std.io_runtime.{exit}
+use std.nogc_sync_mut.ptr.raw.{raw_alloc, raw_release, raw_write_i64}
+use mapped_checksum.{mapped_byte_checksum, mapped_checksum_read_calls}
+
+fn expected_byte_at(index: i64) -> i64:
+    if index < 8:
+        1
+    elif index < 16:
+        3
+    elif index < 24:
+        7
+    else:
+        15
+
+fn expected_checksum(start: i64, length: i64) -> i64:
+    var checksum: i64 = 0
+    var index: i64 = start
+    while index < start + length:
+        checksum = checksum + expected_byte_at(index)
+        index = index + 1
+    checksum
+
+fn fail_selftest(reason: text):
+    print "[iobench-selftest-error] reason={reason}"
+    exit(2)
+
+fn main():
+    val ptr = raw_alloc(32)
+    if ptr <= 0:
+        fail_selftest("allocation_failed")
+        return
+    if ptr % 8 != 0:
+        raw_release(ptr)
+        fail_selftest("allocation_unaligned")
+        return
+
+    raw_write_i64(ptr, 0, 0x0101010101010101)
+    raw_write_i64(ptr, 8, 0x0303030303030303)
+    raw_write_i64(ptr, 16, 0x0707070707070707)
+    raw_write_i64(ptr, 24, 0x0F0F0F0F0F0F0F0F)
+
+    if mapped_byte_checksum(0, 8) != 0 or mapped_checksum_read_calls(0, 8) != 0:
+        raw_release(ptr)
+        fail_selftest("invalid_address_mismatch")
+        return
+    if mapped_byte_checksum(ptr, 0) != 0 or mapped_checksum_read_calls(ptr, 0) != 0:
+        raw_release(ptr)
+        fail_selftest("zero_length_mismatch")
+        return
+
+    var cases: i64 = 0
+    var start: i64 = 0
+    while start < 8:
+        var length: i64 = 0
+        while length <= 17:
+            val actual = mapped_byte_checksum(ptr + start, length)
+            val expected = expected_checksum(start, length)
+            if actual != expected:
+                raw_release(ptr)
+                fail_selftest("checksum_mismatch")
+                return
+            cases = cases + 1
+            length = length + 1
+        start = start + 1
+
+    val fixture_bytes: i64 = 16 * 1024 * 1024
+    val iterations: i64 = 64
+    val scalar_calls = fixture_bytes * iterations
+    val packed_calls = mapped_checksum_read_calls(ptr, fixture_bytes) * iterations
+    raw_release(ptr)
+
+    if cases != 144:
+        fail_selftest("case_count_mismatch")
+        return
+    if scalar_calls != 1073741824 or packed_calls != 134217728:
+        fail_selftest("call_count_mismatch")
+        return
+    if scalar_calls / packed_calls != 8:
+        fail_selftest("call_ratio_mismatch")
+        return
+
+    print "[iobench-selftest] cases=144 scalar_calls=1073741824 packed_calls=134217728 ratio=8"

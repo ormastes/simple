@@ -46,6 +46,12 @@ CUDA/Vulkan inventory, build logs, executable hashes, and API receipts.
 
 ## Tests and documentation
 
+- A1 adapter-attribution SSpec:
+  `test/03_system/gui/wm_compare/render_8k80_a1_adapter_attribution_spec.spl`
+- A1 mirrored operator manual:
+  `doc/06_spec/03_system/gui/wm_compare/render_8k80_a1_adapter_attribution_spec.md`
+- A1 system-test plan:
+  `doc/03_plan/sys_test/render_8k80_a1_adapter_attribution.md`
 - Modern readiness SSpec:
   `test/03_system/gui/wm_compare/render_8k80_cuda_vulkan_container_readiness_spec.spl`
 - Semantic producer SSpec:
@@ -60,3 +66,7 @@ CUDA/Vulkan inventory, build logs, executable hashes, and API receipts.
 
 Unavailable prerequisites are `blocked`, invalid evidence is `failed`, and the
 campaign remains `blocked-physical` until fresh correlated A6/A8 evidence exists.
+The A1 spec is future-executable and fail-closed, but its current runtime,
+docgen, and maintenance status is `TEST_BLOCKED` until an admitted pure-Simple
+CLI exists. Do not substitute the Rust seed or claim the hand-maintained mirror
+as generated evidence.

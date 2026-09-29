@@ -728,22 +728,11 @@ impl RenderBackend for SoftwareBackend:
             i = i + 1
 
     me read_pixels() -> [u32]:
-        val pixel_count = self.w * self.h
-        var copy: [u32] = [0; pixel_count]
-        var i = 0
-        while i < pixel_count:
-            copy[i] = self.buf[i]
-            i = i + 1
-        copy
+        _sw_snapshot_buffer(self.buf, self.w * self.h)
 
     me read_pixels_with_source() -> Engine2DReadback:
-        val pixel_count = self.w * self.h
-        var copy: [u32] = [0; pixel_count]
-        var i = 0
-        while i < pixel_count:
-            copy[i] = self.buf[i]
-            i = i + 1
-        engine2d_readback(copy, readback_source_label(ReadbackSource.CpuMirror))
+        engine2d_readback(_sw_snapshot_buffer(self.buf, self.w * self.h),
+                          readback_source_label(ReadbackSource.CpuMirror))
 
     me scale_alpha_in_place(opacity_milli: i32):
         """Scale every pixel's alpha by opacity_milli/1000 IN PLACE.
@@ -1421,6 +1410,20 @@ impl SoftwareBackend:
         # buf, ...) does NOT propagate under the interpreter — the field read
         # hands the callee a copy — which left every fill/clear a silent no-op
         # on interpreter hosts (found 2026-08-15 via the web-offload oracle).
+        # Bulk channel first (2026-09-03). `arr.write_span(src, ...)` is the
+        # interpreter's in-place bulk array primitive and is the ONLY fast one:
+        # the extern span kernels above (rt_engine2d_simd_*) Arc-clone their
+        # array argument, so a single whole-surface extern call costs O(n) deep
+        # copy — measured 33 ms for one 480k-pixel copy vs 0.2 ms for
+        # write_span, which is why the cpu_simd lane is slower than scalar, not
+        # faster. write_span writes the same u32 values the scalar loop below
+        # writes, so the surface is byte-identical by construction.
+        # Short spans keep the scalar loop: write_span carries a fixed per-call
+        # cost that the row allocation does not amortise below ~32 pixels.
+        if count >= 32:
+            val fill_row: [u32] = [color; count]
+            self.buf.write_span(fill_row, offset as i64, 0, count as i64)
+            return
         var i = 0
         # cpu-lane-loop-ok: scalar fallback inside sw_fill_raw_span itself, taken only when SIMD spans are unavailable; this IS the bulk span primitive
         while i < count:
@@ -1434,6 +1437,10 @@ impl SoftwareBackend:
         if self.native_simd_spans and native_pixel_rows_enabled():
             record_simd_copy_hit()
             self.buf = rt_engine2d_simd_copy_span_u32(self.buf, dst_offset as i64, src, src_offset as i64, safe_count as i64)
+            return
+        # Bulk channel first — same rationale as sw_fill_raw_span above.
+        if safe_count >= 32:
+            self.buf.write_span(src, dst_offset as i64, src_offset as i64, safe_count as i64)
             return
         var i = 0
         # cpu-lane-loop-ok: scalar fallback inside sw_copy_raw_span itself, taken only when rt_engine2d_simd_copy_span_u32 is unavailable; this IS the bulk span primitive
@@ -1615,6 +1622,7 @@ impl SoftwareBackend:
         """True when no tile is marked dirty (a no-op frame)."""
         val n = self.dirty_tiles.len()
         var i = 0
+        # cpu-lane-loop-ok: dirty-tile flag scan that returns on the first dirty tile; bound is the tile count, not a pixel or element sweep
         while i < n:
             if self.dirty_tiles[i]:
                 return false
@@ -1843,6 +1851,33 @@ impl SoftwareBackend:
 # ============================================================================
 # Read-only span helpers (no mutation — safe as free functions)
 # ============================================================================
+
+fn _sw_snapshot_buffer(src: [u32], pixel_count: i32) -> [u32]:
+    """Fresh copy of the first `pixel_count` pixels of a surface buffer.
+
+    Bulk `write_span` rather than a per-pixel loop: readback is the single
+    largest CPU-lane cost after draw (measured 6.6 ms/frame at 800x600,
+    46 ms/frame at 1080p — ~50% of total frame time), and it is a straight
+    memcpy of values, so the bulk channel is byte-identical by construction.
+    The extern span kernels are deliberately NOT used here: they Arc-clone the
+    array argument, making one whole-surface call O(n) deep copy (33 ms
+    measured) — slower than the scalar loop it would replace.
+    """
+    var copy: [u32] = [0; pixel_count]
+    if pixel_count <= 0:
+        return copy
+    var n = pixel_count
+    if n > src.len():
+        n = src.len()
+    if n >= 32:
+        copy.write_span(src, 0, 0, n as i64)
+        return copy
+    var i = 0
+    # cpu-lane-loop-ok: residual element copy for n < 32 only; the bulk path immediately above returns via copy.write_span, so this never runs on a hot-sized buffer
+    while i < n:
+        copy[i] = src[i]
+        i = i + 1
+    copy
 
 fn _span_safe_count(buf_len: i32, offset: i32, count: i32) -> i32:
     if buf_len <= 0 or offset < 0 or count <= 0:

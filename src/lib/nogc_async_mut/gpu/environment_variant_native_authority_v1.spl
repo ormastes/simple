@@ -1,0 +1,195 @@
+"""Live projections from runtime-owned GPU provider capability tokens."""
+
+use std.nogc_sync_mut.composition.environment_variants.contracts_v1.{EnvironmentDigest256V1}
+
+@unsafe(reason: "runtime-owned GPU session capability projection", capabilities: [ffi])
+extern fn rt_gpu_provider_session_authority_word(
+    backend: i64, session: i64, word: i64) -> i64
+@unsafe(reason: "runtime-owned GPU resource capability projection", capabilities: [ffi])
+extern fn rt_gpu_provider_resource_authority_word(
+    backend: i64, session: i64, resource: i64, word: i64) -> i64
+@unsafe(reason: "runtime-owned terminal GPU completion projection", capabilities: [ffi])
+extern fn rt_gpu_provider_completion_authority_word(
+    backend: i64, session: i64, completion: i64, word: i64) -> i64
+@unsafe(reason: "runtime-owned exact device-image capability projection", capabilities: [ffi])
+extern fn rt_gpu_provider_device_image_authority_word(
+    backend: i64, session: i64, image: i64, word: i64) -> i64
+
+pub struct GpuNativeProviderAuthorityV1:
+    backend: i64
+    session: i64
+    provider_identity: u64
+    provider_generation: u64
+    device_identity: u64
+    artifact_digest: EnvironmentDigest256V1
+
+pub struct GpuNativeResourceAuthorityV1:
+    backend: i64
+    session: i64
+    resource: i64
+    capacity_bytes: u64
+    provider_generation: u64
+
+pub struct GpuNativeCompletionAuthorityV1:
+    backend: i64
+    session: i64
+    completion: i64
+    correlation_id: u64
+    provider_generation: u64
+    resource: u64
+    checksum: u64
+    readback_bytes: u64
+    device_identity: u64
+
+pub struct GpuNativeDeviceProgramImageAuthorityV1:
+    backend: i64
+    session: i64
+    image: i64
+    provider_generation: u64
+    program_identity: EnvironmentDigest256V1
+    image_digest: EnvironmentDigest256V1
+    image_bytes: u64
+
+fn _session_word(backend: i64, session: i64, word: i64) -> u64:
+    unsafe(capabilities: [ffi]):
+        rt_gpu_provider_session_authority_word(backend, session, word) as u64
+
+fn _resource_word(backend: i64, session: i64, resource: i64, word: i64) -> u64:
+    unsafe(capabilities: [ffi]):
+        rt_gpu_provider_resource_authority_word(backend, session, resource, word) as u64
+
+fn _completion_word(backend: i64, session: i64, completion: i64, word: i64) -> u64:
+    unsafe(capabilities: [ffi]):
+        rt_gpu_provider_completion_authority_word(
+            backend, session, completion, word) as u64
+
+fn _device_image_word(backend: i64, session: i64, image: i64, word: i64) -> u64:
+    unsafe(capabilities: [ffi]):
+        rt_gpu_provider_device_image_authority_word(
+            backend, session, image, word) as u64
+
+pub fn gpu_native_scalar_identity_v1(value: u64) -> EnvironmentDigest256V1:
+    EnvironmentDigest256V1(w0: value, w1: 0u64, w2: 0u64, w3: 0u64)
+
+pub fn gpu_native_resource_lease_identity_v1(
+    authority: GpuNativeResourceAuthorityV1
+) -> EnvironmentDigest256V1:
+    EnvironmentDigest256V1(
+        w0: authority.resource as u64, w1: authority.session as u64,
+        w2: authority.provider_generation, w3: authority.capacity_bytes)
+
+pub fn gpu_native_provider_authority_v1(
+    backend: i64, session: i64
+) -> Result<GpuNativeProviderAuthorityV1, text>:
+    if backend <= 0 or session <= 0: return Err("invalid native provider handle")
+    val identity = _session_word(backend, session, 0)
+    val generation = _session_word(backend, session, 1)
+    val device = _session_word(backend, session, 2)
+    val digest = EnvironmentDigest256V1(
+        w0: _session_word(backend, session, 3),
+        w1: _session_word(backend, session, 4),
+        w2: _session_word(backend, session, 5),
+        w3: _session_word(backend, session, 6))
+    if identity == 0u64 or generation == 0u64:
+        return Err("native provider authority unavailable")
+    Ok(GpuNativeProviderAuthorityV1(
+        backend: backend, session: session, provider_identity: identity,
+        provider_generation: generation, device_identity: device,
+        artifact_digest: digest))
+
+pub fn gpu_native_provider_authority_live_v1(
+    authority: GpuNativeProviderAuthorityV1
+) -> bool:
+    val current = gpu_native_provider_authority_v1(
+        authority.backend, authority.session)
+    current.is_ok() and current.unwrap() == authority
+
+pub fn gpu_native_resource_authority_v1(
+    provider: GpuNativeProviderAuthorityV1, resource: i64
+) -> Result<GpuNativeResourceAuthorityV1, text>:
+    if not gpu_native_provider_authority_live_v1(provider) or resource <= 0:
+        return Err("native resource authority unavailable")
+    val capacity = _resource_word(provider.backend, provider.session, resource, 0)
+    val generation = _resource_word(provider.backend, provider.session, resource, 1)
+    val session = _resource_word(provider.backend, provider.session, resource, 2)
+    if capacity == 0u64 or generation != provider.provider_generation or
+       session != provider.session as u64:
+        return Err("native resource authority mismatch")
+    Ok(GpuNativeResourceAuthorityV1(
+        backend: provider.backend, session: provider.session, resource: resource,
+        capacity_bytes: capacity, provider_generation: generation))
+
+pub fn gpu_native_resource_authority_live_v1(
+    authority: GpuNativeResourceAuthorityV1
+) -> bool:
+    val provider = gpu_native_provider_authority_v1(
+        authority.backend, authority.session)
+    if provider.is_err(): return false
+    val current = gpu_native_resource_authority_v1(provider.unwrap(), authority.resource)
+    current.is_ok() and current.unwrap() == authority
+
+pub fn gpu_native_completion_authority_v1(
+    provider: GpuNativeProviderAuthorityV1, completion: i64
+) -> Result<GpuNativeCompletionAuthorityV1, text>:
+    if not gpu_native_provider_authority_live_v1(provider) or completion <= 0:
+        return Err("native completion authority unavailable")
+    val correlation = _completion_word(provider.backend, provider.session, completion, 0)
+    val generation = _completion_word(provider.backend, provider.session, completion, 1)
+    val resource = _completion_word(provider.backend, provider.session, completion, 2)
+    val checksum = _completion_word(provider.backend, provider.session, completion, 3)
+    val readback = _completion_word(provider.backend, provider.session, completion, 4)
+    val terminal = _completion_word(provider.backend, provider.session, completion, 5)
+    val device = _completion_word(provider.backend, provider.session, completion, 6)
+    if correlation == 0u64 or generation != provider.provider_generation or
+       resource == 0u64 or checksum == 0u64 or readback == 0u64 or
+       terminal != 1u64 or device != provider.device_identity:
+        return Err("native completion authority mismatch")
+    Ok(GpuNativeCompletionAuthorityV1(
+        backend: provider.backend, session: provider.session,
+        completion: completion, correlation_id: correlation,
+        provider_generation: generation, resource: resource,
+        checksum: checksum, readback_bytes: readback, device_identity: device))
+
+pub fn gpu_native_completion_authority_live_v1(
+    authority: GpuNativeCompletionAuthorityV1
+) -> bool:
+    val provider = gpu_native_provider_authority_v1(
+        authority.backend, authority.session)
+    if provider.is_err(): return false
+    val current = gpu_native_completion_authority_v1(
+        provider.unwrap(), authority.completion)
+    current.is_ok() and current.unwrap() == authority
+
+pub fn gpu_native_device_program_image_authority_v1(
+    backend: i64, session: i64, image: i64
+) -> Result<GpuNativeDeviceProgramImageAuthorityV1, text>:
+    if backend <= 0 or session <= 0 or image <= 0:
+        return Err("invalid native device-image handle")
+    val generation = _device_image_word(backend, session, image, 0)
+    val program = EnvironmentDigest256V1(
+        w0: _device_image_word(backend, session, image, 1),
+        w1: _device_image_word(backend, session, image, 2),
+        w2: _device_image_word(backend, session, image, 3),
+        w3: _device_image_word(backend, session, image, 4))
+    val digest = EnvironmentDigest256V1(
+        w0: _device_image_word(backend, session, image, 5),
+        w1: _device_image_word(backend, session, image, 6),
+        w2: _device_image_word(backend, session, image, 7),
+        w3: _device_image_word(backend, session, image, 8))
+    val bytes = _device_image_word(backend, session, image, 9)
+    if generation == 0u64 or program == EnvironmentDigest256V1(
+            w0: 0u64, w1: 0u64, w2: 0u64, w3: 0u64) or
+       digest == EnvironmentDigest256V1(
+            w0: 0u64, w1: 0u64, w2: 0u64, w3: 0u64) or bytes == 0u64:
+        return Err("native device-image authority unavailable")
+    Ok(GpuNativeDeviceProgramImageAuthorityV1(
+        backend: backend, session: session, image: image,
+        provider_generation: generation, program_identity: program,
+        image_digest: digest, image_bytes: bytes))
+
+pub fn gpu_native_device_program_image_authority_live_v1(
+    authority: GpuNativeDeviceProgramImageAuthorityV1
+) -> bool:
+    val current = gpu_native_device_program_image_authority_v1(
+        authority.backend, authority.session, authority.image)
+    current.is_ok() and current.unwrap() == authority

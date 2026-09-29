@@ -13,6 +13,7 @@ use std.fs_driver.ops.{FsDriver}
 use std.fs_driver.block_device.{BlockDevice}
 use std.fs_driver.fat32_core.{Fat32Core, OpenFile}
 use common.string_core.{char_from_code}
+use std.fs_driver.bytes_util.{text_to_bytes_pure}
 
 struct FsFat32Driver:
     name:    text
@@ -515,12 +516,17 @@ impl FsDriver for FsFat32Driver:
 var _ram_block_sectors: [RamSector] = []
 
 struct RamSector:
-    """One 512-byte sector in the RAM block device store."""
+    """One 512-byte sector in the RAM block device store, owned by one device."""
+    inst_id: i64
     lba:  u64
     data: [u8]
 
 struct RamBlockDevice:
-    """In-memory block device backed by a module-level sector store."""
+    """In-memory block device backed by a module-level store keyed by inst_id.
+
+    Copies of one device share its inst_id and therefore its sectors; two
+    separately constructed devices never observe each other's writes.
+    """
     inst_id: i64
     files:   [RamFile]
 
@@ -536,44 +542,168 @@ fn _ram_block_alloc_inst() -> i64:
     _ram_block_next_inst = _ram_block_next_inst + 1
     id
 
+fn _ram_block_store(inst_id: i64, lba: u64, data: [u8]):
+    var new_store: [RamSector] = []
+    var found: bool = false
+    for s in _ram_block_sectors:
+        if s.inst_id == inst_id and s.lba == lba:
+            new_store.push(RamSector(inst_id: inst_id, lba: lba, data: data))
+            found = true
+        else:
+            new_store.push(s)
+    if not found:
+        new_store.push(RamSector(inst_id: inst_id, lba: lba, data: data))
+    _ram_block_sectors = new_store
+
+# Minimal FAT32 geometry accepted by Fat32Core.mount: 512-byte sectors,
+# 1 sector per cluster, 32 reserved sectors, 2 FATs of 1008 sectors, so the
+# data region (root cluster 2) starts at LBA 32 + 2 * 1008 = 2048.
+val _RAM_FAT32_RESERVED: u64 = 32u64
+val _RAM_FAT32_FAT_SECTORS: u64 = 1008u64
+val _RAM_FAT32_DATA_START: u64 = 2048u64
+val _RAM_FAT32_EOC: u32 = 0x0FFFFFFFu32
+
+fn _ram_zero_sector() -> [u8]:
+    var bytes: [u8] = []
+    var i: i32 = 0
+    while i < 512:
+        bytes.push(0u8)
+        i = i + 1
+    bytes
+
+fn _ram_put_u16(bytes: [u8], offset: i32, value: u32) -> [u8]:
+    var out = bytes
+    out[offset] = (value & 0xFFu32).to_u8()
+    out[offset + 1] = ((value >> 8) & 0xFFu32).to_u8()
+    out
+
+fn _ram_put_u32(bytes: [u8], offset: i32, value: u32) -> [u8]:
+    var out = _ram_put_u16(bytes, offset, value & 0xFFFFu32)
+    _ram_put_u16(out, offset + 2, (value >> 16) & 0xFFFFu32)
+
+fn _ram_fat32_short_name(filename: text) -> [u8]:
+    """Encode filename as a space-padded, upper-case 8.3 directory name."""
+    val raw = text_to_bytes_pure(filename)
+    var dot: i32 = -1
+    var i: i32 = 0
+    while i < raw.len() as i32:
+        if raw[i] == 0x2Eu8:
+            dot = i
+        i = i + 1
+    var name: [u8] = []
+    i = 0
+    while i < 11:
+        name.push(0x20u8)
+        i = i + 1
+    val base_end = if dot < 0: raw.len() as i32 else: dot
+    i = 0
+    while i < base_end and i < 8:
+        name[i] = _ram_ascii_upper(raw[i])
+        i = i + 1
+    if dot >= 0:
+        var j: i32 = 0
+        while dot + 1 + j < raw.len() as i32 and j < 3:
+            name[8 + j] = _ram_ascii_upper(raw[dot + 1 + j])
+            j = j + 1
+    name
+
+fn _ram_ascii_upper(b: u8) -> u8:
+    if b >= 0x61u8 and b <= 0x7Au8: b - 0x20u8 else: b
+
+fn _ram_block_seed_fat32_file(inst_id: i64, filename: text, content: text):
+    """Write a mountable FAT32 image holding `filename` in the root directory."""
+    var boot = _ram_zero_sector()
+    boot = _ram_put_u16(boot, 11, 512u32)
+    boot[13] = 1u8
+    boot = _ram_put_u16(boot, 14, 32u32)
+    boot[16] = 2u8
+    boot = _ram_put_u32(boot, 32, 131072u32)
+    boot = _ram_put_u32(boot, 36, 1008u32)
+    boot = _ram_put_u32(boot, 44, 2u32)
+    boot[510] = 0x55u8
+    boot[511] = 0xAAu8
+    _ram_block_store(inst_id, 0u64, boot)
+
+    val payload = text_to_bytes_pure(content)
+    val payload_len = payload.len() as i64
+    val cluster_count: i64 = (payload_len + 511) / 512
+    val first_cluster: u32 = if cluster_count == 0: 0u32 else: 3u32
+
+    # FAT: entries 0/1 reserved, 2 = root directory, 3.. = the file chain.
+    val last_cluster: i64 = 2 + cluster_count
+    var fat_sector_index: i64 = 0
+    while fat_sector_index * 128 <= last_cluster:
+        var fat = _ram_zero_sector()
+        var slot: i64 = 0
+        while slot < 128:
+            val cluster = fat_sector_index * 128 + slot
+            var value: u32 = 0u32
+            if cluster == 0:
+                value = 0x0FFFFFF8u32
+            elif cluster == 1 or cluster == 2 or cluster == last_cluster:
+                value = _RAM_FAT32_EOC
+            elif cluster > 2 and cluster < last_cluster:
+                value = (cluster + 1) as u32
+            if value != 0u32:
+                fat = _ram_put_u32(fat, (slot * 4) as i32, value)
+            slot = slot + 1
+        _ram_block_store(inst_id, _RAM_FAT32_RESERVED + (fat_sector_index as u64), fat)
+        _ram_block_store(inst_id,
+            _RAM_FAT32_RESERVED + _RAM_FAT32_FAT_SECTORS + (fat_sector_index as u64), fat)
+        fat_sector_index = fat_sector_index + 1
+
+    var root = _ram_zero_sector()
+    val short_name = _ram_fat32_short_name(filename)
+    var n: i32 = 0
+    while n < 11:
+        root[n] = short_name[n]
+        n = n + 1
+    root[11] = 0x20u8
+    root = _ram_put_u16(root, 20, (first_cluster >> 16) & 0xFFFFu32)
+    root = _ram_put_u16(root, 26, first_cluster & 0xFFFFu32)
+    root = _ram_put_u32(root, 28, payload_len as u32)
+    _ram_block_store(inst_id, _RAM_FAT32_DATA_START, root)
+
+    var c: i64 = 0
+    while c < cluster_count:
+        var sector = _ram_zero_sector()
+        var k: i64 = 0
+        while k < 512 and c * 512 + k < payload_len:
+            sector[k as i32] = payload[(c * 512 + k) as i32]
+            k = k + 1
+        _ram_block_store(inst_id, _RAM_FAT32_DATA_START + 1u64 + (c as u64), sector)
+        c = c + 1
+
 impl RamBlockDevice:
     static fn new_empty() -> RamBlockDevice:
         """Create an empty RAM block device."""
         RamBlockDevice(inst_id: _ram_block_alloc_inst(), files: [])
 
     static fn new_with_file(filename: text, content: text) -> RamBlockDevice:
-        """Create a RAM block device pre-loaded with one named file."""
+        """Create a RAM block device holding a mountable FAT32 image with one file.
+
+        The file is a single 8.3 root-directory entry whose cluster chain
+        starts at cluster 3. Before this seeded a real image the device was
+        all zeroes, so Fat32Core.mount rejected it and every FAT32 fixture
+        built on it failed with FsError.Corrupt.
+        """
         var files: [RamFile] = []
         files.push(RamFile(name: filename, content: content))
-        RamBlockDevice(inst_id: _ram_block_alloc_inst(), files: files)
+        val dev = RamBlockDevice(inst_id: _ram_block_alloc_inst(), files: files)
+        _ram_block_seed_fat32_file(dev.inst_id, filename, content)
+        dev
 
 impl BlockDevice for RamBlockDevice:
     fn read_sector(lba: u64) -> Result<[u8], text>:
         """Return zeroed sector (or sector data if written)."""
         for s in _ram_block_sectors:
-            if s.lba == lba:
+            if s.inst_id == self.inst_id and s.lba == lba:
                 return Ok(s.data)
-        # Zero fill
-        var buffer: [u8] = []
-        var j: i32 = 0
-        while j < 512:
-            buffer.push(0)
-            j = j + 1
-        Ok(buffer)
+        Ok(_ram_zero_sector())
 
     fn write_sector(lba: u64, data: [u8]) -> Result<bool, text>:
-        """Write sector data to the module-level store."""
-        var new_store: [RamSector] = []
-        var found: bool = false
-        for s in _ram_block_sectors:
-            if s.lba == lba:
-                new_store.push(RamSector(lba: lba, data: data))
-                found = true
-            else:
-                new_store.push(s)
-        if not found:
-            new_store.push(RamSector(lba: lba, data: data))
-        _ram_block_sectors = new_store
+        """Write sector data to this device's slice of the module-level store."""
+        _ram_block_store(self.inst_id, lba, data)
         Ok(true)
 
     fn sector_size() -> u32:

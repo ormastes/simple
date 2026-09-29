@@ -1,0 +1,71 @@
+# Dedicated `/WEB.ELF` TLS material owner.
+#
+# This owner accepts only bounded mutable DER/PKCS#8 bytes read through the
+# WEB launch pouch. It advertises only the exact authenticated production
+# handlers: bounded HTTP/2 and HTTP/1.1 (including RFC6455 upgrade). H3 is absent.
+
+use os.tls13.server_types.{Tls13ServerConfig}
+use std.common.crypto.secure_memory.{secure_zero_u8_slots}
+
+pub val WEB_TLS_MAX_CERTIFICATE_BYTES_V1: u64 = 65536u64
+pub val WEB_TLS_MAX_PRIVATE_KEY_BYTES_V1: u64 = 16384u64
+pub val WEB_TLS_ED25519_SIGNATURE_SCHEME_V1: u16 = 0x0807u16
+
+pub class WebTlsProvisioningOwnerV1:
+    certificate: [u8]
+    private_key: [u8]
+    admitted: bool
+    quarantined: bool
+
+    pub static fn new() -> WebTlsProvisioningOwnerV1:
+        WebTlsProvisioningOwnerV1(
+            certificate: [], private_key: [], admitted: false,
+            quarantined: false)
+
+    me wipe():
+        val _ = secure_zero_u8_slots(self.certificate)
+        val _ = secure_zero_u8_slots(self.private_key)
+        self.certificate = []
+        self.private_key = []
+
+    pub me fn admit(certificate: [u8], private_key: [u8]) -> bool:
+        if self.admitted or self.quarantined:
+            val _ = secure_zero_u8_slots(certificate)
+            val _ = secure_zero_u8_slots(private_key)
+            return false
+        if (certificate.len() == 0u64 or
+            certificate.len() > WEB_TLS_MAX_CERTIFICATE_BYTES_V1 or
+            private_key.len() == 0u64 or
+            private_key.len() > WEB_TLS_MAX_PRIVATE_KEY_BYTES_V1):
+            val _ = secure_zero_u8_slots(certificate)
+            val _ = secure_zero_u8_slots(private_key)
+            self.quarantined = true
+            return false
+        self.certificate = certificate
+        self.private_key = private_key
+        self.admitted = true
+        true
+
+    pub fn config() -> Result<Tls13ServerConfig, text>:
+        if not self.admitted or self.quarantined:
+            return Err("web-tls-material-not-admitted")
+        val h1: [u8] = [104u8, 116u8, 116u8, 112u8, 47u8, 49u8, 46u8, 49u8]
+        val h2: [u8] = [104u8, 50u8]
+        Ok(Tls13ServerConfig(
+            cert_chain: [self.certificate],
+            server_pkcs8: self.private_key,
+            server_sig_scheme: WEB_TLS_ED25519_SIGNATURE_SCHEME_V1,
+            alpn_protocols: [h2, h1], ready_alpn_protocols: [h2, h1],
+            require_alpn: true))
+
+    pub me quarantine():
+        self.wipe()
+        self.admitted = false
+        self.quarantined = true
+
+    pub me close():
+        self.wipe()
+        self.admitted = false
+
+export WebTlsProvisioningOwnerV1
+export WEB_TLS_MAX_CERTIFICATE_BYTES_V1, WEB_TLS_MAX_PRIVATE_KEY_BYTES_V1

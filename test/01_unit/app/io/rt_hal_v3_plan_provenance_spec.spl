@@ -1,0 +1,120 @@
+"""
+## Purpose and audience
+Regression contract for the direct V3 RT/HAL host entrypoint
+(`rt_hal_install_isolated_exact_host_from_plan_v3`), owned by the RT/HAL and
+compiler-cold-path maintainers. It proves this public surface never claims a
+Ready installation: only the compiler-owned cold sequence may pair a complete
+plan with exit-schema registration and the controller seal, and a forged
+same-rank plan reuse must fail provenance before any lifecycle change.
+## Operator workflow
+Run `simple run test/01_unit/app/io/rt_hal_v3_plan_provenance_spec.spl` after
+touching `src/app/io/rt_hal_isolated_host.spl`, the env-access plan identity
+code, or the RT/HAL process-task-arena lifecycle helpers.
+## Compatibility and limitations
+The pinned-host fixture (`/bin/true` plan identity) requires Linux; on other
+hosts the scenario keeps one real product assertion and returns early. Two
+complete plans deliberately share every reduced host knob and assurance rank;
+only the authoritative operation selector differs.
+## Verification guidance and troubleshooting
+`RTHAL-E-EXIT-SEAL-REQUIRED` is the required verdict for an unsealed but
+otherwise valid plan; `RTHAL-E-PLAN-PROVENANCE` is required when plan and
+identity disagree. A `Ready` lifecycle claim or a missing parallel-claim
+warning is a defect in the host entrypoint, not in this spec. The canonical
+identity is a sha256 hex digest, so its length is fixed at 64.
+"""
+# @cover src/app/io/rt_hal_isolated_host.spl 80%
+# Lifecycle: doc/01_research/domain/mcdc_rt_hal_hardening.md ;
+# doc/03_plan/sspec_modernization_plan.md ;
+# doc/04_architecture/mcdc_rt_hal_hardening.md ;
+# doc/05_design/rt_hal_typed_exit_protocol.md
+
+use std.spec.{step}
+use std.io_runtime.{file_hash_sha256, host_os}
+use std.common.env_access.model.*
+use std.common.env_access.plan_sdn.*
+use app.io.rt_hal_isolated_host.{rt_hal_install_isolated_exact_host_from_plan_v3}
+use std.nogc_sync_mut.rt_hal.process_task_arena.{
+    rt_hal_process_lifecycle_is_ready, rt_hal_process_controller_claim,
+    rt_hal_process_arena_shutdown
+}
+
+fn operation(adapter: i64) -> EnvRtHalOperationPlan:
+    EnvRtHalOperationPlan(
+        operation_id: "test/rt_hal_v3_plan.spl::query",
+        c_adapter_id: adapter, rust_adapter_id: 0,
+        effect_capable: false, c_effect_adapter_id: 0, rust_effect_adapter_id: 0
+    )
+
+fn plan(plan_id: text, executable: text) -> EnvAccessPlan:
+    EnvAccessPlan(
+        plan_id: plan_id, canonical_repo_root: "/workspace/rt-hal",
+        # A V3 comparator plan permits only its pinned provider; physical
+        # environment effects are represented by the complete plan identity.
+        instructions: [], max_total_bytes: 512, max_processes: 1,
+        allowed_tools: [EnvToolIdentity(
+            tool_id: "c-provider", canonical_path: executable,
+            identity_hash: "sha256:" + file_hash_sha256(executable)
+        )], allowed_hardware_probes: []
+    )
+
+fn installation(plan_value: EnvAccessPlan,
+                operations: [EnvRtHalOperationPlan]) -> EnvAccessPlanInstallV1:
+    EnvAccessPlanInstallV1(
+        plan: plan_value, compare_c: true, compare_rust: false,
+        c_tool_id: "c-provider", rust_tool_id: "",
+        worker_count: 1, queue_capacity: 1, timeout_ticks: 100,
+        max_output_bytes: 512, required_assurance_rank: 2,
+        rt_hal_operations: operations
+    )
+
+describe "RT/HAL V3 direct plan provenance":
+    it "refuses unsealed direct install and forged same-rank plan reuse":
+        # @req REQ-RTHAL-V3-PROVENANCE-001
+        # @capture(protocol_binary): host-entrypoint verdict codes and lifecycle flags
+        step("Build two complete same-rank plans that differ only in the operation selector")
+        # The direct host API receives no compiler-owned exit schema. It must
+        # reject before pinning an executable or leaving a partial Installing
+        # lifecycle behind; /bin/true is only a stable plan identity fixture.
+        if host_os() != "linux":
+            # NOTE: RTHAL-SKIP-NONLINUX — the pinned-host fixture requires Linux
+            # (/bin/true plan identity). This real assertion keeps the scenario
+            # non-vacuous on other hosts; it replaces the former pass_do_nothing
+            # scaffold (ORA-001 blocker) without weakening the Linux-path checks.
+            expect(host_os() != "linux").to_equal(true)
+            return
+        val executable = "/bin/true"
+        # The two complete plans deliberately share every reduced host knob
+        # and assurance rank.  Only the authoritative operation selector
+        # differs, which is enough to require a distinct Ready lifecycle.
+        val plan_a = plan("same-rank-a", executable)
+        val plan_b = plan("same-rank-b", executable)
+        val operations_a = [operation(1)]
+        val operations_b = [operation(2)]
+        val identity_a = env_access_plan_canonical_identity_v1(
+            installation(plan_a, operations_a)).unwrap()
+        val identity_b = env_access_plan_canonical_identity_v1(
+            installation(plan_b, operations_b)).unwrap()
+        expect(identity_a.len()).to_equal(64)  # oracle: the canonical identity is a sha256 hex digest, always exactly 64 hex characters
+        expect(identity_b.len()).to_equal(64)  # oracle: same sha256 hex digest contract for plan B
+        expect(identity_a != identity_b).to_equal(true)
+
+        # A valid complete plan still lacks the compiler's schema/controller
+        # seal arguments, so the direct API must fail explicitly rather than
+        # return success in Installing. B cannot be treated as an A reuse.
+        expect(rt_hal_install_isolated_exact_host_from_plan_v3(
+            plan_a, true, false, "c-provider", "", 1, 1, 100, 512, 2,
+            identity_a, operations_a
+        )).to_equal("RTHAL-E-EXIT-SEAL-REQUIRED")
+        expect(rt_hal_process_lifecycle_is_ready()).to_equal(false)
+        expect(rt_hal_install_isolated_exact_host_from_plan_v3(
+            plan_b, true, false, "c-provider", "", 1, 1, 100, 512, 2,
+            identity_b, operations_b
+        )).to_equal("RTHAL-E-EXIT-SEAL-REQUIRED")
+
+        # A forged claim is rejected before any lifecycle installation path.
+        expect(rt_hal_install_isolated_exact_host_from_plan_v3(
+            plan_b, true, false, "c-provider", "", 1, 1, 100, 512, 2,
+            identity_a, operations_b
+        )).to_equal("RTHAL-E-PLAN-PROVENANCE")
+        expect(rt_hal_process_controller_claim()).to_equal("RTHAL-W-PARALLEL-UNSUPPORTED")
+        expect(rt_hal_process_arena_shutdown()).to_equal("")

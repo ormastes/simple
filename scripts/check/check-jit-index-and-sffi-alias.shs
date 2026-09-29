@@ -1,0 +1,202 @@
+#!/bin/sh
+# check-jit-index-and-sffi-alias.shs
+#
+# Regression gate for two GENERAL seed defects that both failed SILENTLY and
+# both live on the JIT/Cranelift lane reached by `simple run`:
+#
+#   D1  u64-typed subscript decoded to NIL.
+#       rt_index_get/rt_index_set gated every non-dict receiver on
+#       RuntimeValue::is_int() (tag() == TAG_INT, the INLINE 61-bit signed
+#       form), but RuntimeValue::from_u64 ALWAYS heap-boxes into
+#       HeapObjectType::UInt, a TAG_HEAP value. So a u64 index failed the test,
+#       the accessor returned NIL, and `as u8` turned that into 0.
+#       Fixed by RuntimeValue::as_index_i64().
+#
+#   D2  an `extern fn` DECLARATION suppressed the SFFI alias.
+#       compile_call chose the alias table (rt_file_write_bytes ->
+#       rt_file_write_bytes_array) via ctx.func_ids.contains_key(name), but
+#       func_ids also holds extern DECLARATIONS (Linkage::Import). Declaring a
+#       runtime symbol therefore counted as shadowing it, the alias was
+#       suppressed, and codegen emitted a 3-argument call against the
+#       4-argument C ABI rt_file_write_bytes(path_ptr, path_len, data_ptr,
+#       data_len). The length came from a stale register (constantly 3), so
+#       every call wrote 3 garbage bytes AND RETURNED TRUE.
+#       Fixed by using has_defined_local_function (Linkage != Import).
+#
+# WHY THIS IS A .shs GATE AND NOT A *_spec.spl
+# Both defects were first written as specs under test/01_unit/language/. Those
+# specs PASSED on a deliberately rebuilt pre-fix seed -- `simple test` does not
+# exercise the JIT lane these defects live on, so the specs were vacuous and
+# were deleted rather than left as false confidence. The defects reproduce only
+# through `simple run`, which is what this gate drives.
+#
+# Verdict is the last line of stdout:
+#   PASS  — <n> check(s) executed, 0 failed   exit 0
+#   FAIL  — ...                               exit 1
+#   ERROR — nothing was checked               exit 2   (0 checks executed is ERROR)
+#
+# Env: SEED (path to the seed binary under test).
+set -eu
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+cd "$ROOT"
+
+SEED="${SEED:-src/compiler_rust/target/release/simple}"
+
+EV_CHECKED=0
+EV_FAILED=0
+FAILNAMES=""
+
+fail_note() { EV_FAILED=$((EV_FAILED + 1)); FAILNAMES="$FAILNAMES $1"; }
+nothing()   { echo "ERROR — nothing was checked: $1"; exit 2; }
+
+# ---------------------------------------------------------------------------
+# Fixture writers. Kept as functions so --selftest can reuse them verbatim.
+# ---------------------------------------------------------------------------
+write_index_fixture() {
+    # $1 = destination .spl
+    cat > "$1" <<'FIXTURE'
+fn _pad_ascii(s: text, width: u64) -> [u8]:
+    var out: [u8] = []
+    var i: u64 = 0u64
+    while i < width:
+        if i < s.len():
+            out.push(s[i] as u8)
+        else:
+            out.push(0x20u8)
+        i = i + 1u64
+    out
+
+fn main() -> i64:
+    val r = _pad_ascii("FSEXEC", 8u64)
+    var j: u64 = 0u64
+    var line: text = ""
+    while j < 8u64:
+        line = line + r[j].to_text() + " "
+        j = j + 1u64
+    print "pad=" + line
+    # An array read through a u64 subscript. Pre-fix this was masked by a typed
+    # MIR fast path that bypasses rt_index_get, so a text-only check would let
+    # the fix be re-narrowed to text and the generic array/tuple paths would
+    # silently regress.
+    val xs: [u8] = [11u8, 22u8, 33u8]
+    val k: u64 = 2u64
+    print "arr=" + xs[k].to_text()
+    return 0
+FIXTURE
+}
+
+write_sffi_fixture() {
+    # $1 = destination .spl, $2 = output .bin path
+    cat > "$1" <<FIXTURE
+extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
+
+fn main() -> i64:
+    var b: [u8] = []
+    b.push(0xEBu8)
+    b.push(0x58u8)
+    b.push(0x90u8)
+    b.push(0x41u8)
+    print "wrote=" + rt_file_write_bytes("$2", b).to_text()
+    return 0
+FIXTURE
+}
+
+# ---------------------------------------------------------------------------
+# --selftest — fatal, runs before any real work. Proves the gate DISCRIMINATES:
+# a checker that cannot fail is not evidence.
+# ---------------------------------------------------------------------------
+selftest() {
+    st=$(mktemp -d "${TMPDIR:-/tmp}/jit-index-selftest.XXXXXX")
+    st_fail=0
+
+    # (1) The pad comparison must reject the exact pre-fix output.
+    prefix_out="pad=0 0 0 0 0 0 32 32 "
+    case "$prefix_out" in
+        "pad=70 83 69 88 69 67 32 32 ") st_fail=1; echo "selftest: pre-fix pad output was accepted" ;;
+    esac
+
+    # (2) ...and must accept the exact post-fix output.
+    good_out="pad=70 83 69 88 69 67 32 32 "
+    case "$good_out" in
+        "pad=70 83 69 88 69 67 32 32 ") ;;
+        *) st_fail=1; echo "selftest: correct pad output was rejected" ;;
+    esac
+
+    # (3) The byte comparison must reject the pre-fix 3-byte file and accept
+    #     the 4-byte one. 4 bytes matters: 3 was the pre-fix constant, so a
+    #     3-byte payload would pass vacuously.
+    printf '\010\000\000' > "$st/bad.bin"
+    printf '\353\130\220\101' > "$st/good.bin"
+    bad_hex=$(od -A n -t x1 "$st/bad.bin" | tr -d ' \n')
+    good_hex=$(od -A n -t x1 "$st/good.bin" | tr -d ' \n')
+    [ "$bad_hex" = "eb589041" ] && { st_fail=1; echo "selftest: pre-fix bytes were accepted"; }
+    [ "$good_hex" = "eb589041" ] || { st_fail=1; echo "selftest: correct bytes were rejected"; }
+
+    # (4) Fixture writers must actually emit non-empty, u64-typed fixtures --
+    #     an empty fixture would make every later run vacuously green.
+    write_index_fixture "$st/i.spl"
+    write_sffi_fixture "$st/s.spl" "$st/out.bin"
+    [ -s "$st/i.spl" ] || { st_fail=1; echo "selftest: index fixture empty"; }
+    [ -s "$st/s.spl" ] || { st_fail=1; echo "selftest: sffi fixture empty"; }
+    grep -q 'var i: u64' "$st/i.spl"        || { st_fail=1; echo "selftest: index fixture lost its u64 index"; }
+    grep -q 'extern fn rt_file_write_bytes' "$st/s.spl" || { st_fail=1; echo "selftest: sffi fixture lost its extern decl"; }
+
+    rm -rf "$st"
+    [ "$st_fail" = "0" ] || { echo "selftest FAILED"; exit 2; }
+    echo "selftest OK"
+}
+
+selftest
+[ "${1:-}" = "--selftest" ] && exit 0
+
+[ -x "$SEED" ] || nothing "seed missing or not executable at $SEED"
+
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/jit-index-check.XXXXXX")
+trap 'rm -rf "$WORK"' EXIT
+
+# ---------------------------------------------------------------------------
+# D1 — u64 subscript decode.
+# ---------------------------------------------------------------------------
+write_index_fixture "$WORK/index.spl"
+IDX_OUT=$("$SEED" run "$WORK/index.spl" 2>/dev/null | grep -E '^(pad|arr)=' || true)
+EV_CHECKED=$((EV_CHECKED + 1))
+IDX_PAD=$(printf '%s\n' "$IDX_OUT" | grep '^pad=' || true)
+IDX_ARR=$(printf '%s\n' "$IDX_OUT" | grep '^arr=' || true)
+# Trailing space is part of the fixture's own formatting; compare trimmed.
+IDX_PAD_T=$(printf '%s' "$IDX_PAD" | sed 's/ *$//')
+if [ "$IDX_PAD_T" != "pad=70 83 69 88 69 67 32 32" ]; then
+    fail_note "u64-text-index(got '$IDX_PAD_T')"
+fi
+EV_CHECKED=$((EV_CHECKED + 1))
+if [ "$IDX_ARR" != "arr=33" ]; then
+    fail_note "u64-array-index(got '$IDX_ARR')"
+fi
+
+# ---------------------------------------------------------------------------
+# D2 — extern declaration must not suppress the SFFI alias.
+# ---------------------------------------------------------------------------
+write_sffi_fixture "$WORK/sffi.spl" "$WORK/out.bin"
+SFFI_OUT=$("$SEED" run "$WORK/sffi.spl" 2>/dev/null | grep '^wrote=' || true)
+EV_CHECKED=$((EV_CHECKED + 1))
+if [ "$SFFI_OUT" != "wrote=true" ]; then
+    fail_note "sffi-write-returned(got '$SFFI_OUT')"
+fi
+EV_CHECKED=$((EV_CHECKED + 1))
+if [ ! -f "$WORK/out.bin" ]; then
+    fail_note "sffi-no-output-file"
+else
+    GOT_HEX=$(od -A n -t x1 "$WORK/out.bin" | tr -d ' \n')
+    if [ "$GOT_HEX" != "eb589041" ]; then
+        fail_note "sffi-bytes(got '$GOT_HEX' want 'eb589041')"
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# Verdict. A run that executed 0 checks is ERROR, never PASS.
+# ---------------------------------------------------------------------------
+[ "$EV_CHECKED" -gt 0 ] || nothing "0 checks executed"
+if [ "$EV_FAILED" -gt 0 ]; then
+    echo "FAIL — $EV_CHECKED check(s) executed, $EV_FAILED failed:$FAILNAMES"
+    exit 1
+fi
+echo "PASS — $EV_CHECKED check(s) executed, 0 failed (seed $SEED)"

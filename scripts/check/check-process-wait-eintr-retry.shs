@@ -32,8 +32,13 @@ selftest() {
     # collapsed onto -1) MUST make the executable self-check fail. If it does
     # not, the self-check is not discriminating and this gate is worthless.
     mkdir -p "$TMP/st"
-    sed -e 's/if (errno == EINTR) continue;.*$/;/' "$SRC" > "$TMP/st/broken.c"
-    sed -i 's/if (WIFSIGNALED(status)) return (int64_t)(128 + WTERMSIG(status));//' "$TMP/st/broken.c"
+    # Patterns target rt_process_wait()'s two retry sites only: the old
+    # 's/if (errno == EINTR) continue;.*$/;/' also hit unrelated one-line
+    # blocks elsewhere in runtime_process.c and made the fixture uncompilable.
+    sed -e 's/} while (waited < 0 \&\& errno == EINTR);/} while (0);/' \
+        -e 's/if (r < 0 \&\& errno == EINTR) continue;//' \
+        -e 's/if (WIFSIGNALED(status)) return (int64_t)(-(128 + WTERMSIG(status)));//' \
+        "$SRC" > "$TMP/st/broken.c"
     "$CC_BIN" -O1 -I "$ROOT_DIR/src/runtime" -o "$TMP/st/bin" "$SELF" "$TMP/st/broken.c" >"$TMP/st/cc.log" 2>&1
     if [ $? -ne 0 ]; then
         echo "selftest: ERROR — could not build the broken fixture; see $TMP/st/cc.log"

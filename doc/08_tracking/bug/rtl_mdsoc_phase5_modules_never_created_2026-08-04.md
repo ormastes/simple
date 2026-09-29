@@ -1,4 +1,8 @@
 # RTL MDSOC reorg Phase 5 modules were never created — 68 system examples red
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN
 **Found:** 2026-08-04
@@ -109,3 +113,14 @@ sufficient — no new evidence of any Phase 5 SA-3/SA-4 work having landed since
 2026-08-04. Characterization is confirmed accurate and unchanged: this is
 genuine unbuilt design-owned feature work, correctly ARCHITECTURAL/OPEN, not a
 defect. No code change made. Status stays OPEN.
+
+## Triage 2026-09-13
+Reconfirmed: Phase 5 RTL MDSOC reorg modules still never created per this
+record, 68 system examples affected. Large module-creation feature work,
+not a quick fix. Left OPEN, no code change attempted.
+## Triage 2026-09-13 (BUGFIX-12 shard 22)
+
+Still genuine unbuilt design-owned feature work (Phase 5 RTL MDSOC reorg), not
+a defect — a whole reorg phase, not a shard-scale fix. No change made.
+Leaving OPEN.
+

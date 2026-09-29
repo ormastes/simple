@@ -33,21 +33,6 @@ placeholder stub today)**.
 - Linux boot guide (authoritative state + reproduction):
   `doc/07_guide/os/rv64_soc_linux_boot.md`.
 
-## Available configurations
-
-| Configuration | Memory path | Evidence | Command |
-|---|---|---|---|
-| RV32 flat | local behavioral RAM | QEMU/GHDL core | `scripts/fpga/ghdl_rv32_nvme_fw.shs` |
-| RV32 BRAM SoC | core `mem_*` to synthesized BRAM banks | exact GHDL; current source-matched KV260 NVMe bundle pending | `scripts/fpga/ghdl_rv32_nvme_bram_soc.shs` |
-| RV32 full AXI4 | `rv32_axi4_mem_adapter` to wait-state RAM/PS DDR | GHDL AXI4 + AXI4-Lite observation | `scripts/fpga/ghdl_rv32_nvme_axi_ram.shs` for NVMe; `scripts/fpga/ghdl_rv32_k26_ddr_boot.shs` for SimpleOS |
-| RV64 full AXI4 | `rv64_axi4_mem_adapter` to wait-state RAM/PS DDR | GHDL; silicon in progress | `scripts/fpga/ghdl_rv64_k26_ddr_boot.shs` |
-
-The RV32 NVMe `.nandram` section is ordinary linker-resident RAM. In the AXI
-configuration its loads/stores traverse full AXI4; in the BRAM configuration
-they do not. The AXI firmware-in-loop gate accepts host-issued Create CQ/SQ,
-Identify, Write, Flush, and Read through MMIO plus queue/PRP DMA and IRQ. The
-BRAM lane remains a CPU-local recovery/boot check, not host NVMe transport.
-
 ## Code Map
 
 - **Shared XLEN layer** `src/lib/hardware/riscv_common/` — `xlen.spl`
@@ -81,32 +66,10 @@ BRAM lane remains a CPU-local recovery/boot check, not host NVMe transport.
   `openocd_kv260_bscan.cfg`, `check_kv260_jtag_debug.shs` verify/soak). THE
   debugging guide (both paths + troubleshooting):
   `doc/07_guide/hardware/fpga/simple_riscv_jtag_debugging.md`.
-- **Synthesizable RTL** `examples/09_embedded/fpga_riscv/rtl/` — the real,
-  SILICON-PROVEN cores (2026-07-26): `rv32_exec_core_flat.vhd` (GHDL lane),
-  `rv32_exec_core_axi.vhd` + `rv32_axi4_mem_adapter.vhd` +
-  `soc_top_rv32_k26_ddr.vhd` (KV260 PS-DDR4, **SimpleOS TEST PASSED on
-  silicon**), `soc_top_rv32_tiny_bram.vhd`/`rv32_bram_soc.vhd` (BRAM-only,
-  **TEST PASSED on silicon**, no FSBL), `rv64_exec_core_{flat,axi}.vhd` +
-  `soc_top_rv64_k26_ddr.vhd` (GHDL green; silicon bring-up in progress). The
-  legacy `rv32_exec_core.vhd` is the 64 KB reference/oracle. The `fpga_linux`
-  bundle generator (`src/lib/hardware/fpga_linux/riscv_fpga_linux.spl`) still
+- **Synthesizable RTL** `examples/09_embedded/fpga_riscv/rtl/rv32_exec_core.vhd`
+  is the ONLY real synthesizable CPU (rv32, no MMU, reference/oracle). The
+  `fpga_linux` bundle generator (`src/lib/hardware/fpga_linux/riscv_fpga_linux.spl`)
   emits `GENERATED_RTL_NOT_IMPLEMENTED` placeholders — NOT a working core.
-  **Launch guide (SimpleOS + NVMe fw on the FPGA cores):**
-  `doc/07_guide/hardware/fpga/simpleos_on_simple_riscv_fpga.md` §5–6 — GHDL
-  rehearsal (ALWAYS also `GARBAGE_FILL=1`; sim RAM zeroes for free, real DDR is
-  garbage — un-zeroed `.bss` was THE silicon killer), then bitstream
-  (`build_k26_rv32_ddr_bitstream.shs` / `build_rv32_tiny_bram_bitstream.shs`),
-  then `bash bringup_kv260_rv32_ddr.shs` (full psu_init BEFORE `fpga -file`,
-  `.bss` zeroing with PRE/POST readback, JTAG via hw_server only).
-  **Since 2026-07-26 the kernels self-zero `.bss` in `_start` (crt0)** —
-  rv32 `sw`/rv64 `sd` loop over `[_sbss,_ebss)` in
-  `examples/09_embedded/simple_os/arch/riscv{32,64}/boot/baremetal_stubs.c`
-  (`_ebss` is `ALIGN(8)` in `common/linker_riscv_common.ld`); loader-side
-  zeroing in the bringup scripts is redundant-but-kept, now ELF-derived
-  (never hardcode `.bss` offsets — a relink shifts them and a stale span
-  corrupts loaded `.data`), skippable via `SKIP_BSS_ZERO=1` for crt0 proof
-  runs. GHDL proofs: rv32/tiny `GARBAGE_FILL=1`; rv64 `GARBAGE_FILL=1
-  SKIP_BSS_ZERO=1` (its tb emulates board step 5b zeroing).
 
 ## Sanity gates (probe = capability)
 
@@ -114,7 +77,6 @@ BRAM lane remains a CPU-local recovery/boot check, not host NVMe transport.
   61-bit defect, `seed_jit_boxed_int_61bit_drops_high_bits_2026-07-22.md`).
 - `addr4g_probe` → `ADDR4G_PROBE: ALL PASS` (4 GiB rv32 + rv64 ≥2^31).
 - `check_linux_loading_rv32.shs` → `CHECK_LINUX_LOADING_RV32: PASS`.
-- `check-kv260-simpleos-boot-release.shs` — REAL-BOARD release gate: fresh KV260 bring-up via `scripts/fpga/systest_kv260_bringup.shs` (outside the test runner — board runs outlive child timeouts), then the 3-tier spec `test/03_system/app/hardware/feature/kv260_simpleos_boot_silicon_spec.spl`; wired into `check-simpleos-mission-critical-release.shs` (board absent = visible SKIP).
 - `check-riscv-hardware-gates.shs` — bundle (JTAG tbs + soc/core/mux/fpu probes;
   FP probes run interpreter via the `INTERP_PROBES` list).
 
@@ -132,13 +94,11 @@ BRAM lane remains a CPU-local recovery/boot check, not host NVMe transport.
 - **rv64 product:** `core64_imac_product_entry` owns Sv39/PMP and emits the CPU
   bus; `_SocVhdlGen` owns the same PS-DDR board path. The old handwritten RV64
   synthesis entry is no longer the product path.
-- **Either on FPGA:** the handwritten-RTL lane IS board-qualified for rv32 as
-  of 2026-07-28 (SimpleOS `TEST PASSED` on KV260 silicon, DDR + BRAM-only; NVMe
-  recovery/prevention PASS in AXI/BRAM GHDL; current source-matched KV260 USER4
-  evidence is pending) — but the *Simple-emitted*
-  (`_SocVhdlGen`) core path remains pending Stage 4 for both XLENs. The PL UART
-  is still not host-routed; markers are read via JTAG obs regs / BSCANE2 tunnel,
-  or wire a 3.3 V PMOD UART.
+- **Either on FPGA:** `build_k26_rv32.shs` and `build_k26_rv64.shs` are thin
+  XLEN selectors for `build_k26_vexriscv.shs`. Neither architecture is
+  board-qualified until its Simple-emitted core passes GHDL, Vivado, PS-DDR
+  load, and DUT-origin bidirectional login/`ls` capture. The connected KV260
+  still needs an external 3.3 V PMOD UART adapter for the PL console.
 
 ## Landmines
 
@@ -178,14 +138,8 @@ BRAM lane remains a CPU-local recovery/boot check, not host NVMe transport.
 - `rv64gc_core_product*` renamed `rv64imac_core_product*` (was a false `gc`
   claim over an IMAC netlist). The `simple_rv{32,64}gc_core` family remains
   unrenamed (woven into formal gates; needs its own lane).
-- `REQ-RISCV-HARDEN-005` removes the unreachable RV32 scratch array and the
-  payload addresses `0x8002AB5C/6C/8C` from the structured generator and
-  pinned golden. Do not restore address-specific datapath exceptions. The
-  fail-closed system contract is
-  `test/03_system/app/hardware/feature/simple_riscv_hardening_ac5_spec.spl`;
-  its manual and exact resume commands live under the matching
-  `doc/06_spec/03_system/...` mirror and
-  `doc/03_plan/sys_test/simple_riscv_hardening_ac5.md`.
+- Payload addresses `0x8002AB5C/6C/8C` in `rv32_exec_core.vhd` are UNREACHABLE
+  dead code (`SCRATCH_BASE_WORD=16384` vs `word_index()` max 16383).
 - Full ledger: `doc/03_plan/agent_tasks/simple_riscv_hardening_2026-07-27.md`.
 
 ## 2026-08-06 riscv64 kernel-closure campaign

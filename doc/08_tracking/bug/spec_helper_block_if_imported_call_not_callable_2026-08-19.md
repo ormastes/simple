@@ -1,4 +1,8 @@
 # Spec-file helper with imported call inside block-if expression fails "semantic: value is not callable" under `simple test`
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Date: 2026-08-19
 - Found while: adding text_layout unit specs (font_rasterizer_bitmap_spec)
@@ -70,3 +74,4 @@ Unit specs that factor per-pixel expectations into helpers hit this and
 misreport as test failures. Workaround: inline the helper (done in
 test/01_unit/lib/nogc_sync_mut/text_layout/font_rasterizer_bitmap_spec.spl,
 which is now green 5/5 with identical logic inlined).
+

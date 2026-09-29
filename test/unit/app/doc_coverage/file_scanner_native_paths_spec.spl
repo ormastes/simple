@@ -1,0 +1,49 @@
+# Reproducing spec for `doc-coverage` reporting "No source files found" on a
+# repo that `simple stats` counts 16,220 sources in (exit 1, Windows).
+#
+# Two independent causes, both pinned here:
+#
+#  1. `dir_walk` returns NATIVE separators, so a discovered file reads
+#     `C:\...\src\lib\foo.spl`. Every classifier in file_scanner.spl tested for
+#     forward-slash segments (`/src/lib/`, `/test/`, ...), so `is_public_api_file`
+#     rejected every file and every exclusion failed open.
+#
+#  2. `discover_source_files` guarded each scan dir with `is_dir`. Measured
+#     inside `doc_coverage_command.spl` (which drops to the interpreter),
+#     `is_dir` answered false for EVERY path including the repo root, while
+#     `dir_walk` on the same string walked 8,116 entries — so every scan
+#     directory was skipped. The guard is gone; `dir_walk` already returns [] for
+#     a directory that does not exist.
+
+use app.doc_coverage.scanner.file_scanner.{
+    should_include_file, is_public_api_file, discover_source_files}
+use app.io.mod (cwd)
+
+describe "file_scanner classifies native-separator paths":
+    it "recognises a backslash stdlib path as public API":
+        expect(is_public_api_file("C:\\repo\\src\\lib\\bitwise_utils.spl")).to_equal(true)
+
+    it "recognises a forward-slash stdlib path as public API":
+        expect(is_public_api_file("/repo/src/lib/bitwise_utils.spl")).to_equal(true)
+
+    it "still rejects a compiler path written with backslashes":
+        expect(is_public_api_file("C:\\repo\\src\\compiler\\mod.spl")).to_equal(false)
+
+    it "excludes a backslash test path, not just a slash one":
+        expect(should_include_file("C:\\repo\\src\\lib\\test\\mod.spl", [])).to_equal(false)
+        expect(should_include_file("/repo/src/lib/test/mod.spl", [])).to_equal(false)
+
+    it "excludes a backslash build-artifact path":
+        expect(should_include_file("C:\\repo\\src\\lib\\target\\mod.spl", [])).to_equal(false)
+
+    it "still includes an ordinary stdlib source":
+        expect(should_include_file("C:\\repo\\src\\lib\\bitwise_utils.spl", [])).to_equal(true)
+
+describe "discovery does not depend on an is_dir pre-check":
+    it "finds source files under the repo root":
+        val found = discover_source_files(cwd(), [])
+        expect(found.len() > 0).to_equal(true)
+
+    it "returns only .spl files":
+        val found = discover_source_files(cwd(), [])
+        expect(found[0].ends_with(".spl")).to_equal(true)

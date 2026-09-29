@@ -1,4 +1,8 @@
 # iso/borrow-check unreachable from the interpret pipeline (`bin/simple test`)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Status: OPEN (P2)
 - Status re-verified 2026-08-17 by source inspection (triage shard 02).
@@ -147,3 +151,4 @@ read of the interpret path plus an exhaustive call-site census of
 `borrow_check()`. The queued run of the sibling e2e spec never got a
 `test-slot.shs` slot (host under a live stage-3 bootstrap, 164 concurrent
 `simple` processes).
+

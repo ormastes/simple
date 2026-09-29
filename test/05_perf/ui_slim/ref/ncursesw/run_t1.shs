@@ -1,0 +1,89 @@
+#!/bin/sh
+# Run the ncursesw T1 reference fixture under a real pty and verify the T1 contract.
+#   sh test/05_perf/ui_slim/ref/ncursesw/run_t1.shs [--selftest] [--timing N]
+# Verdict is the last line of stdout; exit 0 PASS / 1 FAIL / 2 ERROR.
+set -u
+
+here=$(cd "$(dirname "$0")" && pwd)
+repo=$(cd "$here/../../../../.." && pwd)
+. "$here/../run_t1_lib.shs"
+
+FIXTURE="$repo/build/ui_slim/ref/t1_ncursesw"
+NAME="t1_ncursesw"
+
+selftest_only=0
+timing=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --selftest) selftest_only=1 ;;
+    --timing)   shift; timing=${1:-10} ;;
+    *) echo "ERROR — nothing was checked (unknown argument: $1)"; exit 2 ;;
+  esac
+  shift
+done
+
+command -v expect >/dev/null 2>&1 || {
+  echo "ERROR — nothing was checked (expect is not installed; a real pty run is required)"; exit 2; }
+
+# Sabotage fixtures run first and are fatal, exactly like the repo's other guards.
+if ! t1_selftest; then
+  echo "ERROR — nothing was checked (harness selftest failed)"; exit 2
+fi
+if [ "$selftest_only" = "1" ]; then
+  echo "PASS — 4 selftest fixture(s) checked, harness discriminates"; exit 0
+fi
+
+[ -x "$FIXTURE" ] || {
+  echo "ERROR — nothing was checked ($FIXTURE not built; run ./build.shs first)"; exit 2; }
+
+# A redirected stdout must never be reported as a T1 run.
+if ! t1_refuses_non_tty "$FIXTURE"; then
+  echo "FAIL — $NAME accepted a non-tty stdout; a redirected run is not T1"; exit 1
+fi
+
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+
+rc=$(t1_pty_run "$FIXTURE" "$work/t1.log" "$work/t1.time" "$work/t1.mark")
+reasons=$(t1_assert "$work/t1.log" "$rc") || {
+  cp "$work/t1.log" "$repo/build/ui_slim/ref/$NAME.t1.log" 2>/dev/null || true
+  echo "FAIL — 1 run, $NAME did not satisfy the T1 contract:$reasons"; exit 1; }
+
+cp "$work/t1.log" "$repo/build/ui_slim/ref/$NAME.t1.log" 2>/dev/null || true
+
+if [ "$timing" -gt 0 ]; then
+  out="$repo/build/ui_slim/ref/$NAME.timing.sdn"
+  : > "$work/greet"; : > "$work/rss"
+  i=0
+  while [ "$i" -lt "$timing" ]; do
+    i=$((i + 1))
+    r=$(t1_pty_run "$FIXTURE" "$work/r.log" "$work/r.time" "$work/r.mark")
+    [ "$r" = "0" ] || { echo "FAIL — timing run $i exited $r"; exit 1; }
+    t1_assert "$work/r.log" "$r" >/dev/null || { echo "FAIL — timing run $i broke the T1 contract"; exit 1; }
+    awk '/greeting_us/ {print $2}' "$work/r.mark" >> "$work/greet"
+    awk '/maximum resident set size/ {print $1}' "$work/r.time" >> "$work/rss"
+  done
+  med() { sort -n "$1" | awk '{a[NR]=$1} END {print (NR%2)?a[(NR+1)/2]:int((a[NR/2]+a[NR/2+1])/2)}'; }
+  mx()  { sort -n "$1" | tail -1; }
+  {
+    echo "# Diagnostic timing for the T1 reference fixture."
+    echo "# DIAGNOSTIC ONLY. This is NOT a comparison with Simple: the Simple side"
+    echo "# is measured by scripts/check/check-ui-slim-startup.shs on the same T1"
+    echo "# contract, under its own sampling protocol (design 8.5)."
+    echo "fixture: $NAME"
+    echo "workload: T1"
+    echo "label: diagnostic"
+    echo "runs: $timing"
+    echo "metric_note: \"greeting_us is spawn -> greeting bytes on the pty; total wall time is meaningless here because the fixture blocks on input\""
+    echo "greeting_us_median: $(med "$work/greet")"
+    echo "greeting_us_max: $(mx "$work/greet")"
+    echo "max_rss_bytes_median: $(med "$work/rss")"
+    echo "max_rss_bytes_max: $(mx "$work/rss")"
+    echo "host_load: \"$(uptime | sed 's/.*averages*://')\""
+    echo "generated_at: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  } > "$out"
+  echo "timing: $out"
+fi
+
+echo "PASS — 1 run, greeting seen, terminal restored"
+exit 0

@@ -1,0 +1,277 @@
+#!/bin/sh
+# check-rv64-match-result-type-guarded.shs
+#
+# Pins the fix for
+# doc/08_tracking/bug/riscv64_in_guest_mir_lower_type_zero_kind_on_main_2026-09-01.md
+# whose measured root cause is the if-val optional-extraction miscompile filed as
+# doc/08_tracking/bug/riscv64_freestanding_if_val_optional_binds_absent_2026-09-01.md
+#
+# THE DEFECT
+# ----------
+# `MirLowering.match_result_mir_type(expected: HirType?)` extracts its optional
+# with `if val expected_found = expected:` and then dereferences
+# `expected_found.kind`. On riscv64 freestanding that extraction ENTERS its body
+# for an ABSENT optional, binding a zeroed object. Measured in-guest under real
+# OpenSBI v1.4 fw_payload (-bios only, never -kernel, never isa-debug-exit),
+# nonce c643cc6a6e5678b4:
+#
+#     PROBE calls=5 disc=0 strHit=Y intHit=Y kindnil=N
+#           site=switch_operators_calls:839
+#
+# `.kind` then reads raw 0, no `lower_type` arm matches, and the WHOLE in-guest
+# build aborts with E-MIR-TYPE-ZeroKind -- the build-and-run row never reaches
+# its run half. `strHit=Y`/`intHit=Y` in the same boot prove enum construction
+# and matching are healthy on that target, so the fallthrough is a property of
+# the object, not of the match.
+#
+# The repair is a formation guard before the dereference, routing a miscompiled
+# extraction to the SAME `MirType.i64()` the function already returns when
+# `expected` is absent. A genuine HirType always has `kind` written, so the
+# guard cannot fire on a real type and hosted behaviour is unchanged.
+#
+# TWO MODES, AND WHY BOTH EXIST
+# -----------------------------
+# 1. SOURCE MODE (default). Reads the decision site and fails if the
+#    dereference is reachable again without a formation guard. This is cheap
+#    and exact, and it is honestly a SOURCE-SHAPE RATCHET, not a behavioural
+#    test: it pins the one-line regression, it does not prove the target works.
+#    It is RED at this fix's parent and GREEN at the fix.
+#
+# 2. TRANSCRIPT MODE (`--transcript FILE`). Classifies a REAL in-guest serial
+#    log for the ZeroKind abort. This is the behavioural half. THE BOOT IS THE
+#    ACCEPTANCE TEST: the authority for "row 2 works" is
+#    scripts/check/check-simpleos-riscv64-interpreter-in-guest-opensbi.shs,
+#    which builds the kernels and boots them under real OpenSBI. This mode
+#    exists so that gate's transcript can be re-checked for THIS defect
+#    specifically without reboxing a 25-minute boot into every CI run.
+#
+# A source-shape PASS is never evidence that the target is healthy. It is
+# evidence that this particular regression has not been reintroduced.
+#
+# VERDICT CONVENTION (last line of stdout, as in the sibling guards):
+#   PASS — <n> ... checked, ...              exit 0   (n is always > 0)
+#   FAIL — ...                               exit 1
+#   ERROR — nothing was checked              exit 2
+# A run that examined zero sites or zero transcript lines is ERROR, never a
+# pass. `--selftest` runs before every scan and is fatal.
+
+set -e
+
+SELF_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+REPO_ROOT=$(CDPATH= cd -- "$SELF_DIR/../.." && pwd)
+
+TARGET_REL="src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl"
+FN="match_result_mir_type"
+
+usage() {
+    echo "usage: $0 [--selftest] [--transcript FILE] [--root DIR]"
+}
+
+# --- classifier: the single source of truth for both modes -----------------
+#
+# extract_fn <file> <fn-name>
+# Prints the body of `me <fn>(` up to the next `    me ` at the same depth.
+extract_fn() {
+    awk -v fn="$2" '
+        $0 ~ ("^    me " fn "\\(") { inside=1; print; next }
+        inside && /^    me / { inside=0 }
+        inside { print }
+    ' "$1"
+}
+
+# classify_source <file>
+# Echoes "GUARDED" / "UNGUARDED" / "ABSENT".
+# UNGUARDED means: the function dereferences `.kind` off the if-val-bound name
+# without a preceding raw-zero formation guard on that same name.
+classify_source() {
+    _f=$1
+    [ -f "$_f" ] || { echo "ABSENT"; return; }
+    _body=$(extract_fn "$_f" "$FN" || true)
+    [ -n "$_body" ] || { echo "ABSENT"; return; }
+    # The bound name is whatever `if val <name> = ` introduces.
+    _bound=$(printf '%s\n' "$_body" \
+        | sed -n 's/^[[:space:]]*if val \([A-Za-z_][A-Za-z0-9_]*\) = .*/\1/p' \
+        | head -1)
+    if [ -z "$_bound" ]; then
+        # No if-val extraction at all -- the defect shape is gone entirely.
+        echo "GUARDED"
+        return
+    fi
+    # Is `<bound>.kind` dereferenced anywhere?
+    if ! printf '%s\n' "$_body" | grep -q "$_bound\.kind"; then
+        echo "GUARDED"
+        return
+    fi
+    # Is there a raw-zero formation guard on the bound name BEFORE the first
+    # dereference? `== 0` on the kind slot, or `== nil` on the object.
+    _guard=$(printf '%s\n' "$_body" \
+        | grep -cE "if $_bound(\.kind)? == (0|nil):" || true)
+    if [ "${_guard:-0}" -ge 1 ]; then
+        echo "GUARDED"
+    else
+        echo "UNGUARDED"
+    fi
+}
+
+# classify_transcript <file>
+# Echoes "CLEAN" / "ABORTED" / "EMPTY".
+classify_transcript() {
+    _t=$1
+    [ -s "$_t" ] || { echo "EMPTY"; return; }
+    if grep -aq "E-MIR-TYPE-ZeroKind" "$_t"; then
+        echo "ABORTED"
+    else
+        echo "CLEAN"
+    fi
+}
+
+# --- selftest: fatal, runs before every scan -------------------------------
+selftest() {
+    _tmp=$(mktemp -d)
+    _fail=0
+    _n=0
+
+    _mk() { # _mk <path> <body-of-fn>
+        mkdir -p "$(dirname "$1")"
+        {
+            echo "    me something_else(x: i64) -> i64:"
+            echo "        x"
+            echo ""
+            echo "    me $FN(expected: HirType?) -> MirType:"
+            printf '%s\n' "$2"
+            echo ""
+            echo "    me later_method(y: i64) -> i64:"
+            echo "        y"
+        } > "$1"
+    }
+
+    _expect() { # _expect <label> <actual> <wanted>
+        _n=$((_n + 1))
+        if [ "$2" != "$3" ]; then
+            echo "selftest FAIL: $1 -> got '$2', want '$3'" >&2
+            _fail=1
+        fi
+    }
+
+    # 1. must-FAIL fixture: the incident's exact shape, unguarded.
+    _mk "$_tmp/unguarded.spl" '        if val expected_found = expected:
+            match expected_found.kind:
+                case HirTypeKind.Error:
+                    return MirType.i64()
+                case _:
+                    return self.lower_type(expected_found)
+        return MirType.i64()'
+    _expect "unguarded must be UNGUARDED" "$(classify_source "$_tmp/unguarded.spl")" "UNGUARDED"
+
+    # 2. must-PASS: the fix, kind-zero formation guard before the deref.
+    _mk "$_tmp/guarded.spl" '        if val expected_found = expected:
+            if expected_found == nil:
+                return MirType.i64()
+            if expected_found.kind == 0:
+                return MirType.i64()
+            match expected_found.kind:
+                case _:
+                    return self.lower_type(expected_found)
+        return MirType.i64()'
+    _expect "guarded must be GUARDED" "$(classify_source "$_tmp/guarded.spl")" "GUARDED"
+
+    # 3. must-PASS: no if-val extraction at all (defect shape removed).
+    _mk "$_tmp/noifval.spl" '        return MirType.i64()'
+    _expect "no if-val must be GUARDED" "$(classify_source "$_tmp/noifval.spl")" "GUARDED"
+
+    # 4. must-PASS: extraction present but `.kind` never dereferenced.
+    _mk "$_tmp/noderef.spl" '        if val expected_found = expected:
+            return self.lower_type(expected_found)
+        return MirType.i64()'
+    _expect "no deref must be GUARDED" "$(classify_source "$_tmp/noderef.spl")" "GUARDED"
+
+    # 5. a missing function must be ABSENT so the caller is forced to ERROR.
+    echo "    me unrelated(x: i64) -> i64:" > "$_tmp/absent.spl"
+    echo "        x" >> "$_tmp/absent.spl"
+    _expect "missing fn must be ABSENT" "$(classify_source "$_tmp/absent.spl")" "ABSENT"
+
+    # 6. must-FAIL fixture, transcript mode: a real abort line.
+    printf '[buildrun] phase=hir-ok\n[buildrun] FAIL mir lowering error: E-MIR-TYPE-ZeroKind: lower_type received ...\n' > "$_tmp/aborted.log"
+    _expect "abort transcript must be ABORTED" "$(classify_transcript "$_tmp/aborted.log")" "ABORTED"
+
+    # 7. must-PASS, transcript mode: the row got past MIR lowering.
+    printf '[buildrun] phase=hir-ok\n[buildrun] phase=mir-ok functions lowered\n[buildrun] program returned Ok\n' > "$_tmp/clean.log"
+    _expect "clean transcript must be CLEAN" "$(classify_transcript "$_tmp/clean.log")" "CLEAN"
+
+    # 8. an empty transcript must be EMPTY so the caller is forced to ERROR --
+    #    a boot that produced nothing is absence of evidence, never a pass.
+    : > "$_tmp/empty.log"
+    _expect "empty transcript must be EMPTY" "$(classify_transcript "$_tmp/empty.log")" "EMPTY"
+
+    rm -rf "$_tmp"
+    if [ "$_fail" -ne 0 ]; then
+        echo "check-rv64-match-result-type-guarded: ERROR — nothing was checked: selftest failed ($_n fixtures)"
+        exit 2
+    fi
+    echo "check-rv64-match-result-type-guarded: selftest OK ($_n fixtures)"
+}
+
+TRANSCRIPT=""
+ROOT="$REPO_ROOT"
+ONLY_SELFTEST=0
+while [ $# -gt 0 ]; do
+    case $1 in
+        --selftest) ONLY_SELFTEST=1 ;;
+        --transcript) TRANSCRIPT=$2; shift ;;
+        --root) ROOT=$2; shift ;;
+        -h|--help) usage; exit 0 ;;
+        *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
+    esac
+    shift
+done
+
+selftest
+[ "$ONLY_SELFTEST" -eq 1 ] && exit 0
+
+# --- transcript mode -------------------------------------------------------
+if [ -n "$TRANSCRIPT" ]; then
+    VERDICT=$(classify_transcript "$TRANSCRIPT")
+    case $VERDICT in
+        EMPTY)
+            echo "check-rv64-match-result-type-guarded: ERROR — nothing was checked: transcript $TRANSCRIPT is missing or empty"
+            exit 2 ;;
+        ABORTED)
+            grep -a "E-MIR-TYPE-ZeroKind" "$TRANSCRIPT" | head -3
+            echo ""
+            echo "MIR lowering aborted in-guest with E-MIR-TYPE-ZeroKind. The"
+            echo "build-and-run row cannot reach its run half. See the bug"
+            echo "records named in this file's header."
+            LINES=$(wc -l < "$TRANSCRIPT")
+            echo "check-rv64-match-result-type-guarded: FAIL — $LINES transcript line(s) checked, E-MIR-TYPE-ZeroKind present"
+            exit 1 ;;
+        *)
+            LINES=$(wc -l < "$TRANSCRIPT")
+            echo "check-rv64-match-result-type-guarded: PASS — $LINES transcript line(s) checked, no E-MIR-TYPE-ZeroKind abort"
+            exit 0 ;;
+    esac
+fi
+
+# --- source mode -----------------------------------------------------------
+FILE="$ROOT/$TARGET_REL"
+VERDICT=$(classify_source "$FILE")
+case $VERDICT in
+    ABSENT)
+        echo "check-rv64-match-result-type-guarded: ERROR — nothing was checked: no $FN in $TARGET_REL"
+        exit 2 ;;
+    UNGUARDED)
+        echo "offender=$TARGET_REL:$FN"
+        echo ""
+        echo "$FN dereferences the if-val-bound HirType's .kind with no"
+        echo "formation guard. On riscv64 freestanding that extraction enters"
+        echo "its body for an ABSENT optional and binds a zeroed object, so"
+        echo ".kind reads raw 0, no lower_type arm matches, and the entire"
+        echo "in-guest MIR lowering aborts with E-MIR-TYPE-ZeroKind. Guard the"
+        echo "bound name (== nil / .kind == 0) and return the same"
+        echo "MirType.i64() this function already returns for an absent"
+        echo "expected type."
+        echo "check-rv64-match-result-type-guarded: FAIL — 1 site checked, $FN dereferences an unguarded if-val extraction"
+        exit 1 ;;
+    *)
+        echo "check-rv64-match-result-type-guarded: PASS — 1 site checked, $FN guards its if-val extraction before dereferencing"
+        exit 0 ;;
+esac

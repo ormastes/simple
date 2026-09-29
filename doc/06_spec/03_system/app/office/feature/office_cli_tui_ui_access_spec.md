@@ -2,6 +2,29 @@
 
 > As an Office operator, I run one unique evidence campaign against `OFFICE_BINARY`, the standalone artifact produced by a Phase-3 compiler, and inspect the same Calc session through its terminal and semantic UI surfaces. `OFFICE_GATE_BINARY` executes orchestration and `SIMPLE_UI_CLIENT` drives the versioned access protocol; neither tool is the Office product or an application launch dependency. The scenarios never read a shared or prior evidence directory: one inline setup creates the run id and invokes the gate, then every scenario validates only that run's command, PTY, and protocol receipts.
 
+<!-- sdn-diagram:id=office_cli_tui_ui_access_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=office_cli_tui_ui_access_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+office_cli_tui_ui_access_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=office_cli_tui_ui_access_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 5 | 5 | 0 | 0 |
@@ -24,7 +47,7 @@ As an Office operator, I run one unique evidence campaign against `OFFICE_BINARY
 | Design | doc/05_design/office_cli_tui_ui_access.md |
 | Research | doc/01_research/local/office_cli_tui_ui_access.md |
 | Source | `test/03_system/app/office/feature/office_cli_tui_ui_access_spec.spl` |
-| Updated | 2026-08-11 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -188,10 +211,16 @@ that does not answer the public protocol, or stale evidence is a failure.
 
 #### should launch Calc and complete the live semantic formula workflow
 
+_Requirements: `REQ-OFFICE-CLI-UI-001`, `REQ-OFFICE-CLI-UI-002`, `REQ-OFFICE-CLI-UI-003`, `REQ-OFFICE-CLI-UI-004`, `REQ-OFFICE-CLI-UI-005`, `REQ-OFFICE-CLI-UI-006`, `REQ-OFFICE-CLI-UI-007`, `REQ-OFFICE-CLI-UI-008`, `REQ-OFFICE-CLI-UI-009`, `REQ-OFFICE-CLI-UI-010`_
+
+- should create one fresh deployed Office evidence run
+   - Artifact capture: after_step
 - Create one unique deployed Office evidence run
    - Artifact capture: after_step
    - Evidence: artifact verified by 1 expected check
    - Expected: _gate_state_count() equals `1`
+- should launch Calc and complete the live semantic formula workflow
+   - Artifact capture: after_step
 - Launch Calc through the standalone Office artifact
    - Artifact capture: after_step
 - List active Office windows
@@ -221,15 +250,19 @@ that does not answer the public protocol, or stale evidence is a failure.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 57 lines folded for reproduction.
+Runnable source: 61 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should create one fresh deployed Office evidence run")
 step("Create one unique deployed Office evidence run")
 val root = setup_office_cli_tui_ui_access()
 expect(file_exists(root + "/suite.txt")).to_be(true)
 expect(_gate_state_count()).to_equal(1)
 
+# @req REQ-SSPEC-SYSTEM
+step("should launch Calc and complete the live semantic formula workflow")
 step("Launch Calc through the standalone Office artifact")
 val root = check_office_gate()
 step("List active Office windows")
@@ -291,10 +324,16 @@ expect(c1).to_contain("7")
 
 #### should fail closed for invalid commands, stale targets, and unsupported actions
 
+_Requirements: `REQ-SSPEC-SYSTEM`, `NFR-OFFICE-CLI-UI-001`, `NFR-OFFICE-CLI-UI-007`, `NFR-OFFICE-CLI-UI-008`_
+
+- should create one fresh deployed Office evidence run
+   - Protocol capture: after_step
 - Create one unique deployed Office evidence run
    - Protocol capture: after_step
    - Evidence: protocol response verified by 1 expected check
    - Expected: _gate_state_count() equals `1`
+- should fail closed for invalid commands, stale targets, and unsupported actions
+   - Protocol capture: after_step
 - Inspect deployed command and runtime provenance
    - Protocol capture: after_step
 - Review stale, missing, and unsupported action rejection
@@ -312,15 +351,19 @@ expect(c1).to_contain("7")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 46 lines folded for reproduction.
+Runnable source: 50 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should create one fresh deployed Office evidence run")
 step("Create one unique deployed Office evidence run")
 val root = setup_office_cli_tui_ui_access()
 expect(file_exists(root + "/suite.txt")).to_be(true)
 expect(_gate_state_count()).to_equal(1)
 
+# @req REQ-SSPEC-SYSTEM
+step("should fail closed for invalid commands, stale targets, and unsupported actions")
 step("Inspect deployed command and runtime provenance")
 val root = check_office_gate()
 val provenance = file_read(root + "/exec/runtime-provenance.txt")
@@ -374,10 +417,16 @@ expect(_gate_state_count()).to_equal(1)
 
 #### should retain bounded N1 performance and deterministic evidence
 
+_Requirements: `NFR-OFFICE-CLI-UI-002`, `NFR-OFFICE-CLI-UI-003`, `NFR-OFFICE-CLI-UI-004`, `NFR-OFFICE-CLI-UI-005`, `NFR-OFFICE-CLI-UI-006`, `NFR-OFFICE-CLI-UI-009`, `NFR-OFFICE-CLI-UI-010`_
+
+- should create one fresh deployed Office evidence run
+   - Artifact capture: after_step
 - Create one unique deployed Office evidence run
    - Artifact capture: after_step
    - Evidence: artifact verified by 1 expected check
    - Expected: _gate_state_count() equals `1`
+- should retain bounded N1 performance and deterministic evidence
+   - Artifact capture: after_step
 - Retain measured warm public-CLI NFR evidence
    - Artifact capture: after_step
 - Verify bounded history and deterministic TUI evidence
@@ -390,15 +439,19 @@ expect(_gate_state_count()).to_equal(1)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 27 lines folded for reproduction.
+Runnable source: 31 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should create one fresh deployed Office evidence run")
 step("Create one unique deployed Office evidence run")
 val root = setup_office_cli_tui_ui_access()
 expect(file_exists(root + "/suite.txt")).to_be(true)
 expect(_gate_state_count()).to_equal(1)
 
+# @req REQ-SSPEC-SYSTEM
+step("should retain bounded N1 performance and deterministic evidence")
 step("Retain measured warm public-CLI NFR evidence")
 val root = check_office_gate()
 expect(file_exists(root + "/perf/warm-protocol.txt")).to_be(true)
@@ -433,10 +486,16 @@ expect(_gate_state_count()).to_equal(1)
 
 #### should launch the real Calc HTML grid on the shared UI access session
 
+_Requirements: `REQ-SSPEC-SYSTEM`, `NFR-OFFICE-CLI-UI-006`, `NFR-OFFICE-CLI-UI-008`_
+
+- should create one fresh deployed Office evidence run
+   - Protocol capture: after_step
 - Create one unique deployed Office evidence run
    - Protocol capture: after_step
    - Evidence: protocol response verified by 1 expected check
    - Expected: _gate_state_count() equals `1`
+- should launch the real Calc HTML grid on the shared UI access session
+   - Protocol capture: after_step
 - Launch GUI
    - Protocol capture: after_step
 - Open rendered Calc HTML
@@ -452,15 +511,19 @@ expect(_gate_state_count()).to_equal(1)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 35 lines folded for reproduction.
+Runnable source: 39 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should create one fresh deployed Office evidence run")
 step("Create one unique deployed Office evidence run")
 val root = setup_office_cli_tui_ui_access()
 expect(file_exists(root + "/suite.txt")).to_be(true)
 expect(_gate_state_count()).to_equal(1)
 
+# @req REQ-SSPEC-SYSTEM
+step("should launch the real Calc HTML grid on the shared UI access session")
 step("Launch GUI")
 val root = check_office_gate()
 step("Open rendered Calc HTML")
@@ -511,10 +574,10 @@ expect(_gate_state_count()).to_equal(1)
 
 ## Related Documentation
 
-- **Requirements:** `doc/02_requirements/feature/office_cli_tui_ui_access.md`
-- **Plan:** `doc/03_plan/sys_test/office_cli_tui_ui_access.md`
-- **Design:** `doc/05_design/office_cli_tui_ui_access.md`
-- **Research:** `doc/01_research/local/office_cli_tui_ui_access.md`
+- **Requirements:** [doc/02_requirements/feature/office_cli_tui_ui_access.md](doc/02_requirements/feature/office_cli_tui_ui_access.md)
+- **Plan:** [doc/03_plan/sys_test/office_cli_tui_ui_access.md](doc/03_plan/sys_test/office_cli_tui_ui_access.md)
+- **Design:** [doc/05_design/office_cli_tui_ui_access.md](doc/05_design/office_cli_tui_ui_access.md)
+- **Research:** [doc/01_research/local/office_cli_tui_ui_access.md](doc/01_research/local/office_cli_tui_ui_access.md)
 
 
 </details>

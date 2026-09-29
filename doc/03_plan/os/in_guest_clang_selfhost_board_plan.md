@@ -71,6 +71,7 @@ image fresh for the compile pass. Next: Phase 2 (board port).
   no fork. Pass frontend args directly (from `clang_static -### -c hello.c`).
 - **No in-guest linking in Phase 1.** `ld`/lld needs fork too. `.o` is the deliverable;
   link+run happens on host for verification, or is a later phase.
+  [^linker-2026-09-18]
 - **Decisive artifact = byte-valid `.o`, not "exit 0".** Verify: base64/disk `.o` →
   `llvm-readobj --file-headers --syms` = ET_REL/x86_64/`main` → host-link → run →
   `echo $?` == 7. Nothing less counts as done (session-long haiku blind spot).
@@ -205,3 +206,8 @@ target arches; only the in-guest *run* stays walled.
   toolchain here were built with `src/compiler_rust/target/bootstrap/simple`.
 - Follow-up bug docs: `aarch64_real_firmware_boot_gap_and_seed_defects_2026-07-14.md`
   (EFI-stub + 2 arm64 defects), `smf_writer_kernel_trailer_layout_skew.md`.
+
+[^linker-2026-09-18]: 2026-09-18: not a conflict — a linker implemented
+    inside `simple` itself needs no fork, so this Phase-1 constraint is
+    unaffected. See `doc/05_design/compiler/linker/mold_mdsocpp_linker_design.md`
+    §10 row 5.

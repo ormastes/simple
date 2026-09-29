@@ -47,7 +47,7 @@ This scenario is the evidence gate for the shared WM renderer unification slice.
 | Design | N/A |
 | Research | N/A |
 | Source | `test/03_system/gui/shared_wm_renderer_unification_evidence_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-12 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -98,15 +98,16 @@ directory per run, derived from process id and current microsecond timestamp.
 Run the wrapper directly:
 
 ```bash
+SIMPLE_BIN=<admitted-self-hosted> \
 BUILD_DIR=build/shared_wm_renderer_unification_evidence_current \
-REPORT_PATH=doc/09_report/shared_wm_renderer_unification_evidence_2026-06-02.md \
+REPORT_PATH=doc/09_report/shared_wm_renderer_unification_evidence_YYYY-MM-DD.md \
 sh scripts/check/check-shared-wm-renderer-unification-evidence.shs
 ```
 
 Run the SPipe gate:
 
 ```bash
-SIMPLE_LIB=src src/compiler_rust/target/release/simple test \
+SIMPLE_LIB=src /path/to/admitted-self-hosted test \
   test/system/gui/shared_wm_renderer_unification_evidence_spec.spl \
   --mode=interpreter --clean --format json
 ```
@@ -132,6 +133,11 @@ shared_wm_renderer_unification_host_source_contract_status=pass
 
 ## Operator Notes
 
+- The current host report is fail-closed when `bin/simple` identifies as the
+  Rust bootstrap seed. This is unavailable evidence, not a PASS or a dated
+  refresh; resume with `SIMPLE_BIN=<admitted-self-hosted> sh
+  scripts/check/check-shared-wm-renderer-unification-evidence.shs` after an
+  admitted pure-Simple binary is installed.
 - This scenario does not boot QEMU; it covers the host/shared-lifecycle side of
   the WM hardening objective.
 - Live QEMU framebuffer evidence is covered by

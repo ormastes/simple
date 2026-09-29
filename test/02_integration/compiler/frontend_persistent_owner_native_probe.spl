@@ -1,0 +1,69 @@
+use compiler.common.config.{Logger}
+use compiler.core.ast.{ast_reset, decl_count, expr_count, stmt_count}
+use compiler.core.parser.{parser_error_count, parser_release_parse_globals}
+use compiler.frontend.core.lexer.{lexer_release_parse_source_globals, lex_cur_kind_get, lex_cur_text_get}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.flat_ast_bridge.{frontend_prepare_transient_parse_scope}
+use compiler.frontend.frontend_parse_ownership.{frontend_discard_failed_parse_registries, frontend_promote_compilation_registries}
+
+extern fn rt_transient_array_scope_begin() -> bool
+extern fn rt_transient_array_scope_pause() -> bool
+extern fn rt_transient_array_scope_end() -> bool
+
+fn finish_probe_scope() -> bool:
+    val paused = rt_transient_array_scope_pause()
+    parser_release_parse_globals()
+    lexer_release_parse_source_globals()
+    val promoted = if paused: frontend_promote_compilation_registries() else: false
+    val ended = rt_transient_array_scope_end()
+    ast_reset()
+    paused and promoted and ended
+
+fn probe_fail(message: text) -> i32:
+    print("frontend_persistent_owner_probe=FAIL reason=" + message)
+    1
+
+fn main() -> i32:
+    val logger = Logger(level: 0)
+    val failed_path = "frontend_owner_probe_malformed.spl"
+    val valid_path = "frontend_owner_probe_valid.spl"
+    frontend_prepare_transient_parse_scope()
+
+    if not rt_transient_array_scope_begin():
+        return probe_fail("failed-scope-begin")
+    val _failed = parse_full_frontend(
+        "fn malformed(\n", failed_path, "frontend.owner.malformed", logger)
+    if parser_error_count() <= 0:
+        return probe_fail("malformed-source-had-no-error")
+    if decl_count() < 0 or expr_count() < 0 or stmt_count() < 0:
+        return probe_fail("failed-owner-state-unreadable")
+    if lex_cur_kind_get() < -1 or lex_cur_text_get().len() < 0:
+        return probe_fail("failed-lexer-state-unreadable")
+    frontend_discard_failed_parse_registries(failed_path)
+    if not finish_probe_scope():
+        return probe_fail("failed-scope-cleanup")
+    if decl_count() != 0 or expr_count() != 0 or stmt_count() != 0:
+        return probe_fail("failed-ast-not-neutral")
+    if lex_cur_kind_get() != 0 or lex_cur_text_get() != "":
+        return probe_fail("failed-lexer-not-neutral")
+
+    if not rt_transient_array_scope_begin():
+        return probe_fail("valid-scope-begin")
+    val recovered = parse_full_frontend(
+        "pub fn recovered() -> i64:\n    7\n",
+        valid_path,
+        "frontend.owner.valid",
+        logger)
+    if parser_error_count() != 0:
+        return probe_fail("valid-source-parser-error")
+    if not recovered.functions.contains("recovered"):
+        return probe_fail("valid-function-missing")
+    if decl_count() <= 0 or expr_count() < 0 or stmt_count() < 0:
+        return probe_fail("valid-owner-state-unreadable")
+    if not finish_probe_scope():
+        return probe_fail("valid-scope-cleanup")
+    if decl_count() != 0 or lex_cur_kind_get() != 0:
+        return probe_fail("valid-owners-not-neutral")
+
+    print("frontend_persistent_owner_probe=PASS malformed_then_valid=1")
+    0

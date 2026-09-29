@@ -9,7 +9,9 @@
 #endif
 
 #include <errno.h>
+#include <poll.h>
 #include <string.h>
+#include <time.h>
 
 #include <liburing.h>
 #include <liburing/io_uring.h>
@@ -18,14 +20,14 @@
 /*
  * Flush pending SQEs to the kernel SQ ring
  */
-static unsigned io_uring_flush_sq(struct io_uring *ring)
+static void io_uring_flush_sq(struct io_uring *ring)
 {
     struct io_uring_sq *sq = &ring->sq;
     unsigned tail = sq->sqe_tail;
     unsigned to_submit = tail - sq->sqe_head;
 
     if (!to_submit)
-        return 0;
+        return;
 
     /*
      * Fill in SQ array entries with sequential indices.
@@ -42,38 +44,52 @@ static unsigned io_uring_flush_sq(struct io_uring *ring)
     io_uring_smp_store_release(sq->ktail, ktail);
     sq->sqe_head = tail;
 
-    return to_submit;
+}
+
+static unsigned io_uring_sq_ready(struct io_uring *ring)
+{
+    struct io_uring_sq *sq = &ring->sq;
+    unsigned head = io_uring_smp_load_acquire(sq->khead);
+    unsigned tail = io_uring_smp_load_acquire(sq->ktail);
+    return tail - head;
+}
+
+static int io_uring_submit_ready(struct io_uring *ring)
+{
+    unsigned remaining = io_uring_sq_ready(ring);
+    int submitted = 0;
+
+    while (remaining) {
+        int ret = __sys_io_uring_enter(ring->enter_ring_fd, remaining, 0, 0, NULL);
+        if (ret < 0) {
+            if (errno == EINTR)
+                continue;
+            return submitted ? submitted : -errno;
+        }
+        if (ret == 0)
+            break;
+        submitted += ret;
+        remaining -= (unsigned)ret;
+    }
+    return submitted;
 }
 
 int io_uring_submit(struct io_uring *ring)
 {
-    unsigned to_submit = io_uring_flush_sq(ring);
-    int ret;
-
-    ret = __sys_io_uring_enter(ring->enter_ring_fd, to_submit, 0,
-                                0, NULL);
-    if (ret < 0)
-        return -errno;
-
-    return ret;
+    io_uring_flush_sq(ring);
+    return io_uring_submit_ready(ring);
 }
 
 int io_uring_submit_and_wait(struct io_uring *ring, unsigned wait_nr)
 {
-    unsigned to_submit = io_uring_flush_sq(ring);
-    unsigned flags = 0;
-    int ret;
+    io_uring_flush_sq(ring);
+    int submitted = io_uring_submit_ready(ring);
+    if (submitted < 0 || !wait_nr)
+        return submitted;
 
-    if (wait_nr) {
-        flags |= IORING_ENTER_GETEVENTS;
-    }
-
-    ret = __sys_io_uring_enter(ring->enter_ring_fd, to_submit, wait_nr,
-                                flags, NULL);
-    if (ret < 0)
-        return -errno;
-
-    return ret;
+    struct io_uring_cqe *cqe = NULL;
+    int ret = io_uring_wait_cqe(ring, &cqe);
+    return ret < 0 && submitted == 0 ? ret : submitted;
 }
 
 /*
@@ -139,16 +155,19 @@ int io_uring_wait_cqe_timeout(struct io_uring *ring,
         return -EAGAIN;
     }
 
-    /*
-     * Submit a timeout SQE and wait for either the timeout
-     * or a real CQE. For simplicity in this vendored version,
-     * we use the enter syscall with timeout via ext_arg.
-     * Fallback: just do a blocking enter (ignoring timeout precision).
-     */
-    ret = __sys_io_uring_enter(ring->enter_ring_fd, 0, 1,
-                                IORING_ENTER_GETEVENTS, NULL);
+    /* Polling the ring fd is the timeout-capable compatibility path for
+     * kernels predating IORING_ENTER_EXT_ARG.  Never silently turn a bounded
+     * wait into an unbounded enter syscall. */
+    struct pollfd pfd = { .fd = ring->enter_ring_fd, .events = POLLIN };
+    struct timespec timeout = {
+        .tv_sec = (time_t)ts->tv_sec,
+        .tv_nsec = (long)ts->tv_nsec,
+    };
+    ret = ppoll(&pfd, 1, &timeout, NULL);
     if (ret < 0)
         return -errno;
+    if (ret == 0)
+        return -ETIME;
 
     return __io_uring_peek_cqe(ring, cqe_ptr);
 }

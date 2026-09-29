@@ -250,6 +250,10 @@ class LinuxPersonalityContract:
         self.timerfd_status = "stub"
         self.signalfd_status = "stub"
         self.ioctl_status = "stub"
+        # Evaluation is a snapshot, not an append-only event log. Rebuild the
+        # bounded evidence matrix so a repeated status check cannot duplicate
+        # rows or eventually report a full matrix.
+        self.syscall_matrix = LinuxSyscallMatrix.create()
         self.syscall_matrix.add("mmap", self.mmap_status)
         self.syscall_matrix.add("mprotect", self.mprotect_status)
         self.syscall_matrix.add("futex", self.futex_status)
@@ -262,8 +266,40 @@ class LinuxPersonalityContract:
         self.syscall_matrix.add("ioctl", self.ioctl_status)
         "evaluated"
 
+    me capability_status(name: text) -> text:
+        """Authoritative status for an ABI/syscall capability name.
+
+        Unknown names fail closed so report adapters cannot accidentally admit
+        a newly added capability without an owning contract decision.
+        """
+        if name == "elf_load":
+            if self.elf_ready: return "ready"
+            return "missing"
+        if name == "dynlink":
+            if self.dynlink_ready: return "ready"
+            return "missing"
+        if name == "mmap": return self.mmap_status
+        if name == "mprotect": return self.mprotect_status
+        if name == "futex": return self.futex_status
+        if name == "clone": return self.clone_status
+        if name == "signal": return self.signal_status
+        if name == "epoll": return self.epoll_status
+        if name == "eventfd": return self.eventfd_status
+        if name == "timerfd": return self.timerfd_status
+        if name == "signalfd": return self.signalfd_status
+        if name == "ioctl": return self.ioctl_status
+        "missing"
+
+    me capability_note(name: text) -> text:
+        val status = self.capability_status(name)
+        if status == "ready": return ""
+        if status == "partial": return "limited implementation"
+        if status == "stub": return "syscall stub only"
+        if name == "unknown": return "unknown capability"
+        "not implemented"
+
     me is_game_viable() -> bool:
-        """True if ELF + dynlink + mmap + clone + signal are all usable."""
+        """True only when the baseline game profile has usable wake semantics."""
         if self.elf_ready == false:
             return false
         if self.dynlink_ready == false:
@@ -276,6 +312,10 @@ class LinuxPersonalityContract:
             return false
         val signal_ok = self.signal_status == "ready" or self.signal_status == "partial"
         if signal_ok == false:
+            return false
+        # A futex stub is never a safe degraded mode: workloads using
+        # pthread-style synchronization can otherwise hang indefinitely.
+        if self.futex_status != "ready":
             return false
         true
 

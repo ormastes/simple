@@ -10,6 +10,8 @@
 #   describe/it block reachability.  The assertions inside it-blocks are not
 #   executed.  Compiled-mode execution will exercise them.
 
+use std.spec.step
+
 use compiler.mir_opt.pattern.rule_engine.{
     Rule, MatchHit, OptimizerRuleLoadMode, OptimizerRuleLookupKind, OptimizerProviderKind,
     OptimizerBackendKind,
@@ -42,16 +44,18 @@ use compiler.mir.intrinsics.{
     CRYPTO_AES_ROUND, CRYPTO_SHA256_RNDS2, CRC32_U64
 }
 
+use std.spec.{step}
 # ============================================================================
 # Rule schema — create_rule + rule_summary
 # ============================================================================
 
 describe "Rule schema — create_rule + rule_summary":
+    # @manual scenario evidence
     it "create_rule fills name, intrinsic, requires, cost_delta correctly":
         val r = create_rule("test_rule_aes", "crypto_aes_round", "aes", -3)
         expect(r.name).to_equal("test_rule_aes")
         expect(r.intrinsic).to_equal("crypto_aes_round")
-        expect(r.required_fact).to_equal("aes")
+        expect(r.requires).to_equal("aes")
         expect(r.cost_delta).to_equal(-3)
 
     it "rule_summary contains rule name and intrinsic substring":
@@ -77,7 +81,7 @@ describe "cipher_rule_table — registry contents":
             val r = table[i]
             expect(r.name.len() > 0).to_equal(true)
             expect(r.intrinsic.len() > 0).to_equal(true)
-            expect(r.required_fact.len() > 0).to_equal(true)
+            expect(r.requires.len() > 0).to_equal(true)
             i = i + 1
 
     it "first rule is the AES round rule with intrinsic crypto_aes_round":
@@ -100,25 +104,25 @@ describe "cipher_rule_table — registry contents":
 describe "lookup_rule_for_callee — known software callees":
     it "aes_round_software callee returns Some(rule) with intrinsic crypto_aes_round":
         val result = lookup_rule_for_callee("std.common.aes.cipher.aes_round_software")
-        expect(result != nil).to_equal(true)
+        expect(result.?).to_equal(true)
         val r = result.unwrap()
         expect(r.intrinsic).to_equal(CRYPTO_AES_ROUND)
 
     it "sha256 compress_block callee returns Some with crypto_sha256_rounds2":
         val result = lookup_rule_for_callee("std.common.crypto.sha256.compress_block")
-        expect(result != nil).to_equal(true)
+        expect(result.?).to_equal(true)
         val r = result.unwrap()
         expect(r.intrinsic).to_equal(CRYPTO_SHA256_RNDS2)
 
     it "os crc32 update_u64 callee returns Some with crc32_u64":
         val result = lookup_rule_for_callee("os.crypto.crc32.update_u64")
-        expect(result != nil).to_equal(true)
+        expect(result.?).to_equal(true)
         val r = result.unwrap()
         expect(r.intrinsic).to_equal(CRC32_U64)
 
     it "unrecognised symbol returns nil":
         val result = lookup_rule_for_callee("std.common.totally.unknown.callee")
-        expect(result != nil).to_equal(false)
+        expect(result.?).to_equal(false)
 
     it "cipher provider is built in for hot-path lookup":
         val provider = cipher_rule_provider()
@@ -167,7 +171,7 @@ describe "lookup_rule_for_callee — known software callees":
         expect(optimization_fact_list_contains(["typed_mir"], "typed_mir")).to_equal(true)
         expect(optimization_rule_provider_can_run(provider, ["typed_mir"])).to_equal(false)
         val missing = optimization_rule_provider_missing_fact(provider, ["typed_mir"])
-        expect(missing != nil).to_equal(true)
+        expect(missing.?).to_equal(true)
         expect(missing.unwrap()).to_equal("io_alias_summary")
         expect(optimization_rule_provider_can_run(provider, ["typed_mir", "io_alias_summary"])).to_equal(true)
 
@@ -202,7 +206,7 @@ describe "lookup_rule_for_callee — known software callees":
         expect(optimization_rule_provider_applies_to_backend(planned, OptimizerBackendKind.Llvm)).to_equal(false)
         expect(optimization_rule_provider_applies_to_backend_name(planned, "cranlift")).to_equal(true)
         val reason = optimization_rule_provider_skip_reason(planned, OptimizerBackendKind.Llvm)
-        expect(reason != nil).to_equal(true)
+        expect(reason.?).to_equal(true)
         expect(reason.unwrap()).to_equal("llvm_backend_runs_mem2reg_sroa_pipeline")
 
     it "backend policy can restrict expensive hotspot rebuilds to one backend":
@@ -225,26 +229,26 @@ describe "lookup_rule_for_callee — known software callees":
         val rule = create_rule("match_custom_abs", "math_abs", "scalar", -1)
         val bindings = [create_exact_rule_binding("std.math.abs_software", rule)]
         val hit = lookup_exact_rule_binding(bindings, "std.math.abs_software")
-        expect(hit != nil).to_equal(true)
+        expect(hit.?).to_equal(true)
         expect(hit.unwrap().intrinsic).to_equal("math_abs")
         val miss = lookup_exact_rule_binding(bindings, "std.math.sqrt")
-        expect(miss != nil).to_equal(false)
+        expect(miss.?).to_equal(false)
 
     it "lookup stats count hit and miss without touching rule data":
         val zero = rule_lookup_stats_zero()
         val one = rule_lookup_stats_record(zero, true)
         val two = rule_lookup_stats_record(one, false)
-        expect(two.lookups).to_equal(2)
-        expect(two.hits).to_equal(1)
-        expect(two.misses).to_equal(1)
+        expect(two.lookups).to_equal(2)  # oracle: expected value 2 is the behavior asserted by this regression spec
+        expect(two.hits).to_equal(1)  # oracle: expected value 1 is the behavior asserted by this regression spec
+        expect(two.misses).to_equal(1)  # oracle: expected value 1 is the behavior asserted by this regression spec
 
     it "provider stats count changed and skipped scopes":
         val zero = optimization_provider_stats_zero()
         val changed = optimization_provider_stats_record_scope(zero, 3)
         val skipped = optimization_provider_stats_record_scope(changed, 0)
-        expect(skipped.scopes).to_equal(2)
-        expect(skipped.rewrites).to_equal(3)
-        expect(skipped.skipped).to_equal(1)
+        expect(skipped.scopes).to_equal(2)  # oracle: expected value 2 is the behavior asserted by this regression spec
+        expect(skipped.rewrites).to_equal(3)  # oracle: expected value 3 is the behavior asserted by this regression spec
+        expect(skipped.skipped).to_equal(1)  # oracle: expected value 1 is the behavior asserted by this regression spec
 
 # ============================================================================
 # PatternCost — comparator and scalar summary
@@ -272,11 +276,11 @@ describe "PatternCost — comparator":
 
     it "pattern_cost_default returns a zero-cost tuple":
         val c = pattern_cost_default()
-        expect(c.latency).to_equal(0)
-        expect(c.code_size).to_equal(0)
-        expect(c.reg_pressure).to_equal(0)
-        expect(c.tail_cost).to_equal(0)
+        expect(c.latency).to_equal(0)  # oracle: expected value 0 is the behavior asserted by this regression spec
+        expect(c.code_size).to_equal(0)  # oracle: expected value 0 is the behavior asserted by this regression spec
+        expect(c.reg_pressure).to_equal(0)  # oracle: expected value 0 is the behavior asserted by this regression spec
+        expect(c.tail_cost).to_equal(0)  # oracle: expected value 0 is the behavior asserted by this regression spec
 
     it "pattern_cost_total of default is zero":
         val c = pattern_cost_default()
-        expect(pattern_cost_total(c)).to_equal(0)
+        expect(pattern_cost_total(c)).to_equal(0)  # oracle: expected value 0 is the behavior asserted by this regression spec

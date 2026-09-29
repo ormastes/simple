@@ -10,6 +10,7 @@
  */
 
 #include "runtime.h"
+#include "runtime_sqlite_provider_abi_v1.h"
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -25,6 +26,29 @@
 #define SPECIAL_FALSE 19ULL /* 2 << 3 | 0b011 */
 
 typedef int64_t RtValue;
+
+/* The demand bridge admits only this exact native SFFI surface. */
+int64_t spl_sqlite_provider_abi_version_v1(void) {
+    return SIMPLE_SQLITE_PROVIDER_ABI_V1;
+}
+
+#if defined(SIMPLE_SQLITE_DEMAND_PROVIDER)
+static SimpleSqliteRuntimeApiV1 sqlite_runtime_api;
+int64_t spl_sqlite_provider_init_v1(const SimpleSqliteRuntimeApiV1 *api) {
+    if (!api || api->struct_size != sizeof(*api) ||
+            api->abi_version != SIMPLE_SQLITE_PROVIDER_ABI_V1 ||
+            !api->string_new || !api->string_data || !api->string_len) return 0;
+    sqlite_runtime_api = *api;
+    return 1;
+}
+#define sqlite_string_new sqlite_runtime_api.string_new
+#define sqlite_string_data sqlite_runtime_api.string_data
+#define sqlite_string_len sqlite_runtime_api.string_len
+#else
+#define sqlite_string_new rt_string_new
+#define sqlite_string_data rt_string_data
+#define sqlite_string_len rt_string_len
+#endif
 
 /*
  * Integers cross this boundary RAW, not tagged (measured 2026-08-17, the first
@@ -63,7 +87,7 @@ static uint64_t c_string_len(const char *s) {
 
 static RtValue make_string(const char *s) {
     if (!s) return (RtValue)SPECIAL_NIL;
-    return (RtValue)rt_string_new((const uint8_t *)s, c_string_len(s));
+    return (RtValue)sqlite_string_new((const uint8_t *)s, c_string_len(s));
 }
 
 /*
@@ -94,9 +118,9 @@ static const char *borrow_string(RtValue v, CStr *out) {
     out->ptr = NULL;
     if (is_nil(v)) return NULL;
     if ((v & TAG_MASK) != TAG_HEAP) return NULL;
-    const uint8_t *data = rt_string_data((int64_t)v);
+    const uint8_t *data = sqlite_string_data((int64_t)v);
     if (!data) return NULL;
-    int64_t len = rt_string_len((int64_t)v);
+    int64_t len = sqlite_string_len((int64_t)v);
     if (len < 0) return NULL;
     char *buf = out->inline_buf;
     if ((uint64_t)len + 1 > sizeof(out->inline_buf)) {

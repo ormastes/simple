@@ -24,7 +24,7 @@ The enterprise suite has many vertical modules that each copy ONE frozen guarded
 | Design | doc/07_guide/app/enterprise/guarded_command_contract.md |
 | Research | doc/01_research/local/simple_enterprise_suite_assessment_2026-08-14.md |
 | Source | `test/01_unit/lib/nogc_sync_mut/enterprise_conformance_spec.spl` |
-| Updated | 2026-08-16 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -88,6 +88,11 @@ Lane: .spipe/simple_enterprise_suite (W7-B).
 
 #### booking: hold, confirm, cancel, and no-show replay to duplicate-key with one effect
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- booking: hold, confirm, cancel, and no-show replay to duplicate-key with one effect
 - Seed two exclusive-unit resources
    - Expected: booking_create_resource(store, s, t, admin, "res-1", "exclusive-unit", 1, "v1").reason equals `accepted`
    - Expected: booking_create_resource(store, s, t, admin, "res-2", "exclusive-unit", 1, "v1").reason equals `accepted`
@@ -114,10 +119,12 @@ Lane: .spipe/simple_enterprise_suite (W7-B).
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 40 lines folded for reproduction.
+Runnable source: 42 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("booking: hold, confirm, cancel, and no-show replay to duplicate-key with one effect")
 step("Seed two exclusive-unit resources")
 val store = fresh_store("booking")
 val t = tenant_a()
@@ -164,6 +171,7 @@ store_close(store)
 
 #### restaurant: open, add-line, ready, serve, and close replay to duplicate-key with one effect
 
+- restaurant: open, add-line, ready, serve, and close replay to duplicate-key with one effect
 - Seed the venue and one menu item
 - open the table session; the table it occupies is its OWN effect
    - Expected: table_open_session(store, s, t, admin, envelope("rs-open"), "sess-1", "v1", "t1", 2).reason equals `accepted`
@@ -193,10 +201,12 @@ store_close(store)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 45 lines folded for reproduction.
+Runnable source: 47 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("restaurant: open, add-line, ready, serve, and close replay to duplicate-key with one effect")
 step("Seed the venue and one menu item")
 val store = fresh_store("restaurant")
 val t = tenant_a()
@@ -248,6 +258,7 @@ store_close(store)
 
 #### payment: intent-create and captured webhook replay to duplicate-key with one effect
 
+- payment: intent-create and captured webhook replay to duplicate-key with one effect
 - Seed a created, stocked order
    - Expected: sale_place_order(store, s, t, admin, envelope("py-ord"), "order-1", "SKU-1", 1).reason equals `accepted`
 - intent create: the pending intent it writes is its own effect
@@ -266,10 +277,12 @@ store_close(store)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 33 lines folded for reproduction.
+Runnable source: 35 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("payment: intent-create and captured webhook replay to duplicate-key with one effect")
 step("Seed a created, stocked order")
 val store = fresh_store("payment")
 val t = tenant_a()
@@ -294,7 +307,7 @@ expect(effect_fingerprint(store, "tenant-a")).to_equal(fp_int)
 step("captured webhook replays on provider_event_id (already fixed — regression fence)")
 val provider = PaymentProvider(name: "mock", shared_secret: "s3cr3t")
 val env_wh = envelope("py-wh")
-val sig = provider_sign(provider, env_wh.payload)
+val sig = provider_sign_webhook(provider, "tenant-a", "prov-tenant-a-int-1", "captured", "evt-1", env_wh.payload)
 expect(payment_webhook_receive(store, s, t, admin, env_wh, provider, "prov-tenant-a-int-1", "captured", sig, "evt-1", 200).reason).to_equal("accepted")
 val fp_wh = effect_fingerprint(store, "tenant-a")
 val wh_replay = payment_webhook_receive(store, s, t, admin, env_wh, provider, "prov-tenant-a-int-1", "captured", sig, "evt-1", 200)
@@ -309,6 +322,7 @@ store_close(store)
 
 #### hcm: hire, amend, clock in/out, leave request/decide, and terminate replay with one effect
 
+- hcm: hire, amend, clock in/out, leave request/decide, and terminate replay with one effect
 - Hire an employee
    - Expected: hcm_hire(store, s, t, admin, envelope("hc-hire"), "emp-1", "Ann", 0, 2000, 40).reason equals `accepted`
    - Expected: hcm_hire(store, s, t, admin, envelope("hc-hire"), "emp-1", "Ann", 0, 2000, 40).reason equals `duplicate-key`
@@ -341,10 +355,12 @@ store_close(store)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 46 lines folded for reproduction.
+Runnable source: 48 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("hcm: hire, amend, clock in/out, leave request/decide, and terminate replay with one effect")
 step("Hire an employee")
 val store = fresh_store("hcm")
 val t = tenant_a()
@@ -397,6 +413,7 @@ store_close(store)
 
 #### procurement: requisition, approval, PO, receipt, and invoice replay with one effect
 
+- procurement: requisition, approval, PO, receipt, and invoice replay with one effect
 - Register a supplier and raise a requisition
    - Expected: proc_requisition_create(store, s, t, admin, envelope("pr-req"), "req-1", "SKU-1", 5).reason equals `accepted`
    - Expected: proc_requisition_create(store, s, t, admin, envelope("pr-req"), "req-1", "SKU-1", 5).reason equals `duplicate-key`
@@ -423,10 +440,12 @@ store_close(store)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 39 lines folded for reproduction.
+Runnable source: 41 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("procurement: requisition, approval, PO, receipt, and invoice replay with one effect")
 step("Register a supplier and raise a requisition")
 val store = fresh_store("procurement")
 val t = tenant_a()
@@ -472,6 +491,7 @@ store_close(store)
 
 #### channel hub and outbox worker: re-import, re-ack, and re-dispatch produce no second effect
 
+- channel hub and outbox worker: re-import, re-ack, and re-dispatch produce no second effect
 - Register a mock channel with one scripted external order
    - Expected: channel_register(store, s, t, admin, "ch-1", "mock").reason equals `accepted`
 - First import creates exactly one internal order
@@ -494,10 +514,12 @@ store_close(store)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 40 lines folded for reproduction.
+Runnable source: 42 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("channel hub and outbox worker: re-import, re-ack, and re-dispatch produce no second effect")
 step("Register a mock channel with one scripted external order")
 val store = fresh_store("channel")
 val t = tenant_a()
@@ -546,6 +568,7 @@ store_close(store)
 
 #### every reason returned across the suite satisfies reason_allowed
 
+- every reason returned across the suite satisfies reason_allowed
 - Drive a denial from every module and collect the reasons
 - The collected set is non-trivial and wholly inside the closed set
 - The closed set itself is the frozen 16-reason list
@@ -555,10 +578,12 @@ store_close(store)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 70 lines folded for reproduction.
+Runnable source: 72 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("every reason returned across the suite satisfies reason_allowed")
 step("Drive a denial from every module and collect the reasons")
 val store = fresh_store("reasons")
 val t = tenant_a()
@@ -616,9 +641,9 @@ reasons.push(channel_ack_order(store, s, t, admin, mock_channel([], 10), "ch-1",
 reasons.push(channel_import_orders(store, s, t, admin, envelope("rz-20"), mock_channel([], 10), "ch-1", 10).reason)
 # session vertical — the generic, non-enumerating issuance denial
 credential_seed(store, s, t, admin, "user-1", "sales", "salt", "secret")
-reasons.push(session_issue(store, "tenant-a", "user-1", "wrong", 100, 900, "e").reason)
-reasons.push(session_issue(store, "tenant-a", "user-404", "secret", 100, 900, "e").reason)
-reasons.push(session_issue(store, "tenant-a", "user-1", "secret", 100, 900, "e").reason)
+reasons.push(session_issue(store, "tenant-a", "user-1", "wrong", 100, 900, "entropy-conf").reason)
+reasons.push(session_issue(store, "tenant-a", "user-404", "secret", 100, 900, "entropy-conf").reason)
+reasons.push(session_issue(store, "tenant-a", "user-1", "secret", 100, 900, "entropy-conf").reason)
 
 step("The collected set is non-trivial and wholly inside the closed set")
 expect(reasons.len() > 20).to_be(true)
@@ -637,10 +662,11 @@ store_close(store)
 
 #### a session issued for tenant B is denied by every guarded command of tenant A
 
+- a session issued for tenant B is denied by every guarded command of tenant A
 - Seed tenant A state, then attack it with a tenant-B session
 - The intruder's session is valid for tenant B, but tenant A is authority
 - Every one of them is invalid-session — no rung leaks past the first
-   - Expected: denials.len() equals `15`
+   - Expected: denials.len() equals `17`
    - Expected: d equals `invalid-session`
 - Tenant A's observable state is byte-identical afterwards
    - Expected: effect_fingerprint(store, "tenant-a") equals `fp_before`
@@ -650,10 +676,12 @@ store_close(store)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 52 lines folded for reproduction.
+Runnable source: 68 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("a session issued for tenant B is denied by every guarded command of tenant A")
 step("Seed tenant A state, then attack it with a tenant-B session")
 val store = fresh_store("tenancy")
 val ta = tenant_a()
@@ -672,6 +700,14 @@ booking_create_resource(store, s, ta, admin, "res-1", "exclusive-unit", 1, "v1")
 table_open_session(store, s, ta, admin, envelope("tn-open"), "sess-1", "v1", "t1", 2)
 hcm_hire(store, s, ta, admin, envelope("tn-hire"), "emp-1", "Ann", 0, 2000, 40)
 channel_register(store, s, ta, admin, "ch-1", "mock")
+# Refundable money state: a PAID order (sale_refund_order's feasible target).
+sale_place_order(store, s, ta, admin, envelope("tn-seed-o"), "o-1", "SKU-1", 1)
+sale_pay_order(store, s, ta, admin, envelope("tn-seed-p"), "o-1")
+# Receivable inventory state: an approved requisition turned into a PO.
+proc_supplier_add(store, s, ta, admin, "sup-1", "Supplies Inc")
+proc_requisition_create(store, s, ta, admin, envelope("tn-seed-r"), "req-1", "SKU-1", 5)
+proc_requisition_approve(store, s, ta, admin, envelope("tn-seed-a"), "req-1")
+proc_po_create(store, s, ta, admin, envelope("tn-seed-po"), "po-1", "req-1", "sup-1", usd(100))
 val fp_before = effect_fingerprint(store, "tenant-a")
 
 step("The intruder's session is valid for tenant B, but tenant A is authority")
@@ -695,9 +731,15 @@ denials.push(hcm_terminate(store, bad, ta, intruder, envelope("tn-10"), "emp-1",
 denials.push(channel_register(store, bad, ta, intruder, "ch-x", "mock").reason)
 denials.push(channel_ack_order(store, bad, ta, intruder, mock_channel([], 10), "ch-1", "x-1").reason)
 denials.push(channel_import_orders(store, bad, ta, intruder, envelope("tn-11"), mock_channel([], 10), "ch-1", 10).reason)
+# W13-C gap check: two guarded commands never before exercised for
+# cross-tenant mutation, both aimed at FEASIBLE tenant-A state — a
+# paid order (refund would move money) and an open PO (receive would
+# move inventory).
+denials.push(sale_refund_order(store, bad, ta, intruder, envelope("tn-16"), "o-1").reason)
+denials.push(proc_receive(store, bad, ta, intruder, envelope("tn-17"), "po-1", 5).reason)
 
 step("Every one of them is invalid-session — no rung leaks past the first")
-expect(denials.len()).to_equal(15)
+expect(denials.len()).to_equal(17)
 for d in denials:
     expect(d).to_equal("invalid-session")
 
@@ -729,3 +771,54 @@ store_close(store)
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-LIB`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `3907e3b908ad487231c2e0c3e0e3cc39ad00911ae2b693e8eec1737590404cc4`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `3907e3b908ad487231c2e0c3e0e3cc39ad00911ae2b693e8eec1737590404cc4`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `3907e3b908ad487231c2e0c3e0e3cc39ad00911ae2b693e8eec1737590404cc4`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
+
+SSpec documentization score: 86/100
+source: test/01_unit/lib/nogc_sync_mut/enterprise_conformance_spec.spl
+mirror: doc/06_spec/01_unit/lib/nogc_sync_mut/enterprise_conformance_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/lib/nogc_sync_mut/enterprise_conformance_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/lib/nogc_sync_mut/enterprise_conformance_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, assumptions/preconditions, primary workflow, unsupported/limitations
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/lib/nogc_sync_mut/enterprise_conformance_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 11 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/01_unit/lib/nogc_sync_mut/enterprise_conformance_spec.spl:170:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'booking: hold, confirm, cancel, and no-show replay to duplicate-key with one effect' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/lib/nogc_sync_mut/enterprise_conformance_spec.spl:214:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'restaurant: open, add-line, ready, serve, and close replay to duplicate-key with one effect' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/lib/nogc_sync_mut/enterprise_conformance_spec.spl:263:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'payment: intent-create and captured webhook replay to duplicate-key with one effect' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

@@ -1,4 +1,9 @@
 # Pure-Simple test runner executes ZERO specs — trait/impl arity mismatch in `MirToLlvm`
+## Closed 2026-09-16 — Status FIXED 2026-08-04 (00202fbb346); A/B verified 30 specs pass
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** **FIXED 2026-08-04** — `00202fbb346` widened the `MirTextCodegen`
 trait to match its implementor. Verified by A/B, see "Verification" below.
@@ -84,3 +89,4 @@ not depend on `MirToLlvm`.
 
 Related: `optional_passed_to_bool_param_is_neither_coerced_nor_rejected_2026-08-04.md`
 (the measurement that surfaced this).
+

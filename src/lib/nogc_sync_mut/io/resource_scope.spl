@@ -9,6 +9,7 @@ use std.nogc_sync_mut.io.dir_ops.{dir_create, dir_remove}
 use std.nogc_sync_mut.io.process_governor.{proc_slot_acquire, proc_slot_release}
 use std.nogc_sync_mut.io.process_ops.{process_run_bounded, process_bounded_timed_out, process_bounded_kill_signal}
 use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
+use std.nogc_sync_mut.fs.host_path.{host_is_windows_host}
 use std.io_runtime.{getpid}
 use std.convert.{try_parse_int}
 use std.common.perf.execution_metrics.{ResourceUsage, ResourceEvidenceQuality, TerminationCause, TerminationEvidence, ResourceBudget, BudgetDecision, evaluate_resource_budget, classify_termination}
@@ -61,7 +62,7 @@ pub fn standard_resource_budget(resource_class: ExecutionResourceClass) -> Resou
     """Return explicit quantities; history is never consulted here."""
     match resource_class:
         case ExecutionResourceClass.Unit:
-            ResourceBudget(max_wall_ms: 300_000, max_cpu_ms: 600_000, max_tree_charge_bytes: 2_147_483_648, max_direct_child_rss_bytes: 2_147_483_648, max_io_read_bytes: 8_589_934_592, max_io_write_bytes: 2_147_483_648, max_pids: 128, max_fds: 256)
+            ResourceBudget(max_wall_ms: 300_000, max_cpu_ms: 600_000, max_tree_charge_bytes: 3_221_225_472, max_direct_child_rss_bytes: 3_221_225_472, max_io_read_bytes: 8_589_934_592, max_io_write_bytes: 2_147_483_648, max_pids: 128, max_fds: 256)
         case ExecutionResourceClass.Integration:
             ResourceBudget(max_wall_ms: 900_000, max_cpu_ms: 3_600_000, max_tree_charge_bytes: 4_294_967_296, max_direct_child_rss_bytes: 4_294_967_296, max_io_read_bytes: 34_359_738_368, max_io_write_bytes: 8_589_934_592, max_pids: 512, max_fds: 512)
         case ExecutionResourceClass.System:
@@ -196,11 +197,47 @@ fn _run_in_cgroup_v2(scope: ExecutionResourceScope, scope_path: text, cmd: text,
         process.usage
     ObservedProcessResult(stdout: process.stdout, stderr: process.stderr, usage: usage, stdout_truncated: process.stdout_truncated, stderr_truncated: process.stderr_truncated, runtime_error: if process.usage.exit_code == 125: 125 else: process.runtime_error)
 
+# `ulimit -u` (RLIMIT_NPROC) is not POSIX: dash -- /bin/sh on Debian/Ubuntu -- rejects
+# it with "Illegal option -u", so a pid cap must run under a shell that implements it.
+# Returns "" when the scope needs a pid cap and no such shell exists: the caller then
+# FAILS CLOSED (exit 125 receipt) instead of silently running unlimited.
+fn _limit_shell(scope: ExecutionResourceScope) -> text:
+    if scope.budget.max_pids <= 0:
+        return "/bin/sh"
+    for shell in ["/bin/bash", "/usr/bin/bash", "/usr/local/bin/bash", "/bin/ksh", "/usr/bin/ksh", "/bin/zsh", "/usr/bin/zsh"]:
+        if file_exists(shell):
+            return shell
+    ""
+
+# `ulimit -v` maps to RLIMIT_AS, which Darwin's kernel does not implement: EVERY
+# shell on macOS answers `ulimit: virtual memory: cannot modify limit: Invalid
+# argument` (verified 2026-09-05 on /bin/sh and /bin/bash alike), so pairing it
+# with `|| exit 125` killed every bounded child with an infrastructure failure.
+# That is what made `simple test <dir>` report 79/79 "Compilation failed" here.
+# There is no substitute shell -- unlike `ulimit -u`, no shell can enforce this
+# on Darwin -- so the address-space cap is dropped with a LOUD stderr note
+# rather than silently. The `-t`/`-u`/`-n` caps below are unaffected and keep
+# their fail-closed `|| exit 125`.
+# Detected by a single stat rather than `uname -s`: this runs once per bounded
+# child spawn, and shelling out for platform detection inside the spawn path
+# would cost more than the check it guards.
+fn _rlimit_as_enforceable() -> bool:
+    not file_exists("/System/Library/CoreServices/SystemVersion.plist")
+
 fn _run_with_unix_limits(scope: ExecutionResourceScope, cmd: text, args: [text]) -> ObservedProcessResult:
+    val shell = _limit_shell(scope)
+    if shell == "":
+        return ObservedProcessResult(
+            stdout: "",
+            stderr: "resource scope: max_pids={scope.budget.max_pids} requires a shell with `ulimit -u` (bash/ksh/zsh); none found, refusing to run unlimited",
+            usage: _unavailable_usage(0, 125), stdout_truncated: false, stderr_truncated: false, runtime_error: 125)
     var prefix = ""
     val memory_bytes = if scope.budget.max_tree_charge_bytes > 0: scope.budget.max_tree_charge_bytes else: scope.budget.max_direct_child_rss_bytes
     if memory_bytes > 0:
-        prefix = prefix + "ulimit -v {memory_bytes / 1024} || exit 125; "
+        if _rlimit_as_enforceable():
+            prefix = prefix + "ulimit -v {memory_bytes / 1024} || exit 125; "
+        else:
+            eprint("[resource-scope] address-space cap of {memory_bytes} bytes NOT enforced: RLIMIT_AS (`ulimit -v`) is unimplemented on this platform; cpu/pid/fd caps still apply")
     if scope.budget.max_cpu_ms > 0:
         prefix = prefix + "ulimit -t {(scope.budget.max_cpu_ms + 999) / 1000} || exit 125; "
     if scope.budget.max_pids > 0:
@@ -210,7 +247,7 @@ fn _run_with_unix_limits(scope: ExecutionResourceScope, cmd: text, args: [text])
     var command = prefix + "exec " + _shell_quote(cmd)
     for arg in args:
         command = command + " " + _shell_quote(arg)
-    val process = process_run_observed_bounded("/bin/sh", ["-c", command], scope.timeout_ms, scope.max_output_bytes)
+    val process = process_run_observed_bounded(shell, ["-c", command], scope.timeout_ms, scope.max_output_bytes)
     val termination = if process.usage.exit_code == 125:
         TerminationCause.InfrastructureFailure
     elif scope.budget.max_cpu_ms > 0 and process.usage.signal == 24:
@@ -443,7 +480,67 @@ fn _unavailable_usage(wall_ms: i64, exit_code: i64) -> ResourceUsage:
         exit_code: exit_code
     )
 
+fn _legacy_process_fallback(cmd: text, args: [text], timeout_ms: i64, max_output_bytes: i64, reported_error: i64) -> ObservedProcessResult:
+    val legacy_started = time_now_unix_micros()
+    val (legacy_stdout, legacy_stderr, legacy_exit) = process_run_bounded(cmd, args, timeout_ms, max_output_bytes)
+    val legacy_ended = time_now_unix_micros()
+    val legacy_wall_ms = if legacy_ended >= legacy_started: (legacy_ended - legacy_started) / 1000 else: 0
+    val legacy_timed_out = process_bounded_timed_out(legacy_exit, legacy_stderr)
+    val legacy_signal = process_bounded_kill_signal(legacy_exit)
+    val legacy_usage = ResourceUsage(
+        wall_ms: legacy_wall_ms, user_cpu_ms: 0, system_cpu_ms: 0,
+        peak_tree_charge_bytes: 0, peak_direct_child_rss_bytes: 0,
+        heap_live_end_bytes: 0, heap_peak_bytes: 0,
+        io_read_bytes: 0, io_write_bytes: 0, pids_peak: 0,
+        evidence_quality: ResourceEvidenceQuality.Unavailable,
+        termination: if legacy_timed_out: TerminationCause.WallTimeout elif legacy_signal > 0: TerminationCause.Signal elif legacy_exit == -1: TerminationCause.InfrastructureFailure else: TerminationCause.Exited,
+        signal: legacy_signal, exit_code: legacy_exit)
+    # `process_run_bounded` (rt_process_run_bounded) has no receipt flag for
+    # "hit the cap" — it returns only (stdout, stderr, exit_code). Verified
+    # directly against all three parallel runtime implementations that this
+    # facade can resolve to, that a truncated stream is always STRICTLY
+    # LONGER than the requested `max_output_bytes`, so a plain length
+    # comparison is an exact structural substitute for the missing flag:
+    #   - interpreter_extern/system.rs: cuts the stream to exactly
+    #     `max_bytes` then appends the marker AFTER it (comment at :866,
+    #     "the marker is outside the byte budget") -> final len = max_bytes +
+    #     marker_len, always > max_bytes when truncated.
+    #   - runtime_fork.c (POSIX) / runtime_process.c (Windows,
+    #     `win_capture_finish`): a head+tail-split capture where
+    #     `capture->limit` is set to `max_output_bytes` exactly
+    #     (runtime_fork.c:295, runtime_process.c:386-387) and
+    #     `head_limit + tail_limit == capture->limit`. Truncation (`total >
+    #     head_len + tail_len`) only occurs once both the head buffer and the
+    #     tail ring are saturated, so `head_len == head_limit` and
+    #     `tail_len == tail_limit` at that point, and the marker is inserted
+    #     BETWEEN them: final len = head_limit + marker_len + tail_limit =
+    #     `max_output_bytes` + marker_len, again always > max_output_bytes.
+    # A stream that was NOT truncated is always at or under the cap on all
+    # three (no marker is ever inserted). This is a structural length check
+    # against the numeric cap the caller itself requested — not a scan of the
+    # stream's text content — and it is exact for this facade's contract on
+    # every backend, unlike scanning for the marker text (which sits at the
+    # very end on the first implementation but in the MIDDLE of the buffer,
+    # before the retained tail, on the other two).
+    ObservedProcessResult(
+        stdout: legacy_stdout, stderr: legacy_stderr, usage: legacy_usage,
+        stdout_truncated: legacy_stdout.len() > max_output_bytes,
+        stderr_truncated: legacy_stderr.len() > max_output_bytes,
+        runtime_error: if legacy_exit == -1 and not legacy_timed_out: reported_error else: 0)
+
 fn process_run_observed_bounded(cmd: text, args: [text], timeout_ms: i64, max_output_bytes: i64) -> ObservedProcessResult:
+    # ponytail: Windows takes the established bounded facade
+    # (rt_process_run_bounded, runtime_process.c: CreateProcess + job object +
+    # pipes) instead of the owned observed capsule. Measured 2026-09-25: the
+    # seed-built stage-2 tools pass the capsule's `cmd` as one word (C owner
+    # takes ptr+len) and read its raw 3-word tuple result as a runtime array,
+    # so every spawn came back exit -1 ("child produced no exit status").
+    # Ceiling: resource evidence is Unavailable on Windows (the test RSS cap
+    # is still enforced by the runner's Job-Object guard). Upgrade path: an
+    # array-returning owned-process wrapper with Rust twins, tracked in
+    # doc/08_tracking/todo/windows_owned_process_capsule_seed_abi_2026-09-25.md.
+    if host_is_windows_host():
+        return _legacy_process_fallback(cmd, args, timeout_ms, max_output_bytes, -1)
     val started = time_now_unix_micros()
     proc_slot_acquire()
     val (stdout, stderr, fields) = _process_run_observed_raw(cmd, args, timeout_ms, max_output_bytes)
@@ -451,6 +548,12 @@ fn process_run_observed_bounded(cmd: text, args: [text], timeout_ms: i64, max_ou
     val ended = time_now_unix_micros()
     val wall_ms = if ended >= started: (ended - started) / 1000 else: 0
     if fields.len() != 30 or fields[0] != 1 or fields[19] != 2:
+        # A malformed/short payload here does NOT prove the child never ran
+        # (unlike the explicit ENOTSUP lifecycle_error below, which is a
+        # clean pre-spawn refusal) -- re-running via the legacy facade could
+        # execute a side-effecting command (rm, git push, a bootstrap step)
+        # twice. Fail hard and closed, as before; only the explicit
+        # ENOTSUP-family lifecycle_error case below is safe to retry.
         return ObservedProcessResult(
             stdout: stdout,
             stderr: stderr,
@@ -469,25 +572,17 @@ fn process_run_observed_bounded(cmd: text, args: [text], timeout_ms: i64, max_ou
     # Windows and non-pidfd Unix runtimes may not yet implement the additive
     # observed ABI. Preserve execution through the established bounded facade
     # while reporting resource evidence as unavailable.
-    if lifecycle_error == 95 or lifecycle_error == 45 or lifecycle_error == 10045:
-        val legacy_started = time_now_unix_micros()
-        val (legacy_stdout, legacy_stderr, legacy_exit) = process_run_bounded(cmd, args, timeout_ms, max_output_bytes)
-        val legacy_ended = time_now_unix_micros()
-        val legacy_wall_ms = if legacy_ended >= legacy_started: (legacy_ended - legacy_started) / 1000 else: 0
-        val legacy_timed_out = process_bounded_timed_out(legacy_exit, legacy_stderr)
-        val legacy_signal = process_bounded_kill_signal(legacy_exit)
-        val legacy_usage = ResourceUsage(
-            wall_ms: legacy_wall_ms, user_cpu_ms: 0, system_cpu_ms: 0,
-            peak_tree_charge_bytes: 0, peak_direct_child_rss_bytes: 0,
-            heap_live_end_bytes: 0, heap_peak_bytes: 0,
-            io_read_bytes: 0, io_write_bytes: 0, pids_peak: 0,
-            evidence_quality: ResourceEvidenceQuality.Unavailable,
-            termination: if legacy_timed_out: TerminationCause.WallTimeout elif legacy_signal > 0: TerminationCause.Signal elif legacy_exit == -1: TerminationCause.InfrastructureFailure else: TerminationCause.Exited,
-            signal: legacy_signal, exit_code: legacy_exit)
-        return ObservedProcessResult(
-            stdout: legacy_stdout, stderr: legacy_stderr, usage: legacy_usage,
-            stdout_truncated: false, stderr_truncated: false,
-            runtime_error: if legacy_exit == -1 and not legacy_timed_out: lifecycle_error else: 0)
+    # 95 = Linux ENOTSUP, 45 = some BSD ENOTSUP, 10045 = Winsock WSAEOPNOTSUPP.
+    # 129 = Windows UCRT's own `errno.h` ENOTSUP (distinct from all three) --
+    # measured 2026-09-24: even after the 2026-09-13 Win32 sync-family
+    # implementation landed (see the comment on that branch in
+    # src/runtime/runtime_process_owned.c), a deployed x86_64-pc-windows-msvc
+    # seed still answered every call through the RT_OWNED_WIN32_SYNC_IMPLEMENTED
+    # ENOTSUP stub with lifecycle_error == 129, so this branch never matched
+    # and every simple_ctx_execute/simple_ctx_batch_execute call hard-failed
+    # with exit_code -1 and empty stdout/stderr regardless of command or shell.
+    if lifecycle_error == 95 or lifecycle_error == 45 or lifecycle_error == 10045 or lifecycle_error == 129:
+        return _legacy_process_fallback(cmd, args, timeout_ms, max_output_bytes, lifecycle_error)
     val has_tree = (evidence_flags & 2) != 0
     val has_sampled_tree = (evidence_flags & 8) != 0
     val has_direct = (evidence_flags & 1) != 0
@@ -535,7 +630,7 @@ fn process_run_observed_bounded(cmd: text, args: [text], timeout_ms: i64, max_ou
 pub fn run_in_execution_resource_scope(scope: ExecutionResourceScope, cmd: text, args: [text]) -> ExecutionScopeResult:
     """Run one owned process tree and evaluate its declared budget independently."""
     val cgroup_path = _prepare_cgroup_v2(scope)
-    val process = if cgroup_path == "":
+    val process: ObservedProcessResult = if cgroup_path == "":
         if file_exists("/bin/sh"):
             _run_with_unix_limits(scope, cmd, args)
         else:

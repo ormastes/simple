@@ -53,9 +53,13 @@ Use this sequence for every bootstrap/compiler bug or unexplained error:
    child executable, runtime, cache, and failing command.
 2. Reproduce with `--diagnostics=test` first. Retain progress events and coarse
    phase totals; for a focused source run `simple check --phase-profile <path>`.
-3. Let the inventory reach its terminal manifest state when independent work
-   can continue. Group failures by first real diagnostic and phase instead of
-   reacting to every cascade.
+3. Let the explicit `--diagnostic-sweep` inventory reach its terminal manifest
+   state when independent work can continue. Each source owns an isolated
+   process group: a compiler crash or timeout is terminal for that source, not
+   for the sweep. Require retained `manifest.tsv`, `results.tsv`, per-source
+   logs, and `summary.env` with `complete=true`,
+   `terminal_count=source_total`, and `remaining=0` before editing. Group
+   failures by first real diagnostic and phase instead of reacting to cascades.
 4. Escalate only failing categories/files to `--diagnostics=debug`. Preserve
    parser/compiler trace, failing LLVM IR, memory snapshots, and the exact
    executable identities. Add scoped AOP tracing only when weave ownership is
@@ -69,10 +73,17 @@ Do not run debug over the whole tree by default: the probe produced 178 parser
 events for one small compiler file. Intensive use means consistent evidence on
 every bug and deep tracing of the narrowed owner, not unbounded global logging.
 
+This continuation rule applies only to check-only diagnostic inventory.
+Canonical bootstrap, CI, release, and artifact admission remain fail-fast and
+must not publish a partial candidate after a crash or any failed unit.
+
 ## Verification
 
 - POSIX shell syntax passes.
 - Bootstrap help exposes the modes.
+- The diagnostic-sweep integration fixture distinguishes ordinary exit 139
+  from SIGSEGV, proves later sources still run, and reconciles every manifest
+  row in a durable completion receipt.
 - The portability contract proves the mode is default-off, debug preserves
   LLVM IR, and Rust authority progress has a named milestone.
 - Exact integration coverage proves explicit child identity, default-off check

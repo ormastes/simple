@@ -1,4 +1,8 @@
 # RV64 host-GPU MMIO test closure
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 The canonical RV64 host-GPU entry closure reaches the correct PCI, ivshmem,
 protocol, MMIO, and SBI owners. `os.kernel.boot.mmio` also contains allocating
@@ -21,3 +25,4 @@ exits without producing an ELF.
 TODO: fix deployed RV freestanding-runtime object selection and lower SBI
 `unsafe`/inline assembly at the compiler owner. Do not add firmware-local
 runtime shims.
+

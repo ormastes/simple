@@ -1,23 +1,16 @@
 use std.ndarray.*
 use std.nogc_sync_mut.df.mod.{Symbol, DfError, DfValue, Series, SeriesErased, DataFrame, JoinHow, JoinPairs, ConcatAxis, no_missing_values, column_index, series_value_at, symbol_eq, symbol_ne}
+use std.nogc_sync_mut.df.numeric_index.{NumericJoinIndex, numeric_f64_key}
 
-struct PivotCell:
-    value: Float64
-    missing: Bool
+struct PivotGrid:
+    values: [Float64]
+    missing: [Bool]
+    row_count: i64
 
 fn series_value_as_f64(series: Series, index: i64) -> Float64:
     if series.dtype == DType.I64:
-        return Float64.new(series.values.flat_i64(index).value as f64)
-    series.values.flat_f64(index)
-
-fn series_value_equal(left: Series, left_index: i64, right: Series, right_index: i64) -> bool:
-    if left.missing[left_index].value or right.missing[right_index].value:
-        return false
-    if left.dtype == DType.F64:
-        return left.values.flat_f64(left_index) == right.values.flat_f64(right_index)
-    if left.dtype == DType.I64:
-        return left.values.flat_i64(left_index) == right.values.flat_i64(right_index)
-    false
+        return Float64.new(series.values.flat_i64(Index.new(index)).value as f64)
+    series.values.flat_f64(Index.new(index))
 
 fn melt_numeric(frame: DataFrame, id: Symbol, value_vars: [Symbol], variable_name: Symbol, value_name: Symbol) -> Result<DataFrame, DfError>:
     if value_vars.len() == 0:
@@ -46,7 +39,7 @@ fn melt_numeric(frame: DataFrame, id: Symbol, value_vars: [Symbol], variable_nam
         while row < rows:
             value_index = 0
             while value_index < value_series.len():
-                id_values.push(id_series.values.flat_i64(row))
+                id_values.push(id_series.values.flat_i64(Index.new(row)))
                 id_missing.push(id_series.missing[row])
                 variable_values.push(Int64.new(value_index))
                 value_values.push(series_value_as_f64(value_series[value_index], row))
@@ -64,7 +57,7 @@ fn melt_numeric(frame: DataFrame, id: Symbol, value_vars: [Symbol], variable_nam
     while row < rows:
         value_index = 0
         while value_index < value_series.len():
-            id_values.push(id_series.values.flat_f64(row))
+            id_values.push(id_series.values.flat_f64(Index.new(row)))
             id_missing.push(id_series.missing[row])
             variable_values.push(Int64.new(value_index))
             value_values.push(series_value_as_f64(value_series[value_index], row))
@@ -93,86 +86,101 @@ fn pivot_sum(frame: DataFrame, index: Symbol, columns: Symbol, values: Symbol, v
 fn pivot_sum_i64_index(index_series: Series, column_series: Series, value_series: Series, index_name: Symbol, value_prefix: Symbol) -> Result<DataFrame, DfError>:
     var row_keys: [Int64] = []
     var col_keys: [Int64] = []
+    val row_index = NumericJoinIndex.with_rows(value_series.len().value)
+    val col_index = NumericJoinIndex.with_rows(value_series.len().value)
     var row = 0
     while row < value_series.len().value:
         if not index_series.missing[row].value and not column_series.missing[row].value and not value_series.missing[row].value:
-            val row_key = index_series.values.flat_i64(row)
-            val col_key = column_series.values.flat_i64(row)
-            if i64_group_index(row_keys, row_key) < 0:
+            val row_key = index_series.values.flat_i64(Index.new(row))
+            val col_key = column_series.values.flat_i64(Index.new(row))
+            if row_index.first(row_key.value) < 0:
+                row_index.insert(row_key.value, row_keys.len())
                 row_keys.push(row_key)
-            if i64_group_index(col_keys, col_key) < 0:
+            if col_index.first(col_key.value) < 0:
+                col_index.insert(col_key.value, col_keys.len())
                 col_keys.push(col_key)
         row = row + 1
+    val grid = pivot_grid(index_series, column_series, value_series,
+        row_index, col_index, row_keys.len(), col_keys.len())
     var out: [SeriesErased] = [
         SeriesErased.I64Series(Series(name: index_name, values: array_i64(row_keys), dtype: DType.I64, missing: no_missing_values(row_keys.len())))
     ]
     var col_pos = 0
     while col_pos < col_keys.len():
-        var cell_values: [Float64] = []
-        var cell_missing: [Bool] = []
-        var row_pos = 0
-        while row_pos < row_keys.len():
-            val result = pivot_cell_sum_i64_index(index_series, column_series, value_series, row_keys[row_pos], col_keys[col_pos])
-            cell_values.push(result.value)
-            cell_missing.push(result.missing)
-            row_pos = row_pos + 1
-        out.push(SeriesErased.F64Series(Series(name: pivot_value_name(value_prefix, col_pos), values: array(cell_values), dtype: DType.F64, missing: cell_missing)))
+        out.push(SeriesErased.F64Series(
+            pivot_grid_series(grid, col_pos, pivot_value_name(value_prefix, col_pos))))
         col_pos = col_pos + 1
     DataFrame.from_columns(out)
 
 fn pivot_sum_f64_index(index_series: Series, column_series: Series, value_series: Series, index_name: Symbol, value_prefix: Symbol) -> Result<DataFrame, DfError>:
     var row_keys: [Float64] = []
     var col_keys: [Int64] = []
+    val row_index = NumericJoinIndex.with_rows(value_series.len().value)
+    val col_index = NumericJoinIndex.with_rows(value_series.len().value)
     var row = 0
     while row < value_series.len().value:
         if not index_series.missing[row].value and not column_series.missing[row].value and not value_series.missing[row].value:
-            val row_key = index_series.values.flat_f64(row)
-            val col_key = column_series.values.flat_i64(row)
-            if f64_group_index(row_keys, row_key) < 0:
+            val row_key = index_series.values.flat_f64(Index.new(row))
+            val col_key = column_series.values.flat_i64(Index.new(row))
+            val row_key_id = numeric_f64_key(row_key.value)
+            var seen_row_key = false
+            if row_key_id.?:
+                seen_row_key = row_index.first(row_key_id.unwrap()) >= 0
+            if not seen_row_key:
+                if row_key_id.?:
+                    row_index.insert(row_key_id.unwrap(), row_keys.len())
                 row_keys.push(row_key)
-            if i64_group_index(col_keys, col_key) < 0:
+            if col_index.first(col_key.value) < 0:
+                col_index.insert(col_key.value, col_keys.len())
                 col_keys.push(col_key)
         row = row + 1
+    val grid = pivot_grid(index_series, column_series, value_series,
+        row_index, col_index, row_keys.len(), col_keys.len())
     var out: [SeriesErased] = [
         SeriesErased.F64Series(Series(name: index_name, values: array(row_keys), dtype: DType.F64, missing: no_missing_values(row_keys.len())))
     ]
     var col_pos = 0
     while col_pos < col_keys.len():
-        var cell_values: [Float64] = []
-        var cell_missing: [Bool] = []
-        var row_pos = 0
-        while row_pos < row_keys.len():
-            val result = pivot_cell_sum_f64_index(index_series, column_series, value_series, row_keys[row_pos], col_keys[col_pos])
-            cell_values.push(result.value)
-            cell_missing.push(result.missing)
-            row_pos = row_pos + 1
-        out.push(SeriesErased.F64Series(Series(name: pivot_value_name(value_prefix, col_pos), values: array(cell_values), dtype: DType.F64, missing: cell_missing)))
+        out.push(SeriesErased.F64Series(
+            pivot_grid_series(grid, col_pos, pivot_value_name(value_prefix, col_pos))))
         col_pos = col_pos + 1
     DataFrame.from_columns(out)
 
-fn pivot_cell_sum_i64_index(index_series: Series, column_series: Series, value_series: Series, row_key: Int64, col_key: Int64) -> PivotCell:
-    var total = 0.0
-    var found = false
+fn pivot_grid(index_series: Series, column_series: Series, value_series: Series,
+    row_index: NumericJoinIndex, col_index: NumericJoinIndex,
+    row_count: i64, col_count: i64) -> PivotGrid:
+    var sums: [Float64] = []
+    var missing: [Bool] = []
+    var cell = 0
+    while cell < row_count * col_count:
+        sums.push(Float64.new(0.0))
+        missing.push(Bool.new(true))
+        cell = cell + 1
     var row = 0
     while row < value_series.len().value:
         if not index_series.missing[row].value and not column_series.missing[row].value and not value_series.missing[row].value:
-            if index_series.values.flat_i64(row) == row_key and column_series.values.flat_i64(row) == col_key:
-                total = total + value_series.values.flat_f64(row).value
-                found = true
+            if val row_key = numeric_join_key(index_series, row):
+                val row_pos = row_index.first(row_key)
+                val col_key = column_series.values.flat_i64(Index.new(row)).value
+                val col_pos = col_index.first(col_key)
+                if row_pos >= 0 and col_pos >= 0:
+                    val slot = col_pos * row_count + row_pos
+                    sums[slot] = Float64.new(sums[slot].value +
+                        value_series.values.flat_f64(Index.new(row)).value)
+                    missing[slot] = Bool.new(false)
         row = row + 1
-    PivotCell(value: Float64.new(total), missing: Bool.new(not found))
+    PivotGrid(values: sums, missing: missing, row_count: row_count)
 
-fn pivot_cell_sum_f64_index(index_series: Series, column_series: Series, value_series: Series, row_key: Float64, col_key: Int64) -> PivotCell:
-    var total = 0.0
-    var found = false
+fn pivot_grid_series(grid: PivotGrid, column: i64, name: Symbol) -> Series:
+    var values: [Float64] = []
+    var missing: [Bool] = []
     var row = 0
-    while row < value_series.len().value:
-        if not index_series.missing[row].value and not column_series.missing[row].value and not value_series.missing[row].value:
-            if index_series.values.flat_f64(row) == row_key and column_series.values.flat_i64(row) == col_key:
-                total = total + value_series.values.flat_f64(row).value
-                found = true
+    while row < grid.row_count:
+        val slot = column * grid.row_count + row
+        values.push(grid.values[slot])
+        missing.push(grid.missing[slot])
         row = row + 1
-    PivotCell(value: Float64.new(total), missing: Bool.new(not found))
+    Series(name: name, values: array(values), dtype: DType.F64, missing: missing)
 
 fn pivot_value_name(prefix: Symbol, ordinal: i64) -> Symbol:
     Symbol.from("{prefix.text}_{ordinal}")
@@ -280,30 +288,43 @@ fn merge_by_pairs(left: DataFrame, right: DataFrame, on: Symbol, how: JoinHow) -
     Ok(DataFrame(columns_internal: out))
 
 fn join_pairs(left_key: Series, right_key: Series, how: JoinHow) -> JoinPairs:
-    match how:
-        case JoinHow.Right:
-            right_order_join_pairs(left_key, right_key)
-        case _:
-            left_order_join_pairs(left_key, right_key, how)
+    indexed_numeric_join_pairs(left_key, right_key, how)
 
-fn left_order_join_pairs(left_key: Series, right_key: Series, how: JoinHow) -> JoinPairs:
+fn indexed_numeric_join_pairs(left_key: Series, right_key: Series, how: JoinHow) -> JoinPairs:
     var left_idx: [Int64] = []
     var right_idx: [Int64] = []
+    if how == JoinHow.Right:
+        val index = numeric_join_index(left_key)
+        var ri = 0
+        while ri < right_key.len().value:
+            var li = -1
+            if val key = numeric_join_key(right_key, ri):
+                li = index.first(key)
+            if li < 0:
+                left_idx.push(Int64.new(-1))
+                right_idx.push(Int64.new(ri))
+            while li >= 0:
+                left_idx.push(Int64.new(li))
+                right_idx.push(Int64.new(ri))
+                li = index.next_row(li)
+            ri = ri + 1
+        return JoinPairs(left: left_idx, right: right_idx)
+
+    val index = numeric_join_index(right_key)
     var right_matched = no_missing_values(right_key.len().value)
     var li = 0
     while li < left_key.len().value:
-        var matched = false
-        var ri = 0
-        while ri < right_key.len().value:
-            if series_value_equal(left_key, li, right_key, ri):
-                left_idx.push(Int64.new(li))
-                right_idx.push(Int64.new(ri))
-                right_matched[ri] = Bool.new(true)
-                matched = true
-            ri = ri + 1
-        if not matched and (how == JoinHow.Left or how == JoinHow.Outer):
+        var ri = -1
+        if val key = numeric_join_key(left_key, li):
+            ri = index.first(key)
+        if ri < 0 and (how == JoinHow.Left or how == JoinHow.Outer):
             left_idx.push(Int64.new(li))
             right_idx.push(Int64.new(-1))
+        while ri >= 0:
+            left_idx.push(Int64.new(li))
+            right_idx.push(Int64.new(ri))
+            right_matched[ri] = Bool.new(true)
+            ri = index.next_row(ri)
         li = li + 1
     if how == JoinHow.Outer:
         var ri = 0
@@ -314,24 +335,22 @@ fn left_order_join_pairs(left_key: Series, right_key: Series, how: JoinHow) -> J
             ri = ri + 1
     JoinPairs(left: left_idx, right: right_idx)
 
-fn right_order_join_pairs(left_key: Series, right_key: Series) -> JoinPairs:
-    var left_idx: [Int64] = []
-    var right_idx: [Int64] = []
-    var ri = 0
-    while ri < right_key.len().value:
-        var matched = false
-        var li = 0
-        while li < left_key.len().value:
-            if series_value_equal(left_key, li, right_key, ri):
-                left_idx.push(Int64.new(li))
-                right_idx.push(Int64.new(ri))
-                matched = true
-            li = li + 1
-        if not matched:
-            left_idx.push(Int64.new(-1))
-            right_idx.push(Int64.new(ri))
-        ri = ri + 1
-    JoinPairs(left: left_idx, right: right_idx)
+fn numeric_join_index(keys: Series) -> NumericJoinIndex:
+    val index = NumericJoinIndex.with_rows(keys.len().value)
+    var row = 0
+    while row < keys.len().value:
+        if val key = numeric_join_key(keys, row):
+            index.insert(key, row)
+        row = row + 1
+    index
+
+fn numeric_join_key(keys: Series, row: i64) -> i64?:
+    if keys.missing[row].value:
+        return nil
+    if keys.dtype == DType.I64:
+        return Some(keys.values.flat_i64(Index.new(row)).value)
+    val value = keys.values.flat_f64(Index.new(row)).value
+    numeric_f64_key(value)
 
 fn build_left_join_series(series: Series, right_key: Series, pairs: JoinPairs, on: Symbol) -> Result<Series, DfError>:
     match series.dtype:
@@ -342,12 +361,12 @@ fn build_left_join_series(series: Series, right_key: Series, pairs: JoinPairs, o
             while i < pairs.left.len():
                 val row = pairs.left[i].value
                 if row >= 0:
-                    values.push(series.values.flat_f64(row))
+                    values.push(series.values.flat_f64(Index.new(row)))
                     missing.push(series.missing[row])
                 else:
                     val right_row = pairs.right[i].value
                     if symbol_eq(series.name, on) and right_row >= 0:
-                        values.push(right_key.values.flat_f64(right_row))
+                        values.push(right_key.values.flat_f64(Index.new(right_row)))
                         missing.push(right_key.missing[right_row])
                     else:
                         values.push(Float64.new(0.0))
@@ -361,12 +380,12 @@ fn build_left_join_series(series: Series, right_key: Series, pairs: JoinPairs, o
             while i < pairs.left.len():
                 val row = pairs.left[i].value
                 if row >= 0:
-                    values.push(series.values.flat_i64(row))
+                    values.push(series.values.flat_i64(Index.new(row)))
                     missing.push(series.missing[row])
                 else:
                     val right_row = pairs.right[i].value
                     if symbol_eq(series.name, on) and right_row >= 0:
-                        values.push(right_key.values.flat_i64(right_row))
+                        values.push(right_key.values.flat_i64(Index.new(right_row)))
                         missing.push(right_key.missing[right_row])
                     else:
                         values.push(Int64.new(0))
@@ -385,7 +404,7 @@ fn build_right_join_series(series: Series, pairs: JoinPairs) -> Result<Series, D
             while i < pairs.right.len():
                 val row = pairs.right[i].value
                 if row >= 0:
-                    values.push(series.values.flat_f64(row))
+                    values.push(series.values.flat_f64(Index.new(row)))
                     missing.push(series.missing[row])
                 else:
                     values.push(Float64.new(0.0))
@@ -399,7 +418,7 @@ fn build_right_join_series(series: Series, pairs: JoinPairs) -> Result<Series, D
             while i < pairs.right.len():
                 val row = pairs.right[i].value
                 if row >= 0:
-                    values.push(series.values.flat_i64(row))
+                    values.push(series.values.flat_i64(Index.new(row)))
                     missing.push(series.missing[row])
                 else:
                     values.push(Int64.new(0))
@@ -410,6 +429,8 @@ fn build_right_join_series(series: Series, pairs: JoinPairs) -> Result<Series, D
             Err(DfError.ShapeMismatch)
 
 fn groupby_numeric(frame: DataFrame, by: Symbol, value: Symbol, mean: bool) -> Result<DataFrame, DfError>:
+    if symbol_eq(by, value):
+        return Err(DfError.DuplicateColumn)
     val key = frame.col(by)?
     val values = frame.col(value)?
     if values.dtype != DType.F64:
@@ -426,19 +447,25 @@ fn groupby_f64_key(key: Series, values: Series, by: Symbol, value: Symbol, mean:
     var keys: [Float64] = []
     var sums: [Float64] = []
     var counts: [Int64] = []
+    val index = NumericJoinIndex.with_rows(key.len().value)
     var row = 0
     while row < values.len().value:
         if not key.missing[row].value and not values.missing[row].value:
-            val key_value = key.values.flat_f64(row)
-            val value_value = values.values.flat_f64(row)
-            val index = f64_group_index(keys, key_value)
-            if index < 0:
+            val key_value = key.values.flat_f64(Index.new(row))
+            val value_value = values.values.flat_f64(Index.new(row))
+            val key_id = numeric_join_key(key, row)
+            var group = -1
+            if key_id.?:
+                group = index.first(key_id.unwrap())
+            if group < 0:
+                if key_id.?:
+                    index.insert(key_id.unwrap(), keys.len())
                 keys.push(key_value)
                 sums.push(value_value)
                 counts.push(Int64.new(1))
             else:
-                sums[index] = Float64.new(sums[index].value + value_value.value)
-                counts[index] = Int64.new(counts[index].value + 1)
+                sums[group] = Float64.new(sums[group].value + value_value.value)
+                counts[group] = Int64.new(counts[group].value + 1)
         row = row + 1
     if mean:
         sums = divide_group_sums(sums, counts)
@@ -451,19 +478,22 @@ fn groupby_i64_key(key: Series, values: Series, by: Symbol, value: Symbol, mean:
     var keys: [Int64] = []
     var sums: [Float64] = []
     var counts: [Int64] = []
+    val index = NumericJoinIndex.with_rows(key.len().value)
     var row = 0
     while row < values.len().value:
         if not key.missing[row].value and not values.missing[row].value:
-            val key_value = key.values.flat_i64(row)
-            val value_value = values.values.flat_f64(row)
-            val index = i64_group_index(keys, key_value)
-            if index < 0:
+            val key_value = key.values.flat_i64(Index.new(row))
+            val value_value = values.values.flat_f64(Index.new(row))
+            val key_id = numeric_join_key(key, row).unwrap()
+            val group = index.first(key_id)
+            if group < 0:
+                index.insert(key_id, keys.len())
                 keys.push(key_value)
                 sums.push(value_value)
                 counts.push(Int64.new(1))
             else:
-                sums[index] = Float64.new(sums[index].value + value_value.value)
-                counts[index] = Int64.new(counts[index].value + 1)
+                sums[group] = Float64.new(sums[group].value + value_value.value)
+                counts[group] = Int64.new(counts[group].value + 1)
         row = row + 1
     if mean:
         sums = divide_group_sums(sums, counts)
@@ -471,22 +501,6 @@ fn groupby_i64_key(key: Series, values: Series, by: Symbol, value: Symbol, mean:
         Series(name: by, values: array_i64(keys), dtype: DType.I64, missing: no_missing_values(keys.len())),
         Series(name: value, values: array(sums), dtype: DType.F64, missing: no_missing_values(sums.len()))
     ]))
-
-fn f64_group_index(keys: [Float64], value: Float64) -> i64:
-    var i = 0
-    while i < keys.len():
-        if keys[i] == value:
-            return i
-        i = i + 1
-    -1
-
-fn i64_group_index(keys: [Int64], value: Int64) -> i64:
-    var i = 0
-    while i < keys.len():
-        if keys[i] == value:
-            return i
-        i = i + 1
-    -1
 
 fn divide_group_sums(sums: [Float64], counts: [Int64]) -> [Float64]:
     var out: [Float64] = []

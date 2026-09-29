@@ -13,10 +13,10 @@
 # test/01_unit/lib/nogc_sync_mut/enterprise_store/enterprise_store_audit_hash_parity_spec.spl
 # (13 vectors pinned to external reference digests). Run it after any change here.
 
-use std.common.crypto.types.{rotr32}
+use std.common.crypto.word_ops.{rotr32}
 use std.common.crypto.sha256_core.{sha256_initial_hash, sha256_pad_message, sha256_process_block}
 use std.common.crypto.secure_memory.{secure_zero_i64_slots}
-use std.common.string_core.{text_to_bytes as string_core_text_to_bytes}
+use std.common.text_bytes.{text_to_utf8_bytes}
 
 # SHA-256 round constants (first 32 bits of fractional parts of cube roots of first 64 primes).
 fn _sha256_k() -> [i64]:
@@ -209,7 +209,14 @@ fn sha256_bytes(data: [i64]) -> [i64]:
 extern fn rt_tls13_sha256(data: [u8]) -> [u8]
 
 fn sha256_text(data: text) -> text:
-    val raw = string_core_text_to_bytes(data)
+    sha256_u8_fast_hex(text_to_utf8_bytes(data))
+
+# Lowercase hex SHA-256 of raw bytes through the runtime accelerator, with the
+# engine-independent fallback below. `sha256_text` is this over the UTF-8
+# bytes; byte-array callers (SCV content ids) use it directly instead of the
+# pure-Simple os.crypto.sha256, which did not finish on a 3 KB file in a
+# native Windows stage-2 binary (2026-09-25).
+fn sha256_u8_fast_hex(raw: [u8]) -> text:
     var digest: [u8] = []
     unsafe(capabilities: [ffi]):
         digest = rt_tls13_sha256(raw)
@@ -372,7 +379,7 @@ fn _sha256_u8_hex_owned(data: [u8], require_zeroization: bool) -> text:
         var shift = 28
         while shift >= 0:
             val nibble = (word >> shift) & 15
-            result[result_i] = digits[nibble:nibble + 1]
+            result[result_i] = digits.substring(nibble, nibble + 1)
             result_i = result_i + 1
             shift = shift - 4
         out_i = out_i + 1
@@ -499,13 +506,17 @@ fn sha256_stream_v1_update(stream: Sha256StreamV1, data: [u8]) -> bool:
     val data_len = data.len()
     if stream.finished or data_len > 0x1fffffffffffffffu64 - stream.total_bytes:
         return false
-    var i: u64 = 0u64
+    # Native packed [u8] reads use the signed array-index path. The unsigned
+    # path can read different bytes from a runtime-built array even though a
+    # literal array passes the same stream vectors.
+    val indexed_len = data_len.to_i64()
+    var i: i64 = 0
     # Complete an existing partial block once.  The former byte-at-a-time
     # helper performed a call and block-full branch for every input byte.
-    while i < data_len and stream.block_len < 64:
+    while i < indexed_len and stream.block_len < 64:
         stream.block[stream.block_len] = data[i] as i64
         stream.block_len = stream.block_len + 1
-        i = i + 1u64
+        i = i + 1
     if stream.block_len == 64:
         _sha256_stream_v1_process(stream)
         stream.block_len = 0
@@ -513,20 +524,39 @@ fn sha256_stream_v1_update(stream: Sha256StreamV1, data: [u8]) -> bool:
     # Process complete blocks directly.  This preserves the exact schedule and
     # state transition while reducing dispatch/fullness checks from O(bytes) to
     # O(blocks); the byte copies remain linear and allocation-free.
-    while i + 64u64 <= data_len:
+    while i + 64 <= indexed_len:
         var j: i64 = 0
         while j < 64:
-            stream.block[j] = data[i + j as u64] as i64
+            stream.block[j] = data[i + j] as i64
             j = j + 1
         _sha256_stream_v1_process(stream)
-        i = i + 64u64
+        i = i + 64
 
-    while i < data_len:
+    while i < indexed_len:
         stream.block[stream.block_len] = data[i] as i64
         stream.block_len = stream.block_len + 1
-        i = i + 1u64
+        i = i + 1
     stream.total_bytes = stream.total_bytes + data_len
     true
+
+fn sha256_stream_v1_update_byte(stream: Sha256StreamV1, value: u8) -> bool:
+    """Feed one byte without materializing a caller-owned byte array."""
+    if stream.finished or stream.total_bytes >= 0x1fffffffffffffffu64:
+        return false
+    _sha256_stream_v1_push(stream, value as i64)
+    stream.total_bytes = stream.total_bytes + 1u64
+    true
+
+fn sha256_stream_v1_zeroize(stream: Sha256StreamV1) -> bool:
+    """Volatile-wipe all message-derived streaming state and disable reuse."""
+    val state_report = secure_zero_i64_slots(stream.state)
+    val block_report = secure_zero_i64_slots(stream.block)
+    val schedule_report = secure_zero_i64_slots(stream.schedule)
+    stream.block_len = 0
+    stream.total_bytes = 0u64
+    stream.finished = true
+    state_report.verified() and block_report.verified() and
+        schedule_report.verified()
 
 fn sha256_stream_v1_finish_hex(stream: Sha256StreamV1) -> text?:
     if stream.finished:
@@ -549,7 +579,7 @@ fn sha256_stream_v1_finish_hex(stream: Sha256StreamV1) -> text?:
         var nibble_shift = 28
         while nibble_shift >= 0:
             val nibble = (stream.state[wi] >> nibble_shift) & 15
-            result[oi] = digits[nibble:nibble + 1]
+            result[oi] = digits.substring(nibble, nibble + 1)
             oi = oi + 1
             nibble_shift = nibble_shift - 4
         wi = wi + 1
@@ -582,14 +612,14 @@ fn sha256_bytes_scalar(data: [i64]) -> [i64]:
         var block: [i64] = []
         var bi = 0
         while bi < 64:
-            block.push(padded.get(offset + bi))
+            block.push(padded[offset + bi])
             bi = bi + 1
         h = sha256_process_block(h, block)
         offset = offset + 64
     var result: [i64] = []
     var wi = 0
     while wi < 8:
-        val w = h.get(wi)
+        val w = h[wi]
         result.push((w >> 24) & 255)
         result.push((w >> 16) & 255)
         result.push((w >>  8) & 255)
@@ -597,6 +627,6 @@ fn sha256_bytes_scalar(data: [i64]) -> [i64]:
         wi = wi + 1
     result
 
-export sha256_u8_hex
+export sha256_u8_hex, sha256_u8_fast_hex
 export sha256_u8_hex_zeroizing
-export Sha256StreamV1, sha256_stream_v1_new, sha256_stream_v1_reset, sha256_stream_v1_update, sha256_stream_v1_finish_hex
+export Sha256StreamV1, sha256_stream_v1_new, sha256_stream_v1_reset, sha256_stream_v1_update, sha256_stream_v1_update_byte, sha256_stream_v1_finish_hex, sha256_stream_v1_zeroize

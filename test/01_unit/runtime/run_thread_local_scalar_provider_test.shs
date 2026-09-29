@@ -1,0 +1,29 @@
+#!/bin/sh
+set -eu
+
+root_dir=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+cd "$root_dir"
+
+build_dir=${BUILD_DIR:-build/test-artifacts/01_unit/runtime/thread-local-scalar-provider}
+mkdir -p "$build_dir"
+cc -std=gnu11 -O1 -ffunction-sections -fdata-sections -Isrc/runtime \
+    -c src/runtime/runtime_thread.c -o "$build_dir/runtime_thread.o"
+cc -std=gnu11 -O1 -ffunction-sections -fdata-sections -Isrc/runtime \
+    -c src/runtime/runtime_memtrack.c -o "$build_dir/runtime_memtrack.o"
+cc -std=gnu11 -O1 -ffunction-sections -fdata-sections -Isrc/runtime \
+    -c test/01_unit/runtime/thread_local_scalar_c_provider_test.c \
+    -o "$build_dir/thread_local_scalar_c_provider_test.o"
+case "$(uname -s)" in
+    Darwin) dead_strip=-Wl,-dead_strip ;;
+    *) dead_strip=-Wl,--gc-sections ;;
+esac
+cc "$build_dir/thread_local_scalar_c_provider_test.o" "$build_dir/runtime_thread.o" \
+    "$build_dir/runtime_memtrack.o" \
+    "$dead_strip" -lpthread -o "$build_dir/thread_local_scalar_c_provider_test"
+"$build_dir/thread_local_scalar_c_provider_test"
+
+if [ "${1-}" = --c-only ]; then
+    exit 0
+fi
+cargo test --manifest-path src/compiler_rust/runtime/Cargo.toml \
+    test_thread_local_raw_i64_abi_is_distinct_and_isolated --lib

@@ -1,0 +1,180 @@
+# Typed UI identity — phase 1 specs.
+#
+# Covers: UiQualifiedId/UiScopePath/UiNodeKey canonical encoding
+# (surface#widget wire format preserved, scope_path additive),
+# duplicate-registration diagnostics + strict mode in the process-global
+# widget registry, find_widget_strict exactly-one-or-error lookup, and
+# kind-aware accessible-name extraction in the access snapshot.
+
+use common.ui.ui_identity.{
+    UiScopePath,
+    ui_scope_path_encode,
+    ui_scope_path_decode,
+    ui_qualified_id,
+    ui_qualified_id_scoped,
+    ui_qualified_id_wire,
+    ui_qualified_id_from_wire,
+    ui_qualified_id_full,
+    ui_node_key,
+    ui_node_key_wire,
+    ui_node_key_full
+}
+use common.ui.widget.{
+    WidgetNode,
+    WidgetRecord,
+    UITree,
+    UIState,
+    upsert_widget_record,
+    upsert_widget_record_at,
+    set_widget_store_strict,
+    widget_dup_warnings,
+    clear_widget_dup_diagnostics,
+    require_widget_record,
+    register_widget_child
+}
+use common.ui.builder.{button, label, text_widget, panel, text_field, image}
+use common.ui.access_snapshot.{ui_access_snapshot_from_state}
+
+
+describe "UiQualifiedId canonical encoding":
+    it "encodes surface#widget wire format":
+        val qid = ui_qualified_id("main", "save_btn")
+        expect ui_qualified_id_wire(qid) to_equal "main#save_btn"
+
+    it "passes through an already-canonical local id":
+        val qid = ui_qualified_id("main", "other#save_btn")
+        expect ui_qualified_id_wire(qid) to_equal "other#save_btn"
+
+    it "round-trips through from_wire":
+        val qid = ui_qualified_id_from_wire("sheet1#cell_a1")
+        expect qid.surface_id to_equal "sheet1"
+        expect qid.local_id to_equal "cell_a1"
+        expect ui_qualified_id_wire(qid) to_equal "sheet1#cell_a1"
+
+    it "treats a wire id without # as local-only":
+        val qid = ui_qualified_id_from_wire("lonely")
+        expect qid.surface_id to_equal ""
+        expect qid.local_id to_equal "lonely"
+
+describe "UiScopePath additive encoding":
+    it "encodes and decodes scope segments":
+        val path = ui_scope_path_decode("dialog/settings")
+        expect path.segments.len() to_equal 2
+        expect ui_scope_path_encode(path) to_equal "dialog/settings"
+
+    it "keeps plain wire format when scope is empty":
+        val qid = ui_qualified_id("main", "ok_btn")
+        expect ui_qualified_id_full(qid) to_equal "main#ok_btn"
+
+    it "extends encoding with scope path when present":
+        val qid = ui_qualified_id_scoped("main", ["dialog", "settings"], "ok_btn")
+        expect ui_qualified_id_full(qid) to_equal "main#dialog/settings/ok_btn"
+
+describe "UiNodeKey":
+    it "carries kind and encodes both wire and full forms":
+        val key = ui_node_key("main", ["toolbar"], "save", "button")
+        expect key.kind to_equal "button"
+        expect ui_node_key_wire(key) to_equal "main#save"
+        expect ui_node_key_full(key) to_equal "main#toolbar/save"
+
+describe "duplicate widget registration diagnostics":
+    it "records a warning on same-id different-kind and still replaces (default mode)":
+        clear_widget_dup_diagnostics()
+        set_widget_store_strict(false)
+        upsert_widget_record(WidgetRecord(id: "uid_dup1", kind: "button", layout: "vbox", visible: true, focused: false))
+        upsert_widget_record(WidgetRecord(id: "uid_dup1", kind: "text", layout: "vbox", visible: true, focused: false))
+        val warnings = widget_dup_warnings()
+        expect warnings.len() to_equal 1
+        expect warnings[0].contains("uid_dup1") to_equal true
+        expect warnings[0].contains("warning") to_equal true
+        # legacy replace behavior preserved
+        expect require_widget_record("uid_dup1").kind to_equal "text"
+
+    it "does not warn on same-id same-kind re-upsert":
+        clear_widget_dup_diagnostics()
+        upsert_widget_record(WidgetRecord(id: "uid_dup2", kind: "panel", layout: "vbox", visible: true, focused: false))
+        upsert_widget_record(WidgetRecord(id: "uid_dup2", kind: "panel", layout: "hbox", visible: false, focused: false))
+        expect widget_dup_warnings().len() to_equal 0
+
+    it "records a warning on distinct construction sites":
+        clear_widget_dup_diagnostics()
+        val ra = WidgetRecord(id: "uid_dup3", kind: "panel", layout: "vbox", visible: true, focused: false)
+        expect upsert_widget_record_at(ra, "app_a.spl:10") to_equal ""
+        expect upsert_widget_record_at(ra, "app_b.spl:20") to_equal ""
+        val warnings = widget_dup_warnings()
+        expect warnings.len() to_equal 1
+        expect warnings[0].contains("app_b.spl:20") to_equal true
+
+    it "strict mode turns the conflict into an error and refuses the replace":
+        clear_widget_dup_diagnostics()
+        set_widget_store_strict(true)
+        upsert_widget_record(WidgetRecord(id: "uid_dup4", kind: "button", layout: "vbox", visible: true, focused: false))
+        val err = upsert_widget_record_at(WidgetRecord(id: "uid_dup4", kind: "image", layout: "vbox", visible: true, focused: false), "")
+        set_widget_store_strict(false)
+        expect err.contains("error") to_equal true
+        expect err.contains("uid_dup4") to_equal true
+        # record NOT replaced in strict mode
+        expect require_widget_record("uid_dup4").kind to_equal "button"
+
+describe "find_widget_strict":
+    it "finds exactly one match":
+        val root = panel("fs_root1", "Root", [button("fs_save1", "Save", "save")])
+        val result = root.find_widget_strict("fs_save1")
+        expect result.found to_equal true
+        expect result.node_id to_equal "fs_save1"
+        expect result.error to_equal ""
+
+    it "returns unknown-id error with near-miss suggestions":
+        val root = panel("fs_root2", "Root", [button("fs_save_button", "Save", "save")])
+        val result = root.find_widget_strict("fs_save")
+        expect result.found to_equal false
+        expect result.error.contains("unknown widget id") to_equal true
+        expect result.error.contains("fs_save_button") to_equal true
+
+    it "returns ambiguity error listing all candidates when an id appears twice":
+        val root = panel("fs_root3", "Root", [panel("fs_p1", "P1", []), panel("fs_p2", "P2", [])])
+        # same child id registered under two parents => duplicate in tree
+        val dup = button("fs_dup_btn", "Dup", "noop")
+        register_widget_child("fs_p1", "fs_dup_btn")
+        register_widget_child("fs_p2", "fs_dup_btn")
+        val result = root.find_widget_strict("fs_dup_btn")
+        expect result.found to_equal false
+        expect result.candidates.len() to_equal 2
+        expect result.error.contains("ambiguous") to_equal true
+
+    it "works via UITree.find_widget_strict":
+        val root = panel("fs_root4", "Root", [button("fs_ok4", "OK", "ok")])
+        val tree = UITree.new(root)
+        val result = tree.find_widget_strict("fs_ok4")
+        expect result.found to_equal true
+
+describe "access snapshot accessible names":
+    it "extracts text_value per widget kind":
+        val root = panel("an_root", "Settings", [
+            button("an_btn", "Save", "save"),
+            label("an_lbl", "Username"),
+            text_widget("an_txt", "Hello world"),
+            text_field("an_field", "alice", "enter name"),
+            image("an_img", "logo.png", "Company logo")
+        ])
+        val state = UIState.new(UITree.new(root))
+        val snapshot = ui_access_snapshot_from_state(state, [])
+        var by_id: Dict<text, text> = {}
+        for node in snapshot.nodes:
+            by_id[node.widget_id] = node.text_value
+        expect by_id["an_root"] to_equal "Settings"
+        expect by_id["an_btn"] to_equal "Save"
+        expect by_id["an_lbl"] to_equal "Username"
+        expect by_id["an_txt"] to_equal "Hello world"
+        expect by_id["an_field"] to_equal "alice"
+        expect by_id["an_img"] to_equal "Company logo"
+
+    it "falls back to placeholder when text_field value is empty":
+        val root = panel("an_root2", "P2", [text_field("an_field2", "", "type here")])
+        val state = UIState.new(UITree.new(root))
+        val snapshot = ui_access_snapshot_from_state(state, [])
+        var found = ""
+        for node in snapshot.nodes:
+            if node.widget_id == "an_field2":
+                found = node.text_value
+        expect found to_equal "type here"

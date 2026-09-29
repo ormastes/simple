@@ -1,0 +1,66 @@
+"""Pure behavioral integration scenarios for exec-mapping cleanup v1."""
+use std.spec.*
+use compiler.loader.loader.exec_mapping_cleanup_v1.{
+    ExecCleanupSlotPhaseV1, exec_cleanup_state_v1, exec_cleanup_check_v1,
+    exec_cleanup_reserve_v1, exec_cleanup_begin_construct_v1,
+    exec_cleanup_complete_construct_v1, exec_cleanup_completion_v1,
+    exec_cleanup_quarantine_completion_v1, exec_cleanup_free_range_allowed_v1}
+
+fn reserve(id: text = "map-a", bytes: i64 = 4096) -> any:
+    exec_cleanup_reserve_v1(exec_cleanup_state_v1(), id, bytes)
+
+fn bind(id: text = "map-a", bytes: i64 = 4096, addr: i64 = 4096) -> any:
+    val r = reserve(id, bytes)
+    exec_cleanup_begin_construct_v1(r.state, r.token, addr)
+
+fn integration_pending() -> any:
+    val b = bind()
+    exec_cleanup_complete_construct_v1(b.state, b.token, false)
+
+describe "exec mapping cleanup integration behavior v1":
+    it "starts valid and empty":
+        expect(exec_cleanup_check_v1(exec_cleanup_state_v1())).to_equal(true)
+    it "reserves one slot":
+        expect(reserve().state.slots[0].phase).to_equal(ExecCleanupSlotPhaseV1.Reserved)
+    it "rejects duplicate mapping":
+        expect(exec_cleanup_reserve_v1(reserve().state, "map-a", 1).reason).to_equal("duplicate-mapping")
+    it "rejects empty mapping id":
+        expect(reserve("").reason).to_equal("invalid-reservation")
+    it "rejects zero extent":
+        expect(reserve("zero", 0).reason).to_equal("invalid-reservation")
+    it "rejects over-capacity extent":
+        expect(reserve("large", 1073741825).reason).to_equal("capacity-refused")
+    it "binds a positive address":
+        expect(bind().state.slots[0].address).to_equal(4096)
+    it "rejects unknown bind token":
+        expect(exec_cleanup_begin_construct_v1(exec_cleanup_state_v1(), 99, 1).reason).to_equal("StaleReceipt")
+    it "rejects zero bind address":
+        expect(exec_cleanup_begin_construct_v1(reserve().state, 1, 0).reason).to_equal("construct-bind-refused")
+    it "rejects overlapping contention":
+        val a = bind("a", 4096, 4096)
+        val b = exec_cleanup_reserve_v1(a.state, "b", 4096)
+        expect(exec_cleanup_begin_construct_v1(b.state, b.token, 4096).reason).to_equal("retained-range-overlap")
+    it "commits transferred ownership":
+        val b = bind()
+        val done = exec_cleanup_complete_construct_v1(b.state, b.token, true)
+        expect(done.reason).to_equal("CommittedLive")
+        expect(done.state.slots.len()).to_equal(0)
+    it "aborts before allocation":
+        val r = reserve()
+        val done = exec_cleanup_complete_construct_v1(r.state, r.token, false)
+        expect(done.reason).to_equal("construction-aborted-before-allocation")
+    it "enters release pending":
+        val p = integration_pending()
+        expect(p.reason).to_equal("ReleasePending")
+        expect(p.permit_present).to_equal(true)
+        expect(p.state.slots[0].phase).to_equal(ExecCleanupSlotPhaseV1.Quarantined)
+    it "retains bytes on failed release":
+        val p = integration_pending()
+        val f = exec_cleanup_quarantine_completion_v1(p.state, exec_cleanup_completion_v1(p.token, p.permit, false))
+        expect(f.reason).to_equal("NativeReleaseFailed")
+        expect(f.state.reserved_bytes).to_equal(4096)
+    it "releases bytes on verified completion":
+        val p = integration_pending()
+        val d = exec_cleanup_quarantine_completion_v1(p.state, exec_cleanup_completion_v1(p.token, p.permit, true))
+        expect(d.reason).to_equal("released")
+        expect(d.state.slots.len()).to_equal(0)

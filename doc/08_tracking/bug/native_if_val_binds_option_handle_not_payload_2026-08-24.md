@@ -1,4 +1,9 @@
 # `if val x = opt:` binds the Option HANDLE, not the payload (native lane)
+## Closed 2026-09-16 — ...*Date:** 2026-08-24 **Status:** RESOLVED 2026-08-24 — binder fix in `src/compiler/10.front
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-08-24
 **Status:** RESOLVED 2026-08-24 — binder fix in `src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl`; float payload follow-up in `src/compiler/50.mir/_MirLoweringExpr/` (see "Float payload resolution"); gate GREEN with 12 probes
@@ -390,4 +395,5 @@ exit 0. Note the seven pre-existing rows are identical on both sides — this
 change neither regresses nor depends on them. Neighbour gate, same tree:
 `PASS — 4 engine(s) executed, 0 crashes, unwrap-then-field holds`
 (`check-optional-class-unwrap-field.shs`, exit 0).
+
 

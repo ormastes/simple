@@ -4,72 +4,47 @@ use os.kernel.arch.arch_context.{Architecture}
 use os.kernel.arch.user_entry_bridge.{dispatch_fs_exec_user_handoff}
 use os.kernel.loader.fs_exec_spawn.{fs_exec_prepare_spawn}
 use os.kernel.loader.fs_exec_spawn.{fs_exec_adopt_authenticated_v1}
+use os.kernel.loader.fs_exec_launch_caps_v1.{fs_exec_launch_caps_with_launch_v1}
 use std.fs_driver.mount_table.{MountTable}
 use os.kernel.loader.executable_authority_registry.{ExecutableAuthorityRegistryV1, ExecutableAuthorityTokenV1}
 use os.kernel.loader.executable_load_plan_v1.{ExecutableLoadConsumerV1}
 use os.kernel.abi.syscall_shim.{shim_init}
 use os.kernel.scheduler.scheduler.{Scheduler}
+use os.kernel.scheduler.process_execution_observation.{
+    SchedulerExecutionDeliveryStatusV2,
+    scheduler_execution_compare_and_deliver_reaped_v2,
+    scheduler_execution_discard_terminal_v2
+}
+use os.kernel.loader.executable_launch_arguments_v1.{
+    executable_launch_arguments_v1_errno,
+    executable_launch_arguments_v1_validate
+}
+use os.kernel.loader.cap_exec_gate.{exec_cap_check_caps}
+use os.kernel.loader.spawn_authority.{spawn_authority_check_spawn}
+use os.kernel.loader.spawn_recipes.{spawn_recipe_launch_contract_valid}
 use os.kernel.ipc.ipc.{IpcManager}
 use os.kernel.log.klog.{KernelLog}
 use os.services.netstack.netstack_init.{net_arm64_task_teardown}
 use os.kernel.types.task_types.{TaskId}
-use os.kernel.scheduler.scheduler.{wait_collect_result_error, wait_collect_result_status}
-use os.kernel.types.capability_types.{CapabilityKind, CapabilitySet, CapabilityToken}
+use os.kernel.scheduler.scheduler.{wait_collect_result_error, wait_collect_result_pid, wait_collect_result_status}
+use os.kernel.types.capability_types.{CapabilitySet}
+
+@cfg(arm64)
+use os.services.vfs.arm_fs_exec_vfs.{arm_fs_exec_stream_payload_resident_v1}
 
 extern fn serial_println(msg: text)
 
-fn _arm64_launch_token(kind: CapabilityKind, owner: u64, token_id: u64) -> CapabilityToken:
-    CapabilityToken(kind: kind, generation: token_id, owner: owner,
-        token_id: token_id, parent_token_id: 0u64, depth: 0)
+# Lane-C1 clang bring-up (Wall 10): the raw-region ring-3 launcher in
+# examples/09_embedded/simple_os/arch/arm64/boot/baremetal_stubs.c. Raw u64
+# size + tagged [text] argv per the freestanding extern ABI.
+@cfg(arm64)
+extern fn rt_arm_payload_elf64_ring3_enter(size: u64, argv: [text]) -> i64
 
-fn _arm64_add_file_token(tokens: [CapabilityToken], kind: CapabilityKind,
-        owner: u64, next_id: u64) -> ([CapabilityToken], u64):
-    tokens.push(_arm64_launch_token(kind, owner, next_id))
-    (tokens, next_id + 1u64)
-
-fn _arm64_add_server_persistence_path(tokens: [CapabilityToken], path: text,
-        owner: u64, next_id: u64) -> ([CapabilityToken], u64):
-    var result = _arm64_add_file_token(tokens,
-        CapabilityKind.FileRead(path_prefix: path), owner, next_id)
-    result = _arm64_add_file_token(result.0,
-        CapabilityKind.FileWrite(path_prefix: path), owner, result.1)
-    _arm64_add_file_token(result.0,
-        CapabilityKind.FileCreate(path_prefix: path), owner, result.1)
-
-pub fn arm64_fs_exec_launch_caps(path: text, argv: [text], owner: u64) -> CapabilitySet:
-    """Build the pledged, non-delegable authority for one payload launch."""
-    var tokens: [CapabilityToken] = []
-    var next_id: u64 = 1u64
-    tokens.push(_arm64_launch_token(CapabilityKind.NetConnect(port: 0), owner, next_id))
-    next_id = next_id + 1u64
-    tokens.push(_arm64_launch_token(CapabilityKind.NetListen(port: 0), owner, next_id))
-    next_id = next_id + 1u64
-    tokens.push(_arm64_launch_token(CapabilityKind.FileExec(path_prefix: path), owner, next_id))
-    next_id = next_id + 1u64
-    tokens.push(_arm64_launch_token(CapabilityKind.FileRead(path_prefix: path), owner, next_id))
-    next_id = next_id + 1u64
-    # Absolute argv entries are the only additional filesystem inputs known at
-    # launch. Flags and other scalar arguments must not turn into path grants.
-    for arg in argv:
-        if arg.starts_with("/") and arg != path:
-            tokens.push(_arm64_launch_token(CapabilityKind.FileRead(path_prefix: arg), owner, next_id))
-            next_id = next_id + 1u64
-    # The server payload consumes two immutable mounted inputs and the exact
-    # canonical database/WAL names. File capabilities use component-aware
-    # prefix matching, so granting each complete filename does not authorize a
-    # sibling or the filesystem root.
-    if path == "/SERVERS.ELF":
-        var added = _arm64_add_file_token(tokens,
-            CapabilityKind.FileRead(path_prefix: "/SYS/SERVER.HTM"), owner, next_id)
-        added = _arm64_add_file_token(added.0,
-            CapabilityKind.FileRead(path_prefix: "/SYS/SRVDB.KEY"), owner, added.1)
-        for db_path in [
-            "/SERVER.SDN", "/SERVER.SDN.lock", "/SERVER.SDN.tmp",
-            "/SERVER.SDN.wal", "/SERVER.SDN.wal.lock", "/SERVER.SDN.wal.tmp"
-        ]:
-            added = _arm64_add_server_persistence_path(added.0, db_path, owner, added.1)
-        tokens = added.0
-    CapabilitySet(caps: tokens, is_pledged: true)
+pub fn arm64_fs_exec_launch_caps_with_launch_v1(
+    path: text, argv: [text], envp: [text], owner: u64
+) -> CapabilitySet:
+    """Use the shared exact service recipe for the authenticated ARM64 launch."""
+    fs_exec_launch_caps_with_launch_v1(path, argv, envp, owner)
 
 pub fn arm64_fs_exec_spawn(path: text, argv: [text], envp: [text]) -> i64:
     val prepared = fs_exec_prepare_spawn(path, argv, envp)
@@ -96,19 +71,48 @@ pub fn arm64_fs_exec_spawn_ring3(path: text, argv: [text], envp: [text]) -> i64:
     # The shim has a fresh canonical capability owner, so explicitly install a
     # least-privilege record for the scheduler-owned task before making it live.
     launch_ipc.cap_manager.init_task(
-        launch_id, arm64_fs_exec_launch_caps(path, argv, launch_id.id))
+        launch_id, arm64_fs_exec_launch_caps_with_launch_v1(
+            path, argv, envp, launch_id.id))
     val launch_log = KernelLog.new(256)
     shim_init(prepared.scheduler, launch_ipc, launch_log)
     val rc = dispatch_fs_exec_user_handoff(Architecture.Arm64, prepared.pid as u64, prepared.scheduler)
     var owner = prepared.scheduler
     owner.exit_task_by_id(launch_id, rc.to_i32())
     val collected = owner.wait_for_collect(TaskId(id: 0u64), launch_id, false)
-    net_arm64_task_teardown(launch_id.id)
+    val net_retirement = net_arm64_task_teardown(launch_id.id)
     shim_init(Scheduler.new_bootstrap(), IpcManager.new(), KernelLog.new(64))
+    if net_retirement.pending != 0u64:
+        serial_println("[net-retire] task={launch_id.id} pending={net_retirement.pending}")
+        return -5
     if wait_collect_result_error(collected) != 0 or
        wait_collect_result_status(collected) != rc.to_i32():
         return -10
     rc
+
+@cfg(arm64)
+pub fn arm64_fs_exec_spawn_ring3_payload_resident(path: text, argv: [text], envp: [text]) -> i64:
+    """Lane-local UNCHECKED ring-3 launch of the resident raw-region payload.
+
+    Bypasses the fail-closed authenticated spawn seam (fs_exec_prepare_spawn
+    -> -13, by design) for the lane-C1 bring-up only — the arm64 mirror of the
+    proven x86 OVMF lane's private _admit_raw_elf64/_map_pt_loads admission
+    (route B in the lane status doc). The payload bytes are already resident
+    in the raw .bss region (Wall 9); the C launcher validates the ELF out of
+    that region, copies PT_LOADs into fresh physical frames, maps the user
+    stack with a SysV argc/argv frame, and erets into EL0 with a kernel
+    resume frame so exit(0) returns the payload's exit code.
+
+    This is NOT an authenticated admission: production filesystem execution
+    must go through fs_exec_adopt_authenticated_v1.
+    """
+    val _envp = envp
+    val staged = arm_fs_exec_stream_payload_resident_v1(path)
+    if staged.is_err():
+        serial_println("[fs-exec] spawn:resolve-fail path={path}")
+        return -2
+    val resident = staged.unwrap()
+    serial_println("[fs-exec] spawn:resident path={path} bytes={resident}")
+    rt_arm_payload_elf64_ring3_enter(resident, argv)
 
 pub fn arm64_fs_exec_spawn_authenticated_v1(
     scheduler: Scheduler,
@@ -134,11 +138,89 @@ pub fn arm64_fs_exec_spawn_authenticated_v1(
     var owner = prepared.scheduler
     owner.exit_task_by_id(child, exit_code.to_i32())
     val collected = owner.wait_for_collect(TaskId(id: 0u64), child, false)
-    net_arm64_task_teardown(child.id)
+    val net_retirement = net_arm64_task_teardown(child.id)
+    if net_retirement.pending != 0u64:
+        serial_println("[net-retire] task={child.id} pending={net_retirement.pending}")
+        return -5
     if wait_collect_result_error(collected) != 0 or
        wait_collect_result_status(collected) != exit_code.to_i32():
         return -10
     exit_code
+
+pub(package) fn arm64_fs_exec_spawn_authenticated_with_launch_v1(
+    scheduler: Scheduler,
+    mut table: MountTable,
+    authorities: ExecutableAuthorityRegistryV1,
+    token: ExecutableAuthorityTokenV1,
+    consumer: ExecutableLoadConsumerV1,
+    entry_point: u64,
+    caller: i64,
+    caller_caps: CapabilitySet,
+    path: text,
+    argv: [text],
+    envp: [text],
+    recipe: i64
+) -> FsExecAuthenticatedRunResultV1:
+    """Validate the launch contract, then adopt, enter, reap, and evidence one ARM64 executable.
+
+    The launch-args/recipe/cap/authority gate mirrors the arm32 owner's
+    pre-admission sequence. Adoption itself goes through the generic
+    fs_exec_adopt_authenticated_v1 seam: HEAD has no arm64
+    adopt_authenticated_executable_pid_with_launch_v1 (dropped with the
+    merge-clobbered declarations), so the argv/envp contract is validated
+    here but the adopted image carries the validated path only — the same
+    capability the generic authenticated seam provides.
+    """
+    val launch_result = executable_launch_arguments_v1_validate(path, argv, envp)
+    if launch_result.is_err():
+        return FsExecAuthenticatedRunResultV1(
+            exit_code: executable_launch_arguments_v1_errno(
+                launch_result.unwrap_err()) as i64,
+            evidence: nil, scheduler: scheduler)
+    val launch = launch_result.unwrap()
+    if not spawn_recipe_launch_contract_valid(
+        recipe, launch.path, launch.argv, launch.envp):
+        return FsExecAuthenticatedRunResultV1(exit_code: -13, evidence: nil, scheduler: scheduler)
+    val gate = exec_cap_check_caps(caller_caps, launch.path)
+    if gate != 0:
+        return FsExecAuthenticatedRunResultV1(exit_code: gate as i64, evidence: nil, scheduler: scheduler)
+    val allowed = spawn_authority_check_spawn(caller, recipe)
+    if allowed != 0:
+        return FsExecAuthenticatedRunResultV1(exit_code: allowed as i64, evidence: nil, scheduler: scheduler)
+
+    val prepared = fs_exec_adopt_authenticated_v1(
+        scheduler, table, authorities, token, consumer, entry_point,
+        caller, launch.path, recipe)
+    if prepared.pid <= 0:
+        return FsExecAuthenticatedRunResultV1(
+            exit_code: prepared.pid, evidence: nil, scheduler: prepared.scheduler)
+    serial_println("[fs-exec] spawn:pid={prepared.pid} path={path}")
+    val child = TaskId(id: prepared.pid.to_u64())
+    val exit_code = dispatch_fs_exec_user_handoff(
+        Architecture.Arm64, child.id, prepared.scheduler)
+    var owner = prepared.scheduler
+    owner.exit_task_by_id(child, exit_code.to_i32())
+    val collected = owner.wait_for_collect(TaskId(id: 0u64), child, false)
+    val net_retirement = net_arm64_task_teardown(child.id)
+    if net_retirement.pending != 0u64:
+        serial_println("[net-retire] task={child.id} pending={net_retirement.pending}")
+        _ = scheduler_execution_discard_terminal_v2(child.id)
+        return FsExecAuthenticatedRunResultV1(
+            exit_code: -5, evidence: nil, scheduler: owner)
+    if (wait_collect_result_error(collected) != 0 or
+        wait_collect_result_pid(collected) != child.id or
+        wait_collect_result_status(collected) != exit_code.to_i32()):
+        _ = scheduler_execution_discard_terminal_v2(child.id)
+        return FsExecAuthenticatedRunResultV1(
+            exit_code: -10, evidence: nil, scheduler: owner)
+    val delivered = scheduler_execution_compare_and_deliver_reaped_v2(
+        child.id, path, argv)
+    if delivered.status != SchedulerExecutionDeliveryStatusV2.Delivered:
+        _ = scheduler_execution_discard_terminal_v2(child.id)
+        return FsExecAuthenticatedRunResultV1(
+            exit_code: -10, evidence: nil, scheduler: owner)
+    FsExecAuthenticatedRunResultV1(
+        exit_code: exit_code, evidence: delivered.token, scheduler: owner)
 
 pub fn arm64_fs_exec_load_and_launch_hello_world() -> i64:
     """Load `/sys/apps/hello_world.smf` and emit genuine load + launch proofs.

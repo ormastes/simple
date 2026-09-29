@@ -1,8 +1,7 @@
 # Host WM Cached Chrome Full-Frame Blit Perf Gap
 
 Date: 2026-07-06
-Status: OPEN (P3)
-Status re-verified 2026-08-17 by source inspection (triage shard 01).
+Status: open
 
 ## Summary
 

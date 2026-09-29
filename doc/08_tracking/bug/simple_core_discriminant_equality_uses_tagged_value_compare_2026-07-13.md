@@ -1,4 +1,8 @@
 # Simple-core discriminant equality uses tagged-value comparison
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Symptom
 
@@ -26,3 +30,4 @@ disassembly of `rt_enum_check_discriminant` and the discriminant branch of
 `rt_is_none` to contain no call/reference to `rt_native_eq`. Then rerun the
 filesystem `emit-llvm` profile and require translation to advance beyond the
 third `__simple_main` local.
+

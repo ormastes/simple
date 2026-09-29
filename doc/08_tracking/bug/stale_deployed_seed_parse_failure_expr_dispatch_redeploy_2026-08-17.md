@@ -1,4 +1,9 @@
 # Stale deployed `bin/simple` seed could not parse origin's compiler source — redeploy 2026-08-17
+## Closed 2026-09-16 — ...redeploy 2026-08-17 **Status:** RESOLVED by redeploy (authorised explicitly by the user; a
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** RESOLVED by redeploy (authorised explicitly by the user; a `bin/simple`
 swap is normally forbidden because ~16 concurrent lanes depend on the binary).
@@ -139,3 +144,4 @@ it is Stage 3 self-host being unblocked so the deployed binary is a versioned
 self-hosted artifact rather than an ad-hoc seed whose only recorded identity is
 its mtime. Until then, every timing or verdict claim must record the binary's
 size and mtime alongside it.
+

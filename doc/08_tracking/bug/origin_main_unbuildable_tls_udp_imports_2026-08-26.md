@@ -1,4 +1,8 @@
 # origin/main unbuildable: unresolved rt_tls_*/rt_io_udp_* imports (2026-08-26)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Symptom
 
@@ -42,3 +46,4 @@ should either restore the definitions or drop the re-exports, then run
 
 Found during the simply whole-earth dashboard sweep
 (`.spipe/simply_showcase/state.md`).
+

@@ -151,17 +151,8 @@ dispatcher that even looks at a second argument is
 and it "implements" the offset by re-calling
 `s.index_of(needle, start)` — the very 2-arg form that does not exist,
 i.e. it delegates to itself. All other sites are arity-1 only:
-~~`interpreter/eval_methods.spl:466-473`~~, `compiler/cg_expr.spl:527-530`
+`interpreter/eval_methods.spl:466-473`, `compiler/cg_expr.spl:527-530`
 (emits 2-param `spl_str_index_of`), `95.interp/mir_interp_intrinsics.spl:155-163`.
-
-> **Citation dropped 2026-08-01 — conclusion unchanged.** `eval_methods.spl`
-> was a dead duplicate shadowed by the `_EvalOps` copies and was deleted in
-> `f97dfbbb8ee`; it was never one of the "sites" in the sense this survey
-> means, because it never executed. Removing it does not change the finding:
-> the sole live 2-arg-aware dispatcher is still
-> `_EvalOps/access_literal_assign_eval.spl` (the arm has since moved to
-> :243-257 and still delegates to `s.index_of(needle, start)`), and every other
-> live site is still arity-1. The self-delegation defect stands.
 
 ## A semantics decision is required before any fix
 
@@ -250,30 +241,3 @@ Assert on both lanes that `"a[P]b[P]c".index_of("[P]", 3)` is `5`, that a start
 beyond the last match yields `-1`, and that a start past end-of-string yields
 `-1` rather than the sentinel. Assert the exit status too, so the run lane
 cannot pass by exiting 0 with a corrupt value.
-
----
-
-## Triage re-verification 2026-08-17 (c_mir lane, classified by CONTENT not SHA)
-
-**Governing fact for every 50.mir-attributed row:** nothing runnable on this
-host executes `src/compiler/50.mir/**.spl`. `bin/simple` resolves to
-`bin/release/x86_64-unknown-linux-gnu/simple` (59536728 bytes, mtime
-2026-08-16 22:59), whose own `--version` banner states it is a Rust
-**bootstrap seed**; it has its own Rust MIR/JIT/native pipeline and never reads
-`src/compiler/**.spl` for compilation logic. `bin/release/simple` is the
-2181-byte refusing production-guard wrapper, and no stage2/stage3 self-hosted
-binary exists under `build/bootstrap/`. Therefore any evidence in this doc
-phrased as "reproduced on `bin/simple`" is evidence about the **seed**, not
-about 50.mir, and the runtime claim here can only be closed by a full
-self-hosted bootstrap (not run: the user's bootstrap is live and
-`build/bootstrap/**` is off-limits). Rows were therefore classified by
-grepping current source.
-
-**Verdict: ALREADY-FIXED IN 50.mir BY CONTENT.**
-
-`src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl:2247` now handles
-`method == "index_of" and args.len() == 2`, lowering three operands including
-`tf_start` into `rt_text_find` at `:2265-2274`. The `start` argument is no longer
-dropped. Not separately verified: the existence/behaviour of the `rt_text_find`
-runtime symbol, and the error-sentinel-leak half of this row — both need a
-runtime lane this host cannot provide.

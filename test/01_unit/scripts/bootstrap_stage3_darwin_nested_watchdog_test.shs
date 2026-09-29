@@ -1,0 +1,63 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+guard=$root/scripts/resource/process-tree-rss-watchdog.pl
+work=$(mktemp -d "${TMPDIR:-/tmp}/stage3-darwin-watchdog.XXXXXX")
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+export TMPDIR=$work
+fail() { echo "FAIL: $*" >&2; exit 1; }
+. "$root/scripts/check/lib/bootstrap-stage3/memory-admission.shs"
+
+# A standalone launcher creates a session and preserves explicit monitor mode.
+unset SIMPLE_BOOTSTRAP_SESSION_ID SIMPLE_BOOTSTRAP_SESSION_EXEC
+mode=$(bootstrap_stage3_memory_darwin_session_mode)
+SIMPLE_BOOTSTRAP_RSS_CAP_MODE=monitor
+export SIMPLE_BOOTSTRAP_RSS_CAP_MODE
+status=0
+perl "$guard" \
+  --session-mode="$mode" --rss-cap-mode="${SIMPLE_BOOTSTRAP_RSS_CAP_MODE:-enforce}" \
+  --max-rss-kib=1 --receipt="$work/standalone.env" -- \
+  sh -c 'test "$SIMPLE_BOOTSTRAP_RSS_CAP_MODE" = monitor; "$SIMPLE_BOOTSTRAP_SESSION_EXEC" --check; exit 37' \
+  >"$work/standalone.log" 2>&1 || status=$?
+[ "$status" -eq 37 ] || fail "standalone child exit became $status"
+grep -Fxq 'session_mode=new' "$work/standalone.env" || fail 'standalone session mode'
+grep -Fxq 'rss_cap_enforced=0' "$work/standalone.env" || fail 'monitor mode lost'
+grep -Fxq 'exit_status=37' "$work/standalone.env" || fail 'standalone exit receipt'
+
+# The inner watchdog inherits the outer admitted session and propagates its
+# child's status through both wrappers.
+cat >"$work/inner.sh" <<'EOF'
+#!/bin/sh
+set -eu
+root=$1 work=$2
+. "$root/scripts/check/lib/bootstrap-stage3/memory-admission.shs"
+mode=$(bootstrap_stage3_memory_darwin_session_mode)
+perl "$root/scripts/resource/process-tree-rss-watchdog.pl" \
+  --session-mode="$mode" --rss-cap-mode="${SIMPLE_BOOTSTRAP_RSS_CAP_MODE:-enforce}" \
+  --max-rss-kib=1 --receipt="$work/inner.env" -- \
+  sh -c 'test "$SIMPLE_BOOTSTRAP_RSS_CAP_MODE" = monitor; "$SIMPLE_BOOTSTRAP_SESSION_EXEC" --check; exit 23'
+EOF
+status=0
+SIMPLE_BOOTSTRAP_RSS_CAP_MODE=monitor perl "$guard" \
+  --session-mode=new --rss-cap-mode=monitor --max-rss-kib=1 \
+  --receipt="$work/outer.env" -- sh "$work/inner.sh" "$root" "$work" \
+  >"$work/nested.log" 2>&1 || status=$?
+[ "$status" -eq 23 ] || fail "nested child exit became $status"
+grep -Fxq 'session_mode=inherit' "$work/inner.env" || fail 'inner did not inherit'
+grep -Fxq 'rss_cap_enforced=0' "$work/inner.env" || fail 'inner lost monitor mode'
+grep -Fxq 'exit_status=23' "$work/inner.env" || fail 'inner exit receipt'
+outer_sid=$(sed -n 's/^session_id=//p' "$work/outer.env")
+grep -Fxq "session_id=$outer_sid" "$work/inner.env" || fail 'nested session changed'
+
+# A partial inherited pair must fail closed before launching the payload.
+mode=$(SIMPLE_BOOTSTRAP_SESSION_ID=1 bootstrap_stage3_memory_darwin_session_mode)
+status=0
+SIMPLE_BOOTSTRAP_SESSION_ID=1 perl "$guard" --session-mode="$mode" \
+  --rss-cap-mode=enforce --receipt="$work/partial.env" -- \
+  sh -c 'touch "$1"' sh "$work/partial.payload" \
+  >"$work/partial.log" 2>&1 || status=$?
+[ "$status" -eq 89 ] && [ ! -e "$work/partial.payload" ] ||
+  fail "partial contract launched payload or returned $status"
+
+echo 'PASS: Darwin watchdog standalone/inherited sessions, monitor, partial rejection, exit propagation'

@@ -1,0 +1,132 @@
+use std.spec.*
+use std.nogc_sync_mut.composition.environment_variants.contracts_v1.*
+use std.nogc_sync_mut.composition.environment_variants.feature_registry_v1.*
+use std.nogc_sync_mut.composition.environment_variants.admission.*
+
+fn d(value: u64) -> EnvironmentDigest256V1:
+    EnvironmentDigest256V1(w0: value, w1: 0u64, w2: 0u64, w3: 0u64)
+
+fn r(offset: u32, count: u32) -> EnvironmentArenaRangeV1:
+    EnvironmentArenaRangeV1(offset: offset, count: count)
+
+fn fs(offset: u32) -> EnvironmentFeatureSetV1:
+    EnvironmentFeatureSetV1(
+        architecture: ENV_ARCH_X86_64_V1,
+        words: r(offset, 1u32))
+
+fn snapshot(available_offset: u32) -> EnvironmentSnapshotV1:
+    EnvironmentSnapshotV1(
+        descriptor_size: 232u32,
+        schema_version: ENV_VARIANT_SCHEMA_V1,
+        execution_architecture: ENV_ARCH_X86_64_V1,
+        os_id: 1u32,
+        abi_id: 1u32,
+        object_format_id: 1u32,
+        endian_id: 1u16,
+        pointer_width_bits: 64u16,
+        snapshot_identity: d(20u64),
+        snapshot_generation: 1u64,
+        execution_domain_identity: d(21u64),
+        hardware_features: fs(available_offset),
+        os_usable_features: fs(available_offset),
+        policy_allowed_features: fs(available_offset),
+        vector_state_mode: ENV_VECTOR_NONE_V1,
+        vector_length_bits: 0u32,
+        loader_permission_bits: 1u64,
+        allowed_effect_bits: 1u64,
+        numerical_contract_id: 1u32,
+        resource_layout_digest: d(9u64),
+        gpu_devices: r(0u32, 0u32))
+
+fn descriptor(required_offset: u32) -> VariantDescriptorV1:
+    VariantDescriptorV1(
+        descriptor_size: 360u32,
+        schema_version: ENV_VARIANT_SCHEMA_V1,
+        placement: ENV_PLACEMENT_NATIVE_DYNLIB_V1,
+        provider_identity: d(1u64),
+        variant_identity: d(2u64),
+        contract_identity: d(4u64),
+        contract_major: 1u16,
+        contract_minor: 0u16,
+        abi_digest: d(5u64),
+        semantic_identity: d(6u64),
+        grammar_identity: d(7u64),
+        program_identity: d(8u64),
+        artifact_digest: d(10u64),
+        artifact_location: r(0u32, 1u32),
+        target_architecture: ENV_ARCH_X86_64_V1,
+        required_os_id: 1u32,
+        required_abi_id: 1u32,
+        required_object_format_id: 1u32,
+        required_endian_id: 1u16,
+        required_pointer_width_bits: 64u16,
+        required_loader_permission_bits: 1u64,
+        required_cpu_features: fs(required_offset),
+        required_os_state_words: r(0u32, 0u32),
+        required_vector_state_mode: ENV_VECTOR_NONE_V1,
+        required_vector_length_bits: 0u32,
+        required_device_api: 0u32,
+        minimum_device_api_version: 0u32,
+        required_device_features: r(0u32, 0u32),
+        required_memory_domain_bits: 0u64,
+        minimum_device_buffer_bytes: 0u64,
+        minimum_workgroup_invocations: 0u32,
+        minimum_queue_family_count: 0u32,
+        required_effect_bits: 1u64,
+        numerical_contract_id: 1u32,
+        resource_layout_digest: d(9u64),
+        dependencies: r(0u32, 0u32),
+        assurance_receipt_digest: d(11u64),
+        startup_budget_us: 1u64,
+        max_session_bytes: 1u64,
+        max_inflight_operations: 1u32)
+
+describe "Environment x86 VBMI registry boundaries":
+    it "accepts each declared VBMI bit and rejects the first undeclared bit":
+        val vbmi = environment_feature_registry_lookup_v1(
+            ENV_FEATURE_X86_64_AVX512_VBMI_V1).unwrap()
+        val vbmi2 = environment_feature_registry_lookup_v1(
+            ENV_FEATURE_X86_64_AVX512_VBMI2_V1).unwrap()
+        val both = environment_feature_registry_lookup_v1(
+            ENV_FEATURE_X86_64_V4_VBMI_VBMI2_V1).unwrap()
+        expect(vbmi.feature_mask).to_equal(0x0001ffffu64)
+        expect(vbmi2.feature_mask).to_equal(0x0002ffffu64)
+        expect(both.feature_mask).to_equal(0x0003ffffu64)
+        expect(environment_feature_registry_validate_v1(fs(0u32), [vbmi.feature_mask]))
+            .to_equal(Ok(()))
+        expect(environment_feature_registry_validate_v1(fs(0u32), [vbmi2.feature_mask]))
+            .to_equal(Ok(()))
+        expect(environment_feature_registry_validate_v1(fs(0u32), [both.feature_mask]))
+            .to_equal(Ok(()))
+        expect(environment_feature_registry_validate_v1(fs(0u32), [0x0004ffffu64]))
+            .to_equal(Err(EnvironmentFeatureRegistryErrorV1.UnknownFeatureBits))
+
+    it "keeps VBMI and VBMI2 independent under registry subset semantics":
+        expect(environment_feature_registry_id_subset_v1(
+            ENV_FEATURE_X86_64_AVX512_VBMI_V1,
+            ENV_FEATURE_X86_64_AVX512_VBMI2_V1)).to_equal(false)
+        expect(environment_feature_registry_id_subset_v1(
+            ENV_FEATURE_X86_64_AVX512_VBMI2_V1,
+            ENV_FEATURE_X86_64_AVX512_VBMI_V1)).to_equal(false)
+        expect(environment_feature_registry_id_subset_v1(
+            ENV_FEATURE_X86_64_AVX512_VBMI_V1,
+            ENV_FEATURE_X86_64_V4_VBMI_VBMI2_V1)).to_equal(true)
+        expect(environment_feature_registry_id_subset_v1(
+            ENV_FEATURE_X86_64_AVX512_VBMI2_V1,
+            ENV_FEATURE_X86_64_V4_VBMI_VBMI2_V1)).to_equal(true)
+
+    it "admits a provider only when its exact optional x86 bit is available":
+        val vbmi = environment_feature_registry_lookup_v1(
+            ENV_FEATURE_X86_64_AVX512_VBMI_V1).unwrap()
+        val vbmi2 = environment_feature_registry_lookup_v1(
+            ENV_FEATURE_X86_64_AVX512_VBMI2_V1).unwrap()
+        val both = environment_feature_registry_lookup_v1(
+            ENV_FEATURE_X86_64_V4_VBMI_VBMI2_V1).unwrap()
+        expect(variant_eligibility_reason_v1(
+            snapshot(1u32), descriptor(0u32),
+            [vbmi.feature_mask, vbmi2.feature_mask], [], []))
+            .to_equal(ENV_ADMISSION_CPU_FEATURES_MISSING_V1)
+        expect(variant_eligibility_reason_v1(
+            snapshot(1u32), descriptor(0u32),
+            [vbmi.feature_mask, both.feature_mask], [], []))
+            .to_equal(ENV_ADMISSION_OK_V1)

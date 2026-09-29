@@ -1,0 +1,291 @@
+# PureDatabase durable schema-v3 metadata and introspection contract.
+# @req REQ-LIB-PURE-DATABASE-SCHEMA-V3-001
+
+use std.spec.*
+use std.database.pure_sql.{
+    PureDatabase, PureColumnTypeV1, PureColumnSchemaV1
+}
+use nogc_sync_mut.database.sql.types.{DbValue}
+use std.common.crypto.sha256.{sha256_text}
+use std.io_runtime.{file_delete, file_read, file_write}
+
+extern fn rt_getpid() -> i64
+extern fn rt_time_now_unix_micros() -> i64
+
+fn store_path(suffix: text) -> text:
+    "/tmp/pure_database_schema_v3_{rt_getpid()}_{rt_time_now_unix_micros()}_{suffix}.db"
+
+fn remove_store(path: text):
+    file_delete(path)
+    file_delete(path + ".commit.lock")
+
+fn write_framed(path: text, version: text, payload: text, digest: text):
+    expect(file_write(path, version + "\n" + payload.len().to_text() + "\n" +
+        digest + "\n" + payload)).to_equal(true)
+
+fn expect_v3_payload_rejected(suffix: text, payload: text):
+    val path = store_path(suffix)
+    remove_store(path)
+    write_framed(path, "simple-pure-db-v3", payload, sha256_text(payload))
+    val before = file_read(path)
+    expect(PureDatabase.open_deferred(path).is_err()).to_equal(true)
+    expect(file_read(path)).to_equal(before)
+    remove_store(path)
+
+fn expect_type(db: PureDatabase, table: text, index: i32, expected: PureColumnTypeV1):
+    val described = db.describe_table(table).unwrap()
+    expect(described.is_some()).to_equal(true)
+    val schema = described.unwrap()
+    expect(schema.columns[index].declared_type).to_equal(expected)
+
+fn main() -> ():
+    describe("PureDatabase schema v3", fn() -> ():
+        it("round-trips empty tables, ordered types, a non-first PK, and no PK", fn() -> ():
+            val path = store_path("roundtrip")
+            remove_store(path)
+            val db = PureDatabase.open_deferred(path).unwrap()
+            expect(db.exec_sql("CREATE TABLE zed (name TEXT, id INTEGER PRIMARY KEY, active BOOLEAN, score REAL, raw BLOB)").is_ok()).to_equal(true)
+            expect(db.exec_sql("CREATE TABLE alpha (value TEXT)").is_ok()).to_equal(true)
+            expect(db.checkpoint().is_ok()).to_equal(true)
+            expect(file_read(path).starts_with("simple-pure-db-v3\n")).to_equal(true)
+
+            val reopened = PureDatabase.open_deferred(path).unwrap()
+            expect(reopened.table_names().unwrap()).to_equal(["alpha", "zed"])
+            val zed = reopened.describe_table("zed").unwrap().unwrap()
+            expect(zed.columns.len()).to_equal(5)
+            expect(zed.columns[0].name).to_equal("name")
+            expect(zed.columns[1].name).to_equal("id")
+            expect(zed.primary_key_index).to_equal(1)
+            expect_type(reopened, "zed", 0, PureColumnTypeV1.Text)
+            expect_type(reopened, "zed", 1, PureColumnTypeV1.Integer)
+            expect_type(reopened, "zed", 2, PureColumnTypeV1.Boolean)
+            expect_type(reopened, "zed", 3, PureColumnTypeV1.Real)
+            expect_type(reopened, "zed", 4, PureColumnTypeV1.Blob)
+            expect(reopened.describe_table("alpha").unwrap().unwrap().primary_key_index).to_equal(-1)
+            remove_store(path)
+        )
+
+        it("returns detached inventories and reserves nil for legacy unknown", fn() -> ():
+            val db = PureDatabase.memory_deferred().unwrap()
+            expect(db.exec_sql("CREATE TABLE stable (id INTEGER PRIMARY KEY, value TEXT)").is_ok()).to_equal(true)
+            var names = db.table_names().unwrap()
+            names.push("injected")
+            expect(db.table_names().unwrap()).to_equal(["stable"])
+
+            val first = db.describe_table("stable").unwrap().unwrap()
+            var columns = first.columns
+            columns.push(PureColumnSchemaV1(name: "injected", declared_type: PureColumnTypeV1.Text))
+            expect(db.describe_table("stable").unwrap().unwrap().columns.len()).to_equal(2)
+            expect(db.describe_table("missing").is_err()).to_equal(true)
+            expect(db.close().is_ok()).to_equal(true)
+            expect(db.table_names().is_err()).to_equal(true)
+            expect(db.describe_table("stable").is_err()).to_equal(true)
+        )
+
+        it("reads v1 and v2 without rewriting and preserves explicit unknown through v3 publication", fn() -> ():
+            val v1_path = store_path("legacy_v1")
+            val v2_path = store_path("legacy_v2")
+            remove_store(v1_path)
+            remove_store(v2_path)
+            val v1_image = "simple-pure-db-v1\ntable|legacy|id,value"
+            expect(file_write(v1_path, v1_image)).to_equal(true)
+            val v2_payload = "table|legacy|id,value"
+            write_framed(v2_path, "simple-pure-db-v2", v2_payload, sha256_text(v2_payload))
+            val v2_image = file_read(v2_path)
+
+            val v1 = PureDatabase.open_deferred(v1_path).unwrap()
+            val v2 = PureDatabase.open_deferred(v2_path).unwrap()
+            expect(v1.describe_table("legacy").unwrap().is_none()).to_equal(true)
+            expect(v2.describe_table("legacy").unwrap().is_none()).to_equal(true)
+            expect(file_read(v1_path)).to_equal(v1_image)
+            expect(file_read(v2_path)).to_equal(v2_image)
+
+            expect(v1.exec_sql("ALTER TABLE legacy ADD COLUMN active BOOLEAN").is_ok()).to_equal(true)
+            expect(v1.checkpoint().is_ok()).to_equal(true)
+            expect(file_read(v1_path).starts_with("simple-pure-db-v3\n")).to_equal(true)
+            val migrated = PureDatabase.open_deferred(v1_path).unwrap()
+            expect(migrated.describe_table("legacy").unwrap().is_none()).to_equal(true)
+            remove_store(v1_path)
+            remove_store(v2_path)
+        )
+
+        it("rejects corrupt checksums and valid-checksum malformed metadata without changing bytes", fn() -> ():
+            val checksum_path = store_path("bad_checksum")
+            val metadata_path = store_path("bad_metadata")
+            remove_store(checksum_path)
+            remove_store(metadata_path)
+            val payload = "table|T3:bad|T2:idT5:value\nschema|T3:bad|T8:known-v1I2:-1T7:integerT4:nope"
+            write_framed(checksum_path, "simple-pure-db-v3", payload,
+                "0000000000000000000000000000000000000000000000000000000000000000")
+            write_framed(metadata_path, "simple-pure-db-v3", payload, sha256_text(payload))
+            val checksum_bytes = file_read(checksum_path)
+            val metadata_bytes = file_read(metadata_path)
+
+            expect(PureDatabase.open_deferred(checksum_path).is_err()).to_equal(true)
+            expect(PureDatabase.open_deferred(metadata_path).is_err()).to_equal(true)
+            expect(file_read(checksum_path)).to_equal(checksum_bytes)
+            expect(file_read(metadata_path)).to_equal(metadata_bytes)
+            remove_store(checksum_path)
+            remove_store(metadata_path)
+        )
+
+        it("rejects missing, duplicate, out-of-order, and structurally invalid schema records", fn() -> ():
+            expect_v3_payload_rejected("missing_schema", "table|T3:bad|T2:id")
+            expect_v3_payload_rejected("schema_before_table", "schema|T3:bad|T14:legacy-unknown")
+            expect_v3_payload_rejected("duplicate_schema",
+                "table|T3:bad|T2:id\nschema|T3:bad|T14:legacy-unknown\nschema|T3:bad|T14:legacy-unknown")
+            expect_v3_payload_rejected("duplicate_column",
+                "table|T3:bad|T2:idT2:id\nschema|T3:bad|T8:known-v1I2:-1T7:integerT4:text")
+            expect_v3_payload_rejected("invalid_pk",
+                "table|T3:bad|T2:id\nschema|T3:bad|T8:known-v1I1:2T7:integer")
+            expect_v3_payload_rejected("row_before_schema",
+                "table|T3:bad|T2:id\nrow|T3:bad|I1:1\nschema|T3:bad|T8:known-v1I2:-1T7:integer")
+            expect_v3_payload_rejected("noncanonical_integer",
+                "table|T1:t|T1:a\nschema|T1:t|T8:known-v1I2:-1T7:integer\nrow|T1:t|I2:01")
+        )
+
+        it("rejects an existing zero-byte image without rewriting it", fn() -> ():
+            val path = store_path("empty_image")
+            remove_store(path)
+            expect(file_write(path, "")).to_equal(true)
+            expect(PureDatabase.open_deferred(path).is_err()).to_equal(true)
+            expect(file_read(path)).to_equal("")
+            remove_store(path)
+        )
+
+        it("restores schema across ALTER, CREATE, and DROP rollback", fn() -> ():
+            val db = PureDatabase.memory_deferred().unwrap()
+            expect(db.exec_sql("CREATE TABLE base (id INTEGER PRIMARY KEY, value TEXT)").is_ok()).to_equal(true)
+            expect(db.exec_sql("BEGIN").is_ok()).to_equal(true)
+            expect(db.exec_sql("ALTER TABLE base ADD COLUMN score REAL").is_ok()).to_equal(true)
+            expect(db.exec_sql("CREATE TABLE transient (value TEXT)").is_ok()).to_equal(true)
+            expect(db.exec_sql("DROP TABLE base").is_ok()).to_equal(true)
+            expect(db.exec_sql("ROLLBACK").is_ok()).to_equal(true)
+
+            expect(db.table_names().unwrap()).to_equal(["base"])
+            val restored = db.describe_table("base").unwrap().unwrap()
+            expect(restored.columns.len()).to_equal(2)
+            expect(restored.primary_key_index).to_equal(0)
+            expect(restored.columns[1].declared_type).to_equal(PureColumnTypeV1.Text)
+        )
+
+        it("publishes committed ALTER and DROP metadata across reopen", fn() -> ():
+            val path = store_path("ddl_commit")
+            remove_store(path)
+            val db = PureDatabase.open_deferred(path).unwrap()
+            expect(db.exec_sql("CREATE TABLE base (id INTEGER PRIMARY KEY, value TEXT)").is_ok()).to_equal(true)
+            expect(db.exec_sql("BEGIN").is_ok()).to_equal(true)
+            expect(db.exec_sql("ALTER TABLE base ADD COLUMN active BOOLEAN").is_ok()).to_equal(true)
+            expect(db.exec_sql("COMMIT").is_ok()).to_equal(true)
+            expect(db.checkpoint().is_ok()).to_equal(true)
+
+            val altered = PureDatabase.open_deferred(path).unwrap()
+            val altered_schema = altered.describe_table("base").unwrap().unwrap()
+            expect(altered_schema.columns.len()).to_equal(3)
+            expect(altered_schema.columns[2].declared_type).to_equal(PureColumnTypeV1.Boolean)
+            expect(altered.exec_sql("BEGIN").is_ok()).to_equal(true)
+            expect(altered.exec_sql("DROP TABLE base").is_ok()).to_equal(true)
+            expect(altered.exec_sql("COMMIT").is_ok()).to_equal(true)
+            expect(altered.checkpoint().is_ok()).to_equal(true)
+
+            val dropped = PureDatabase.open_deferred(path).unwrap()
+            expect(dropped.table_names().unwrap().len()).to_equal(0)
+            expect(dropped.describe_table("base").is_err()).to_equal(true)
+            remove_store(path)
+        )
+
+        it("ALTER preserves deferred delimiter text and Blob bytes and rollback restores both owners", fn() -> ():
+            val db = PureDatabase.memory_deferred().unwrap()
+            expect(db.exec_sql("CREATE TABLE payloads (id TEXT PRIMARY KEY, body TEXT, raw BLOB)").is_ok()).to_equal(true)
+            expect(db.put("payloads", [
+                DbValue.Text(value: "one"),
+                DbValue.Text(value: "left\tright\nline"),
+                DbValue.Blob(value: [1u8, 2u8, 3u8])
+            ]).is_ok()).to_equal(true)
+            expect(db.exec_sql("ALTER TABLE payloads ADD COLUMN score REAL").is_ok()).to_equal(true)
+            val after_alter = db.scan_all("payloads").unwrap()
+            expect(after_alter.len()).to_equal(1)
+            expect(after_alter[0].values.len()).to_equal(4)
+            match after_alter[0].values[1]:
+                case DbValue.Text(value): expect(value).to_equal("left\tright\nline")
+                case _: assert_true(false)
+            match after_alter[0].values[2]:
+                case DbValue.Blob(value): expect(value).to_equal([1u8, 2u8, 3u8])
+                case _: assert_true(false)
+            expect(after_alter[0].values[3].is_null()).to_equal(true)
+
+            expect(db.exec_sql("BEGIN").is_ok()).to_equal(true)
+            expect(db.put("payloads", [
+                DbValue.Text(value: "two"), DbValue.Text(value: "discard"),
+                DbValue.Blob(value: [9u8]), DbValue.Real(value: 1.0)
+            ]).is_ok()).to_equal(true)
+            expect(db.exec_sql("ALTER TABLE payloads ADD COLUMN active BOOLEAN").is_ok()).to_equal(true)
+            expect(db.exec_sql("ROLLBACK").is_ok()).to_equal(true)
+            val restored = db.scan_all("payloads").unwrap()
+            expect(restored.len()).to_equal(1)
+            expect(restored[0].values.len()).to_equal(4)
+            match restored[0].values[1]:
+                case DbValue.Text(value): expect(value).to_equal("left\tright\nline")
+                case _: assert_true(false)
+            match restored[0].values[2]:
+                case DbValue.Blob(value): expect(value).to_equal([1u8, 2u8, 3u8])
+                case _: assert_true(false)
+            expect(db.describe_table("payloads").unwrap().unwrap().columns.len()).to_equal(4)
+        )
+
+        it("keeps the winner schema after a concurrent commit conflict", fn() -> ():
+            val path = store_path("conflict")
+            remove_store(path)
+            val seed = PureDatabase.open(path).unwrap()
+            expect(seed.close().is_ok()).to_equal(true)
+            val winner = PureDatabase.open(path).unwrap()
+            val loser = PureDatabase.open(path).unwrap()
+            expect(winner.exec_sql("BEGIN").is_ok()).to_equal(true)
+            expect(loser.exec_sql("BEGIN").is_ok()).to_equal(true)
+            expect(winner.exec_sql("CREATE TABLE winner (label TEXT, id INTEGER PRIMARY KEY)").is_ok()).to_equal(true)
+            expect(loser.exec_sql("CREATE TABLE loser (id TEXT PRIMARY KEY)").is_ok()).to_equal(true)
+            expect(winner.exec_sql("COMMIT").is_ok()).to_equal(true)
+            expect(loser.exec_sql("COMMIT").is_err()).to_equal(true)
+            expect(loser.exec_sql("ROLLBACK").is_ok()).to_equal(true)
+
+            val reopened = PureDatabase.open_deferred(path).unwrap()
+            expect(reopened.table_names().unwrap()).to_equal(["winner"])
+            expect(reopened.describe_table("winner").unwrap().unwrap().primary_key_index).to_equal(1)
+            expect(reopened.describe_table("loser").is_err()).to_equal(true)
+            remove_store(path)
+        )
+
+        it("rejects multiple inline primary keys before creating a table", fn() -> ():
+            val db = PureDatabase.memory_deferred().unwrap()
+            expect(db.exec_sql("CREATE TABLE invalid (a INTEGER PRIMARY KEY, b TEXT PRIMARY KEY)").is_err()).to_equal(true)
+            expect(db.table_names().unwrap().len()).to_equal(0)
+            expect(db.exec_sql("CREATE TABLE unknown_type (value UNKNOWN_TYPE)").is_err()).to_equal(true)
+            expect(db.table_names().unwrap().len()).to_equal(0)
+            expect(db.exec_sql("CREATE TABLE stable (id INTEGER PRIMARY KEY)").is_ok()).to_equal(true)
+            expect(db.exec_sql("ALTER TABLE stable ADD COLUMN duplicate UNKNOWN_TYPE").is_err()).to_equal(true)
+            expect(db.describe_table("stable").unwrap().unwrap().columns.len()).to_equal(1)
+            expect(db.exec_sql("ALTER TABLE stable ADD COLUMN second INTEGER PRIMARY KEY").is_err()).to_equal(true)
+            expect(db.describe_table("stable").unwrap().unwrap().columns.len()).to_equal(1)
+            expect(db.exec_sql("CREATE TABLE no_pk (value TEXT)").is_ok()).to_equal(true)
+            expect(db.exec_sql("ALTER TABLE no_pk ADD COLUMN id INTEGER PRIMARY KEY").is_err()).to_equal(true)
+            val no_pk = db.describe_table("no_pk").unwrap().unwrap()
+            expect(no_pk.columns.len()).to_equal(1)
+            expect(no_pk.primary_key_index).to_equal(-1)
+        )
+
+        it("rejects direct put arity before mutation or publication", fn() -> ():
+            val path = store_path("put_arity")
+            remove_store(path)
+            val db = PureDatabase.open_deferred(path).unwrap()
+            expect(db.exec_sql("CREATE TABLE one_col (value TEXT)").is_ok()).to_equal(true)
+            val before = file_read(path)
+            var empty: [DbValue] = []
+            expect(db.put("one_col", empty).is_err()).to_equal(true)
+            expect(db.scan_all("one_col").unwrap().len()).to_equal(0)
+            expect(file_read(path)).to_equal(before)
+            expect(db.checkpoint().is_ok()).to_equal(true)
+            val reopened = PureDatabase.open_deferred(path).unwrap()
+            expect(reopened.scan_all("one_col").unwrap().len()).to_equal(0)
+            remove_store(path)
+        )
+    )

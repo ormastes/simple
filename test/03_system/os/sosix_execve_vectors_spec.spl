@@ -1,0 +1,50 @@
+# Evidence class: host-fixture/source-contract. No live syscall is issued here.
+# @req REQ-SOSIX-EXECVE-VECTORS-001
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.io_runtime.{file_read_result}
+use os.userlib.execve_plan_v1.{execve_plan_v1}
+use os.userlib.execve.{user_execve}
+use std.common.string_core.{bytes_to_text}
+
+describe "SOSIX execve vector delivery contracts":
+    it "host-fixture: should copy compiler argument bytes into an independent plan":
+        step("Prepare compiler argv and environment before a syscall")
+        var arguments = ["simple", "build", "hello.spl"]
+        val plan = execve_plan_v1("/bin/simple", arguments, ["SIMPLE_LIB=/lib"]).unwrap()
+        step("Change caller values and inspect the retained wire bytes")
+        arguments[1] = "run"
+        val start = plan.argv_offsets[1]
+        expect(bytes_to_text(plan.bytes.slice(start, start + 5))).to_equal("build")
+        expect(plan.argv_offsets.len()).to_equal(3)
+        expect(plan.envp_offsets.len()).to_equal(1)
+
+    it "host-fixture: should reject invalid vectors through the production owner before a syscall":
+        step("Submit invalid argv zero to the scoped execve owner")
+        expect(user_execve("/bin/simple", [""], [])).to_equal(-22)
+        step("Submit a NUL-containing environment entry")
+        val env = bytes_to_text([88u8, 61u8, 0u8, 89u8])
+        expect(user_execve("/bin/simple", ["simple"], [env])).to_equal(-22)
+
+    it "source-contract: should route SOSIX through owned argv and envp storage":
+        step("Inspect the SOSIX to userlib route and scoped allocation lifetime")
+        val source = file_read_result("src/os/sosix/process.spl").unwrap()
+        val owner = file_read_result("src/os/userlib/execve.spl").unwrap()
+        expect(source).to_contain("user_execve(path, args, envp)")
+        expect(source.contains("val _ignored_envp = envp")).to_equal(false)
+        expect(owner).to_contain("raw_write_i64(allocation, index * 8, allocation + plan.argv_offsets[index])")
+        expect(owner).to_contain("raw_write_i64(allocation, plan.env_table_offset + index * 8, allocation + plan.envp_offsets[index])")
+        expect(owner).to_contain("val result = syscall(59,")
+        expect(owner).to_contain("raw_free(allocation, size)\n    result")
+        expect(owner.contains(".ptr() as")).to_equal(false)
+
+    it "source-contract: should retain the kernel's exact char pointer limits":
+        step("Inspect kernel vector limits and lossless UTF-8 copy-in")
+        val source = file_read_result("src/os/kernel/ipc/syscall.spl").unwrap()
+        expect(source).to_contain("MAX_BINARY_PATH_LEN: u64 = 256")
+        expect(source).to_contain("MAX_EXEC_ARG_COUNT: u64 = 64")
+        expect(source).to_contain("MAX_EXEC_ENV_COUNT: u64 = 128")
+        expect(source).to_contain("MAX_EXEC_STRING_LEN: u64 = 4096")
+        expect(source).to_contain("MAX_EXEC_TOTAL_STRING_BYTES: u64 = 32768")
+        val copy = file_read_result("src/os/kernel/memory/vmm_copy.spl").unwrap()
+        expect(copy).to_contain("val decoded = validated_utf8_bytes_to_text_linear(bytes)")
+        expect(copy.contains("chars.push((b.to_i64()).to_char())")).to_equal(false)

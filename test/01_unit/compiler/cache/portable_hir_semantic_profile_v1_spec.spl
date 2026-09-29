@@ -1,0 +1,624 @@
+# Focused executable contract for the inactive portable Base semantic profile.
+# Runtime qualification is deliberately separate; these scenarios must run only
+# on an admitted self-hosted runtime.
+
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use compiler.hir.hir_types.{HirModule, HirType, HirTypeKind, SymbolId, SymbolKind,
+    SymbolTable, ScopeId, ScopeKind, Effect, EffectKind}
+use compiler.hir.hir_definitions.{HirFunction, HirParam, HirBlock, HirStmt,
+    HirStmtKind, HirExpr, HirExprKind, HirCallArg, HirUnaryOp}
+use compiler.common.attributes.{FunctionAttr, ExportAttr, DriverManifestAttr,
+    DriverManifestAttrKind, vhdl_hardware_metadata_default}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_codec.{HirDecodeLimits, hir_module_encode_canonical,
+    hir_module_decode_bounded, hir_canonical_codec_generated_available_v1,
+    HirDecodeError}
+use compiler.common.cache_contract.portable_object_ref_v1.{
+    PortableObjectStageV1, PortablePortabilityV1, PortableObjectRefV1
+}
+use compiler.hir.portable_object_profile_v1.{PortableHirProfileInputV1,
+    PortableHirObjectV1, PortableEmbeddedBodyKindV1, PortableBodyErrorV1,
+    PortableBodyLimitsV1, PortableBodyLedgerV1, PortableBodySemanticFactsV1,
+    portable_hir_semantic_verifier_digest_v1,
+    portable_hir_semantic_verifier_available_v1,
+    portable_body_semantic_completeness_available_v1,
+    portable_body_semantic_completeness_issue_v1,
+    portable_embedded_body_profile_digest_v1,
+    portable_embedded_body_effect_rules_digest_v1,
+    portable_embedded_body_kind_available_v1, portable_body_limits_default_v1,
+    portable_body_signed_literal_valid_v1,
+    portable_hir_semantic_facts_v1, portable_hir_semantics_valid_v1,
+    encode_portable_hir_object_v1, verify_portable_hir_object_v1,
+    portable_hir_native_loader_admit_v1}
+use compiler.hir.portable_body_profile_types.{PortableBodyBudgetCountersV1,
+    PortableBodyDependencyEdgeV1}
+use compiler.hir.portable_body_graph.{portable_body_graph_analyze_v1}
+use compiler.semantics.portable_body_effects.{portable_body_normalized_pure_effect_v1}
+
+fn digest(label: text) -> text: sha256_text(label)
+fn span() -> Span: Span.empty()
+fn i64_type() -> HirType: HirType(kind: HirTypeKind.Int(64, true), span: span())
+fn i8_type() -> HirType: HirType(kind: HirTypeKind.Int(8, true), span: span())
+fn bool_type() -> HirType: HirType(kind: HirTypeKind.Bool, span: span())
+
+fn typed(kind: HirExprKind, type_: HirType) -> HirExpr:
+    HirExpr(kind: kind, has_type_: true, type_: type_, span: span())
+
+fn block(stmts: [HirStmt], value: HirExpr) -> HirBlock:
+    HirBlock(stmts: stmts, has: true, value: value, span: span())
+
+fn function(id: SymbolId, name: text, params: [HirParam], body: HirBlock,
+            public_: bool) -> HirFunction:
+    HirFunction(symbol: id, name: name, type_params: [], params: params,
+        return_type: i64_type(), body: body, effects: [],
+        visibility: if public_: Visibility.Public else: Visibility.Private,
+        is_async: false, is_static: false, is_public: public_, is_method: false,
+        is_mutable: false, is_const: false, is_extern: false,
+        func_attr: FunctionAttr.default(), has_export_attr: false, export_attr: nil,
+        has_driver_manifest_attr: false, driver_manifest_attr: nil,
+        has_suspension: false, has_vhdl_metadata: false, vhdl_metadata: nil,
+        has_doc_comment: false, doc_comment: "", span: span(),
+        is_gpu_kernel: false, gpu_target: "", gpu_backend_order: "",
+        verification_contract: nil, is_generic_template: false)
+
+fn given_typed_base_helper_module() -> HirModule:
+    var symbols = SymbolTable.new()
+    val identity_type = HirType(kind: HirTypeKind.Function([i64_type()],
+        i64_type(), []), span: span())
+    val identity_id = symbols.define("identity", SymbolKind.Function,
+        Some(identity_type), span(), Visibility.Private, false, Some("qualified"))
+    _ = symbols.push_scope(ScopeKind.Function)
+    val parameter_id = symbols.define("value", SymbolKind.Parameter,
+        Some(i64_type()), span(), Visibility.Private, false, Some("qualified"))
+    val local_id = symbols.define("saved", SymbolKind.Variable,
+        Some(i64_type()), span(), Visibility.Private, false, Some("qualified"))
+    symbols.pop_scope()
+    val parameter = HirParam(symbol: parameter_id, name: "value", type_: i64_type(),
+        has_default: false, default: nil, span: span(), is_mutable: false)
+    val let_stmt = HirStmt(kind: HirStmtKind.Let(local_id, i64_type(),
+        typed(HirExprKind.Var(parameter_id), i64_type())), span: span())
+    val condition = typed(HirExprKind.BoolLit(true), bool_type())
+    val selected = typed(HirExprKind.If(condition,
+        block([], typed(HirExprKind.Var(local_id), i64_type())),
+        Some(block([], typed(HirExprKind.IntLit(0, nil), i64_type())))), i64_type())
+    val identity = function(identity_id, "identity", [parameter],
+        block([let_stmt], selected), false)
+
+    val entry_type = HirType(kind: HirTypeKind.Function([], i64_type(), []), span: span())
+    val entry_id = symbols.define("entry", SymbolKind.Function,
+        Some(entry_type), span(), Visibility.Public, false, Some("qualified"))
+    val callee = typed(HirExprKind.NamedVar(identity_id, "identity"), identity_type)
+    val call = typed(HirExprKind.Call(callee,
+        [HirCallArg(has_name: false, name: "",
+            value: typed(HirExprKind.IntLit(7, nil), i64_type()), span: span())], []),
+        i64_type())
+    val entry = function(entry_id, "entry", [], block([], call), true)
+    var functions: Dict<SymbolId, HirFunction> = {}
+    functions[identity_id] = identity
+    functions[entry_id] = entry
+    HirModule(name: "qualified", path: "qualified.spl", imports: [], exports: ["entry"],
+        domain_blocks: [], symbols: symbols, functions: functions,
+        gpu_function_targets: {}, gpu_function_backend_orders: {}, classes: {},
+        structs: {}, enums: {}, bitfields: {}, traits: {}, impls: [], constants: {},
+        static_asserts: [], aop_advices: [], di_bindings: [], arch_rules: [],
+        mock_decls: [], types: [], extend_enums: [])
+
+fn given_nested_local_scope_module() -> HirModule:
+    var module = given_typed_base_helper_module()
+    var symbols = module.symbols
+    var saved_id: i64 = -1
+    for raw_id in symbols.symbols.keys():
+        if symbols.symbols[raw_id].name == "saved": saved_id = raw_id
+    val function_scope_id = symbols.symbols[saved_id].scope.id
+    symbols.current_scope = ScopeId(id: function_scope_id)
+    val nested_scope = symbols.push_scope(ScopeKind.Block)
+    symbols.pop_scope()
+    symbols.pop_scope()
+    var function_scope = symbols.scopes[function_scope_id]
+    function_scope.symbols = function_scope.symbols.remove("saved")
+    symbols.scopes[function_scope_id] = function_scope
+    var saved = symbols.symbols[saved_id]
+    saved.scope = nested_scope
+    symbols.symbols[saved_id] = saved
+    var block_scope = symbols.scopes[nested_scope.id]
+    block_scope.symbols["saved"] = saved_id
+    symbols.scopes[nested_scope.id] = block_scope
+    module.symbols = symbols
+    module
+
+fn profile_input(module: HirModule) -> PortableHirProfileInputV1:
+    PortableHirProfileInputV1(module: module, stage: PortableObjectStageV1.Base,
+        portability: PortablePortabilityV1.Portable,
+        required_semantics_digest: portable_embedded_body_profile_digest_v1(),
+        target_contract_digest: nil,
+        verifier_digest: portable_hir_semantic_verifier_digest_v1())
+
+fn facts(module: HirModule) -> PortableBodySemanticFactsV1:
+    val ledger = PortableBodyLedgerV1.create(portable_body_limits_default_v1()).unwrap()
+    portable_hir_semantic_facts_v1(profile_input(module), ledger).unwrap()
+
+fn require_canonical_hir_bytes_v1(
+    result: Result<text, HirDecodeError>,
+) -> text:
+    match result:
+        case Ok(bytes): bytes
+        case Err(error):
+            fail("canonical HIR bytes unavailable: " + error.to_string())
+
+fn require_bounded_hir_module_v1(
+    result: Result<HirModule, HirDecodeError>,
+) -> HirModule:
+    match result:
+        case Ok(module): module
+        case Err(error):
+            fail("bounded HIR decode unavailable: " + error.to_string())
+
+# Frozen manual helper names from the design handoff.
+fn given_real_encoded_hir_body() -> text:
+    require_canonical_hir_bytes_v1(
+        hir_module_encode_canonical(given_typed_base_helper_module()))
+
+fn then_exact_dependency_edges(
+    value: PortableBodySemanticFactsV1,
+):
+    expect(value.graph.dependency_edges.len()).to_equal(1)
+    expect(value.graph.dependency_edges[0].caller_name).to_equal("entry")
+    expect(value.graph.dependency_edges[0].callee_name).to_equal("identity")
+
+fn graph_ledger(depth: i64, edges: i64, calls: i64) -> PortableBodyLedgerV1:
+    PortableBodyLedgerV1.create(PortableBodyLimitsV1(max_body_objects: 16,
+        max_functions: 16, max_symbols: 128, max_scopes: 128, max_exports: 16,
+        max_parameters: 128, max_nodes: 1024, max_graph_nodes: 16,
+        max_dependency_edges: edges,
+        max_call_occurrences: calls, max_call_chain_depth: depth,
+        max_semantic_depth: 128,
+        max_text_bytes: 65536, max_encoded_bytes: 65536,
+        max_retained_bytes: 65536, max_work_units: 65536)).unwrap()
+
+fn limits_for_budget(budget: PortableBodyBudgetCountersV1, bodies: i64,
+                     text_delta: i64, retained_delta: i64,
+                     work_delta: i64) -> PortableBodyLimitsV1:
+    PortableBodyLimitsV1(max_body_objects: budget.body_objects * bodies,
+        max_functions: budget.functions * bodies,
+        max_symbols: budget.symbols * bodies,
+        max_scopes: budget.scopes * bodies,
+        max_exports: budget.exports * bodies,
+        max_parameters: budget.parameters * bodies,
+        max_nodes: budget.nodes * bodies,
+        max_graph_nodes: budget.graph_nodes * bodies,
+        max_dependency_edges: budget.dependency_edges * bodies,
+        max_call_occurrences: budget.call_occurrences * bodies,
+        max_call_chain_depth: 8, max_semantic_depth: 8,
+        max_text_bytes: budget.text_bytes * bodies + text_delta,
+        max_encoded_bytes: budget.encoded_bytes * bodies,
+        max_retained_bytes: budget.retained_bytes * bodies + retained_delta,
+        max_work_units: budget.work_units * bodies + work_delta)
+
+fn edge(caller: i64, caller_name: text, callee: i64,
+        callee_name: text) -> PortableBodyDependencyEdgeV1:
+    PortableBodyDependencyEdgeV1(caller_symbol_id: caller, caller_name: caller_name,
+        callee_symbol_id: callee, callee_name: callee_name)
+
+describe "Portable HIR semantic SIO profile":
+    it "reports the canonical codec as exactly unavailable before qualification":
+        expect(hir_canonical_codec_generated_available_v1()).to_equal(false)
+        match hir_module_encode_canonical(given_typed_base_helper_module()):
+            case Err(HirDecodeError.Unavailable(detail)):
+                expect(detail).to_equal("canonical_codec_generator_stale")
+            case _: fail("canonical encode did not report exact unavailability")
+        match hir_module_decode_bounded("not-admitted-canonical-hir",
+                HirDecodeLimits.standard()):
+            case Err(HirDecodeError.Unavailable(detail)):
+                expect(detail).to_equal("canonical_codec_generator_stale")
+            case _: fail("bounded decode did not report exact unavailability")
+
+    it "keeps byte and attempt authority closed while body kinds are explicit":
+        expect(portable_hir_semantic_verifier_available_v1()).to_equal(false)
+        expect(portable_body_semantic_completeness_available_v1()).to_equal(false)
+        expect(portable_body_semantic_completeness_issue_v1().is_err()).to_equal(true)
+        expect(portable_embedded_body_kind_available_v1(
+            PortableEmbeddedBodyKindV1.ConcreteFunction)).to_equal(true)
+        expect(portable_embedded_body_kind_available_v1(
+            PortableEmbeddedBodyKindV1.MacroExpansion)).to_equal(false)
+        expect(portable_embedded_body_kind_available_v1(
+            PortableEmbeddedBodyKindV1.GenericBody)).to_equal(false)
+        expect(portable_embedded_body_kind_available_v1(
+            PortableEmbeddedBodyKindV1.TraitDefaultBody)).to_equal(false)
+        expect(portable_embedded_body_kind_available_v1(
+            PortableEmbeddedBodyKindV1.AroundAdvice)).to_equal(false)
+
+    it "derives exact deterministic Base semantic facts from typed HIR":
+        val first = facts(given_typed_base_helper_module())
+        val second = facts(given_typed_base_helper_module())
+        then_exact_dependency_edges(first)
+        expect(first.semantic_profile_digest).to_equal(
+            portable_embedded_body_profile_digest_v1())
+        expect(first.exported_entries.len()).to_equal(1)
+        expect(first.exported_entries[0].name).to_equal("entry")
+        expect(first.graph.dependency_digest).to_equal(second.graph.dependency_digest)
+        expect(first.transitive_effect_digest).to_equal(second.transitive_effect_digest)
+        expect(first.graph.longest_call_chain).to_equal(2)
+        expect(given_real_encoded_hir_body().len()).to_be_greater_than(0)
+
+    it "specifies direct versus bounded canonical decode fact equivalence":
+        val direct = facts(given_typed_base_helper_module())
+        val decoded = require_bounded_hir_module_v1(
+            hir_module_decode_bounded(given_real_encoded_hir_body(),
+                HirDecodeLimits.standard()))
+        val after_decode = facts(decoded)
+        expect(after_decode.semantic_profile_digest).to_equal(
+            direct.semantic_profile_digest)
+        expect(after_decode.graph.dependency_digest).to_equal(
+            direct.graph.dependency_digest)
+        expect(after_decode.transitive_effect_digest).to_equal(
+            direct.transitive_effect_digest)
+        expect(after_decode.exported_entries[0].signature_digest).to_equal(
+            direct.exported_entries[0].signature_digest)
+
+    it "rejects defining-module scope builtin visibility and index substitutions":
+        var foreign = given_typed_base_helper_module()
+        for raw_id in foreign.symbols.symbols.keys():
+            var symbol = foreign.symbols.symbols[raw_id]
+            if symbol.name == "identity":
+                symbol.defining_module = Some("foreign")
+                foreign.symbols.symbols[raw_id] = symbol
+        expect(portable_hir_semantics_valid_v1(foreign)).to_equal(false)
+
+        var wrong_scope = given_typed_base_helper_module()
+        for raw_id in wrong_scope.symbols.symbols.keys():
+            var symbol = wrong_scope.symbols.symbols[raw_id]
+            if symbol.name == "entry":
+                symbol.scope = ScopeId(id: 1)
+                wrong_scope.symbols.symbols[raw_id] = symbol
+        expect(portable_hir_semantics_valid_v1(wrong_scope)).to_equal(false)
+
+        var builtin = given_typed_base_helper_module()
+        for raw_id in builtin.symbols.symbols.keys():
+            var symbol = builtin.symbols.symbols[raw_id]
+            if symbol.name == "saved":
+                symbol.builtin_method_tag = 1
+                builtin.symbols.symbols[raw_id] = symbol
+        expect(portable_hir_semantics_valid_v1(builtin)).to_equal(false)
+
+        var hidden_export = given_typed_base_helper_module()
+        for key in hidden_export.functions.keys():
+            if hidden_export.functions[key].name == "entry":
+                var entry_fn = hidden_export.functions[key]
+                entry_fn.is_public = false
+                hidden_export.functions[key] = entry_fn
+        expect(portable_hir_semantics_valid_v1(hidden_export)).to_equal(false)
+
+        var stale_index = given_typed_base_helper_module()
+        stale_index.symbols.exact_symbols["entry"] = 999
+        expect(portable_hir_semantics_valid_v1(stale_index)).to_equal(false)
+
+        var qualified_index = given_typed_base_helper_module()
+        qualified_index.symbols.qualified_functions["qualified#entry"] = 1
+        expect(portable_hir_semantics_valid_v1(qualified_index)).to_equal(false)
+
+        var callable_index = given_typed_base_helper_module()
+        callable_index.symbols.module_callables["qualified#entry"] = 999
+        expect(portable_hir_semantics_valid_v1(callable_index)).to_equal(false)
+
+        var sibling_scope = given_typed_base_helper_module()
+        val foreign_scope = sibling_scope.symbols.push_scope(ScopeKind.Function)
+        sibling_scope.symbols.pop_scope()
+        var saved_id: i64 = -1
+        for raw_id in sibling_scope.symbols.symbols.keys():
+            if sibling_scope.symbols.symbols[raw_id].name == "saved": saved_id = raw_id
+        var saved_symbol = sibling_scope.symbols.symbols[saved_id]
+        val old_scope_id = saved_symbol.scope.id
+        var old_scope = sibling_scope.symbols.scopes[old_scope_id]
+        old_scope.symbols = old_scope.symbols.remove("saved")
+        sibling_scope.symbols.scopes[old_scope_id] = old_scope
+        saved_symbol.scope = foreign_scope
+        sibling_scope.symbols.symbols[saved_id] = saved_symbol
+        var other_scope = sibling_scope.symbols.scopes[foreign_scope.id]
+        other_scope.symbols["saved"] = saved_id
+        sibling_scope.symbols.scopes[foreign_scope.id] = other_scope
+        expect(portable_hir_semantics_valid_v1(sibling_scope)).to_equal(false)
+
+    it "rejects duplicate exports map keys names and extra declarations":
+        var duplicate_export = given_typed_base_helper_module()
+        duplicate_export.exports = ["entry", "entry"]
+        expect(portable_hir_semantics_valid_v1(duplicate_export)).to_equal(false)
+
+        var wrong_key = given_typed_base_helper_module()
+        for key in wrong_key.functions.keys():
+            if wrong_key.functions[key].name == "entry":
+                val entry_fn = wrong_key.functions[key]
+                wrong_key.functions = wrong_key.functions.remove(key)
+                wrong_key.functions[SymbolId(id: -1)] = entry_fn
+        expect(portable_hir_semantics_valid_v1(wrong_key)).to_equal(false)
+
+        var duplicate_name = given_typed_base_helper_module()
+        for key in duplicate_name.functions.keys():
+            if duplicate_name.functions[key].name == "identity":
+                var identity = duplicate_name.functions[key]
+                identity.name = "entry"
+                duplicate_name.functions[key] = identity
+        expect(portable_hir_semantics_valid_v1(duplicate_name)).to_equal(false)
+
+        var extra = given_typed_base_helper_module()
+        _ = extra.symbols.define("extra", SymbolKind.Variable, Some(i64_type()),
+            span(), Visibility.Private, false, Some("qualified"))
+        expect(portable_hir_semantics_valid_v1(extra)).to_equal(false)
+
+    it "rejects noncanonical disabled payloads targets and unreachable unsupported nodes":
+        var export_payload = given_typed_base_helper_module()
+        for key in export_payload.functions.keys():
+            if export_payload.functions[key].name == "entry":
+                var entry_fn = export_payload.functions[key]
+                entry_fn.export_attr = ExportAttr(is_export_c: false, export_name: "")
+                export_payload.functions[key] = entry_fn
+        expect(portable_hir_semantics_valid_v1(export_payload)).to_equal(false)
+
+        var driver_payload = given_typed_base_helper_module()
+        for key in driver_payload.functions.keys():
+            if driver_payload.functions[key].name == "entry":
+                var entry_fn = driver_payload.functions[key]
+                entry_fn.driver_manifest_attr = DriverManifestAttr(
+                    kind: DriverManifestAttrKind.Driver, driver_class: 0, vendor: 0,
+                    device_ids: [], version: "", abi: "")
+                driver_payload.functions[key] = entry_fn
+        expect(portable_hir_semantics_valid_v1(driver_payload)).to_equal(false)
+
+        var vhdl_payload = given_typed_base_helper_module()
+        for key in vhdl_payload.functions.keys():
+            if vhdl_payload.functions[key].name == "entry":
+                var entry_fn = vhdl_payload.functions[key]
+                entry_fn.vhdl_metadata = vhdl_hardware_metadata_default()
+                vhdl_payload.functions[key] = entry_fn
+        expect(portable_hir_semantics_valid_v1(vhdl_payload)).to_equal(false)
+
+        var target = given_typed_base_helper_module()
+        for key in target.functions.keys():
+            if target.functions[key].name == "entry":
+                var entry_fn = target.functions[key]
+                entry_fn.gpu_target = "cuda"
+                target.functions[key] = entry_fn
+        expect(portable_hir_semantics_valid_v1(target)).to_equal(false)
+
+        var doc_payload = given_typed_base_helper_module()
+        for key in doc_payload.functions.keys():
+            if doc_payload.functions[key].name == "entry":
+                var entry_fn = doc_payload.functions[key]
+                entry_fn.doc_comment = "hidden encoded payload"
+                doc_payload.functions[key] = entry_fn
+        expect(portable_hir_semantics_valid_v1(doc_payload)).to_equal(false)
+
+        var default_payload = given_typed_base_helper_module()
+        for key in default_payload.functions.keys():
+            if default_payload.functions[key].name == "identity":
+                var identity = default_payload.functions[key]
+                identity.params[0].default = typed(HirExprKind.IntLit(1, nil), i64_type())
+                default_payload.functions[key] = identity
+        expect(portable_hir_semantics_valid_v1(default_payload)).to_equal(false)
+
+        var dead_unsupported = given_typed_base_helper_module()
+        for key in dead_unsupported.functions.keys():
+            if dead_unsupported.functions[key].name == "identity":
+                var identity = dead_unsupported.functions[key]
+                match identity.body.value.kind:
+                    case HirExprKind.If(condition, then_, Some(other)):
+                        var bad = other
+                        bad.value = typed(HirExprKind.Unary(HirUnaryOp.Ref,
+                            typed(HirExprKind.IntLit(0, nil), i64_type())), i64_type())
+                        identity.body.value.kind = HirExprKind.If(condition, then_, Some(bad))
+                    case _: fail("fixture must contain required-else if")
+                dead_unsupported.functions[key] = identity
+        expect(portable_hir_semantics_valid_v1(dead_unsupported)).to_equal(false)
+
+    it "normalizes empty and explicit Pure through the semantic effect owner":
+        val empty = portable_body_normalized_pure_effect_v1([]).unwrap()
+        val explicit = portable_body_normalized_pure_effect_v1(
+            [Effect(kind: EffectKind.Pure, span: span())]).unwrap()
+        expect(empty).to_equal(explicit)
+        expect(explicit).to_equal(portable_embedded_body_effect_rules_digest_v1())
+        expect(portable_body_normalized_pure_effect_v1([
+            Effect(kind: EffectKind.Pure, span: span()),
+            Effect(kind: EffectKind.Pure, span: span())]).is_err()).to_equal(true)
+        expect(portable_body_normalized_pure_effect_v1([
+            Effect(kind: EffectKind.IO, span: span())]).is_err()).to_equal(true)
+        expect(portable_body_normalized_pure_effect_v1([
+            Effect(kind: EffectKind.Async, span: span())]).is_err()).to_equal(true)
+        expect(portable_body_normalized_pure_effect_v1([
+            Effect(kind: EffectKind.Throws(i64_type()), span: span())]).is_err()).to_equal(true)
+        expect(portable_body_normalized_pure_effect_v1([
+            Effect(kind: EffectKind.Mutates, span: span())]).is_err()).to_equal(true)
+        expect(portable_body_normalized_pure_effect_v1([
+            Effect(kind: EffectKind.Allocates, span: span())]).is_err()).to_equal(true)
+        expect(portable_body_normalized_pure_effect_v1([
+            Effect(kind: EffectKind.Custom("host"), span: span())]).is_err()).to_equal(true)
+
+    it "rejects wrong return and direct-call arity before fact issuance":
+        var wrong_return = given_typed_base_helper_module()
+        for key in wrong_return.functions.keys():
+            if wrong_return.functions[key].name == "entry":
+                var entry_fn = wrong_return.functions[key]
+                entry_fn.body.value.type_ = bool_type()
+                wrong_return.functions[key] = entry_fn
+        expect(portable_hir_semantics_valid_v1(wrong_return)).to_equal(false)
+
+        var wrong_arity = given_typed_base_helper_module()
+        for key in wrong_arity.functions.keys():
+            if wrong_arity.functions[key].name == "entry":
+                var entry_fn = wrong_arity.functions[key]
+                match entry_fn.body.value.kind:
+                    case HirExprKind.Call(callee, _, type_args):
+                        entry_fn.body.value.kind = HirExprKind.Call(callee, [], type_args)
+                    case _: fail("fixture entry must be a direct call")
+                wrong_arity.functions[key] = entry_fn
+        expect(portable_hir_semantics_valid_v1(wrong_arity)).to_equal(false)
+
+    it "rejects a missing parameter SymbolId without indexing it":
+        var missing = given_typed_base_helper_module()
+        for key in missing.functions.keys():
+            if missing.functions[key].name == "identity":
+                var identity = missing.functions[key]
+                var parameters = identity.params
+                var parameter = parameters[0]
+                parameter.symbol = SymbolId(id: 999)
+                parameters[0] = parameter
+                identity.params = parameters
+                missing.functions[key] = identity
+        val ledger = PortableBodyLedgerV1.create(portable_body_limits_default_v1()).unwrap()
+        match portable_hir_semantic_facts_v1(profile_input(missing), ledger):
+            case Err(PortableBodyErrorV1.UnsupportedSemantics(detail)):
+                expect(detail).to_contain("function body")
+            case _: fail("missing parameter SymbolId did not fail closed")
+
+    it "checks every admitted signed-width boundary and suffix":
+        expect(portable_body_signed_literal_valid_v1(-128, Some("i8"), i8_type())).to_equal(true)
+        expect(portable_body_signed_literal_valid_v1(127, Some("i8"), i8_type())).to_equal(true)
+        expect(portable_body_signed_literal_valid_v1(-129, Some("i8"), i8_type())).to_equal(false)
+        expect(portable_body_signed_literal_valid_v1(128, Some("i8"), i8_type())).to_equal(false)
+        val i16_type = HirType(kind: HirTypeKind.Int(16, true), span: span())
+        expect(portable_body_signed_literal_valid_v1(-32768, Some("i16"), i16_type)).to_equal(true)
+        expect(portable_body_signed_literal_valid_v1(32767, Some("i16"), i16_type)).to_equal(true)
+        expect(portable_body_signed_literal_valid_v1(-32769, Some("i16"), i16_type)).to_equal(false)
+        expect(portable_body_signed_literal_valid_v1(32768, Some("i16"), i16_type)).to_equal(false)
+        val i32_type = HirType(kind: HirTypeKind.Int(32, true), span: span())
+        expect(portable_body_signed_literal_valid_v1(-2147483648, Some("i32"), i32_type)).to_equal(true)
+        expect(portable_body_signed_literal_valid_v1(2147483647, Some("i32"), i32_type)).to_equal(true)
+        expect(portable_body_signed_literal_valid_v1(1, Some("i64"), i32_type)).to_equal(false)
+        expect(portable_body_signed_literal_valid_v1(1, nil, i64_type())).to_equal(true)
+        expect(portable_body_signed_literal_valid_v1(1, nil, i8_type())).to_equal(false)
+
+    it "deduplicates edges and makes component framing and permutations stable":
+        val repeated = [edge(1, "a:1", 2, "b"), edge(1, "a:1", 2, "b")]
+        val first = portable_body_graph_analyze_v1([1, 2], repeated,
+            graph_ledger(2, 1, 2)).unwrap()
+        val permuted = portable_body_graph_analyze_v1([2, 1],
+            [repeated[1], repeated[0]], graph_ledger(2, 1, 2)).unwrap()
+        expect(first.dependency_edges.len()).to_equal(1)
+        expect(first.call_occurrences).to_equal(2)
+        expect(first.dependency_digest).to_equal(permuted.dependency_digest)
+        val boundary = portable_body_graph_analyze_v1([1, 2],
+            [edge(1, "a", 2, "1:b")], graph_ledger(2, 1, 1)).unwrap()
+        expect(first.dependency_digest == boundary.dependency_digest).to_equal(false)
+
+    it "handles diamonds disconnected nodes cycles and exact call-chain depth":
+        val diamond_edges = [edge(1, "a", 2, "b"), edge(1, "a", 3, "c"),
+            edge(2, "b", 4, "d"), edge(3, "c", 4, "d")]
+        val diamond = portable_body_graph_analyze_v1([1, 2, 3, 4, 5],
+            diamond_edges, graph_ledger(3, 4, 4)).unwrap()
+        expect(diamond.longest_call_chain).to_equal(3)
+        expect(portable_body_graph_analyze_v1([1], [edge(1, "a", 1, "a")],
+            graph_ledger(2, 1, 1)).is_err()).to_equal(true)
+        val mutual = [edge(1, "a", 2, "b"), edge(2, "b", 1, "a")]
+        expect(portable_body_graph_analyze_v1([1, 2], mutual,
+            graph_ledger(2, 2, 2)).is_err()).to_equal(true)
+        val chain = [edge(1, "a", 2, "b"), edge(2, "b", 3, "c")]
+        expect(portable_body_graph_analyze_v1([3, 2, 1], chain,
+            graph_ledger(3, 2, 2)).is_ok()).to_equal(true)
+        match portable_body_graph_analyze_v1([1, 2, 3], chain,
+                graph_ledger(2, 2, 2)):
+            case Err(PortableBodyErrorV1.BoundsExceeded(detail)):
+                expect(detail).to_contain("call chain depth")
+            case _: fail("one-over call-chain depth was not a typed bounds refusal")
+
+    it "reports bounds separately and shares aggregate body accounting":
+        val small = PortableBodyLimitsV1(max_body_objects: 1, max_functions: 2,
+            max_symbols: 4, max_scopes: 4, max_exports: 1,
+            max_parameters: 0, max_nodes: 128, max_graph_nodes: 2,
+            max_dependency_edges: 1, max_call_occurrences: 1,
+            max_call_chain_depth: 8, max_semantic_depth: 8,
+            max_text_bytes: 65536,
+            max_encoded_bytes: 65536, max_retained_bytes: 65536,
+            max_work_units: 65536)
+        val header_ledger = PortableBodyLedgerV1.create(small).unwrap()
+        expect(portable_hir_semantic_facts_v1(
+            profile_input(given_typed_base_helper_module()), header_ledger).is_err()).to_equal(true)
+
+        val aggregate_limits = PortableBodyLimitsV1(max_body_objects: 1,
+            max_functions: 4, max_symbols: 16, max_scopes: 16, max_exports: 4,
+            max_parameters: 4, max_nodes: 256, max_graph_nodes: 4,
+            max_dependency_edges: 4, max_call_occurrences: 4,
+            max_call_chain_depth: 8, max_semantic_depth: 8,
+            max_text_bytes: 65536,
+            max_encoded_bytes: 65536, max_retained_bytes: 65536,
+            max_work_units: 65536)
+        val shared = PortableBodyLedgerV1.create(aggregate_limits).unwrap()
+        expect(portable_hir_semantic_facts_v1(
+            profile_input(given_typed_base_helper_module()), shared).is_ok()).to_equal(true)
+        match portable_hir_semantic_facts_v1(
+                profile_input(given_typed_base_helper_module()), shared):
+            case Err(PortableBodyErrorV1.BoundsExceeded(detail)):
+                expect(detail).to_contain("body object")
+            case _: fail("aggregate body limit was not a typed bounds refusal")
+
+    it "accepts exact aggregate descriptor budgets and rejects one-byte-over limits":
+        val baseline = facts(given_typed_base_helper_module()).budget
+        # Independent oracle for this fixture, including the 260-byte canonical
+        # transitive-effect text and both copied fact descriptors.
+        expect(baseline.text_bytes).to_equal(414)
+        expect(baseline.retained_bytes).to_equal(1774)
+        expect(baseline.work_units).to_equal(53)
+        val exact = PortableBodyLedgerV1.create(
+            limits_for_budget(baseline, 2, 0, 0, 0)).unwrap()
+        expect(portable_hir_semantic_facts_v1(
+            profile_input(given_typed_base_helper_module()), exact).is_ok()).to_equal(true)
+        match portable_hir_semantic_facts_v1(
+                profile_input(given_typed_base_helper_module()), exact):
+            case Ok(value):
+                expect(value.budget.text_bytes).to_equal(baseline.text_bytes * 2)
+                expect(value.budget.retained_bytes).to_equal(
+                    baseline.retained_bytes * 2)
+            case _: fail("two bodies did not fit their exact aggregate budgets")
+
+        val text_over = PortableBodyLedgerV1.create(
+            limits_for_budget(baseline, 2, -1, 0, 0)).unwrap()
+        expect(portable_hir_semantic_facts_v1(
+            profile_input(given_typed_base_helper_module()), text_over).is_ok()).to_equal(true)
+        match portable_hir_semantic_facts_v1(
+                profile_input(given_typed_base_helper_module()), text_over):
+            case Err(PortableBodyErrorV1.BoundsExceeded(detail)):
+                expect(detail).to_contain("semantic text budget")
+            case _: fail("one-byte-over aggregate effect text did not refuse")
+
+        val retained_over = PortableBodyLedgerV1.create(
+            limits_for_budget(baseline, 2, 0, -1, 0)).unwrap()
+        expect(portable_hir_semantic_facts_v1(
+            profile_input(given_typed_base_helper_module()), retained_over).is_ok()).to_equal(true)
+        match portable_hir_semantic_facts_v1(
+                profile_input(given_typed_base_helper_module()), retained_over):
+            case Err(PortableBodyErrorV1.BoundsExceeded(detail)):
+                expect(detail).to_contain("retained semantic budget")
+            case _: fail("one-byte-over aggregate descriptor retention did not refuse")
+
+    it "charges every scope ancestry hop against the aggregate work budget":
+        val shallow = facts(given_typed_base_helper_module()).budget
+        val deep = facts(given_nested_local_scope_module()).budget
+        expect(shallow.work_units).to_equal(53)
+        expect(deep.work_units).to_equal(58)
+        expect(deep.work_units).to_equal(shallow.work_units + 5)
+        val exact = PortableBodyLedgerV1.create(
+            limits_for_budget(deep, 1, 0, 0, 0)).unwrap()
+        expect(portable_hir_semantic_facts_v1(
+            profile_input(given_nested_local_scope_module()), exact).is_ok()).to_equal(true)
+        val one_over = PortableBodyLedgerV1.create(
+            limits_for_budget(deep, 1, 0, 0, -1)).unwrap()
+        match portable_hir_semantic_facts_v1(
+                profile_input(given_nested_local_scope_module()), one_over):
+            case Err(PortableBodyErrorV1.BoundsExceeded(detail)):
+                expect(detail).to_contain("semantic work budget")
+            case _: fail("one-over scope-hop work did not refuse")
+
+    it "keeps copied references and legacy byte/native paths non-authoritative":
+        val object = PortableHirObjectV1(encoded_hir: "unverified",
+            verifier_digest: portable_hir_semantic_verifier_digest_v1(),
+            reference: PortableObjectRefV1(content_digest: digest("content"),
+                stage: PortableObjectStageV1.Base,
+                portability: PortablePortabilityV1.Portable, ir_schema: 2,
+                required_semantics_digest: portable_embedded_body_profile_digest_v1(),
+                target_contract_digest: nil,
+                verification_receipt_digest: digest("copied-receipt")))
+        expect(verify_portable_hir_object_v1(object, nil)).to_equal(false)
+        expect(encode_portable_hir_object_v1(
+            profile_input(given_typed_base_helper_module())).is_err()).to_equal(true)
+        match portable_hir_native_loader_admit_v1(object):
+            case Err(reason): expect(reason).to_equal("portable_hir_verification_failed")
+            case Ok(_): fail("portable body entered the native loader")

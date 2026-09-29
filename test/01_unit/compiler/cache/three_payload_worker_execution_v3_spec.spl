@@ -1,0 +1,162 @@
+# codex-system-test
+# Purpose: trusted owner-only L7 parse-preflight contract and fail-closed compile route.
+# @req REQ-CSM-006 REQ-CSM-017 REQ-CSM-024 REQ-CSM-027
+
+use std.spec.*
+use std.spec.step
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io.file_ops.{file_read_text}
+use compiler.common.cache_contract.three_payload_execution_v3.{
+    ThreePayloadExecutionBindingV3, ThreePayloadPhysicalReadReceiptV3,
+    three_payload_execution_binding_valid_v3,
+    three_payload_execution_binding_digest_v3,
+    three_payload_execution_binding_equal_v3,
+    three_payload_physical_read_receipt_valid_v3,
+    three_payload_execution_contract_v3,
+    three_payload_execution_contract_valid_v3,
+    three_payload_compiled_execution_available_v3,
+    three_payload_compiled_execution_blocker_v3
+}
+
+fn v3_digest(label: text) -> text: sha256_text(label)
+
+fn v3_binding() -> ThreePayloadExecutionBindingV3:
+    ThreePayloadExecutionBindingV3(
+        owner_instance_identity: 101u64, session_serial: 201u64,
+        grant_serial: 301u64, run_serial: 401u64, owner_close_epoch: 2u64,
+        scope_generation: 7, cancellation_epoch: 4,
+        reader_admission_epoch: 6,
+        owner_grant_digest: v3_digest("owner-grant"),
+        attempt_seal_digest: v3_digest("attempt"),
+        semantic_completeness_seal_digest: v3_digest("complete"),
+        closure_seal_digest: v3_digest("closure"),
+        parser_profile_digest: v3_digest("parser-profile"),
+        execution_limits_digest: v3_digest("execution-limits"),
+        dependency_enumeration_digest: v3_digest("dependencies"),
+        issuer_set_digest: v3_digest("issuers"),
+        body_set_digest: v3_digest("bodies"),
+        executor_digest: v3_digest("executor"))
+
+fn v3_receipt(prior: i64) -> ThreePayloadPhysicalReadReceiptV3:
+    ThreePayloadPhysicalReadReceiptV3(
+        ordinary_input_count: 2 + prior, distinct_source: 1,
+        distinct_prior: prior, distinct_init: 1,
+        successful_bounded_facade_read_operations: 2 + prior,
+        successful_file_read_bytes: 4096, decoded_sections: 2,
+        largest_declared_decode_bytes: 1024,
+        measured_peak_decode_bytes: -1, rr_file_reads: 0,
+        external_file_reads: 0, denied_input_attempts: 0,
+        macro_body_refs: 0, generic_body_refs: 0,
+        trait_default_body_refs: 0, trait_callable_refs: 0,
+        aspect_callable_refs: 0, semantic_object_file_reads: 0)
+
+describe "Three-payload trusted execution V3":
+    it "separates parse-preflight availability from compiled-result authority":
+        step("Inspect the frozen V3 capability contract")
+        val contract = three_payload_execution_contract_v3()
+        expect(three_payload_execution_contract_valid_v3(contract)).to_equal(true)
+        expect(contract.parse_preflight_available).to_equal(true)
+        expect(contract.compiled_result_available).to_equal(false)
+        expect(contract.owner_only_execution).to_equal(true)
+        expect(contract.private_reserve_begin_complete).to_equal(true)
+        expect(contract.caller_result_dto_accepted).to_equal(false)
+        expect(three_payload_compiled_execution_available_v3()).to_equal(false)
+        expect(three_payload_compiled_execution_blocker_v3()).to_equal(
+            "owned_parser_state_profile_and_semantic_pipeline_unavailable")
+
+    it "binds cross-owner stale canceled and executor-substituted contract values":
+        step("Bind owner, session, grant, run, epochs, seals, semantic inputs, and executor")
+        val expected = v3_binding()
+        expect(three_payload_execution_binding_valid_v3(expected)).to_equal(true)
+        val expected_digest = three_payload_execution_binding_digest_v3(expected)
+        expect(expected_digest.len()).to_equal(64)
+
+        var forged = expected
+        forged.owner_instance_identity = 102u64
+        expect(three_payload_execution_binding_equal_v3(expected, forged)).to_equal(false)
+        expect(three_payload_execution_binding_digest_v3(forged) == expected_digest).to_equal(false)
+        forged = expected
+        forged.session_serial = 202u64
+        expect(three_payload_execution_binding_digest_v3(forged) == expected_digest).to_equal(false)
+        forged = expected
+        forged.grant_serial = 302u64
+        expect(three_payload_execution_binding_digest_v3(forged) == expected_digest).to_equal(false)
+        forged = expected
+        forged.run_serial = 402u64
+        expect(three_payload_execution_binding_digest_v3(forged) == expected_digest).to_equal(false)
+        forged = expected
+        forged.owner_close_epoch = 3u64
+        expect(three_payload_execution_binding_digest_v3(forged) == expected_digest).to_equal(false)
+        forged = expected
+        forged.scope_generation = 8
+        expect(three_payload_execution_binding_digest_v3(forged) == expected_digest).to_equal(false)
+        forged = expected
+        forged.cancellation_epoch = 5
+        expect(three_payload_execution_binding_digest_v3(forged) == expected_digest).to_equal(false)
+        forged = expected
+        forged.reader_admission_epoch = 8
+        expect(three_payload_execution_binding_digest_v3(forged) == expected_digest).to_equal(false)
+        forged = expected
+        forged.owner_grant_digest = v3_digest("other-grant")
+        expect(three_payload_execution_binding_digest_v3(forged) == expected_digest).to_equal(false)
+        forged = expected
+        forged.execution_limits_digest = v3_digest("other-limits")
+        expect(three_payload_execution_binding_digest_v3(forged) == expected_digest).to_equal(false)
+        forged = expected
+        forged.attempt_seal_digest = v3_digest("other-attempt")
+        expect(three_payload_execution_binding_digest_v3(forged) == expected_digest).to_equal(false)
+        forged = expected
+        forged.parser_profile_digest = v3_digest("other-parser-profile")
+        expect(three_payload_execution_binding_digest_v3(forged) == expected_digest).to_equal(false)
+        forged = expected
+        forged.dependency_enumeration_digest = v3_digest("other-dependencies")
+        expect(three_payload_execution_binding_digest_v3(forged) == expected_digest).to_equal(false)
+        forged = expected
+        forged.issuer_set_digest = v3_digest("other-issuers")
+        expect(three_payload_execution_binding_digest_v3(forged) == expected_digest).to_equal(false)
+        forged = expected
+        forged.body_set_digest = v3_digest("other-bodies")
+        expect(three_payload_execution_binding_digest_v3(forged) == expected_digest).to_equal(false)
+        forged = expected
+        forged.executor_digest = v3_digest("caller-executor")
+        expect(three_payload_execution_binding_digest_v3(forged) == expected_digest).to_equal(false)
+        forged = expected
+        forged.reader_admission_epoch = 7
+        expect(three_payload_execution_binding_valid_v3(forged)).to_equal(false)
+        forged = expected
+        forged.cancellation_epoch = -1
+        expect(three_payload_execution_binding_valid_v3(forged)).to_equal(false)
+
+    it "accepts only cold-two or warm-three physical receipts with no fourth input":
+        step("Validate broker-owned physical counters")
+        expect(three_payload_physical_read_receipt_valid_v3(v3_receipt(0))).to_equal(true)
+        expect(three_payload_physical_read_receipt_valid_v3(v3_receipt(1))).to_equal(true)
+        var fourth = v3_receipt(1)
+        fourth.ordinary_input_count = 4
+        fourth.successful_bounded_facade_read_operations = 4
+        expect(three_payload_physical_read_receipt_valid_v3(fourth)).to_equal(false)
+        var rr = v3_receipt(0)
+        rr.rr_file_reads = 1
+        expect(three_payload_physical_read_receipt_valid_v3(rr)).to_equal(false)
+        var invented_peak = v3_receipt(0)
+        invented_peak.measured_peak_decode_bytes = 1024
+        expect(three_payload_physical_read_receipt_valid_v3(invented_peak)).to_equal(false)
+
+    it "keeps transitions and handle constructors private to the canonical owner":
+        step("Inspect the owner boundary without manufacturing a test grant")
+        val source = file_read_text(
+            "src/compiler/80.driver/cache/gateway/semantic_scope_live_owner_v2.spl")
+        expect(source.contains("pub me preflight_three_payload_parse_v3")).to_equal(true)
+        expect(source.contains("pub me execute_three_payload_compile_v3")).to_equal(true)
+        expect(source.contains("me _reserve_three_payload_execution_v3")).to_equal(true)
+        expect(source.contains("me _begin_three_payload_execution_v3")).to_equal(true)
+        expect(source.contains("me _complete_three_payload_parse_preflight_v3")).to_equal(true)
+        expect(source.contains("pub me _reserve_three_payload_execution_v3")).to_equal(false)
+        expect(source.contains("pub struct VerifiedThreePayloadParsePreflightV3")).to_equal(false)
+        expect(source.contains("_retired_run_known_v2(verified.owner_instance_identity")).to_equal(true)
+        expect(source.contains("_attempt_live_at_v2(index)?")).to_equal(true)
+        expect(source.contains("not self._issuer_rows_current_v2(index)")).to_equal(true)
+        expect(source.contains("# Parsing is not an authority-preserving critical section.")).to_equal(true)
+        expect(source.contains("Failed runs never remain Running.")).to_equal(true)
+        expect(source.contains("TPWV1-summary")).to_equal(false)
+        expect(source.contains("TPWV1-diagnostic")).to_equal(false)

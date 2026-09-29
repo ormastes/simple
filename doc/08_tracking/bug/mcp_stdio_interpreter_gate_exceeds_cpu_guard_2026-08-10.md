@@ -173,3 +173,7 @@ concurrent `simple` processes, and the one spec this lane did queue
 Note also `src/compiler/50.mir/**` is claimed by another lane this session; the
 `text_extern_abi.spl` reference above is a READ for evidence only — nothing under
 `50.mir` was edited here.
+
+## Triage 2026-09-13 (BUGFIX-7 lane)
+
+Out of lane: needs measuring CPU-guard behavior under the MCP stdio interpreter gate in a live server session, not reproducible via a unit spec in this lane's budget. No change made.

@@ -1,4 +1,8 @@
 # Stage4 accepted cross targets without cross compiler capsules
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Symptom
 
@@ -20,3 +24,4 @@ x64/AArch64, Windows x64, and FreeBSD x64/AArch64.
 Real cross-target Stage4 remains deferred until target-specific compiler
 capsules have explicit ABI, inventory, and distribution ownership. No runtime
 execution is claimed under this session's static-only restriction.
+

@@ -4,48 +4,28 @@
 # duplicate register constants.  All functions are noalloc-safe (no heap
 # allocation).
 
-use os.kernel.boot.uart16550_mmio.{
-    uart16550_mmio_init,
-    uart16550_mmio_write_byte,
-    uart16550_mmio_read_byte
-}
+use os.kernel.boot.uart16550_mmio.{uart16550_mmio_write_byte, uart16550_mmio_read_byte}
 use os.kernel.boot.mmio.{mmio_write8}
+use os.kernel.arch.riscv64.platform.uart_baud_policy.{
+    uart_baud_plan,
+    uart_baud_apply_plan_with
+}
 
-# 16550 register offsets (referenced only for baud-divisor programming)
-val _UART_IER: u64 = 0x01
-val _UART_LCR: u64 = 0x03
-val _UART_DLL: u64 = 0x00
-val _UART_DLH: u64 = 0x01
-val _UART_FCR: u64 = 0x02
-val _UART_MCR: u64 = 0x04
+val _UART_INPUT_CLOCK_HZ: u64 = 1843200u64
 
-val _UART_LCR_DLAB: u8   = 0x80
-val _UART_LCR_8N1: u8    = 0x03
-val _UART_FCR_RESET: u8  = 0xC7
-val _UART_MCR_DTR: u8    = 0x0B
+fn uart_mmio_try_init(base: u64, baud: u64) -> bool:
+    """Validate baud policy before crossing the hardware MMIO boundary."""
+    val plan = uart_baud_plan(_UART_INPUT_CLOCK_HZ, baud)
+    uart_baud_apply_plan_with(base, plan, mmio_write8) == 7
 
 fn uart_mmio_init(base: u64, baud: u64):
     """Initialize NS16550-compatible UART at base address for the given baud rate.
 
-    When baud matches the uart16550_mmio_init default (115200) the shared
-    initialiser is used directly.  For other rates the divisor is computed
-    from the FPGA UART input clock (assumed 1.8432 MHz, divisor = clock /
-    (baud * 16)) and programmed via DLAB.
+    The pure policy rejects zero, overflow-shaped, too-fast, and out-of-range
+    divisors before any register write. The compatibility entry point keeps
+    its unit return; callers that need the verdict use uart_mmio_try_init.
     """
-    if baud == 115200:
-        uart16550_mmio_init(base)
-        return
-    # Compute baud divisor: UART clock assumed 1843200 Hz (standard 16x)
-    val divisor = 1843200 / (baud * 16)
-    val dll = (divisor & 0xFF) as u8
-    val dlh = ((divisor >> 8) & 0xFF) as u8
-    mmio_write8(base + _UART_IER, 0x00)
-    mmio_write8(base + _UART_LCR, _UART_LCR_DLAB)
-    mmio_write8(base + _UART_DLL, dll)
-    mmio_write8(base + _UART_DLH, dlh)
-    mmio_write8(base + _UART_LCR, _UART_LCR_8N1)
-    mmio_write8(base + _UART_FCR, _UART_FCR_RESET)
-    mmio_write8(base + _UART_MCR, _UART_MCR_DTR)
+    val _initialized = uart_mmio_try_init(base, baud)
 
 fn uart_mmio_putchar(base: u64, ch: u8):
     """Write single byte, blocking until TX holding register is empty."""

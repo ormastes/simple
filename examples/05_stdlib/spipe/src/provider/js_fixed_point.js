@@ -44,3 +44,36 @@ export class JsFixedPointSearchProvider {
   #requireHealthy() { if (this.#state !== "healthy") searchFail("handshake_required", "initialize first"); }
   #requireIndex() { this.#requireHealthy(); if (!this.#index) searchFail("snapshot_not_found", "no logical index is open"); }
 }
+
+/**
+ * Read-only fallback for a coordinator-owned scoped snapshot.
+ *
+ * This is intentionally not an authority, lifecycle, or identity service:
+ * it has no open/apply/publish methods and never writes canonical state.  The
+ * caller pins both the scope and root at construction; every read repeats that
+ * binding before the lexical index is consulted.
+ */
+export class ReadOnlyJsFallbackSearchProvider {
+  #state = "new"; #index; #scope; #root;
+  constructor({ analyzer, scope_digest, logical_root, documents = [], cursor_key = null }) {
+    this.#index = new LogicalLexicalIndex({ scope_digest, analyzer, documents, cursor_key });
+    if (this.#index.logical_root !== logical_root) searchFail("binding_mismatch", "read-only fallback root does not match its scoped snapshot");
+    this.#scope = scope_digest; this.#root = logical_root;
+  }
+  initialize(request) {
+    if (this.#state !== "new") searchFail("invalid_request", "provider is already initialized");
+    this.#state = "initializing";
+    try { validateInitializeRequest(request); this.#state = "healthy"; return createInitializeResult({ request_id: request.request_id, implementation_digest: IMPLEMENTATION_DIGEST }); }
+    catch (error) { this.#state = "quarantined"; throw error; }
+  }
+  search(payload) { this.#requireBinding(payload, ["scope_digest", "logical_root", "query_text", "filters", "limit", "cursor", "explain"], "search"); return this.#index.query(payload); }
+  explain(payload) { this.#requireBinding(payload, ["scope_digest", "logical_root", "document_id", "query_text", "filters"], "explain"); return Object.freeze({ logical_root: this.#root, document_id: payload.document_id, explanation: this.#index.explain(payload) }); }
+  stats(payload) { this.#requireBinding(payload, ["scope_digest", "logical_root"], "stats"); return Object.freeze({ ...this.#index.stats(), index_bytes: 0, cache_bytes: 0, peak_rss_bytes: process.memoryUsage().rss }); }
+  health() { return Object.freeze({ state: this.#state, mode: "read_only", scope_digest: this.#scope, logical_root: this.#root, provider: CONTRACTS.provider, analyzer: CONTRACTS.analyzer, score: CONTRACTS.score, explanation: CONTRACTS.explanation, logical_index: CONTRACTS.logical_index }); }
+  shutdown() { this.#state = "closed"; return Object.freeze({ status: "closing" }); }
+  #requireBinding(payload, fields, operation) {
+    if (this.#state !== "healthy") searchFail("handshake_required", "initialize first");
+    if (!payload || typeof payload !== "object" || Array.isArray(payload) || Object.keys(payload).join(",") !== fields.join(",")) searchFail("invalid_request", `${operation} payload must be closed and ordered`);
+    if (payload.scope_digest !== this.#scope || payload.logical_root !== this.#root) searchFail("binding_mismatch", "read-only fallback scope/root mismatch");
+  }
+}

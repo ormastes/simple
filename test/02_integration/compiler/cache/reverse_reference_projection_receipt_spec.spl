@@ -1,0 +1,652 @@
+use app.spipe.testing.*
+use compiler.driver.driver_build.incremental.{
+    build_cache_record_entry_at, build_cache_entry_is_valid_at,
+    incremental_detect_changes_at, incremental_reverse_reference_fallback_reason_v1
+}
+use compiler.driver.cache.package_scc_scheduler.{
+    package_scc_consume_index_schedule_v1
+}
+use compiler.driver.cache.package_module_index.{
+    PackageModuleIndexEntryV1, PackageModuleIndexGenerationV1
+}
+use compiler.driver.cache.reverse_reference_receipt.{
+    REVERSE_REFERENCE_FAMILIES_V1, ReverseReferenceProjectionV1,
+    ReverseReferenceGenerationReceiptV1, reverse_reference_read_current_v1,
+    reverse_reference_consumers_v1, reverse_reference_receipt_encode_v1,
+    reverse_reference_receipt_decode_v1, reverse_reference_receipt_digest_v1,
+    reverse_reference_publish_generation_v1, reverse_reference_exact_key_v1,
+    reverse_reference_receipt_contains_key_v1,
+    reverse_reference_bind_published_keys_v1
+}
+use compiler.common.cache.reverse_reference_key.{
+    ReverseReferenceKeyV1, reverse_reference_key_encode_v1
+}
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.cache.reverse_reference_facts.{
+    reverse_reference_owner_begin_v1, reverse_reference_owner_end_v1,
+    reverse_reference_owner_mark_known_v1,
+    reverse_reference_owner_snapshot_v1
+}
+use compiler.traits.trait_solver.{trait_solver_publish_trait_candidate_v1}
+use compiler.semantics.resolve_strategies.{
+    resolve_strategies_publish_unresolved_method_v1
+}
+use compiler.hir.hir_lowering._Items.declaration_lowering.{
+    declaration_lowering_publish_annotation_consumer_v1
+}
+use compiler.mono.monomorphize.note_sdn.{
+    note_sdn_publish_generic_specialization_v1
+}
+use compiler.mdsoc.aop_index.reverse_index.{
+    reverse_index_publish_aop_consumer_v1
+}
+use compiler.backend.backend.llvm_native_link_orchestrator.{
+    llvm_native_link_orchestrator_publish_runtime_provider_v1
+}
+use compiler.mir._MirLowering.module_lowering.{
+    module_lowering_publish_initializer_dependency_v1
+}
+use compiler.backend.linker.symbol_analysis.{
+    symbol_analysis_publish_relocation_v1
+}
+use std.nogc_sync_mut.io_runtime.{dir_create_all}
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_read_text(path: text) -> text?
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_dir_remove_all(path: text) -> bool
+extern fn rt_getpid() -> i64
+
+fn fixture_root() -> text:
+    "build/test/reverse-reference-m2-{rt_getpid()}"
+
+fn family_source_text() -> text:
+    "export fn consumer() -> i64: 1\n"
+
+fn register_real_owner_publication_seams(subject: text, consumer: text):
+    trait_solver_publish_trait_candidate_v1(subject, consumer, "trait-registry-v1")
+    resolve_strategies_publish_unresolved_method_v1(
+        subject, consumer, "method-candidates-v1")
+    declaration_lowering_publish_annotation_consumer_v1(
+        subject, consumer, "hir-attributes-v1")
+    note_sdn_publish_generic_specialization_v1(
+        subject, consumer, "mono-record-v1")
+    reverse_index_publish_aop_consumer_v1(
+        subject, consumer, "aop-reverse-index-v1")
+    llvm_native_link_orchestrator_publish_runtime_provider_v1(
+        subject, consumer, "link-inputs-v1")
+    module_lowering_publish_initializer_dependency_v1(
+        subject, consumer, "initializer-dag-v1")
+    symbol_analysis_publish_relocation_v1(
+        subject, consumer, "symbol-relocation-v1")
+
+fn publish_exact_ten_family_fixture() -> (text, text, text):
+    reverse_reference_owner_end_v1()
+    expect(reverse_reference_owner_begin_v1()).to_equal(true)
+    val root = fixture_root()
+    rt_dir_remove_all(root)
+    dir_create_all(root)
+    val source = "{root}/source.spl"
+    val output = "{root}/source.o"
+    val cache = "{root}/build-cache.sdn"
+    rt_file_write_text(source, family_source_text())
+    rt_file_write_text(output, "object-v1")
+    register_real_owner_publication_seams(source, source)
+    expect(build_cache_record_entry_at(cache, source, [], [output])).to_equal(true)
+    (cache, source, source)
+
+fn publish_fixture() -> (text, text, text):
+    reverse_reference_owner_end_v1()
+    expect(reverse_reference_owner_begin_v1()).to_equal(true)
+    val root = fixture_root()
+    rt_dir_remove_all(root)
+    dir_create_all(root)
+    val dependency = "{root}/provider.spl"
+    val consumer = "{root}/consumer.spl"
+    val output = "{root}/consumer.o"
+    val provider_output = "{root}/provider.o"
+    val cache = "{root}/build-cache.sdn"
+    rt_file_write_text(dependency, "export fn provider() -> i64: 1\n")
+    rt_file_write_text(consumer, family_source_text())
+    rt_file_write_text(output, "object-v1")
+    rt_file_write_text(provider_output, "provider-object-v1")
+    register_real_owner_publication_seams(dependency, consumer)
+    expect(build_cache_record_entry_at(
+        cache, dependency, [], [provider_output])).to_equal(true)
+    expect(build_cache_record_entry_at(cache, consumer, [dependency], [output])).to_equal(true)
+    (cache, dependency, consumer)
+
+fn family_receipt(family: text, subjects: [text]) -> ReverseReferenceGenerationReceiptV1:
+    val owner = sha256_text("owner-generation")
+    val root = sha256_text("root-generation")
+    var projections: [ReverseReferenceProjectionV1] = []
+    for subject in subjects:
+        projections = projections.push(ReverseReferenceProjectionV1(
+            key: ReverseReferenceKeyV1(
+                registry_kind: if family == "aop-consumer": "aop"
+                    elif family == "module-scc-artifact": "native"
+                    elif family == "emitted-symbol-relocation": "linker"
+                    else: "semantic",
+                owner_generation: owner,
+                root_generation: root,
+                subject_identity: subject,
+                projection_kind: family,
+                projection_digest: sha256_text("{family}:{subject}"),
+                schema_version: 1),
+            consumer_identity: "consumer::{family}"))
+    for other_family in REVERSE_REFERENCE_FAMILIES_V1:
+        if other_family != family:
+            projections = projections.push(ReverseReferenceProjectionV1(
+                key: ReverseReferenceKeyV1(
+                    registry_kind: if other_family == "aop-consumer": "aop"
+                        elif other_family == "module-scc-artifact": "native"
+                        elif other_family == "emitted-symbol-relocation": "linker"
+                        else: "semantic",
+                    owner_generation: owner,
+                    root_generation: root,
+                    subject_identity: "@unknown-family",
+                    projection_kind: other_family,
+                    projection_digest: sha256_text("unknown:{other_family}"),
+                    schema_version: 1),
+                consumer_identity: "registry-not-published:{other_family}"))
+    ReverseReferenceGenerationReceiptV1(1, owner, root, projections)
+
+fn known_empty_receipt() -> ReverseReferenceGenerationReceiptV1:
+    val owner = sha256_text("known-empty-owner-generation")
+    val root = sha256_text("known-empty-root-generation")
+    var projections: [ReverseReferenceProjectionV1] = []
+    for family in REVERSE_REFERENCE_FAMILIES_V1:
+        projections = projections.push(ReverseReferenceProjectionV1(
+            key: ReverseReferenceKeyV1(
+                registry_kind: if family == "aop-consumer": "aop"
+                    elif family == "module-scc-artifact": "native"
+                    elif family == "emitted-symbol-relocation": "linker"
+                    else: "semantic",
+                owner_generation: owner,
+                root_generation: root,
+                subject_identity: "@known-empty-family",
+                projection_kind: family,
+                projection_digest: sha256_text("known-empty:{family}"),
+                schema_version: 1),
+            consumer_identity: "registry-published-empty:{family}"))
+    ReverseReferenceGenerationReceiptV1(1, owner, root, projections)
+
+describe "M2 immutable reverse-reference projection receipts":
+    it "records exact facts through every typed registration API":
+        val fixture = publish_exact_ten_family_fixture()
+        val snapshot = reverse_reference_owner_snapshot_v1()
+        expect(snapshot.known_families.len()).to_equal(10)
+        expect(snapshot.facts.len()).to_equal(10)
+        for family in REVERSE_REFERENCE_FAMILIES_V1:
+            var found = false
+            for fact in snapshot.facts:
+                if (fact.projection_kind == family and
+                        fact.subject_identity == fixture.1 and
+                        fact.consumer_identity == fixture.2):
+                    found = true
+            expect(found).to_equal(true)
+
+    it "persists every owner-published family through the BuildCache writer":
+        step("Persist a real incremental build entry")
+        val fixture = publish_fixture()
+        val read = reverse_reference_read_current_v1(fixture.0)
+        expect(read.valid).to_equal(true)
+        expect(REVERSE_REFERENCE_FAMILIES_V1.len()).to_equal(10)
+        for family in REVERSE_REFERENCE_FAMILIES_V1:
+            val consumers = reverse_reference_consumers_v1(read, fixture.1, family)
+            expect(consumers.exact).to_equal(true)
+            expect(consumers.consumers).to_equal([fixture.2])
+
+    it "does not report a consumer for a causally unrelated subject":
+        val fixture = publish_fixture()
+        val read = reverse_reference_read_current_v1(fixture.0)
+        for family in REVERSE_REFERENCE_FAMILIES_V1:
+            val consumers = reverse_reference_consumers_v1(
+                read, "{fixture.1}.unrelated", family)
+            expect(consumers.exact).to_equal(true)
+            expect(consumers.consumers.len()).to_equal(0)
+
+    it "distinguishes a published known-empty family from unknown state":
+        val read = reverse_reference_receipt_decode_v1(
+            reverse_reference_receipt_encode_v1(known_empty_receipt()))
+        expect(read.valid).to_equal(true)
+        for family in REVERSE_REFERENCE_FAMILIES_V1:
+            val consumers = reverse_reference_consumers_v1(
+                read, "absent-subject", family)
+            expect(consumers.exact).to_equal(true)
+            expect(consumers.fallback_reason).to_equal("")
+            expect(consumers.consumers.len()).to_equal(0)
+
+    it "keeps family boundaries separate":
+        val fixture = publish_fixture()
+        val read = reverse_reference_read_current_v1(fixture.0)
+        val direct = reverse_reference_consumers_v1(
+            read, fixture.1, "direct-import-export")
+        val trait_consumers = reverse_reference_consumers_v1(
+            read, fixture.1, "trait-type-implementation")
+        expect(direct.consumers).to_equal(trait_consumers.consumers)
+        val unknown = reverse_reference_consumers_v1(
+            read, fixture.1, "not-a-projection-family")
+        expect(unknown.exact).to_equal(false)
+        expect(unknown.fallback_reason).to_equal(
+            "unknown-projection-family:not-a-projection-family")
+        expect(unknown.consumers.len()).to_equal(0)
+
+    it "rejects a digest-valid receipt from an older cache generation":
+        val fixture = publish_fixture()
+        val stale_pointer = rt_file_read_text(
+            "{fixture.0}.reverse-references/CURRENT") ?? ""
+        val extra = "{fixture_root()}/extra.spl"
+        val extra_output = "{fixture_root()}/extra.o"
+        rt_file_write_text(extra, "export fn extra() -> i64: 1\n")
+        rt_file_write_text(extra_output, "extra-object")
+        expect(build_cache_record_entry_at(
+            fixture.0, extra, [], [extra_output])).to_equal(true)
+        rt_file_write_text(
+            "{fixture.0}.reverse-references/CURRENT", stale_pointer)
+        rt_file_write_text(fixture.1, "export fn provider() -> i64: 71\n")
+        val changes = incremental_detect_changes_at(
+            fixture.0, [fixture.1, fixture.2, extra])
+        expect(changes.files.contains(fixture.1)).to_equal(true)
+        expect(changes.files.contains(fixture.2)).to_equal(true)
+        expect(changes.files.contains(extra)).to_equal(true)
+        expect(incremental_reverse_reference_fallback_reason_v1()).to_equal(
+            "stale-generation")
+
+    it "publishes canonical ordering independent of dependency input order":
+        val root = fixture_root()
+        rt_dir_remove_all(root)
+        dir_create_all(root)
+        val dep_a = "{root}/a.spl"
+        val dep_b = "{root}/b.spl"
+        val consumer = "{root}/consumer.spl"
+        val output = "{root}/consumer.o"
+        val cache = "{root}/build-cache.sdn"
+        rt_file_write_text(dep_a, "export fn a(): 1\n")
+        rt_file_write_text(dep_b, "export fn b(): 2\n")
+        rt_file_write_text(consumer, family_source_text())
+        rt_file_write_text(output, "object")
+        expect(build_cache_record_entry_at(
+            cache, consumer, [dep_b, dep_a], [output])).to_equal(true)
+        val first_pointer = rt_file_read_text("{cache}.reverse-references/CURRENT") ?? ""
+        expect(build_cache_record_entry_at(
+            cache, consumer, [dep_a, dep_b], [output])).to_equal(true)
+        val second_pointer = rt_file_read_text("{cache}.reverse-references/CURRENT") ?? ""
+        expect(second_pointer).to_equal(first_pointer)
+
+    it "fails closed when the generation pointer is missing":
+        val fixture = publish_fixture()
+        rt_file_delete("{fixture.0}.reverse-references/CURRENT")
+        val read = reverse_reference_read_current_v1(fixture.0)
+        expect(read.valid).to_equal(false)
+        expect(read.reason).to_equal("missing-generation")
+        val consumers = reverse_reference_consumers_v1(
+            read, fixture.1, "direct-import-export")
+        expect(consumers.exact).to_equal(false)
+        expect(consumers.fallback_reason).to_equal("missing-generation")
+
+    it "rejects corrupt pointer schema instead of reusing entries":
+        val fixture = publish_fixture()
+        rt_file_write_text("{fixture.0}.reverse-references/CURRENT", "v2")
+        val read = reverse_reference_read_current_v1(fixture.0)
+        expect(read.valid).to_equal(false)
+        expect(read.reason).to_equal("corrupt-generation-pointer")
+
+    it "turns an immutable receipt mutation red":
+        val fixture = publish_fixture()
+        val pointer = rt_file_read_text(
+            "{fixture.0}.reverse-references/CURRENT") ?? ""
+        val receipt_path = "{fixture.0}.reverse-references/{pointer}.receipt"
+        val original = rt_file_read_text(receipt_path) ?? ""
+        rt_file_write_text(receipt_path, original + "x")
+        val read = reverse_reference_read_current_v1(fixture.0)
+        expect(read.valid).to_equal(false)
+        expect(read.reason).to_equal("generation-digest-mismatch")
+
+    it "rejects an immutable-path collision instead of replacing bytes":
+        val root = fixture_root()
+        rt_dir_remove_all(root)
+        dir_create_all(root + "/cache.reverse-references")
+        val receipt = family_receipt("direct-import-export", ["subject"])
+        val digest = reverse_reference_receipt_digest_v1(receipt)
+        val immutable_path =
+            "{root}/cache.reverse-references/{digest}.receipt"
+        rt_file_write_text(immutable_path, "forged-collision")
+        expect(reverse_reference_publish_generation_v1(
+            root + "/cache", receipt)).to_equal(false)
+        expect(rt_file_read_text(immutable_path) ?? "").to_equal(
+            "forged-collision")
+
+    it "turns dropping any authoritative family with a real dependent red":
+        for family in REVERSE_REFERENCE_FAMILIES_V1:
+            val fixture = publish_fixture()
+            val complete_read = reverse_reference_read_current_v1(fixture.0)
+            val before = reverse_reference_consumers_v1(
+                complete_read, fixture.1, family)
+            expect(before.consumers).to_equal([fixture.2])
+            val complete = complete_read.receipt.unwrap()
+            var retained: [ReverseReferenceProjectionV1] = []
+            for projection in complete.projections:
+                if projection.key.projection_kind != family:
+                    retained = retained.push(projection)
+            val dropped = ReverseReferenceGenerationReceiptV1(
+                complete.schema_version, complete.owner_generation,
+                complete.root_generation, retained)
+            val dropped_read = reverse_reference_receipt_decode_v1(
+                reverse_reference_receipt_encode_v1(dropped))
+            expect(dropped_read.valid).to_equal(false)
+            expect(dropped_read.reason).to_equal("missing-family:{family}")
+            val after = reverse_reference_consumers_v1(
+                dropped_read, fixture.1, family)
+            expect(after.exact).to_equal(false)
+
+    it "invalidates production cache admission after a causal provider mutation":
+        val fixture = publish_fixture()
+        expect(build_cache_entry_is_valid_at(fixture.0, fixture.2)).to_equal(true)
+        rt_file_write_text(fixture.1, "export fn provider() -> i64: 999\n")
+        expect(build_cache_entry_is_valid_at(fixture.0, fixture.2)).to_equal(false)
+
+    it "proves boundary ordering schema and corruption behavior for every family":
+        for family in REVERSE_REFERENCE_FAMILIES_V1:
+            val receipt = family_receipt(family, ["subject|suffix", "subject"])
+            val encoded = reverse_reference_receipt_encode_v1(receipt)
+            expect(encoded == "").to_equal(false)
+            val decoded = reverse_reference_receipt_decode_v1(encoded)
+            expect(decoded.valid).to_equal(true)
+            val boundary = reverse_reference_consumers_v1(
+                decoded, "subject", family)
+            expect(boundary.consumers).to_equal(["consumer::{family}"])
+            val framed_neighbor = reverse_reference_consumers_v1(
+                decoded, "subject|suffix", family)
+            expect(framed_neighbor.consumers).to_equal(["consumer::{family}"])
+            val absent = reverse_reference_consumers_v1(
+                decoded, "subject|suffi", family)
+            expect(absent.consumers.len()).to_equal(0)
+            var wrong_schema = receipt
+            wrong_schema.schema_version = 2
+            expect(reverse_reference_receipt_encode_v1(wrong_schema)).to_equal("")
+            val corrupt = reverse_reference_receipt_decode_v1(encoded + "x")
+            expect(corrupt.valid).to_equal(false)
+
+    it "rejects a mismatched canonical source identity at exact-key lookup":
+        val read = reverse_reference_receipt_decode_v1(
+            reverse_reference_receipt_encode_v1(
+                family_receipt("module-scc-artifact", ["source-a.spl"])))
+        expect(read.valid).to_equal(true)
+        val exact = reverse_reference_exact_key_v1(
+            read, "source-a.spl", "consumer::module-scc-artifact",
+            "module-scc-artifact")
+        expect(exact != nil).to_equal(true)
+        val mismatch = reverse_reference_exact_key_v1(
+            read, "source-b.spl", "consumer::module-scc-artifact",
+            "module-scc-artifact")
+        expect(mismatch == nil).to_equal(true)
+
+    it "rejects a valid synthesized replacement absent from the M2 receipt":
+        val read = reverse_reference_receipt_decode_v1(
+            reverse_reference_receipt_encode_v1(
+                family_receipt("direct-import-export", ["source-a.spl"])))
+        val exact = reverse_reference_exact_key_v1(
+            read, "source-a.spl", "consumer::direct-import-export",
+            "direct-import-export")
+        expect(exact != nil).to_equal(true)
+        expect(reverse_reference_receipt_contains_key_v1(
+            read, reverse_reference_key_encode_v1(exact!))).to_equal(true)
+        val synthesized = ReverseReferenceKeyV1(
+            exact!.registry_kind, exact!.owner_generation,
+            exact!.root_generation, exact!.subject_identity,
+            exact!.projection_kind, sha256_text("replacement-projection"), 1)
+        expect(reverse_reference_receipt_contains_key_v1(
+            read, reverse_reference_key_encode_v1(synthesized))).to_equal(false)
+
+    it "binds M3 key frames to the exact immutable M2 publication":
+        val fixture = publish_fixture()
+        val read = reverse_reference_read_current_v1(fixture.0)
+        val exact = reverse_reference_exact_key_v1(
+            read, fixture.1, fixture.1, "module-scc-artifact")
+        expect(exact != nil).to_equal(true)
+        val digest = reverse_reference_receipt_digest_v1(
+            read.receipt.unwrap())
+        expect(reverse_reference_bind_published_keys_v1(
+            fixture.0, digest, read.receipt!.owner_generation,
+            read.receipt!.root_generation,
+            [reverse_reference_key_encode_v1(exact!)],
+            [fixture.1])).to_equal("ok")
+        val replacement = ReverseReferenceKeyV1(
+            exact!.registry_kind, exact!.owner_generation,
+            exact!.root_generation, exact!.subject_identity,
+            exact!.projection_kind, sha256_text("m3-synthesized"), 1)
+        expect(reverse_reference_bind_published_keys_v1(
+            fixture.0, digest, read.receipt!.owner_generation,
+            read.receipt!.root_generation,
+            [reverse_reference_key_encode_v1(replacement)],
+            [fixture.1])).to_equal(
+                "m2-synthesized-key-substitution")
+
+    it "uses the production receipt reader to select the causal consumer":
+        val fixture = publish_fixture()
+        rt_file_write_text(fixture.1, "export fn provider() -> i64: 2\n")
+        val changes = incremental_detect_changes_at(
+            fixture.0, [fixture.1, fixture.2])
+        expect(changes.files.contains(fixture.1)).to_equal(true)
+        expect(changes.files.contains(fixture.2)).to_equal(true)
+        expect(incremental_reverse_reference_fallback_reason_v1()).to_equal("")
+
+    it "attributes a conservative closure rebuild when registry state is unknown":
+        reverse_reference_owner_end_v1()
+        expect(reverse_reference_owner_begin_v1()).to_equal(true)
+        val root = fixture_root()
+        rt_dir_remove_all(root)
+        dir_create_all(root)
+        val source_a = "{root}/unknown-a.spl"
+        val source_b = "{root}/unknown-b.spl"
+        val source_c = "{root}/unknown-c.spl"
+        val cache = "{root}/build-cache.sdn"
+        rt_file_write_text(source_a, "export fn a(): 1\n")
+        rt_file_write_text(source_b, "export fn b(): 2\n")
+        rt_file_write_text(source_c, "export fn c(): 3\n")
+        rt_file_write_text("{root}/a.o", "a")
+        rt_file_write_text("{root}/b.o", "b")
+        rt_file_write_text("{root}/c.o", "c")
+        register_real_owner_publication_seams(source_a, source_b)
+        register_real_owner_publication_seams(source_b, source_c)
+        expect(build_cache_record_entry_at(cache, source_a, [], ["{root}/a.o"])).to_equal(true)
+        expect(build_cache_record_entry_at(cache, source_b, [source_a], ["{root}/b.o"])).to_equal(true)
+        expect(build_cache_record_entry_at(cache, source_c, [source_b], ["{root}/c.o"])).to_equal(true)
+        rt_file_delete("{cache}.reverse-references/CURRENT")
+        rt_file_write_text(source_a, "export fn a(): 33\n")
+        val changes = incremental_detect_changes_at(cache, [source_a, source_b, source_c])
+        expect(changes.files.contains(source_a)).to_equal(true)
+        expect(changes.files.contains(source_b)).to_equal(true)
+        expect(changes.files.contains(source_c)).to_equal(true)
+        expect(incremental_reverse_reference_fallback_reason_v1()).to_equal(
+            "missing-generation")
+
+    it "attributes an unrecognized existing generation distinctly and rebuilds the closure":
+        reverse_reference_owner_end_v1()
+        expect(reverse_reference_owner_begin_v1()).to_equal(true)
+        val root = fixture_root()
+        rt_dir_remove_all(root)
+        dir_create_all(root)
+        val source_a = "{root}/unknown-generation-a.spl"
+        val source_b = "{root}/unknown-generation-b.spl"
+        val source_c = "{root}/unknown-generation-c.spl"
+        val cache = "{root}/build-cache.sdn"
+        rt_file_write_text(source_a, "export fn a(): 1\n")
+        rt_file_write_text(source_b, "export fn b(): 2\n")
+        rt_file_write_text(source_c, "export fn c(): 3\n")
+        rt_file_write_text("{root}/a.o", "a")
+        rt_file_write_text("{root}/b.o", "b")
+        rt_file_write_text("{root}/c.o", "c")
+        register_real_owner_publication_seams(source_a, source_b)
+        register_real_owner_publication_seams(source_b, source_c)
+        expect(build_cache_record_entry_at(cache, source_a, [], ["{root}/a.o"])).to_equal(true)
+        expect(build_cache_record_entry_at(cache, source_b, [source_a], ["{root}/b.o"])).to_equal(true)
+        expect(build_cache_record_entry_at(cache, source_c, [source_b], ["{root}/c.o"])).to_equal(true)
+        val unknown_receipt = "simple-reverse-reference-generation-receipt-v2\n" +
+            "schema=2\nowner=declared-v2\nroot=declared-v2\ncount=0"
+        val unknown_digest = sha256_text(unknown_receipt)
+        val generation_dir = "{cache}.reverse-references"
+        rt_file_write_text("{generation_dir}/{unknown_digest}.receipt", unknown_receipt)
+        rt_file_write_text("{generation_dir}/CURRENT", unknown_digest)
+        val unknown_read = reverse_reference_read_current_v1(cache)
+        expect(unknown_read.valid).to_equal(false)
+        expect(unknown_read.reason).to_equal("unknown-generation")
+        rt_file_write_text(source_a, "export fn a(): 44\n")
+        val changes = incremental_detect_changes_at(cache, [source_a, source_b, source_c])
+        expect(changes.files.contains(source_a)).to_equal(true)
+        expect(changes.files.contains(source_b)).to_equal(true)
+        expect(changes.files.contains(source_c)).to_equal(true)
+        expect(incremental_reverse_reference_fallback_reason_v1()).to_equal(
+            "unknown-generation")
+
+    it "does not leak facts across sequential compilation owners or workspaces":
+        reverse_reference_owner_end_v1()
+        expect(reverse_reference_owner_begin_v1()).to_equal(true)
+        trait_solver_publish_trait_candidate_v1(
+            "workspace-a-subject", "workspace-a-consumer", "workspace-a-registry")
+        val first = reverse_reference_owner_snapshot_v1()
+        expect(first.facts.len()).to_equal(1)
+        reverse_reference_owner_end_v1()
+
+        expect(reverse_reference_owner_begin_v1()).to_equal(true)
+        val second = reverse_reference_owner_snapshot_v1()
+        expect(second.facts.len()).to_equal(0)
+        expect(second.known_families.len()).to_equal(0)
+        reverse_reference_owner_mark_known_v1("trait-type-implementation")
+        val known_empty = reverse_reference_owner_snapshot_v1()
+        expect(known_empty.facts.len()).to_equal(0)
+        expect(known_empty.known_families).to_equal(["trait-type-implementation"])
+        expect(reverse_reference_owner_begin_v1()).to_equal(false)
+        reverse_reference_owner_end_v1()
+
+    it "keeps an ordinary dependency reusable after a private-body edit":
+        reverse_reference_owner_end_v1()
+        expect(reverse_reference_owner_begin_v1()).to_equal(true)
+        val root = fixture_root()
+        rt_dir_remove_all(root)
+        dir_create_all(root)
+        val provider = "{root}/private-provider.spl"
+        val semantic_consumer = "{root}/semantic-consumer.spl"
+        val link_action = "{root}/link-action.spl"
+        val cache = "{root}/build-cache.sdn"
+        rt_file_write_text(provider, "export fn answer() -> i64: 1\n")
+        rt_file_write_text(semantic_consumer, "export fn use_answer() -> i64: 2\n")
+        rt_file_write_text(link_action, "export fn link_action() -> i64: 3\n")
+        rt_file_write_text("{root}/provider.o", "provider")
+        rt_file_write_text("{root}/consumer.o", "consumer")
+        rt_file_write_text("{root}/linked-output", "linked")
+        for family in REVERSE_REFERENCE_FAMILIES_V1:
+            reverse_reference_owner_mark_known_v1(family)
+        declaration_lowering_publish_annotation_consumer_v1(
+            provider, semantic_consumer, "semantic-only")
+        symbol_analysis_publish_relocation_v1(
+            provider, link_action, "provider-relocation-v1")
+        expect(build_cache_record_entry_at(
+            cache, provider, [], ["{root}/provider.o"])).to_equal(true)
+        expect(build_cache_record_entry_at(
+            cache, semantic_consumer, [provider], ["{root}/consumer.o"])).to_equal(true)
+        expect(build_cache_record_entry_at(
+            cache, link_action, [], ["{root}/linked-output"])).to_equal(true)
+
+        rt_file_write_text(provider, "export fn answer() -> i64: 99\n")
+        val changes = incremental_detect_changes_at(
+            cache, [provider, semantic_consumer, link_action])
+        expect(changes.files.contains(provider)).to_equal(true)
+        expect(changes.files.contains(link_action)).to_equal(true)
+        expect(changes.files.contains(semantic_consumer)).to_equal(false)
+        expect(build_cache_entry_is_valid_at(cache, semantic_consumer)).to_equal(true)
+        expect(incremental_reverse_reference_fallback_reason_v1()).to_equal("")
+
+    it "follows exact semantic consumers after an exported-interface edit":
+        reverse_reference_owner_end_v1()
+        expect(reverse_reference_owner_begin_v1()).to_equal(true)
+        val root = fixture_root()
+        rt_dir_remove_all(root)
+        dir_create_all(root)
+        val provider = "{root}/interface-provider.spl"
+        val semantic_consumer = "{root}/interface-consumer.spl"
+        val unrelated = "{root}/unrelated.spl"
+        val cache = "{root}/build-cache.sdn"
+        rt_file_write_text(provider, "export fn answer() -> i64: 1\n")
+        rt_file_write_text(semantic_consumer, "export fn use_answer() -> i64: 2\n")
+        rt_file_write_text(unrelated, "export fn unrelated() -> i64: 3\n")
+        for path in [provider, semantic_consumer, unrelated]:
+            rt_file_write_text(path + ".o", path)
+        for family in REVERSE_REFERENCE_FAMILIES_V1:
+            reverse_reference_owner_mark_known_v1(family)
+        declaration_lowering_publish_annotation_consumer_v1(
+            provider, semantic_consumer, "semantic-only")
+        expect(build_cache_record_entry_at(cache, provider, [], [provider + ".o"])).to_equal(true)
+        expect(build_cache_record_entry_at(cache, semantic_consumer, [], [semantic_consumer + ".o"])).to_equal(true)
+        expect(build_cache_record_entry_at(cache, unrelated, [], [unrelated + ".o"])).to_equal(true)
+
+        rt_file_write_text(provider, "export fn answer() -> text: \"changed\"\n")
+        val changes = incremental_detect_changes_at(
+            cache, [provider, semantic_consumer, unrelated])
+        expect(changes.files.contains(provider)).to_equal(true)
+        expect(changes.files.contains(semantic_consumer)).to_equal(true)
+        expect(changes.files.contains(unrelated)).to_equal(false)
+        expect(incremental_reverse_reference_fallback_reason_v1()).to_equal("")
+
+    it "computes the transitive causal closure through dependent consumers":
+        reverse_reference_owner_end_v1()
+        expect(reverse_reference_owner_begin_v1()).to_equal(true)
+        val root = fixture_root()
+        rt_dir_remove_all(root)
+        dir_create_all(root)
+        val source_a = "{root}/a.spl"
+        val source_b = "{root}/b.spl"
+        val source_c = "{root}/c.spl"
+        val cache = "{root}/build-cache.sdn"
+        rt_file_write_text(source_a, "export fn a(): 1\n")
+        rt_file_write_text(source_b, "export fn b(): 2\n")
+        rt_file_write_text(source_c, "export fn c(): 3\n")
+        rt_file_write_text("{root}/a.o", "a")
+        rt_file_write_text("{root}/b.o", "b")
+        rt_file_write_text("{root}/c.o", "c")
+        register_real_owner_publication_seams(source_a, source_b)
+        register_real_owner_publication_seams(source_b, source_c)
+        expect(build_cache_record_entry_at(cache, source_a, [], ["{root}/a.o"])).to_equal(true)
+        expect(build_cache_record_entry_at(cache, source_b, [source_a], ["{root}/b.o"])).to_equal(true)
+        expect(build_cache_record_entry_at(cache, source_c, [source_b], ["{root}/c.o"])).to_equal(true)
+        rt_file_write_text(source_a, "export fn a(): 99\n")
+        val changes = incremental_detect_changes_at(cache, [source_a, source_b, source_c])
+        expect(changes.files.contains(source_a)).to_equal(true)
+        expect(changes.files.contains(source_b)).to_equal(true)
+        expect(changes.files.contains(source_c)).to_equal(true)
+
+    it "invalidates a proven SCC peer after a private-body edit":
+        reverse_reference_owner_end_v1()
+        expect(reverse_reference_owner_begin_v1()).to_equal(true)
+        val root = fixture_root()
+        rt_dir_remove_all(root)
+        dir_create_all(root)
+        val source_a = "{root}/cycle-a.spl"
+        val source_b = "{root}/cycle-b.spl"
+        val cache = "{root}/build-cache.sdn"
+        rt_file_write_text(source_a, "export fn a(): 1\n")
+        rt_file_write_text(source_b, "export fn b(): 2\n")
+        rt_file_write_text("{root}/a.o", "a")
+        rt_file_write_text("{root}/b.o", "b")
+        for family in REVERSE_REFERENCE_FAMILIES_V1:
+            reverse_reference_owner_mark_known_v1(family)
+        val digest = sha256_text("fixture")
+        val entry_a = PackageModuleIndexEntryV1(
+            "pkg-a", "mod-a", source_a, digest, digest, digest, digest,
+            digest, digest, digest, digest, "cycle-a-b-scc-v1", ["mod-b"], ["mod-b"])
+        val entry_b = PackageModuleIndexEntryV1(
+            "pkg-b", "mod-b", source_b, digest, digest, digest, digest,
+            digest, digest, digest, digest, "cycle-a-b-scc-v1", ["mod-a"], ["mod-a"])
+        val generation = PackageModuleIndexGenerationV1(
+            1, digest, "root-v1", "revision-v1", "commit-v1", "tree-v1",
+            digest, [entry_a, entry_b])
+        val scheduled = package_scc_consume_index_schedule_v1(
+            generation, ["pkg-a", "pkg-b"])
+        expect(scheduled.valid).to_equal(true)
+        expect(build_cache_record_entry_at(cache, source_a, [source_b], ["{root}/a.o"])).to_equal(true)
+        expect(build_cache_record_entry_at(cache, source_b, [source_a], ["{root}/b.o"])).to_equal(true)
+        rt_file_write_text(source_a, "export fn a(): 7\n")
+        val changes = incremental_detect_changes_at(cache, [source_a, source_b])
+        expect(changes.files.contains(source_a)).to_equal(true)
+        expect(changes.files.contains(source_b)).to_equal(true)

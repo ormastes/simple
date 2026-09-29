@@ -156,7 +156,19 @@ fn winit_window_free(win: WinitWindow) -> bool:
     else:
         false
 
-fn winit_present_rgba(win: WinitWindow, w: i64, h: i64, pixels: [i64]) -> bool:
+# Preserve packed pixel order and the existing to_u32 narrowing semantics.
+# Reserve the complete output once: value-array push would copy the growing
+# prefix once per pixel (over eight million appends for a 4K frame).
+fn winit_rgba_to_native_pixels(pixels: [i64]) -> [u32]:
+    val count = pixels.len()
+    var native_pixels: [u32] = [0u32; count]
+    var index = 0
+    while index < count:
+        native_pixels[index] = pixels[index].to_u32()
+        index = index + 1
+    native_pixels
+
+fn winit_present_rgba_u32(win: WinitWindow, w: i64, h: i64, pixels: [u32]) -> bool:
     if not win.is_valid:
         return false
     if w <= 0 or h <= 0 or w > 9223372036854775807 / h:
@@ -168,18 +180,20 @@ fn winit_present_rgba(win: WinitWindow, w: i64, h: i64, pixels: [i64]) -> bool:
         staging = rt_winit_window_staging_ptr(win.handle, w, h)
     if staging == 0:
         return false
-    var native_pixels: [u32] = []
-    for pixel in pixels:
-        native_pixels = native_pixels.push(pixel.to_u32())
     var written: i64 = 0
     unsafe(capabilities: [ffi, raw_ptr]):
-        written = rt_write_u32s_to_raw(staging, native_pixels)
+        written = rt_write_u32s_to_raw(staging, pixels)
     if written != pixels.len().to_i64():
         return false
     var presented: i64 = 0
     unsafe(capabilities: [ffi]):
         presented = rt_winit_window_present_staged(win.handle, w, h)
     presented != 0
+
+# Compatibility entrypoint for callers that store packed pixels as i64. New
+# renderers should use winit_present_rgba_u32 and avoid this conversion.
+fn winit_present_rgba(win: WinitWindow, w: i64, h: i64, pixels: [i64]) -> bool:
+    winit_present_rgba_u32(win, w, h, winit_rgba_to_native_pixels(pixels))
 
 # Toggle borderless fullscreen on the native window. The mutation is routed
 # through the event-loop/main thread (required on macOS). Returns true when the
@@ -472,7 +486,8 @@ fn winit_poll_input(lp: WinitLoop) -> WinitInput:
     winit_poll_input_into(lp, ignored_events)
 
 fn winit_wait_input_into(
-    lp: WinitLoop, timeout_ms: i64, mut events_out: [WinitInputEvent]
+    lp: WinitLoop, timeout_ms: i64, mut events_out: [WinitInputEvent],
+    previous_mouse_x: f64 = 0.0, previous_mouse_y: f64 = 0.0
 ) -> WinitInput:
     var close_requested = false
     var focus_events: i64 = 0
@@ -481,8 +496,10 @@ fn winit_wait_input_into(
     var event_kinds: [i64] = []
     var keys: [i64] = []
     var scroll_y = 0.0
-    var mouse_x = 0.0
-    var mouse_y = 0.0
+    # Mouse-button events carry no position. Preserve the caller's last cursor
+    # even when motion and button events arrive in different wait batches.
+    var mouse_x = previous_mouse_x
+    var mouse_y = previous_mouse_y
     var mouse_moves = 0
     var click_buttons: [i64] = []
     var click_pressed: [bool] = []

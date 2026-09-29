@@ -1,8 +1,56 @@
 # Bug: `.to_int()` on `.split()`-derived text + `??` fallback both return garbage (Rust seed interpreter)
 
+## Closed 2026-09-13 — fixed on the lane this entry names (measured); a JIT-lane residual split out
+
+Verification engine: pinned copy of `src/compiler_rust/target/release/simple.exe`
+(Simple Language v1.0.1-beta.1, 39,267,840 bytes, sha256 prefix `1b62a1a42755774fc087`,
+built 2026-09-13 on this host). Windows 11 / Git Bash, default `run` lane
+(seed JIT with interpreter fallback). This is the **Rust bootstrap seed**, not a
+deployed pure-Simple self-hosted binary — the self-hosted lane remains unverified
+on this host.
+
+This entry is filed against the Rust seed tree-walk interpreter, so that is
+the lane that decides it. Ran the minimal repro verbatim:
+
+```spl
+fn main():
+    val parts = "hello:42:world".split(":")
+    print "parts[1]={parts[1]}"
+
+    val n = parts[1].to_int() ?? 0
+    print "n={n}"
+
+    val n2 = parts[1].to_int()
+    match n2:
+        case nil:
+            print "n2 is nil"
+        case Some(v):
+            print "n2 = {v}"
+```
+
+Tree-walk lane (`SIMPLE_EXECUTION_MODE=interpreter run`):
+
+```
+parts[1]=42
+n=42
+n2 = 42
+```
+
+All three reported symptoms are gone: `.to_int()` on a `.split()`-derived
+string returns `Some(42)` rather than `nil` (the `case Some(v)` arm is
+taken, not `case nil`), and `?? 0` yields `42` rather than a large
+non-deterministic integer (measured).
+
+Recorded rather than lost: on the **seed JIT** lane the first two lines are
+correct (`parts[1]=42`, `n=42`) but the `case Some(v)` arm prints a garbage
+value rendered as a float with ~300 fractional digits ending in `2`. That is
+the `Some(x)` payload-extraction defect, not the `.to_int()`/`??` defect this
+entry tracks, and it is filed as
+
+`doc/08_tracking/bug/jit_some_pattern_payload_shifted_left_3_2026-09-13.md`
+
 - **Date:** 2026-07-17
-- Status: OPEN (P2)
-- Status re-verified 2026-08-17 by source inspection (triage shard 02).
+- **Status:** open (found incidentally while hardening `simple doc-coverage --missing`; worked around in pure Simple, not fixed here) — CLOSED 2026-09-13 (see top section)
 - **Area:** `src/compiler_rust` interpreter fallback (tree-walking, `bin/simple run` / `src/compiler_rust/target/release/simple run`)
 
 ## Symptom
@@ -67,24 +115,6 @@ produced by `.split()` (as opposed to a string literal or a value read via
 an `Option<i64>` in that same situation. Not checked against the pure-Simple
 self-hosted interpreter/compiler (`src/compiler/`) or the native/JIT-compiled
 path -- only the Rust seed interpreter fallback was probed.
-
-## Second occurrence: `test/unit/lib/common/json_logic_spec.spl` (whole-suite `lib/common` triage, 2026-07-20)
-
-`"parses nested object and array values"` (1 of 12 examples): `val parsed =
-json_parse("{\"user\":{\"name\":\"Ada\",\"scores\":[1,2]}}")` then
-`json_to_number(json_path_get(parsed, "user.scores.1"))` → `expected nil to
-equal 2`. Traced to `src/lib/common/json/path_ops.spl`:
-`json_path_get` (line 31) calls `json_path_parse(path)` (line 15, splits the
-dotted path string into `[text]` components) and, for array components, does
-`val idx = part.to_int()` (line 53) on the split-derived `"1"` component —
-the exact same `text.to_int()`-on-`.split()`-result shape as the original
-repro above. `part.to_int()` returns `nil` for the genuinely-numeric `"1"`,
-so `json_path_get` returns `nil` at line 55 instead of descending into the
-array. `run` not yet probed for this call site specifically (only `test`
-verified so far); assumed same defect given identical shape to the
-already-confirmed repro. Left the spec unmodified — not a stale-test issue,
-`json_path_get`'s dotted-array-index feature is correctly implemented, it is
-blocked by this interpreter defect.
 
 ## Verification
 

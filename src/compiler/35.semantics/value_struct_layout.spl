@@ -3,23 +3,16 @@
 use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.{HirStruct}
 
+# A module key whose text object was freed under the caller (the 2026-09-06
+# module-surface freeze defect) reads back as nil, and `nil + "|" + name` is
+# nil too. Concatenating that produced silent nil node keys, and the dictionary
+# miss they caused was dereferenced as a HirStruct: a bare SIGSEGV with no
+# diagnostic. This never dereferences, so the test itself cannot fault.
+extern fn rt_heap_ref_wellformed(value: Any) -> bool
+
 struct ValueStructLayoutWalk:
     node_key: text
     path: text
-
-fn value_layout_named_symbol(type_: HirType) -> SymbolId?:
-    match type_.kind:
-        case HirTypeKind.Named(symbol, args):
-            if args.len() == 0:
-                return Some(symbol)
-        case _:
-            pass
-    nil
-
-fn value_layout_symbol_is_struct(symbol: HirSymbol) -> bool:
-    match symbol.kind:
-        case SymbolKind.Struct: true
-        case _: false
 
 fn value_layout_node_key(module_name: text, struct_name: text) -> text:
     # Both values are compiler-owned scalar identities. Re-normalizing a key
@@ -64,6 +57,9 @@ fn validate_value_struct_layouts(
             # Use the stable scalar owner key. HirModule.name is unsafe when
             # projected from an aggregate Dict value under closure pressure.
             val canonical = value_layout_node_key(module_key, struct_.name)
+            if not rt_heap_ref_wellformed(canonical):
+                return ["internal error: value struct layout module key at index "
+                    + "{module_index}" + " does not carry a usable text value"]
             structs[canonical] = struct_
             owner_module_indices[canonical] = module_index
             if not root_keys.has(canonical):
@@ -88,6 +84,12 @@ fn validate_value_struct_layouts(
                 continue
             visited[walk.node_key] = true
 
+            # A node key only ever comes from `roots` or from a `structs.has`
+            # guarded edge, so a miss here is a broken invariant, not input.
+            # Reading the miss and walking its fields is what turned that
+            # broken invariant into a SIGSEGV with no message.
+            if not structs.has(walk.node_key):
+                return ["internal error: value struct layout node key is absent from the struct index"]
             val struct_ = structs[walk.node_key]
             val owner_module_index = owner_module_indices[walk.node_key]
             if owner_module_index < 0 or owner_module_index >= module_values.len():
@@ -95,19 +97,41 @@ fn validate_value_struct_layouts(
             val owner_module_key = module_keys[owner_module_index]
             val owner: HirModule = module_values[owner_module_index]
             for field in struct_.fields:
-                val named_symbol = value_layout_named_symbol(field.type_)
-                if not named_symbol.?:
+                # Scalar-only edge resolution. This path used to cross two
+                # Option-of-aggregate boundaries -- a `SymbolId?` helper return
+                # and `Dict<i64, HirSymbol>.get()` -- and the Phase-2 native
+                # ABI decoded both as a nil payload that the next field read
+                # dereferenced: a bare SIGSEGV, no diagnostic, on EVERY module
+                # declaring a struct field whose type is a user-declared name
+                # (struct, class or enum alike). Membership test plus indexed
+                # read is the idiom the struct index above already uses, and
+                # the match is inlined so no HirType aggregate crosses a call
+                # boundary either.
+                var field_symbol_id: i64 = -1
+                match field.type_.kind:
+                    case HirTypeKind.Named(symbol, args):
+                        if args.len() == 0:
+                            field_symbol_id = symbol.id
+                    case _:
+                        pass
+                if field_symbol_id < 0:
                     continue
-                val symbol: HirSymbol? = owner.symbols.symbols.get(named_symbol.unwrap().id)
-                if not symbol.?:
+                if not owner.symbols.symbols.has(field_symbol_id):
                     continue
-                val resolved = symbol.unwrap()
-                if not value_layout_symbol_is_struct(resolved):
+                val resolved: HirSymbol = owner.symbols.symbols[field_symbol_id]
+                val resolved_is_struct: bool = match resolved.kind:
+                    case SymbolKind.Struct: true
+                    case _: false
+                if not resolved_is_struct:
                     continue
 
-                val defining_module = resolved.defining_module ?? owner_module_key
-                val unresolved_key = value_layout_node_key(defining_module, resolved.name)
-                val target = unresolved_key
+                var defining_module: text = owner_module_key
+                match resolved.defining_module:
+                    case Some(symbol_module):
+                        defining_module = symbol_module
+                    case _:
+                        pass
+                val target = value_layout_node_key(defining_module, resolved.name)
                 if not structs.has(target):
                     continue
 
@@ -120,3 +144,4 @@ fn validate_value_struct_layouts(
     []
 
 export validate_value_struct_layouts
+use compiler.hir.hir_types.{HirModule}  # explicit: a glob is not an import-origin for surface projection

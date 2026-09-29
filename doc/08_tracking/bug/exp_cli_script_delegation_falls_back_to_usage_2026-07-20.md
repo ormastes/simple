@@ -1,7 +1,8 @@
 # `exp` app CLI: experiment script execution falls back to usage/help text instead of delegating
+## Open 2026-09-16 — needs owner triage
 
-Status: OPEN (P2)
-Status re-verified 2026-08-17 by source inspection (triage shard 01).
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-20
 **Component:** `src/app/exp/main.spl` CLI script-delegation path
@@ -40,3 +41,4 @@ test provides.
 Spec left unmodified — could not confirm from source whether the test's
 invocation shape or the CLI's dispatch is out of sync; flagging as a
 genuine gap.
+

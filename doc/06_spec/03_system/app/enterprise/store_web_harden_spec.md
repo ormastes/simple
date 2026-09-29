@@ -24,7 +24,7 @@ AC-15 of `.spipe/simple_enterprise_suite` (Goal Set v2): the store web UI is dis
 | Design | N/A |
 | Research | doc/01_research/app/enterprise/simple_enterprise_suite_assessment_and_parallel_plan_2026-08-16.md |
 | Source | `test/03_system/app/enterprise/store_web_harden_spec.spl` |
-| Updated | 2026-08-16 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -66,6 +66,11 @@ Lane: .spipe/simple_enterprise_suite (v2, L-B, AC-15).
 
 #### denies an inactive session 401 before any route logic runs
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- denies an inactive session 401 before any route logic runs
 - Dispatch GET /store/catalog with an inactive session
    - Expected: http_status_code(resp.status) equals `401`
 - A session bound to another tenant is also denied 401
@@ -75,10 +80,12 @@ Lane: .spipe/simple_enterprise_suite (v2, L-B, AC-15).
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("denies an inactive session 401 before any route logic runs")
 val store = fresh_store("auth")
 val t = tenant_a()
 val admin = admin_a()
@@ -101,6 +108,7 @@ store_close(store)
 
 #### renders a script-tag product name with no raw script element
 
+- renders a script-tag product name with no raw script element
 - Publish a product whose NAME is a script injection attempt
    - Expected: add.reason equals `accepted`
 - Render the catalog and verify the payload arrives escaped
@@ -110,10 +118,12 @@ store_close(store)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("renders a script-tag product name with no raw script element")
 val store = fresh_store("xss")
 val t = tenant_a()
 val admin = admin_a()
@@ -137,6 +147,7 @@ store_close(store)
 
 #### carries CSP, nosniff, and frame denial on success and on denial
 
+- carries CSP, nosniff, and frame denial on success and on denial
 - A successful catalog response carries the shared policy headers
    - Expected: header_value(ok, "X-Content-Type-Options") equals `nosniff`
    - Expected: header_value(ok, "X-Frame-Options") equals `DENY`
@@ -149,10 +160,12 @@ store_close(store)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("carries CSP, nosniff, and frame denial on success and on denial")
 val store = fresh_store("headers")
 val t = tenant_a()
 val admin = admin_a()
@@ -179,6 +192,7 @@ store_close(store)
 
 #### rejects smuggling-shaped and traversal-shaped requests
 
+- rejects smuggling-shaped and traversal-shaped requests
 - Duplicate Host header is rejected 400 (header smuggling)
    - Expected: http_status_code(r1.status) equals `400`
 - Oversized Content-Length is rejected 413
@@ -191,10 +205,12 @@ store_close(store)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("rejects smuggling-shaped and traversal-shaped requests")
 val store = fresh_store("limits")
 val t = tenant_a()
 val admin = admin_a()
@@ -239,3 +255,54 @@ store_close(store)
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `1a0932b919c57ace6e31678afc37456809509e59e4cdf91a0d08f312ebc04b0e`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `1a0932b919c57ace6e31678afc37456809509e59e4cdf91a0d08f312ebc04b0e`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `1a0932b919c57ace6e31678afc37456809509e59e4cdf91a0d08f312ebc04b0e`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
+
+SSpec documentization score: 86/100
+source: test/03_system/app/enterprise/store_web_harden_spec.spl
+mirror: doc/06_spec/03_system/app/enterprise/store_web_harden_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/app/enterprise/store_web_harden_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/app/enterprise/store_web_harden_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/app/enterprise/store_web_harden_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 8 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/app/enterprise/store_web_harden_spec.spl:87:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'denies an inactive session 401 before any route logic runs' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/enterprise/store_web_harden_spec.spl:106:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'renders a script-tag product name with no raw script element' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/enterprise/store_web_harden_spec.spl:126:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'carries CSP, nosniff, and frame denial on success and on denial' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

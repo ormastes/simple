@@ -29,10 +29,10 @@ is structural behavior only—not release evidence—while
 `SIMPLEOS_EVIDENCE_SERIALIZED_OWNER_ADMITTED` remains `false` pending an
 authoritative self-hosted concurrent execution verdict.
 
-Trust-root initialization is currently a structural first-writer mutex model,
-not a privileged boot/configuration authority. Performance campaign policy is
-also still supplied as copyable values, and freshness is caller-timestamped
-rather than read from a canonical time owner. Their independent
+Trust-root initialization is now boot-adapter-owned; the public compatibility
+entrypoint is assertion-only and cannot become a structural first writer.
+Performance policy is checked by an immutable service-local catalog and
+freshness is sampled by the serialized authority clock. Their independent
 `SIMPLEOS_EVIDENCE_TRUST_ROOT_OWNER_ADMITTED` and
 `SIMPLEOS_EVIDENCE_POLICY_OWNER_ADMITTED` and
 `SIMPLEOS_EVIDENCE_TIME_OWNER_ADMITTED` gates therefore remain false; merely enabling
@@ -42,8 +42,7 @@ The ledger therefore rejects every `PASS` promotion; complete `BLOCKED` rows
 remain usable.
 
 Closure requires authoritative self-hosted concurrent execution evidence for
-the mutex owner, a privileged immutable boot trust-root/configuration owner, a
-service-owned performance campaign policy, plus executable Ed25519 KAT and native constant-work evidence over
+the mutex owner and executable Ed25519 KAT and native constant-work evidence over
 `encode_simpleos_evidence_receipt_v1_signing_bytes`; authoritative capture-owner
 delivery of the bounded byte snapshots and freshness time; plus concurrent
 forgery, replay, key-revocation, failed-step, and restart tests.
@@ -58,5 +57,71 @@ Current focused implementation/evidence surfaces:
 - `test/01_unit/os/services/evidence/artifact_snapshot_spec.spl`
 - `test/01_unit/os/services/evidence/verifier_owner_spec.spl`
 
-Static review is complete. Executable status remains unverified because only a
-Stage-2 compile/native-build lane is admitted; it is not SSpec/test authority.
+## Trust, policy, and time owner checkpoint (2026-09-23)
+
+`authority_owner.spl` now projects evidence signing roots only from the
+loader's one-time immutable trust-root registry and pins its generation. It
+owns the bounded receipt-age/challenge-TTL policy and samples the wall-clock
+provider through `std.nogc_sync_mut.io.time_ops`'s single-call, non-panicking
+sentinel facade, with rollback quarantine. This removes the evidence service's
+direct runtime call; SOSIX has no separate Unix-epoch provider on this route,
+so guest-native clock delivery remains an explicit QEMU verification item.
+The umbrella admission path uses those authoritative roots and time; its
+legacy roots parameter is only an exact assertion and cannot select authority.
+Partial initialization, root-generation change, clock failure, rollback, lock
+failure, and unlock failure reject the operation.
+
+This deliberately does not admit any release gate. The loader's package-owned
+boot trust-root installation is privileged, while trust/policy/time stay false
+and the first blocker remains `trust-root-owner-unavailable`; crypto and
+serialization also remain false. The verifier now has root-free and time-free
+authority entrypoints. Its legacy caller-root/time entrypoints remain
+diagnostic: mismatched roots reject after authority startup, caller timestamps
+reject once the verifier is authority-initialized, and a diagnostic
+initialization cannot be upgraded to PASS authority.
+
+The owner keeps at most 16 copied 32-byte public keys and performs bounded
+O(root-count) work only at initialization/root projection. Steady-state time
+sampling is O(1), allocation-free apart from returned value construction, and
+does not alter receipt signature verification or ledger hot loops.
+
+TODO(environment): once an admitted Phase-2 test-capable runtime exists, run
+`test/01_unit/os/services/evidence/authority_clock_transition_spec.spl`,
+`authority_owner_spec.spl`,
+`artifact_snapshot_spec.spl`, `verifier_owner_spec.spl`, and
+`verifier_authority_spec.spl`, `performance_policy_owner_spec.spl`, and
+`umbrella_admission_spec.spl`; then run SimpleOS QEMU root-absence,
+root-replacement, clock-failure, and clock-rollback cases. Keep PASS blocked
+until executable Ed25519 KAT/native constant-work evidence and authoritative
+mutex concurrency evidence independently admit their remaining gates.
+Before admitting trust/policy/time, require a privileged boot token for loader
+root initialization, preregister immutable performance campaign baselines,
+and add deterministic clock failure/rollback and lock-failure injection
+coverage.
+
+This verifier wiring has source-level checks only. Executable status remains
+unverified because only a Stage-2 compile/native-build lane is admitted; it is
+not SSpec/test authority.
+
+## Performance campaign policy checkpoint (2026-09-23)
+
+`performance_policy_owner.spl` adds an immutable service-local campaign lookup.
+Its authoritative API takes a candidate and the verified byte snapshot, never
+the caller-constructible `SimpleOsCapabilityAdmissionContextV1`. The policy
+value checker binds the exact row/workload, the indexed fixture artifact, a
+distinct baseline identity, fixed config/board/CPU/frequency/noise/accelerator,
+positive bounded RSS and baseline values, and the
+canonical sample/noise/absolute-budget/regression projection. The immutable
+catalog is empty because no reviewed fixture and baseline artifact set is
+preregistered; a performance row therefore fails with
+`performance-policy-unavailable`. This does not enable the policy gate.
+
+The authoritative verifier now calls
+`simpleos_evidence_performance_policy_check_v1(candidate, snapshot)` after
+rehashing the snapshot and before creating a verified handle. The catalog is
+immutable for the process lifetime, so the handle cannot outlive a policy
+mutation. TODO(environment): preregister reviewed native campaign fixture and
+baseline values only after an exact baseline artifact is available. Run the
+focused policy and verifier authority specs with an admitted test-capable
+self-hosted runtime and the native/QEMU campaign when the phase environment is
+ready.

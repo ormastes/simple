@@ -69,60 +69,6 @@ entity soc_top_rv32_k26_ddr is
     m_axi_hp_rvalid  : in  std_logic;
     m_axi_hp_rready  : out std_logic;
 
-    -- NVMe controller DMA master into PS DDR.
-    m_axi_nvme_dma_awaddr  : out std_logic_vector(31 downto 0);
-    m_axi_nvme_dma_awlen   : out std_logic_vector(7 downto 0);
-    m_axi_nvme_dma_awsize  : out std_logic_vector(2 downto 0);
-    m_axi_nvme_dma_awburst : out std_logic_vector(1 downto 0);
-    m_axi_nvme_dma_awcache : out std_logic_vector(3 downto 0);
-    m_axi_nvme_dma_awprot  : out std_logic_vector(2 downto 0);
-    m_axi_nvme_dma_awvalid : out std_logic;
-    m_axi_nvme_dma_awready : in  std_logic;
-    m_axi_nvme_dma_wdata   : out std_logic_vector(31 downto 0);
-    m_axi_nvme_dma_wstrb   : out std_logic_vector(3 downto 0);
-    m_axi_nvme_dma_wlast   : out std_logic;
-    m_axi_nvme_dma_wvalid  : out std_logic;
-    m_axi_nvme_dma_wready  : in  std_logic;
-    m_axi_nvme_dma_bresp   : in  std_logic_vector(1 downto 0);
-    m_axi_nvme_dma_bvalid  : in  std_logic;
-    m_axi_nvme_dma_bready  : out std_logic;
-    m_axi_nvme_dma_araddr  : out std_logic_vector(31 downto 0);
-    m_axi_nvme_dma_arlen   : out std_logic_vector(7 downto 0);
-    m_axi_nvme_dma_arsize  : out std_logic_vector(2 downto 0);
-    m_axi_nvme_dma_arburst : out std_logic_vector(1 downto 0);
-    m_axi_nvme_dma_arcache : out std_logic_vector(3 downto 0);
-    m_axi_nvme_dma_arprot  : out std_logic_vector(2 downto 0);
-    m_axi_nvme_dma_arvalid : out std_logic;
-    m_axi_nvme_dma_arready : in  std_logic;
-    m_axi_nvme_dma_rdata   : in  std_logic_vector(31 downto 0);
-    m_axi_nvme_dma_rresp   : in  std_logic_vector(1 downto 0);
-    m_axi_nvme_dma_rlast   : in  std_logic;
-    m_axi_nvme_dma_rvalid  : in  std_logic;
-    m_axi_nvme_dma_rready  : out std_logic;
-
-    nvme_irq: out std_logic;
-
-    -- Host NVMe AXI4-Lite register aperture.
-    s_axi_nvme_awaddr   : in  std_logic_vector(15 downto 0);
-    s_axi_nvme_awprot   : in  std_logic_vector(2 downto 0);
-    s_axi_nvme_awvalid  : in  std_logic;
-    s_axi_nvme_awready  : out std_logic;
-    s_axi_nvme_wdata    : in  std_logic_vector(31 downto 0);
-    s_axi_nvme_wstrb    : in  std_logic_vector(3 downto 0);
-    s_axi_nvme_wvalid   : in  std_logic;
-    s_axi_nvme_wready   : out std_logic;
-    s_axi_nvme_bresp    : out std_logic_vector(1 downto 0);
-    s_axi_nvme_bvalid   : out std_logic;
-    s_axi_nvme_bready   : in  std_logic;
-    s_axi_nvme_araddr   : in  std_logic_vector(15 downto 0);
-    s_axi_nvme_arprot   : in  std_logic_vector(2 downto 0);
-    s_axi_nvme_arvalid  : in  std_logic;
-    s_axi_nvme_arready  : out std_logic;
-    s_axi_nvme_rdata    : out std_logic_vector(31 downto 0);
-    s_axi_nvme_rresp    : out std_logic_vector(1 downto 0);
-    s_axi_nvme_rvalid   : out std_logic;
-    s_axi_nvme_rready   : in  std_logic;
-
     -- AXI4-Lite control / observation slave (from M_AXI_HPM0_LPD)
     s_axi_ctrl_awaddr  : in  std_logic_vector(15 downto 0);
     s_axi_ctrl_awprot  : in  std_logic_vector(2 downto 0);
@@ -180,12 +126,6 @@ architecture rtl of soc_top_rv32_k26_ddr is
   signal mem_wstrb  : std_logic_vector(3 downto 0);
   signal mem_rdata  : std_logic_vector(31 downto 0);
   signal mem_rvalid : std_logic;
-  signal ddr_mem_rdata  : std_logic_vector(31 downto 0);
-  signal ddr_mem_rvalid  : std_logic;
-  signal ddr_mem_req : std_logic;
-  signal fw_sel, fw_valid, fw_ready : std_logic;
-  signal fw_active_q, fw_rvalid_q : std_logic := '0';
-  signal fw_rdata, fw_rdata_q : std_logic_vector(31 downto 0) := (others => '0');
 
   signal dbg_uart_valid : std_logic;
   signal dbg_uart_byte  : std_logic_vector(7 downto 0);
@@ -195,28 +135,6 @@ begin
   -- Core is held in reset until DDR is populated AND software sets CTRL bit0.
   core_rst  <= '1' when (rst_n = '0' or core_run = '0') else '0';
   core_rstn <= rst_n;
-  fw_sel    <= '1' when mem_addr(31 downto 8) = x"200000" else '0';
-  fw_valid  <= mem_req and fw_sel and not fw_active_q;
-  ddr_mem_req <= mem_req and not fw_sel;
-  mem_rdata <= fw_rdata_q when fw_sel = '1' else ddr_mem_rdata;
-  mem_rvalid <= fw_rvalid_q when fw_sel = '1' else ddr_mem_rvalid;
-
-  -- Convert the core's held mem_req protocol into one mailbox transaction.
-  process(clk)
-  begin
-    if rising_edge(clk) then
-      if core_rstn = '0' then
-        fw_active_q <= '0'; fw_rvalid_q <= '0'; fw_rdata_q <= (others => '0');
-      else
-        fw_rvalid_q <= '0';
-        if fw_active_q = '1' then
-          if mem_req = '0' then fw_active_q <= '0'; end if;
-        elsif fw_valid = '1' and fw_ready = '1' then
-          fw_active_q <= '1'; fw_rvalid_q <= '1'; fw_rdata_q <= fw_rdata;
-        end if;
-      end if;
-    end if;
-  end process;
 
   u_core : rv32_exec_core_axi
     generic map (CLK_FREQ => G_CLK_FREQ, BAUD_RATE => G_BAUD_RATE)
@@ -233,9 +151,9 @@ begin
     generic map (G_CORE_BASE => G_CORE_BASE, G_DDR_BASE => G_DDR_BASE)
     port map (
       clk => clk, resetn => core_rstn,
-      mem_req => ddr_mem_req, mem_we => mem_we, mem_addr => mem_addr,
+      mem_req => mem_req, mem_we => mem_we, mem_addr => mem_addr,
       mem_wdata => mem_wdata, mem_wstrb => mem_wstrb,
-      mem_rdata => ddr_mem_rdata, mem_rvalid => ddr_mem_rvalid,
+      mem_rdata => mem_rdata, mem_rvalid => mem_rvalid,
       stat_reads => stat_reads, stat_writes => stat_writes,
       m_axi_awaddr => m_axi_hp_awaddr, m_axi_awlen => m_axi_hp_awlen,
       m_axi_awsize => m_axi_hp_awsize, m_axi_awburst => m_axi_hp_awburst,
@@ -253,42 +171,6 @@ begin
       m_axi_rdata => m_axi_hp_rdata, m_axi_rresp => m_axi_hp_rresp,
       m_axi_rlast => m_axi_hp_rlast, m_axi_rvalid => m_axi_hp_rvalid,
       m_axi_rready => m_axi_hp_rready);
-
-  u_nvme : entity work.rv32_nvme_axi
-    port map (
-      clk => clk, resetn => rst_n,
-      s_axi_awaddr => x"0000" & s_axi_nvme_awaddr,
-      s_axi_awprot => s_axi_nvme_awprot,
-      s_axi_awvalid => s_axi_nvme_awvalid, s_axi_awready => s_axi_nvme_awready,
-      s_axi_wdata => s_axi_nvme_wdata, s_axi_wstrb => s_axi_nvme_wstrb,
-      s_axi_wvalid => s_axi_nvme_wvalid, s_axi_wready => s_axi_nvme_wready,
-      s_axi_bresp => s_axi_nvme_bresp, s_axi_bvalid => s_axi_nvme_bvalid,
-      s_axi_bready => s_axi_nvme_bready,
-      s_axi_araddr => x"0000" & s_axi_nvme_araddr,
-      s_axi_arprot => s_axi_nvme_arprot,
-      s_axi_arvalid => s_axi_nvme_arvalid, s_axi_arready => s_axi_nvme_arready,
-      s_axi_rdata => s_axi_nvme_rdata, s_axi_rresp => s_axi_nvme_rresp,
-      s_axi_rvalid => s_axi_nvme_rvalid, s_axi_rready => s_axi_nvme_rready,
-      m_axi_awaddr => m_axi_nvme_dma_awaddr, m_axi_awlen => m_axi_nvme_dma_awlen,
-      m_axi_awsize => m_axi_nvme_dma_awsize, m_axi_awburst => m_axi_nvme_dma_awburst,
-      m_axi_awcache => m_axi_nvme_dma_awcache, m_axi_awprot => m_axi_nvme_dma_awprot,
-      m_axi_awvalid => m_axi_nvme_dma_awvalid, m_axi_awready => m_axi_nvme_dma_awready,
-      m_axi_wdata => m_axi_nvme_dma_wdata, m_axi_wstrb => m_axi_nvme_dma_wstrb,
-      m_axi_wlast => m_axi_nvme_dma_wlast, m_axi_wvalid => m_axi_nvme_dma_wvalid,
-      m_axi_wready => m_axi_nvme_dma_wready,
-      m_axi_bresp => m_axi_nvme_dma_bresp, m_axi_bvalid => m_axi_nvme_dma_bvalid,
-      m_axi_bready => m_axi_nvme_dma_bready,
-      m_axi_araddr => m_axi_nvme_dma_araddr, m_axi_arlen => m_axi_nvme_dma_arlen,
-      m_axi_arsize => m_axi_nvme_dma_arsize, m_axi_arburst => m_axi_nvme_dma_arburst,
-      m_axi_arcache => m_axi_nvme_dma_arcache, m_axi_arprot => m_axi_nvme_dma_arprot,
-      m_axi_arvalid => m_axi_nvme_dma_arvalid, m_axi_arready => m_axi_nvme_dma_arready,
-      m_axi_rdata => m_axi_nvme_dma_rdata, m_axi_rresp => m_axi_nvme_dma_rresp,
-      m_axi_rlast => m_axi_nvme_dma_rlast, m_axi_rvalid => m_axi_nvme_dma_rvalid,
-      m_axi_rready => m_axi_nvme_dma_rready,
-      irq_o => nvme_irq,
-      fw_valid_i => fw_valid, fw_write_i => mem_we, fw_addr_i => mem_addr(7 downto 0),
-      fw_wdata_i => mem_wdata, fw_wstrb_i => mem_wstrb,
-      fw_ready_o => fw_ready, fw_rdata_o => fw_rdata);
 
   u_ctrl : entity work.rv32_ctrl_obs_slave
     port map (

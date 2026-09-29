@@ -1,0 +1,118 @@
+use std.spec.{describe, it, expect}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.db.dbfs_driver.{DbFsDriver}
+use std.fs_driver.mem_block_device.{MemBlockDevice}
+use std.fs_driver.types.{ArtifactPublicationStateV1, OpenFlags, Path}
+
+fn bundle_driver() -> DbFsDriver:
+    DbFsDriver.open_on_device(
+        MemBlockDevice.new(4096u64, 512u32), 0i64, 4096i64).unwrap()
+
+fn stage_bundle_row(driver: DbFsDriver, path: text, bytes: [u8]):
+    val lease = driver.artifact_publication_begin_v1(path, bytes.len() as i64).unwrap()
+    driver.stream_ingest_append(lease, 0i64, bytes).unwrap()
+    lease
+
+describe "DBFS atomic target artifact bundle publication":
+    it "binds all three identities to one namespace generation":
+        val driver = bundle_driver()
+        val payload: [u8] = [0x7fu8, 0x45u8, 0x4cu8, 0x46u8]
+        val scr2: [u8] = [0x53u8, 0x43u8, 0x52u8, 0x32u8]
+        val sbe2: [u8] = [0x53u8, 0x42u8, 0x45u8, 0x32u8]
+        val payload_lease = stage_bundle_row(driver, "/boot/hello", payload)
+        val scr2_lease = stage_bundle_row(driver, "/boot/hello.scr2", scr2)
+        val sbe2_lease = stage_bundle_row(driver, "/boot/hello.sbe2", sbe2)
+        val outcome = driver.artifact_bundle_finish_v1(
+            payload_lease, scr2_lease, sbe2_lease,
+            sha256_u8_hex(payload), sha256_u8_hex(scr2), sha256_u8_hex(sbe2),
+            "riscv64-unknown-simpleos")
+        expect(outcome.publication_state()).to_equal(
+            ArtifactPublicationStateV1.Published)
+        val receipt = outcome.publication_receipt().unwrap()
+        expect(receipt.published_namespace_generation() > 0i64).to_equal(true)
+        expect(receipt.published_payload().published_path()).to_equal("/boot/hello")
+        expect(receipt.published_scr2_receipt().published_path()).to_equal(
+            "/boot/hello.scr2")
+        expect(receipt.published_sbe2_policy().published_path()).to_equal(
+            "/boot/hello.sbe2")
+        expect(receipt.published_payload().published_object_identity() !=
+            receipt.published_scr2_receipt().published_object_identity()).to_equal(true)
+        expect(receipt.published_payload().published_object_identity() !=
+            receipt.published_sbe2_policy().published_object_identity()).to_equal(true)
+        expect(receipt.published_target()).to_equal("riscv64-unknown-simpleos")
+
+    it "preserves every replaced open identity across the root commit":
+        val driver = bundle_driver()
+        val p = driver.open_path(
+            Path(raw: "/boot/tool"), OpenFlags.read_write().with_create()).unwrap()
+        val r = driver.open_path(
+            Path(raw: "/boot/tool.scr2"), OpenFlags.read_write().with_create()).unwrap()
+        val b = driver.open_path(
+            Path(raw: "/boot/tool.sbe2"), OpenFlags.read_write().with_create()).unwrap()
+        driver.write_bytes_handle(p, [1u8]).unwrap()
+        driver.write_bytes_handle(r, [2u8]).unwrap()
+        driver.write_bytes_handle(b, [3u8]).unwrap()
+        val pb: [u8] = [11u8]
+        val rb: [u8] = [12u8]
+        val bb: [u8] = [13u8]
+        val outcome = driver.artifact_bundle_finish_v1(
+            stage_bundle_row(driver, "/boot/tool", pb),
+            stage_bundle_row(driver, "/boot/tool.scr2", rb),
+            stage_bundle_row(driver, "/boot/tool.sbe2", bb),
+            sha256_u8_hex(pb), sha256_u8_hex(rb), sha256_u8_hex(bb),
+            "x86_64-unknown-simpleos")
+        expect(outcome.publication_state()).to_equal(
+            ArtifactPublicationStateV1.Published)
+        expect(driver.pread_bytes_handle(p, 0i64, 2i64).unwrap()).to_equal([1u8])
+        expect(driver.pread_bytes_handle(r, 0i64, 2i64).unwrap()).to_equal([2u8])
+        expect(driver.pread_bytes_handle(b, 0i64, 2i64).unwrap()).to_equal([3u8])
+
+    it "keeps all names private when one stored digest is wrong":
+        val driver = bundle_driver()
+        val bytes: [u8] = [7u8]
+        val outcome = driver.artifact_bundle_finish_v1(
+            stage_bundle_row(driver, "/boot/x", bytes),
+            stage_bundle_row(driver, "/boot/x.scr2", bytes),
+            stage_bundle_row(driver, "/boot/x.sbe2", bytes),
+            sha256_u8_hex(bytes),
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            sha256_u8_hex(bytes), "aarch64-unknown-simpleos")
+        expect(outcome.publication_state()).to_equal(
+            ArtifactPublicationStateV1.NotPublished)
+        expect(driver.open_path(
+            Path(raw: "/boot/x"), OpenFlags.read_only()).is_err()).to_equal(true)
+        expect(driver.open_path(
+            Path(raw: "/boot/x.scr2"), OpenFlags.read_only()).is_err()).to_equal(true)
+        expect(driver.open_path(
+            Path(raw: "/boot/x.sbe2"), OpenFlags.read_only()).is_err()).to_equal(true)
+
+    it "restores all prior names and retained identities after partial prepare":
+        val driver = bundle_driver()
+        val p = driver.open_path(
+            Path(raw: "/boot/y"), OpenFlags.read_write().with_create()).unwrap()
+        val r = driver.open_path(
+            Path(raw: "/boot/y.scr2"), OpenFlags.read_write().with_create()).unwrap()
+        val b = driver.open_path(
+            Path(raw: "/boot/y.sbe2"), OpenFlags.read_write().with_create()).unwrap()
+        driver.write_bytes_handle(p, [21u8]).unwrap()
+        driver.write_bytes_handle(r, [22u8]).unwrap()
+        driver.write_bytes_handle(b, [23u8]).unwrap()
+        val replacement: [u8] = [31u8]
+        val outcome = driver.artifact_bundle_finish_v1(
+            stage_bundle_row(driver, "/boot/y", replacement),
+            stage_bundle_row(driver, "/boot/y.scr2", replacement),
+            stage_bundle_row(driver, "/boot/y.sbe2", replacement),
+            sha256_u8_hex(replacement), sha256_u8_hex(replacement),
+            "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            "x86_64-unknown-simpleos")
+        expect(outcome.publication_state()).to_equal(
+            ArtifactPublicationStateV1.NotPublished)
+        expect(driver.pread_bytes_handle(p, 0i64, 2i64).unwrap()).to_equal([21u8])
+        expect(driver.pread_bytes_handle(r, 0i64, 2i64).unwrap()).to_equal([22u8])
+        expect(driver.pread_bytes_handle(b, 0i64, 2i64).unwrap()).to_equal([23u8])
+        val rp = driver.open_path(Path(raw: "/boot/y"), OpenFlags.read_only()).unwrap()
+        val rr = driver.open_path(Path(raw: "/boot/y.scr2"), OpenFlags.read_only()).unwrap()
+        val rb = driver.open_path(Path(raw: "/boot/y.sbe2"), OpenFlags.read_only()).unwrap()
+        expect(driver.pread_bytes_handle(rp, 0i64, 2i64).unwrap()).to_equal([21u8])
+        expect(driver.pread_bytes_handle(rr, 0i64, 2i64).unwrap()).to_equal([22u8])
+        expect(driver.pread_bytes_handle(rb, 0i64, 2i64).unwrap()).to_equal([23u8])

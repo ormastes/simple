@@ -1,0 +1,188 @@
+# @tag:in-development
+# Tracks: doc/08_tracking/bug/pr1870_pr1830_unreviewed_merge_fallout_2026-09-28.md
+use std.spec.*
+use std.io_runtime.{process_run, env_get, env_set, file_exists, file_delete, getpid, read_file_text}
+use std.io.{file_write}
+use app.optimize.sprof_collection_profile.{
+    sprof_source_module_identity, sprof_load_collection_profile_text,
+    sprof_build_collection_metric_index, sprof_indexed_collection_metric_stats
+}
+
+val COLLECTION_PROFILE_PROBE = "test/02_integration/compiler/probe_profile_switchable_cli_feedback.spl"
+
+fn collection_probe_value(output: text, prefix: text) -> text:
+    for line in output.split("\n"):
+        val trimmed = line.trim()
+        if trimmed.starts_with(prefix):
+            return trimmed.substring(prefix.len(), trimmed.len())
+    ""
+
+describe "profile feedback reaches source-attributed containers through simple run":
+    it "applies admitted prior load only to the matching automatic container":
+        var simple_bin = env_get("SIMPLE_BIN") ?? ""
+        if simple_bin == "":
+            simple_bin = if file_exists("bin/simple.exe"): "bin/simple.exe" else: "bin/simple"
+        val previous_delegate = env_get("SIMPLE_NO_BOOTSTRAP_DELEGATE") ?? ""
+        expect(env_set("SIMPLE_NO_BOOTSTRAP_DELEGATE", "1")).to_be(true)
+        val module_identity = sprof_source_module_identity(COLLECTION_PROFILE_PROBE)
+        val path = "build/collection_profile_cli_{getpid()}.sprof"
+        val (capture_stdout, capture_stderr, capture_code) = process_run(
+            simple_bin, [
+                "run", COLLECTION_PROFILE_PROBE,
+                "--collection-profile-out=" + path,
+                "--collection-module=" + module_identity,
+                "--collection-workload=lookup-workload",
+                "--collection-target=x86_64-v3"
+            ]
+        )
+        val capture = capture_stdout + capture_stderr
+        expect(capture_code).to_equal(0)
+        expect(capture).to_contain("COLLECTION_PROFILE_CLI: PASS")
+        expect(collection_probe_value(capture, "COLLECTION_HOT_PREINSERT_HASH:")).to_equal("false")
+        expect(collection_probe_value(capture, "COLLECTION_MAP_PREINSERT_HASH:")).to_equal("false")
+        expect(collection_probe_value(capture, "COLLECTION_HOT_AFTER_LOAD_HASH:")).to_equal("true")
+        expect(collection_probe_value(capture, "COLLECTION_MAP_AFTER_LOAD_HASH:")).to_equal("true")
+        expect(file_exists(path)).to_be(true)
+        val (append_stdout, append_stderr, append_code) = process_run(
+            simple_bin, [
+                "run", COLLECTION_PROFILE_PROBE,
+                "--collection-profile-out=" + path,
+                "--collection-profile-append",
+                "--collection-module=" + module_identity,
+                "--collection-workload=lookup-workload",
+                "--collection-target=x86_64-v3"
+            ]
+        )
+        expect(append_code).to_equal(0)
+        expect(append_stdout + append_stderr).to_contain("COLLECTION_PROFILE_CLI: PASS")
+        val body = read_file_text(path)
+        expect(body).to_contain("header;schema=sprof-v2;module=")
+        expect(body).to_contain("collection;sample=")
+        expect(body).to_contain("metric;sample=")
+        val hot_site = collection_probe_value(capture, "COLLECTION_HOT_SITE:")
+        val forced_site = collection_probe_value(capture, "COLLECTION_FORCED_SITE:")
+        val map_site = collection_probe_value(capture, "COLLECTION_MAP_SITE:")
+        val lookups = collection_probe_value(capture, "COLLECTION_HOT_LOOKUPS:").to_i64() ?? -1
+        val hits = collection_probe_value(capture, "COLLECTION_HOT_HITS:").to_i64() ?? -1
+        val misses = collection_probe_value(capture, "COLLECTION_HOT_MISSES:").to_i64() ?? -1
+        val map_lookups = collection_probe_value(capture, "COLLECTION_MAP_LOOKUPS:").to_i64() ?? -1
+        val map_hits = collection_probe_value(capture, "COLLECTION_MAP_HITS:").to_i64() ?? -1
+        val map_misses = collection_probe_value(capture, "COLLECTION_MAP_MISSES:").to_i64() ?? -1
+        expect(hot_site).to_start_with("ast://")
+        expect(forced_site).to_start_with("ast://")
+        expect(map_site).to_start_with("ast://")
+        expect(lookups).to_be_greater_than(32)
+        expect(hits + misses).to_equal(lookups)
+        expect(map_lookups).to_be_greater_than(32)
+        expect(map_hits + map_misses).to_equal(map_lookups)
+        expect(body).to_contain("site=" + hot_site)
+        expect(body).to_contain("site=" + forced_site)
+        expect(body).to_contain("site=" + map_site)
+        val captured = sprof_load_collection_profile_text(body, module_identity, "lookup-workload")
+        expect(captured.status).to_equal("loaded")
+        val metrics = sprof_build_collection_metric_index(captured)
+        expect(metrics.admitted).to_be(true)
+        val hot_size = sprof_indexed_collection_metric_stats(metrics, hot_site, "x86_64-v3", "collection_size")
+        val hot_lookups = sprof_indexed_collection_metric_stats(metrics, hot_site, "x86_64-v3", "lookup_count")
+        val hot_distinct = sprof_indexed_collection_metric_stats(metrics, hot_site, "x86_64-v3", "distinct_key_count")
+        val hot_materializations = sprof_indexed_collection_metric_stats(metrics, hot_site, "x86_64-v3", "materialization_count")
+        val map_materializations = sprof_indexed_collection_metric_stats(metrics, map_site, "x86_64-v3", "materialization_count")
+        val hot_probes = sprof_indexed_collection_metric_stats(metrics, hot_site, "x86_64-v3", "hash_probe_count")
+        val hot_collisions = sprof_indexed_collection_metric_stats(metrics, hot_site, "x86_64-v3", "hash_collision_count")
+        val map_probes = sprof_indexed_collection_metric_stats(metrics, map_site, "x86_64-v3", "hash_probe_count")
+        expect(hot_size.count).to_equal(2)
+        expect(hot_lookups.p95).to_equal(lookups)
+        expect(hot_distinct.count).to_equal(2)
+        expect(hot_materializations.p95).to_equal(1)
+        expect(map_materializations.p95).to_equal(2)
+        expect(hot_probes.count).to_equal(2)
+        expect(hot_probes.p95).to_be_greater_than(0)
+        expect(hot_collisions.count).to_equal(2)
+        expect(hot_collisions.p95).to_be_greater_than(-1)
+        expect(map_probes.p95).to_be_greater_than(0)
+        val (static_explain_stdout, static_explain_stderr, static_explain_code) = process_run(
+            simple_bin, [
+                "optimize", COLLECTION_PROFILE_PROBE, "--explain-collection-plan",
+                "--collection-target=x86_64-v3", "--site=" + hot_site
+            ]
+        )
+        expect(static_explain_code).to_equal(0)
+        expect(static_explain_stdout + static_explain_stderr).to_contain("site=" + hot_site)
+        expect(static_explain_stdout + static_explain_stderr).to_contain("selected=linear")
+        val (profile_explain_stdout, profile_explain_stderr, profile_explain_code) = process_run(
+            simple_bin, [
+                "optimize", COLLECTION_PROFILE_PROBE, "--explain-collection-plan",
+                "--profile=" + path, "--collection-workload=lookup-workload",
+                "--collection-target=x86_64-v3", "--site=" + hot_site
+            ]
+        )
+        expect(profile_explain_code).to_equal(0)
+        expect(profile_explain_stdout + profile_explain_stderr).to_contain("site=" + hot_site)
+        expect(profile_explain_stdout + profile_explain_stderr).to_contain("selected=hash")
+        expect(profile_explain_stdout + profile_explain_stderr).to_contain("profile.status=admitted-exact-site")
+        val (wrong_explain_stdout, wrong_explain_stderr, wrong_explain_code) = process_run(
+            simple_bin, [
+                "optimize", COLLECTION_PROFILE_PROBE, "--explain-collection-plan",
+                "--profile=" + path, "--collection-workload=lookup-workload",
+                "--collection-target=aarch64-neon", "--site=" + hot_site
+            ]
+        )
+        expect(wrong_explain_code).to_equal(1)
+        expect(wrong_explain_stdout + wrong_explain_stderr).to_contain("no samples for target")
+        val (stdout, stderr, code) = process_run(simple_bin, [
+            "run", COLLECTION_PROFILE_PROBE,
+            "--collection-profile=" + path,
+            "--collection-module=" + module_identity,
+            "--collection-workload=lookup-workload",
+            "--collection-target=x86_64-v3"
+        ])
+        val (rejected_stdout, rejected_stderr, rejected_code) = process_run(
+            simple_bin, [
+                "run", COLLECTION_PROFILE_PROBE,
+                "--collection-profile=" + path,
+                "--collection-module=" + module_identity,
+                "--collection-workload=unrelated-workload",
+                "--collection-target=x86_64-v3"
+            ]
+        )
+        val (wrong_target_stdout, wrong_target_stderr, wrong_target_code) = process_run(
+            simple_bin, [
+                "run", COLLECTION_PROFILE_PROBE,
+                "--collection-profile=" + path,
+                "--collection-module=" + module_identity,
+                "--collection-workload=lookup-workload",
+                "--collection-target=aarch64-neon"
+            ]
+        )
+        val corrupt_body = "header;schema=sprof-v2;module=" + module_identity + ";workload=lookup-workload\ncollection;sample=0;site=invalid"
+        expect(file_write(path, corrupt_body)).to_be(true)
+        val (append_rejected_stdout, append_rejected_stderr, append_rejected_code) = process_run(
+            simple_bin, [
+                "run", COLLECTION_PROFILE_PROBE,
+                "--collection-profile-out=" + path,
+                "--collection-profile-append",
+                "--collection-module=" + module_identity,
+                "--collection-workload=lookup-workload",
+                "--collection-target=x86_64-v3"
+            ]
+        )
+        expect(append_rejected_code).to_equal(1)
+        expect(append_rejected_stdout + append_rejected_stderr).to_contain("collection profile output was rejected")
+        expect(read_file_text(path)).to_equal(corrupt_body)
+        file_delete(path)
+        expect(env_set("SIMPLE_NO_BOOTSTRAP_DELEGATE", previous_delegate)).to_be(true)
+        expect(code).to_equal(0)
+        expect(stdout + stderr).to_contain("COLLECTION_PROFILE_CLI: PASS")
+        val replay_output = stdout + stderr
+        expect(collection_probe_value(replay_output, "COLLECTION_HOT_PREINSERT_HASH:")).to_equal("true")
+        expect(collection_probe_value(replay_output, "COLLECTION_MAP_PREINSERT_HASH:")).to_equal("true")
+        expect(collection_probe_value(replay_output, "COLLECTION_HOT_AFTER_FIRST_HASH:")).to_equal("true")
+        expect(collection_probe_value(replay_output, "COLLECTION_MAP_AFTER_FIRST_HASH:")).to_equal("true")
+        expect(collection_probe_value(replay_output, "COLLECTION_HOT_AFTER_LOAD_HASH:")).to_equal("true")
+        expect(collection_probe_value(replay_output, "COLLECTION_MAP_AFTER_LOAD_HASH:")).to_equal("true")
+        expect(collection_probe_value(replay_output, "COLLECTION_COLD_PREINSERT_HASH:")).to_equal("false")
+        expect(collection_probe_value(replay_output, "COLLECTION_FORCED_PREINSERT_HASH:")).to_equal("false")
+        expect(rejected_code).to_equal(1)
+        expect(rejected_stdout + rejected_stderr).to_contain("collection profile was not admitted")
+        expect(wrong_target_code).to_equal(1)
+        expect(wrong_target_stdout + wrong_target_stderr).to_contain("collection profile was not admitted")

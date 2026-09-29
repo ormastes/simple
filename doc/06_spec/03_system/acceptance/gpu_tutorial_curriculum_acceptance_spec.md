@@ -20,7 +20,7 @@ Purpose: prove the CUDA curriculum under examples/08_gpu/simple_cuda_example
 | Category | Other |
 | Status | Active |
 | Source | `test/03_system/acceptance/gpu_tutorial_curriculum_acceptance_spec.spl` |
-| Updated | 2026-08-25 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 Purpose: prove the CUDA curriculum under examples/08_gpu/simple_cuda_example
@@ -221,3 +221,63 @@ else:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+- `REQ-GPU-PORT-008`
+- `REQ-GPU-PORT-012`
+- `REQ-GPU-PORT-009`
+- `REQ-GPU-PORT-010`
+- `REQ-GPU-PORT-011`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `bfb61608ac17f0719c8c2fccbba65296a32315408abaa008379e1bdee06f08b8`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `bfb61608ac17f0719c8c2fccbba65296a32315408abaa008379e1bdee06f08b8`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `bfb61608ac17f0719c8c2fccbba65296a32315408abaa008379e1bdee06f08b8`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **80/100**; effective score: **49/100**; blockers: **1**.
+
+SSpec documentization score: 49/100
+source: test/03_system/acceptance/gpu_tutorial_curriculum_acceptance_spec.spl
+mirror: doc/06_spec/03_system/acceptance/gpu_tutorial_curriculum_acceptance_spec.md (current)
+findings: 7 blockers: 1
+  narrative=100 structure=100 oracle=70
+  traceability=60 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+  raw=80; blocker cap makes effective=49
+doc/06_spec/03_system/acceptance/gpu_tutorial_curriculum_acceptance_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/acceptance/gpu_tutorial_curriculum_acceptance_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/acceptance/gpu_tutorial_curriculum_acceptance_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 4 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/acceptance/gpu_tutorial_curriculum_acceptance_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 1 declared requirement(s) have no scenario binding
+  why: A requirement list without scenario evidence is inventory, not traceability.
+  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
+test/03_system/acceptance/gpu_tutorial_curriculum_acceptance_spec.spl:72:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'gives every module of the curriculum a README a learner can open' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/acceptance/gpu_tutorial_curriculum_acceptance_spec.spl:89:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'backs every README with at least one runnable sdoctest, so the teaching text fails when it goes stale' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/acceptance/gpu_tutorial_curriculum_acceptance_spec.spl:115:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'ships a spec alongside every module that ships a runnable program' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

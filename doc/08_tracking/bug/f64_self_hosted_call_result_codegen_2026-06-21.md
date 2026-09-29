@@ -1,49 +1,17 @@
 # f64 call-result corrupted in self-hosted (production) codegen
 
-> ## 2026-08-17 (worker W5): stated repro FIXED and measured; suspected ROOT CAUSE disproven; self-hosted half still unverifiable -> LEFT OPEN, narrowed
->
-> **1. The repro in this doc no longer reproduces.** The doc says "Reproduces on the
-> deployed `bin/simple`". It does not. All four affected forms are correct and
-> IDENTICAL under both engines on the deployed seed:
->
-> ```
-> F1=21.5   # print(half())
-> F2=43.0   # print(half() + half())
-> F3=21.5   # f64 call result passed as a fn argument
-> F4=21.5   # bound to a local, then used
-> ```
-> (`env SIMPLE_EXECUTION_MODE={interpreter,jit} bin/simple run
-> test/01_unit/engine_divergence/probes/f64_call_result_probe.spl`; mode switch
-> proven live by the guard's 61-bit control.)
->
-> **2. The suspected root cause is disproven by source.** This doc guesses the fault
-> is that `translate_call`'s named-call branch "does not appear to capture/stamp the
-> result type". That is not how the self-hosted adapter recovers f64-ness at all:
-> `operand_is_float` -> `operand_type` -> `local_type` reads the type off the MIR
-> LOCAL table (`cranelift_codegen_adapter.spl:1412-1435`), so a call result bound to
-> a local is classified from its declared MIR type and needs no call-site stamp.
-> Chasing a call-result stamp would have been wasted work.
->
-> **3. The one real defect on that path was already fixed, and its comment says so.**
-> `operand_type` coalesces the optional LocalId before lookup:
-> ```
-> val local_value = local ?? LocalId(id: -1)
-> ```
-> with the in-source note "Stage4 `if val` can lose the LocalId payload and silently
-> classify an F64 operand as I64" -- i.e. exactly this doc's symptom class, at exactly
-> this doc's component, already cured.
->
-> **Why this is NOT being closed.** The doc's component is the SELF-HOSTED adapter,
-> which the seed does not execute. Confirming (3) end-to-end needs a stage4
-> `native-build --backend cranelift`, which this session must not run. The measured
-> evidence above retires the *deployed-binary* claim only. Left OPEN, narrowed to:
-> "does the self-hosted cranelift adapter still mis-type an f64 call result?" -- to be
-> answered by a lane with stage4 rebuild capacity, which should start from (2) and (3)
-> rather than from the original guess. Regression guard for the measured half: `test/01_unit/engine_divergence/check-engine-divergence-probes.shs`.
+## Triage 2026-09-13 — STILL OPEN: seed half confirmed fixed, self-hosted half still blocked
+- **measured** — the seed fix holds: `fn half(x: f64) -> f64: return x / 2.0` called from
+  `main` prints `3.5` for `half(7.0)` and `2.5` for `half(3.0) + 1.0` under
+  `bin/simple run` (Rust seed v1.0.0-rc.1, Windows) — an f64 call result used both
+  directly and as an operand.
+- **inferred** — that is exactly the half this entry already records as fixed and landed.
+  The open half is the port into
+  `src/compiler/70.backend/backend/cranelift_codegen_adapter.spl`, which needs a working
+  self-hosted build; a bootstrap is running concurrently and `src/compiler/**` is off-limits
+  to this pass. Left OPEN.
 
-
-- Status: OPEN (P1)
-- Status re-verified 2026-08-17 by source inspection (triage shard 01).
+- **Status:** OPEN (seed fixed & landed; self-hosted port blocked by bootstrap breakage)
 - **Severity:** High — any f64 returned from a non-inlined function is wrong in `bin/simple` compiled/JIT mode
 - **Date:** 2026-06-21
 - **Component:** `src/compiler/70.backend/backend/cranelift_codegen_adapter.spl` (self-hosted cranelift codegen)
@@ -96,6 +64,21 @@ the port is deferred until the bootstrap/stage4 path produces a runnable binary.
 - **Production (pending):** `scripts/check/check-f64-call-abi.shs` runs against
   `bin/simple`; reports PENDING now and flips to PASS automatically once a
   working self-hosted build with the port is deployed.
+
+## 2026-09-21 guard admission false-success
+
+**Status: OPEN for the underlying codegen defect.** Before the 2026-09-21 guard
+repair, the production guard categorized the known-bad self-hosted JIT value
+`0.0` as `XFAIL` and exited `0`. A release or bootstrap caller observing only
+the process status could therefore admit the exact defect this guard is meant
+to block. This evidence-contract defect belongs to the existing bug, so it was
+fixed here rather than creating a duplicate DB row.
+
+The repaired guard reserves exit `0` for a measured correct JIT result. A known-bad
+development result remains visibly categorized as `XFAIL`, but returns a
+distinct nonzero status. Missing authority and Rust-seed targets remain
+`UNTESTABLE`, also nonzero. Canonical shell fixtures must prove all categories
+without claiming Stage 4 authority.
 
 ## Fix checklist
 

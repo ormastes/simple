@@ -1,22 +1,11 @@
-"""
-## Purpose and audience
-Purpose: Prove that Text builtin rfind MIR lowering.
-Audience: compiler and tooling engineers who maintain this spec.
-"""
-# @req: REQ-COMPILER-MIR-001 — stable requirement identity for this spec.
-
 use std.spec
+use std.spec.step
 use compiler.common.config.{Logger}
-use compiler.mir.mir_lowering.{MirLowering}
-use compiler.mir.mir_serialization.{serialize_mir_module}
 use compiler.frontend.frontend.{parse_full_frontend}
 use compiler.hir.hir_lowering.types.{HirLowering}
-# `lower_module` is a `me` method defined in _Items/module_lowering.spl and
-# re-exported via hir_lowering.items; types.spl alone does not bring it in scope.
-use compiler.hir.hir_lowering.items.*
 use compiler.mir.mir.*
 
-fn lower_text_method_mir(src: text, fname: text) -> text:
+fn lower_text_rfind_mir(src: text, fname: text) -> text:
     val module = parse_full_frontend(src, fname + ".spl", fname + ".spl", Logger(level: 0))
     var hir_lowering = HirLowering.with_filename(fname + ".spl")
     val hir = hir_lowering.lower_module(module)
@@ -24,20 +13,39 @@ fn lower_text_method_mir(src: text, fname: text) -> text:
     serialize_mir_module(mir_lowering.lower_module(hir))
 
 describe "Text builtin rfind MIR lowering", tag: ["only-compiled"]:
+    # @manual scenario evidence
     it "keeps a replace result on the string runtime owner":
-        step("Verify: keeps a replace result on the string runtime owner")
-        # @req: REQ-COMPILER-MIR-001
         val source = "fn parent_dir(path: text) -> i64:\n    val normalized = path.replace(\"\\\\\", \"/\")\n    return normalized.rfind(\"/\")\n"
-        val mir = lower_text_method_mir(source, "parent_dir")
+        val mir = lower_text_rfind_mir(source, "parent_dir")
 
         expect(mir).to_contain("rt_string_replace")
         expect(mir).to_contain("rt_string_rfind")
         expect(mir.contains("rt_string_to_lower")).to_equal(false)
         expect(mir.contains("DoubleEndedIterator")).to_equal(false)
 
+    it "keeps statically typed text methods on runtime ABI symbols":
+        val source = "fn normalize(value: text) -> [text]:\n    value.strip().lines()\n"
+        val mir = lower_text_rfind_mir(source, "typed_text_runtime_symbols")
+
+        expect(mir).to_contain("rt_string_trim")
+        expect(mir).to_contain("rt_string_replace")
+        expect(mir).to_contain("rt_string_split")
+        expect(mir.contains("str.strip")).to_equal(false)
+        expect(mir.contains("str.lines")).to_equal(false)
+
+    it "keeps custom instance trait UFCS and static strip-lines owners":
+        val source = "struct InstanceTextNames:\n    marker: i64\n\nimpl InstanceTextNames:\n    fn strip(self) -> i64: self.marker\n    fn lines(self) -> i64: self.marker + 1\n\ntrait TraitTextNames:\n    fn strip() -> i64\n    fn lines() -> i64\n\nstruct TraitTextOwner:\n    marker: i64\n\nimpl TraitTextNames for TraitTextOwner:\n    fn strip(self) -> i64: self.marker + 2\n    fn lines(self) -> i64: self.marker + 3\n\nstruct UfcsTextOwner:\n    marker: i64\n\nfn strip(owner: UfcsTextOwner) -> i64: owner.marker + 4\nfn lines(owner: UfcsTextOwner) -> i64: owner.marker + 5\n\nstruct StaticTextNames:\n    marker: i64\n\nimpl StaticTextNames:\n    static fn strip() -> i64: 6\n    static fn lines() -> i64: 7\n\nfn custom_text_names(a: InstanceTextNames, b: TraitTextOwner, c: UfcsTextOwner) -> i64:\n    a.strip() + a.lines() + b.strip() + b.lines() + c.strip() + c.lines() + StaticTextNames.strip() + StaticTextNames.lines()\n"
+        val mir = lower_text_rfind_mir(source, "custom_text_method_owners")
+
+        for owner in ["InstanceTextNames", "TraitTextNames", "strip", "lines", "StaticTextNames"]:
+            expect(mir).to_contain(owner)
+        expect(mir.contains("rt_string_trim")).to_equal(false)
+        expect(mir.contains("rt_string_replace")).to_equal(false)
+        expect(mir.contains("rt_string_split")).to_equal(false)
+        expect(mir.contains("rt_text_eq_any")).to_equal(false)
+
 describe "Primitive text conversion MIR lowering", tag: ["only-compiled"]:
     it "selects each scalar renderer for both aliases":
-        step("Verify: selects each scalar renderer for both aliases")
         val source = "fn render_string(b: bool, f: f64, u: u64, i: i64) -> text:\n    b.to_string() + \"|\" + f.to_string() + \"|\" + u.to_string() + \"|\" + i.to_string()\n\nfn render_text(b: bool, f: f64, u: u64, i: i64) -> text:\n    b.to_text() + \"|\" + f.to_text() + \"|\" + u.to_text() + \"|\" + i.to_text()\n"
         val mir = lower_text_method_mir(source, "primitive_to_string")
 
@@ -48,32 +56,29 @@ describe "Primitive text conversion MIR lowering", tag: ["only-compiled"]:
 
 describe "Text char_code_at MIR lowering", tag: ["only-compiled"]:
     it "rejects a source definition of the compiler-reserved alias":
-        step("Verify: rejects a source definition of the compiler-reserved alias")
         val module = parse_full_frontend("fn __simple_rt_string_char_code_at(value: i64, index: i64) -> i64:\n    999\n", "reserved_alias.spl", "reserved_alias.spl", Logger(level: 0))
         var lowering = HirLowering.with_filename("reserved_alias.spl")
         val _hir = lowering.lower_module(module)
 
-        expect(lowering.errors.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        expect(lowering.errors.len()).to_equal(1)
         expect(lowering.errors[0].message).to_contain("is reserved for compiler-generated text calls")
 
     it "accepts the alias only from the canonical runtime module":
-        step("Verify: accepts the alias only from the canonical runtime module")
         val source = "fn __simple_rt_string_char_code_at(value: i64, index: i64) -> i64:\n    999\n"
         for filename in ["src/runtime/simple_core/core_string.spl", "src\\runtime\\simple_core\\core_string.spl"]:
             val module = parse_full_frontend(source, filename, filename, Logger(level: 0))
             var lowering = HirLowering.with_filename(filename)
             val _hir = lowering.lower_module(module)
 
-            expect(lowering.errors.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
+            expect(lowering.errors.len()).to_equal(0)
 
         val spoof = "/tmp/project/src/runtime/simple_core/core_string.spl"
         val spoof_module = parse_full_frontend(source, spoof, spoof, Logger(level: 0))
         var spoof_lowering = HirLowering.with_filename(spoof)
         val _spoof_hir = spoof_lowering.lower_module(spoof_module)
-        expect(spoof_lowering.errors.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        expect(spoof_lowering.errors.len()).to_equal(1)
 
     it "uses the reserved raw runtime ABI without capturing a source function":
-        step("Verify: uses the reserved raw runtime ABI without capturing a source function")
         val source = "fn rt_string_char_code_at(value: i64, index: i64) -> i64:\n    return 999\n\nfn codes() -> i64:\n    val tagged = \"X\" + \"Y\"\n    return \"X\".char_code_at(0) + tagged.char_code_at(0) + rt_string_char_code_at(1, 2)\n"
         val mir = lower_text_method_mir(source, "text_char_code_at")
 
@@ -83,7 +88,6 @@ describe "Text char_code_at MIR lowering", tag: ["only-compiled"]:
 
 describe "Text predicate custom-owner MIR lowering", tag: ["only-compiled"]:
     it "keeps custom predicate methods ahead of text fallbacks":
-        step("Verify: keeps custom predicate methods ahead of text fallbacks")
         val source = "struct PredicateOwner:\n    marker: i64\n\nimpl PredicateOwner:\n    fn starts_with(self, value: text) -> bool: self.marker == value.len()\n    fn ends_with(self, value: text) -> bool: self.marker != value.len()\n    fn contains(self, value: text) -> bool: self.marker > value.len()\n\nstruct StaticPredicates:\n    marker: i64\n\nimpl StaticPredicates:\n    static fn starts_with(value: text) -> bool: value.len() == 1\n    static fn ends_with(value: text) -> bool: value.len() == 2\n    static fn contains(value: text) -> bool: value.len() == 3\n\nfn predicate_calls(owner: PredicateOwner) -> bool:\n    owner.starts_with(\"a\") and owner.ends_with(\"bb\") and owner.contains(\"ccc\") and StaticPredicates.starts_with(\"a\") and StaticPredicates.ends_with(\"bb\") and StaticPredicates.contains(\"ccc\")\n"
         val mir = lower_text_method_mir(source, "predicate_owner")
 

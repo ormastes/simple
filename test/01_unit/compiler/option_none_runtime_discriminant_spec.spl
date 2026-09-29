@@ -1,0 +1,266 @@
+"""
+## Purpose and audience
+
+Executable evidence that an `Option<T>` whose absence is only knowable at
+RUNTIME still discriminates as None: `if x.?:`, `match` and `if val` must
+all agree with `unwrap()`. Written for the compiler engineers who own
+`ensure_option_handle`
+(`src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl`) and for
+reviewers of any change to Option promotion or to the simple-core Option
+predicates.
+
+## Operator workflow
+
+Run this spec; every example must pass on every lane. The interpreter is
+the oracle, so an interpreter-lane failure means the spec or the harness
+broke, not codegen. The lane gate is the differential harness row
+(`scripts/check/check-native-interp-differential.shs`, pinned in
+`config/check/native_interp_differential_pinned.txt`), which runs this same
+file on both lanes and diffs the per-example verdicts.
+
+Presence is read through `if x.?:` in a helper that returns a plain `bool`,
+never as a bare `x.?` in an argument slot. That is deliberate: a bare
+optional in argument position has its own open defect
+(`doc/08_tracking/bug/bare_optional_in_condition_position_wrong_branch_2026-08-01.md`)
+which made an earlier draft of this spec fail natively for a reason that had
+nothing to do with None discrimination, including on the Some cases. The
+helper shape is also what product code actually writes.
+
+## Compatibility and limitations
+
+Only BOXED payloads (text, array, dict, tuple, struct, class, dyn) are
+pinned for runtime discrimination. For a scalar payload such as `i64?` the
+raw word 3 is a legal value AND the nil sentinel, so absence there is not
+decidable from the payload word and stays decided by lowering provenance;
+the scalar examples below pin the statically-decidable shapes only, which
+is current reality rather than approval.
+
+## Verification guidance and troubleshooting
+
+A failure of the form "presence true but `unwrap()` nil" is the promotion
+bug: an Option was built with discriminant Some around a nil payload. Look
+at `ensure_option_handle`'s `runtime_disc` branch and at `rt_is_none` /
+`rt_is_present` in `src/runtime/simple_core/`.
+"""
+# Lifecycle: architecture: doc/04_architecture/adr/ADR-004-indexed-access-value-semantics.md ; design: doc/05_design/language/collections/fixed_size_arrays.md
+# @cover src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl
+# @cover src/runtime/simple_core/core_values.spl
+# @manual_section: Option None discrimination
+
+use std.spec.step
+
+use std.spec
+
+
+struct Rec:
+    n: i64
+
+
+class Holder:
+    n: i64
+
+
+fn find_struct(k: text) -> Rec?:
+    if k == "hit":
+        return Rec(n: 42)
+    nil
+
+
+fn find_class(k: text) -> Holder?:
+    if k == "hit":
+        return Holder(n: 43)
+    nil
+
+
+fn find_text(k: text) -> text?:
+    if k == "hit":
+        return "yes"
+    nil
+
+
+fn find_via_dict(k: text) -> Rec?:
+    # Absence here is knowable only at RUNTIME: the dict read is not a
+    # syntactic `nil`, so static nil-provenance cannot classify it.
+    var d: Dict<text, Rec> = {}
+    d["hit"] = Rec(n: 44)
+    return d.get(k)
+
+
+fn relay_struct(k: text) -> Rec?:
+    # A nilable flowing through a second function boundary -- again not a
+    # syntactic nil at this return site.
+    val inner = find_struct(k)
+    return inner
+
+
+fn present_struct(k: text) -> bool:
+    val o = find_struct(k)
+    if o.?:
+        return true
+    false
+
+
+fn present_class(k: text) -> bool:
+    val o = find_class(k)
+    if o.?:
+        return true
+    false
+
+
+fn present_text(k: text) -> bool:
+    val o = find_text(k)
+    if o.?:
+        return true
+    false
+
+
+fn present_dict(k: text) -> bool:
+    val o = find_via_dict(k)
+    if o.?:
+        return true
+    false
+
+
+fn present_relay(k: text) -> bool:
+    val o = relay_struct(k)
+    if o.?:
+        return true
+    false
+
+
+fn match_arm(k: text) -> text:
+    match find_via_dict(k):
+        case Some(r): "some"
+        case None: "none"
+
+
+fn if_val_binds(k: text) -> bool:
+    if val r = find_via_dict(k):
+        return true
+    false
+
+
+fn struct_n_or(k: text, fallback: i64) -> i64:
+    """Presence test and unwrap in the SAME shape product code uses -- this is
+    the pairing that crashed in PR #1001 when the two disagreed."""
+    val o = find_struct(k)
+    if o.?:
+        return o.unwrap().n
+    fallback
+
+
+fn dict_n_or(k: text, fallback: i64) -> i64:
+    val o = find_via_dict(k)
+    if o.?:
+        return o.unwrap().n
+    fallback
+
+
+fn scalar_present_nil() -> bool:
+    val o: i64? = nil
+    if o.?:
+        return true
+    false
+
+
+fn scalar_present_three() -> bool:
+    val o: i64? = 3
+    if o.?:
+        return true
+    false
+
+
+describe "Option None discrimination for boxed payloads":
+    # @manual scenario evidence
+    """
+    ## Presence must agree with `unwrap()`
+
+    A None built around a boxed payload must read absent through every
+    presence form, and never present-with-a-nil-payload.
+    """
+
+    it "reports a struct-payload None as absent":
+        # @req REQ-OPTION-NONE-RT-001
+        # @capture(protocol_json): presence verdict for a struct-payload miss
+        step("call a struct-returning finder that misses")
+        expect(present_struct("x")).to_equal(false)  # oracle: the miss returns nil, so presence must be false
+        expect(find_struct("x") == nil).to_equal(true)
+
+    it "reports a class-payload None as absent":
+        # @req REQ-OPTION-NONE-RT-001
+        # @capture(protocol_json): presence verdict for a class-payload miss
+        step("call a class-returning finder that misses")
+        expect(present_class("x")).to_equal(false)
+        expect(find_class("x") == nil).to_equal(true)
+
+    it "reports a text-payload None as absent":
+        # @req REQ-OPTION-NONE-RT-001
+        # @capture(protocol_json): presence verdict for a text-payload miss
+        step("call a text-returning finder that misses")
+        expect(present_text("x")).to_equal(false)
+        expect(find_text("x") == nil).to_equal(true)
+
+    it "reports a dict-miss None as absent":
+        # @req REQ-OPTION-NONE-RT-002
+        # @capture(protocol_json): presence verdict for a runtime-only-known miss
+        step("return a dict lookup that missed through a typed Option return")
+        expect(present_dict("x")).to_equal(false)  # oracle: absence is only knowable at runtime here, which is the defect's shape
+        expect(find_via_dict("x") == nil).to_equal(true)
+
+    it "reports a relayed None as absent":
+        # @req REQ-OPTION-NONE-RT-002
+        # @capture(protocol_json): presence verdict for a None crossing two boundaries
+        step("relay a miss through a second function return")
+        expect(present_relay("x")).to_equal(false)
+        expect(relay_struct("x") == nil).to_equal(true)
+
+    it "takes the None arm under match":
+        # @req REQ-OPTION-NONE-RT-003
+        # @capture(protocol_json): match arm chosen for a runtime-only-known miss
+        step("match a dict-miss Option")
+        expect(match_arm("x")).to_equal("none")
+
+    it "does not bind under if val":
+        # @req REQ-OPTION-NONE-RT-003
+        # @capture(protocol_json): if-val binding for a runtime-only-known miss
+        step("if-val bind a dict-miss Option")
+        expect(if_val_binds("x")).to_equal(false)
+
+    it "never unwraps a nil payload behind a true presence test":
+        # @req REQ-OPTION-NONE-RT-004
+        # @capture(protocol_json): guarded presence-then-unwrap on a miss
+        step("guard an unwrap with a presence test on a missing key")
+        expect(struct_n_or("x", -1)).to_equal(-1)  # oracle: reaching unwrap here is the PR #1001 crash, so the fallback must win
+        expect(dict_n_or("x", -2)).to_equal(-2)
+
+    it "still reports a present boxed payload as present":
+        # @req REQ-OPTION-NONE-RT-005
+        # @capture(protocol_json): presence and unwrap for genuine hits
+        step("call the same finders on a hit")
+        expect(present_struct("hit")).to_equal(true)
+        expect(present_dict("hit")).to_equal(true)  # oracle: a runtime-decided Some must stay Some, so the fix cannot be "always None"
+        expect(present_text("hit")).to_equal(true)
+        expect(struct_n_or("hit", -1)).to_equal(42)
+        expect(dict_n_or("hit", -2)).to_equal(44)
+
+
+describe "Option None discrimination for scalar payloads":
+    # @manual scenario evidence
+    """
+    ## Scalars stay provenance-decided
+
+    `i64?` cannot use the payload word: 3 is both a legal value and the nil
+    sentinel. These examples pin the statically-decidable shapes.
+    """
+
+    it "reports a literal-nil i64 Option as absent":
+        # @req REQ-OPTION-NONE-RT-006
+        # @capture(protocol_json): presence verdict for a literal nil i64 Option
+        step("bind a literal nil to an i64 Option")
+        expect(scalar_present_nil()).to_equal(false)
+
+    it "keeps the i64 payload 3 present":
+        # @req REQ-OPTION-NONE-RT-006
+        # @capture(protocol_json): presence verdict for the i64 payload 3
+        step("bind the literal 3 to an i64 Option")
+        expect(scalar_present_three()).to_equal(true)  # oracle: 3 aliases the nil sentinel, so this is the case a payload-word test must not break

@@ -1,45 +1,27 @@
 # Seed interpreter: `.to_int()` misdispatches on split()-produced strings
 
-## VERIFIED FIXED 2026-08-17 — does not reproduce
+## Closed 2026-09-13 — fixed, re-verified by running the entry repro
 
-Classified by content and execution, not SHA ancestry (brief correction #1).
-Executed against the deployed `bin/simple`, default lane:
+Verification engine: pinned copy of `src/compiler_rust/target/release/simple.exe`
+(Simple Language v1.0.1-beta.1, 39,267,840 bytes, sha256 prefix `1b62a1a42755774fc087`,
+built 2026-09-13 on this host). Windows 11 / Git Bash, default `run` lane
+(seed JIT with interpreter fallback). This is the **Rust bootstrap seed**, not a
+deployed pure-Simple self-hosted binary — the self-hosted lane remains unverified
+on this host.
 
-```
-val parts = "10,20,30".split(",")
-print(parts[1])                              # => 20
-print(parts[1].to_int())                     # => 20   (reported: pointer-like garbage)
-print(parts[0].to_int() + parts[2].to_int()) # => 40
-```
+Ran a `split()`-produced-string `.to_int()` repro:
 
-A `split()`-produced string now dispatches `.to_int()` the same as a literal.
-The sum is included so a coincidentally-right single read cannot pass this.
-
-## VERIFIED FIXED 2026-08-17 (batch_02 core-silent-wrong lane) — does not reproduce
-
-The "Minimal repro" below was re-run verbatim and prints `10`, correctly, under
-BOTH `SIMPLE_EXECUTION_MODE=interpret` and the default JIT lane, on BOTH the
-deployed seed (mtime 2026-08-16 22:59) and a seed freshly built this session
-from `88227f48202`:
-
-```
-val parts = "10,4".split(",")
-val p = parts[0]
-print(p.to_int())        -> 10   (doc: pointer-like garbage, e.g. 6277833388737)
+```spl
+fn main():
+    val parts = "12,34".split(",")
+    print(parts[0].to_int() + parts[1].to_int())
 ```
 
-Same-family evidence: the sibling doc
-`seed_jit_string_to_i64_float_tagged_silent_wrong_2026-07-28.md` is also fixed,
-by `2a240d9b0b2`, which added the missing STRING receiver branch to the
-numeric-cast dispatch — i.e. exactly the "dispatch resolving to a different
-method for these receivers" this doc predicted.
+Result: prints `46` (12 + 34) — correct integer dispatch on
+split()-produced strings. The reported misdispatch does not reproduce
+on the seed lane (measured).
 
-Closeable. The Simple-side workaround `core_digits_to_i64`
-(`src/compiler/10.frontend/core/lexer.spl`) is now removable, but that removal
-is deliberately NOT done here: the lexer is in another lane's claimed path this
-session.
-
-- **Status:** open (seed/Rust interpreter; worked around in Simple code)
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed) — CLOSED 2026-09-13 (see top section)
 - **Date:** 2026-07-03
 - **Component:** `src/compiler_rust` interpreter method dispatch
 
@@ -74,3 +56,26 @@ Worked around with a dispatch-free digit parser (`core_digits_to_i64` in
 `src/compiler/10.frontend/core/lexer.spl`). Fix belongs in the seed's
 method-dispatch order; until then avoid `.to_int()` on runtime-produced
 strings in seed-executed hot paths.
+
+## Re-probed 2026-09-06 — NOT REPRODUCIBLE
+
+Binary probed: `bin/release/aarch64-unknown-linux-gnu/simple` (Rust seed,
+aarch64). Both engines exercised: `SIMPLE_EXECUTION_MODE=interpret` (tree-walk)
+and `env -u SIMPLE_EXECUTION_MODE` (default Cranelift JIT). Probe sources are
+listed with each entry; they were run on both lanes and compared.
+
+The record's own minimal repro (`"10,4".split(",")` then `parts[0].to_int()`)
+now yields `10` on BOTH lanes:
+
+```
+SPLIT_TO_INT=10     # interpret
+SPLIT_TO_INT=10     # jit
+```
+
+Probe `_scratch/p_str.spl`. Not fixed by this session — it was already correct.
+The workaround `core_digits_to_i64` in `src/compiler/10.frontend/core/lexer.spl`
+that this record installed can be revisited independently; it was NOT removed
+here, since removing a live workaround needs its own verification pass.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

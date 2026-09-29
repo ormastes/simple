@@ -1,0 +1,169 @@
+use std.spec.*
+use compiler.mir.hwir.types.{CoreConfig, HwModuleDef}
+use compiler.mir.hwir.host_evaluator.{HwHostInput, evaluate_strict_comb_hwir}
+use compiler.mir.hwir.riscv_scalar_runtime_class_router_v5.{strict_riscv_scalar_runtime_class_router_v5}
+use compiler.mir.hwir.riscv_scalar_runtime_completion_merge_v5.{strict_riscv_scalar_runtime_completion_merge_v5}
+
+fn router_inputs(class_code: i64, legal: i64, illegal: i64, busy: i64,
+    valid: i64 = 1, alu_ready: i64 = 1, control_ready: i64 = 1,
+    system_ready: i64 = 1, illegal_ready: i64 = 1, pending_ready: i64 = 1,
+    sticky_fault: i64 = 0) -> [HwHostInput]:
+    [HwHostInput.bits("uop_valid", valid), HwHostInput.bits("decode_legal", legal),
+        HwHostInput.bits("illegal_valid", illegal), HwHostInput.bits("decoded_execution_class", class_code),
+        HwHostInput.bits("alu_ready", alu_ready), HwHostInput.bits("control_ready", control_ready),
+        HwHostInput.bits("system_ready", system_ready), HwHostInput.bits("illegal_ready", illegal_ready),
+        HwHostInput.bits("pending_ready", pending_ready), HwHostInput.bits("pending_busy", busy),
+        HwHostInput.bits("sticky_fault", sticky_fault)]
+
+fn payload_value(index: i64, width: i32, pending: bool) -> i64:
+    val raw = index + (if pending: 19 else: 3)
+    if width == 1: return raw & 1
+    if width == 2: return raw & 3
+    if width == 3: return raw & 7
+    if width == 5: return raw & 31
+    raw
+
+fn merge_inputs(module: HwModuleDef, immediate: i64, pending: i64, ready: i64,
+    immediate_fault: i64 = 0, pending_fault: i64 = 0) -> [HwHostInput]:
+    var result: [HwHostInput] = []
+    var immediate_index: i64 = 0
+    var pending_index: i64 = 0
+    for port in module.ports:
+        if port.direction == "in":
+            var value: i64 = 0
+            if port.name == "immediate_valid": value = immediate
+            elif port.name == "pending_valid": value = pending
+            elif port.name == "skid_upstream_ready": value = ready
+            elif port.name == "immediate_fault": value = immediate_fault
+            elif port.name == "pending_fault": value = pending_fault
+            elif port.name.starts_with("immediate_"):
+                value = payload_value(immediate_index, port.bit_width, false)
+                immediate_index = immediate_index + 1
+            elif port.name.starts_with("pending_"):
+                value = payload_value(pending_index, port.bit_width, true)
+                pending_index = pending_index + 1
+            result.push(HwHostInput.bits(port.name, value))
+    result
+
+describe("runtime pipeline v5 canonical prerequisites"):
+    it("routes every supported class and gives illegal ownership priority"):
+        val module = strict_riscv_scalar_runtime_class_router_v5("pipeline_v5_router", CoreConfig.rv64()).unwrap()
+        for row in [(1, "alu_valid"), (2, "control_valid"), (5, "system_valid"),
+                (3, "pending_dispatch_valid"), (7, "pending_dispatch_valid")]:
+            val result = evaluate_strict_comb_hwir(module, router_inputs(row[0], 1, 0, 0)).unwrap()
+            expect(result.value_of(row[1]).unwrap()).to_equal(1)
+            expect(result.value_of("uop_ready").unwrap()).to_equal(1)
+            expect(result.value_of("router_fault").unwrap()).to_equal(0)
+        val lsu = evaluate_strict_comb_hwir(module, router_inputs(3, 1, 0, 0)).unwrap()
+        val fence = evaluate_strict_comb_hwir(module, router_inputs(7, 1, 0, 0)).unwrap()
+        expect(lsu.value_of("pending_dispatch_tag").unwrap()).to_equal(1)
+        expect(fence.value_of("pending_dispatch_tag").unwrap()).to_equal(4)
+        val illegal = evaluate_strict_comb_hwir(module, router_inputs(1, 1, 1, 0)).unwrap()
+        expect(illegal.value_of("illegal_lane_valid").unwrap()).to_equal(1)
+        expect(illegal.value_of("alu_valid").unwrap()).to_equal(0)
+        val skewed = evaluate_strict_comb_hwir(module, router_inputs(1, 0, 0, 0)).unwrap()
+        expect(skewed.value_of("illegal_lane_valid").unwrap()).to_equal(0)
+        expect(skewed.value_of("uop_ready").unwrap()).to_equal(0)
+        expect(skewed.value_of("router_fault").unwrap()).to_equal(1)
+        for class_code in [3, 7]:
+            val stateful_skew = evaluate_strict_comb_hwir(module, router_inputs(class_code, 0, 0, 0)).unwrap()
+            for port in ["alu_valid", "control_valid", "system_valid", "illegal_lane_valid",
+                    "pending_dispatch_valid", "uop_ready"]:
+                expect(stateful_skew.value_of(port).unwrap()).to_equal(0)
+            expect(stateful_skew.value_of("router_fault").unwrap()).to_equal(1)
+            val marked_illegal = evaluate_strict_comb_hwir(module, router_inputs(class_code, 0, 1, 0)).unwrap()
+            expect(marked_illegal.value_of("illegal_lane_valid").unwrap()).to_equal(1)
+            expect(marked_illegal.value_of("pending_dispatch_valid").unwrap()).to_equal(0)
+            expect(marked_illegal.value_of("router_fault").unwrap()).to_equal(0)
+
+    it("returns readiness from the selected owner only"):
+        val module = strict_riscv_scalar_runtime_class_router_v5("pipeline_v5_router_ready", CoreConfig.rv64()).unwrap()
+        for row in [(1, 0), (2, 1), (5, 2), (0, 3), (3, 4)]:
+            val illegal = if row[1] == 3: 1 else: 0
+            var blocked = router_inputs(row[0], 1, illegal, 0, 1, 1, 1, 1, 1, 1)
+            blocked[4 + row[1]] = HwHostInput.bits(blocked[4 + row[1]].name, 0)
+            expect(evaluate_strict_comb_hwir(module, blocked).unwrap().value_of("uop_ready").unwrap()).to_equal(0)
+            val selected_only = router_inputs(row[0], 1, illegal, 0, 1, 0, 0, 0, 0, 0)
+            selected_only[4 + row[1]] = HwHostInput.bits(selected_only[4 + row[1]].name, 1)
+            expect(evaluate_strict_comb_hwir(module, selected_only).unwrap().value_of("uop_ready").unwrap()).to_equal(1)
+
+    it("suppresses every lane while busy and faults unsupported legal classes only"):
+        val module = strict_riscv_scalar_runtime_class_router_v5("pipeline_v5_router_fault", CoreConfig.rv32()).unwrap()
+        for class_code in [1, 2, 3, 5, 7]:
+            val busy = evaluate_strict_comb_hwir(module, router_inputs(class_code, 1, 0, 1)).unwrap()
+            for name in ["alu_valid", "control_valid", "system_valid", "illegal_lane_valid",
+                    "pending_dispatch_valid", "uop_ready"]:
+                expect(busy.value_of(name).unwrap()).to_equal(0)
+        val unsupported = evaluate_strict_comb_hwir(module, router_inputs(4, 1, 0, 0)).unwrap()
+        expect(unsupported.value_of("router_fault").unwrap()).to_equal(1)
+        val idle = evaluate_strict_comb_hwir(module, router_inputs(0, 0, 0, 0, 0)).unwrap()
+        expect(idle.value_of("router_fault").unwrap()).to_equal(0)
+
+    it("sticky fault deterministically inhibits every handshake while retaining raw unknown-class diagnosis"):
+        val module = strict_riscv_scalar_runtime_class_router_v5("pipeline_v5_router_sticky", CoreConfig.rv64()).unwrap()
+        for class_code in [1, 2, 3, 5, 7]:
+            val held = evaluate_strict_comb_hwir(module, router_inputs(class_code, 1, 0, 0,
+                1, 1, 1, 1, 1, 1, 1)).unwrap()
+            for name in ["alu_valid", "control_valid", "system_valid", "illegal_lane_valid",
+                    "pending_dispatch_valid", "uop_ready"]:
+                expect(held.value_of(name).unwrap()).to_equal(0)
+            expect(held.value_of("router_fault").unwrap()).to_equal(0)
+        val unsupported = evaluate_strict_comb_hwir(module, router_inputs(4, 1, 0, 0,
+            1, 1, 1, 1, 1, 1, 1)).unwrap()
+        expect(unsupported.value_of("router_fault").unwrap()).to_equal(1)
+        val idle = evaluate_strict_comb_hwir(module, router_inputs(0, 0, 0, 0,
+            0, 1, 1, 1, 1, 1, 1)).unwrap()
+        expect(idle.value_of("router_fault").unwrap()).to_equal(0)
+        expect(idle.value_of("uop_ready").unwrap()).to_equal(0)
+
+    it("merges each source with backpressure and no latency-absence fault"):
+        val module = strict_riscv_scalar_runtime_completion_merge_v5("pipeline_v5_merge", CoreConfig.rv64()).unwrap()
+        for row in [(1, 0, false), (0, 1, true)]:
+            val held = evaluate_strict_comb_hwir(module, merge_inputs(module, row[0], row[1], 0)).unwrap()
+            expect(held.value_of("selected_valid").unwrap()).to_equal(1)
+            var payload_index: i64 = 0
+            for port in module.ports:
+                if port.direction == "out" and port.name.starts_with("selected_") and port.name != "selected_valid":
+                    expect(held.value_of(port.name).unwrap()).to_equal(
+                        payload_value(payload_index, port.bit_width, row[2]))
+                    payload_index = payload_index + 1
+            expect(payload_index).to_equal(25)
+            expect(held.value_of("immediate_ready").unwrap()).to_equal(0)
+            expect(held.value_of("pending_ready").unwrap()).to_equal(0)
+            val accepted = evaluate_strict_comb_hwir(module, merge_inputs(module, row[0], row[1], 1)).unwrap()
+            expect(accepted.value_of(if row[0] == 1: "immediate_ready" else: "pending_ready").unwrap()).to_equal(1)
+        val idle = evaluate_strict_comb_hwir(module, merge_inputs(module, 0, 0, 1)).unwrap()
+        expect(idle.value_of("merge_fault").unwrap()).to_equal(0)
+        expect(idle.value_of("selected_valid").unwrap()).to_equal(0)
+
+    it("fails closed on overlap or either provider fault and zeros all 25 payload fields"):
+        val module = strict_riscv_scalar_runtime_completion_merge_v5("pipeline_v5_merge_fault", CoreConfig.rv32()).unwrap()
+        for row in [(1, 1, 0, 0), (1, 0, 1, 0), (0, 1, 0, 1)]:
+            val result = evaluate_strict_comb_hwir(module,
+                merge_inputs(module, row[0], row[1], 1, row[2], row[3])).unwrap()
+            expect(result.value_of("merge_fault").unwrap()).to_equal(1)
+            expect(result.value_of("selected_valid").unwrap()).to_equal(0)
+            expect(result.value_of("immediate_ready").unwrap()).to_equal(0)
+            expect(result.value_of("pending_ready").unwrap()).to_equal(0)
+            var payloads = 0
+            for port in module.ports:
+                if port.direction == "out" and port.name.starts_with("selected_") and port.name != "selected_valid":
+                    expect(result.value_of(port.name).unwrap()).to_equal(0)
+                    payloads = payloads + 1
+            expect(payloads).to_equal(25)
+
+    it("has valid shapes and deterministic config-sensitive identities"):
+        val router32 = strict_riscv_scalar_runtime_class_router_v5("pipeline_v5_identity", CoreConfig.rv32()).unwrap()
+        val router32_again = strict_riscv_scalar_runtime_class_router_v5("pipeline_v5_identity", CoreConfig.rv32()).unwrap()
+        val router64 = strict_riscv_scalar_runtime_class_router_v5("pipeline_v5_identity", CoreConfig.rv64()).unwrap()
+        val merge32 = strict_riscv_scalar_runtime_completion_merge_v5("pipeline_v5_merge_identity", CoreConfig.rv32()).unwrap()
+        val merge32_again = strict_riscv_scalar_runtime_completion_merge_v5("pipeline_v5_merge_identity", CoreConfig.rv32()).unwrap()
+        val merge64 = strict_riscv_scalar_runtime_completion_merge_v5("pipeline_v5_merge_identity", CoreConfig.rv64()).unwrap()
+        expect(router32.shape_diagnostic()).to_equal("")
+        expect(merge32.shape_diagnostic()).to_equal("")
+        expect(router32.port_direction("sticky_fault")).to_equal("in")
+        expect(router32.port_width("sticky_fault")).to_equal(1)
+        expect(router32.structural_sha256()).to_equal(router32_again.structural_sha256())
+        expect(merge32.structural_sha256()).to_equal(merge32_again.structural_sha256())
+        expect(router32.structural_sha256() == router64.structural_sha256()).to_equal(false)
+        expect(merge32.structural_sha256() == merge64.structural_sha256()).to_equal(false)

@@ -1,0 +1,72 @@
+#![allow(unnamed_duplicate_typed_args)]
+@allow(unnamed_duplicate_typed_args)
+# T32 LSP MCP - Validate-only backend
+
+use t32_lsp_mcp.json_helpers
+use t32_lsp_mcp.debug_log.{lsp_debug_append, lsp_debug_enabled}
+use t32_lsp_mcp.tool_runner_common.{runner_arg0_is_executable_path, debug_args, check_gui_keywords, check_has_command, request_json_source}
+use cmm_lsp.cmm_parser_runtime.{parse_cmm_source}
+
+extern fn sys_get_args() -> [text]
+extern fn sys_exit(code: i64)
+extern fn rt_file_read_text(path: text) -> text
+
+fn handle_cmm_validate_cli(id: text, args: text) -> text:
+    val source = request_json_source(args)
+    if lsp_debug_enabled():
+        lsp_debug_append("requests.log", "validate id=" + id + " args=" + args + " source_len=" + str(source.len()))
+    if source == "":
+        return lsp_make_tool_error(id, -32602, "Missing required parameter: source")
+    var issues: [text] = []
+    val lower_source = source.to_lower()
+    val gui_violations = check_gui_keywords(source)
+    var i = 0
+    while i < gui_violations.len():
+        issues.push("GUI keyword found: " + gui_violations[i])
+        i = i + 1
+    if not check_has_command(source, "screen.off"):
+        issues.push("Missing SCREEN.OFF command")
+    if not lower_source.contains("area.create") or not lower_source.contains("area.select"):
+        issues.push("Missing AREA.Create/Select setup")
+    if not (lower_source.contains("on error") or lower_source.contains("on.error") or lower_source.contains("globalon error")):
+        issues.push("Missing ON ERROR handler")
+    if not source.contains("@target:"):
+        issues.push("Missing @target: metadata header")
+    if not source.contains("@purpose:"):
+        issues.push("Missing @purpose: metadata header")
+    if not source.contains("ENDDO TRUE()") and not source.contains("ENDDO FALSE()"):
+        issues.push("Missing ENDDO TRUE()/FALSE() return value")
+    val program = parse_cmm_source(source)
+    if program.errors.len() > 0:
+        issues.push("Parse error: " + program.errors[0])
+    var issues_arr = lsp_SB_L()
+    i = 0
+    while i < issues.len():
+        if i > 0:
+            issues_arr = issues_arr + ","
+        issues_arr = issues_arr + lsp_js(issues[i])
+        i = i + 1
+    issues_arr = issues_arr + lsp_SB_R()
+    val valid = if issues.len() == 0: "true" else: "false"
+    lsp_make_tool_result(id, lsp_jo3(lsp_jp("valid", valid), lsp_jp("issue_count", str(issues.len())), lsp_jp("issues", issues_arr)))
+
+fn main():
+    val raw_args = sys_get_args()
+    var args = raw_args
+    if args.len() >= 2 and not args[0].ends_with(".spl") and args[1].ends_with(".spl"):
+        args = args[2:args.len()]
+    elif args.len() >= 1 and args[0].ends_with(".spl"):
+        args = args[1:args.len()]
+    elif args.len() >= 4 and runner_arg0_is_executable_path(args[0]):
+        args = args[1:args.len()]
+
+    if args.len() < 3:
+        print "tool_runner_validate argument error: " + debug_args(args)
+        sys_exit(2)
+
+    val id = args[0]
+    val args_path = args[2]
+    val args_raw = rt_file_read_text(args_path) ?? "null"
+    if lsp_debug_enabled():
+        lsp_debug_append("requests.log", "validate runner id=" + id + " raw=" + args_raw)
+    print_raw(handle_cmm_validate_cli(id, args_raw))

@@ -1,0 +1,210 @@
+"""
+## Purpose and audience
+Purpose: Prove PERF-COW-001/002/003 catch the copy-on-write alias hot-path
+defect class at authoring time, with the ratchet's exact semantics.
+Audience: compiler and tooling engineers who maintain this spec.
+"""
+# @req: REQ-COMPILER-LINT-001 — stable requirement identity for this spec.
+
+# Copy-On-Write Alias Hot-Path Lint Specification
+#
+# The acceptance cases are lifted directly from the selftest fixtures of
+# `scripts/check/check-cow-alias-hotpath.shs`, so the authoring-time lint and
+# the push-time ratchet cannot disagree about what the defect class is. That
+# includes both of the ratchet's documented false-positive fixes: per-function
+# state reset (crossfn) and the loop-VARYING receiver exemption (varying).
+#
+# Background: doc/08_tracking/bug/value_semantics_cow_alias_perf_class_2026-08-21.md
+
+use std.spec.*
+use compiler.semantics.lint.cow_alias_hotpath.{
+    CowAliasFinding,
+    check_cow_alias_hotpath
+}
+
+
+fn _codes(findings: [CowAliasFinding]) -> [text]:
+    var out: [text] = []
+    for f in findings:
+        out.push(f.code)
+    out
+
+
+# ============================================================================
+# Test Group 1: PERF-COW-001 — round trip through a local
+# ============================================================================
+
+describe "PERF-COW-001: COW round trip through a local":
+    """
+    ## Round-Trip Detection
+
+    `val t = self.table` / `t.push(x)` / `self.table = t` keeps the field and
+    the local aliasing the same buffer across every write, so each push
+    deep-copies the whole table: O(n) per write, O(n^2) overall.
+    """
+
+    context "when a field is taken, mutated, and stored back in one function":
+        """
+        ### Scenario: the ratchet's `roundtrip.spl` selftest fixture
+        """
+
+        it "flags the take line with PERF-COW-001":
+            step("Verify: flags the take line with PERF-COW-001")
+            # @req: REQ-COMPILER-LINT-001
+            val source = "fn add_one(self, v: i64):\n    val t = self.table\n    t.push(v)\n    self.table = t\n"
+            val findings = check_cow_alias_hotpath(source, "src/x/a.spl")
+            expect(findings.len()).to_equal(1)  # oracle: 1 — one round trip in the fixture
+            expect(findings[0].code).to_equal("PERF-COW-001")
+            expect(findings[0].line_num).to_equal(2)  # oracle: 2 — the `val t = self.table` line
+
+        it "does not flag a direct owner mutation":
+            step("Verify: `self.table.push(v)` is the correct form and is clean")
+            val source = "fn add_three(self, v: i64):\n    self.table.push(v)\n"
+            val findings = check_cow_alias_hotpath(source, "src/x/a.spl")
+            expect(findings.len()).to_equal(0)  # oracle: 0 — correct form
+
+        it "does not flag a take that is never mutated":
+            step("Verify: a read-only take plus store-back is not a hot path")
+            val source = "fn read_back(self):\n    val t = self.table\n    self.table = t\n"
+            val findings = check_cow_alias_hotpath(source, "src/x/a.spl")
+            expect(findings.len()).to_equal(0)  # oracle: 0 — no mutation, no repeated copy
+
+    context "when the take and the store-back are in different functions":
+        """
+        ### Scenario: the ratchet's `crossfn.spl` selftest fixture
+
+        Per-function state reset — a take in one function must not pair with a
+        store-back in the next.
+        """
+
+        it "does not pair across a function boundary":
+            step("Verify: cross-function take/store does not become a finding")
+            val source = "fn take_only(self):\n    val t = self.table\n    t.push(1)\n\nfn store_only(self, t: [i64]):\n    self.table = t\n"
+            val findings = check_cow_alias_hotpath(source, "src/x/a.spl")
+            expect(findings.len()).to_equal(0)  # oracle: 0 — no round trip exists
+
+
+# ============================================================================
+# Test Group 2: PERF-COW-002 — by-value helper store-back
+# ============================================================================
+
+describe "PERF-COW-002: COW by-value helper store-back":
+    """
+    ## By-Value Helper Detection
+
+    `self.xs = push_into(self.xs, v)` keeps the field's buffer aliased by the
+    parameter binding, so each call deep-copies the whole collection.
+    """
+
+    context "when a field is passed by value and stored back":
+        """
+        ### Scenario: the ratchet's `byvalue.spl` selftest fixture
+        """
+
+        it "flags the store-back line with PERF-COW-002":
+            step("Verify: flags the store-back line with PERF-COW-002")
+            # @req: REQ-COMPILER-LINT-001
+            val source = "fn add_two(self, v: i64):\n    self.xs = push_into(self.xs, v)\n"
+            val findings = check_cow_alias_hotpath(source, "src/x/a.spl")
+            expect(findings.len()).to_equal(1)  # oracle: 1 — one by-value store-back
+            expect(findings[0].code).to_equal("PERF-COW-002")
+            expect(findings[0].line_num).to_equal(2)  # oracle: 2 — the store-back line
+
+        it "does not flag a helper called on a DIFFERENT field":
+            step("Verify: differing source and target fields are not an alias")
+            val source = "fn copy_over(self):\n    self.xs = derive_from(self.ys)\n"
+            val findings = check_cow_alias_hotpath(source, "src/x/a.spl")
+            expect(findings.len()).to_equal(0)  # oracle: 0 — no self-aliasing
+
+
+# ============================================================================
+# Test Group 3: PERF-COW-003 — keys()/values() in a loop body
+# ============================================================================
+
+describe "PERF-COW-003: keys()/values() on a loop-invariant receiver":
+    """
+    ## Materialized-View Detection
+
+    `.keys()` / `.values()` inside a loop body on a receiver that does not
+    change with the loop rebuilds the same key vector every iteration: O(n)
+    per iteration, O(n^2) per loop.
+    """
+
+    context "when the receiver is loop-invariant":
+        """
+        ### Scenario: the ratchet's `keysinloop.spl` selftest fixture
+        """
+
+        it "flags the call with PERF-COW-003":
+            step("Verify: flags the in-loop keys() call with PERF-COW-003")
+            # @req: REQ-COMPILER-LINT-001
+            val source = "fn walk(self):\n    var i = 0\n    while i < 10:\n        val ks = self.table.keys()\n        i = i + 1\n"
+            val findings = check_cow_alias_hotpath(source, "src/x/a.spl")
+            expect(findings.len()).to_equal(1)  # oracle: 1 — one invariant materialization
+            expect(findings[0].code).to_equal("PERF-COW-003")
+            expect(findings[0].line_num).to_equal(4)  # oracle: 4 — the keys() line
+
+        it "does not flag a keys() call hoisted above the loop":
+            step("Verify: the corrected form is clean")
+            val source = "fn walk2(self):\n    val ks = self.table.keys()\n    for k in ks:\n        print(k)\n"
+            val findings = check_cow_alias_hotpath(source, "src/x/a.spl")
+            expect(findings.len()).to_equal(0)  # oracle: 0 — hoisted, materialized once
+
+    context "when the receiver is rebound by the loop":
+        """
+        ### Scenario: the ratchet's `varying.spl` selftest fixture
+
+        Each iteration materializes the keys of a DIFFERENT dict, so the total
+        is O(total entries) — optimal, and not a finding.
+        """
+
+        it "does not flag a for-pattern-bound receiver":
+            step("Verify: `for surface in ...` then `surface.callables.keys()` is clean")
+            val source = "fn walk_surfaces(self):\n    for surface in self.surfaces:\n        val names = surface.callables.keys()\n        print(names)\n"
+            val findings = check_cow_alias_hotpath(source, "src/x/a.spl")
+            expect(findings.len()).to_equal(0)  # oracle: 0 — receiver varies per iteration
+
+        it "does not flag a receiver bound by a val inside the loop body":
+            step("Verify: a val declared inside the loop is loop-varying")
+            val source = "fn walk_mods(self):\n    var i = 0\n    while i < 10:\n        val module = self.mods[i]\n        val names = module.structs.keys()\n        i = i + 1\n"
+            val findings = check_cow_alias_hotpath(source, "src/x/a.spl")
+            expect(findings.len()).to_equal(0)  # oracle: 0 — receiver varies per iteration
+
+
+# ============================================================================
+# Test Group 4: whole-file behaviour
+# ============================================================================
+
+describe "PERF-COW: whole-file behaviour":
+    """
+    ## Combined Detection
+
+    All three shapes are found in a single linear pass, and clean code stays
+    clean.
+    """
+
+    context "when a file carries all three shapes":
+        """
+        ### Scenario: one file, three distinct offenders
+        """
+
+        it "reports one finding per shape":
+            step("Verify: reports one finding per shape")
+            # @req: REQ-COMPILER-LINT-001
+            val source = "fn a(self, v: i64):\n    val t = self.table\n    t.push(v)\n    self.table = t\n\nfn b(self, v: i64):\n    self.xs = push_into(self.xs, v)\n\nfn c(self):\n    var i = 0\n    while i < 3:\n        val ks = self.table.keys()\n        i = i + 1\n"
+            val findings = check_cow_alias_hotpath(source, "src/x/a.spl")
+            expect(findings.len()).to_equal(3)  # oracle: 3 — one per shape
+            expect(_codes(findings).contains("PERF-COW-001")).to_be_true()
+            expect(_codes(findings).contains("PERF-COW-002")).to_be_true()
+            expect(_codes(findings).contains("PERF-COW-003")).to_be_true()
+
+    context "when the file is clean":
+        """
+        ### Scenario: correct forms only
+        """
+
+        it "reports nothing":
+            step("Verify: correct forms produce no findings")
+            val source = "fn a(self, v: i64):\n    self.table.push(v)\n\nfn b(self):\n    val ks = self.table.keys()\n    for k in ks:\n        print(k)\n"
+            val findings = check_cow_alias_hotpath(source, "src/x/a.spl")
+            expect(findings.len()).to_equal(0)  # oracle: 0 — clean file

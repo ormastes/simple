@@ -2,7 +2,58 @@
 use strict;
 use warnings;
 use Errno qw(EPERM ESRCH);
-use Fcntl qw(:mode);
+use Fcntl qw(:mode O_RDONLY O_NOFOLLOW);
+
+# The enforced Darwin workload must never spawn its setuid /bin/ps. Reuse the
+# watchdog's admitted observer, including during EXIT-trap owner verification.
+# Keep the legacy lstart manifest encoding so unguarded callers interoperate.
+sub darwin_identity {
+    my ($pid) = @_;
+    my $path = $ENV{SIMPLE_BOOTSTRAP_PROCESS_OBSERVER} // '';
+    my $sha = $ENV{SIMPLE_BOOTSTRAP_PROCESS_OBSERVER_SHA256} // '';
+    return unless length($path) && $sha =~ /\A[0-9a-f]{64}\z/;
+    my ($child, $pipe, $row);
+    my $ok = eval {
+        local $SIG{ALRM} = sub { die "lock observer timeout\n" };
+        alarm 5;
+        require Digest::SHA;
+        sysopen(my $fh, $path, O_RDONLY | O_NOFOLLOW) or die "observer open\n";
+        my @st = stat($fh); my @entry = lstat($path);
+        S_ISREG($st[2]) && @entry && !S_ISLNK($entry[2]) &&
+            $st[0] == $entry[0] && $st[1] == $entry[1] && !($st[2] & 06000) &&
+            Digest::SHA->new(256)->addfile($fh)->hexdigest eq $sha
+            or die "observer admission\n";
+        close($fh) or die "observer close\n";
+        $child = open($pipe, '-|');
+        defined($child) or die "observer fork\n";
+        if (!$child) {
+            alarm 5;
+            exec {$path} $path, '--identity', $pid;
+            exit 127;
+        }
+        $row = '';
+        while (1) {
+            my $n = sysread($pipe, my $chunk, 256);
+            defined($n) or die "observer read\n";
+            last unless $n;
+            $row .= $chunk;
+            length($row) <= 256 or die "observer oversized identity\n";
+        }
+        my $closed = close($pipe);
+        $child = undef;
+        $closed or die "observer exit\n";
+        alarm 0;
+        1;
+    };
+    alarm 0;
+    if (defined($child) && $child > 0) {
+        kill 'KILL', $child;
+        close($pipe);
+        waitpid($child, 0);
+    }
+    return unless $ok && $row =~ /\A([0-9]+:[0-9]+) [0-9]+ ([^\r\n]+)\n\z/;
+    return ($1, $2);
+}
 
 sub fail_usage {
     die "usage: portable-hardlink-lock.pl COMMAND ARGS...\n";
@@ -65,6 +116,16 @@ sub proc_stat_snapshot {
 sub process_snapshot {
     my ($pid) = @_;
     return unless defined($pid) && $pid =~ /\A[1-9][0-9]*\z/;
+    if ($^O eq 'darwin' && (exists($ENV{SIMPLE_BOOTSTRAP_PROCESS_OBSERVER}) ||
+                            exists($ENV{SIMPLE_BOOTSTRAP_RSS_CAP_MODE}))) {
+        my ($birth_one, $start) = darwin_identity($pid);
+        return unless defined($birth_one);
+        my $pgid = getpgrp($pid);
+        return unless defined($pgid) && $pgid > 0;
+        my ($birth_two) = darwin_identity($pid);
+        return unless defined($birth_two) && $birth_one eq $birth_two;
+        return (unpack('H*', $start), $pgid);
+    }
     my $start_one = ps_value('lstart', $pid);
     if (defined($start_one)) {
         my $pgid = ps_value('pgid', $pid);
@@ -91,13 +152,137 @@ sub pid_absent {
     return 0;
 }
 
-sub group_state {
+sub group_state_detail {
     my ($pgid) = @_;
-    return 'unknown' unless defined($pgid) && $pgid =~ /\A[1-9][0-9]*\z/;
-    return 'live' if kill(0, -$pgid);
-    return 'live' if $! == EPERM;
-    return 'dead' if $! == ESRCH;
-    return 'unknown';
+    return ('unknown', 0) unless defined($pgid) && $pgid =~ /\A[1-9][0-9]*\z/;
+    return ('live', 1) if kill(0, -$pgid);
+    return ('live', 0) if $! == EPERM;
+    return ('dead', 0) if $! == ESRCH;
+    return ('unknown', 0);
+}
+
+# Full (pid, ppid, pgid, starttime) table from /proc. Returns an empty list
+# when /proc scanning is unavailable (e.g. macOS); callers must then keep the
+# kill()-based verdict unchanged.
+sub proc_table {
+    return unless -r "/proc/$$/stat";
+    opendir(my $dh, '/proc') or return;
+    my @rows;
+    for my $entry (readdir($dh)) {
+        next unless $entry =~ /\A[1-9][0-9]*\z/;
+        open(my $fh, '<', "/proc/$entry/stat") or next;
+        my $line = <$fh>;
+        close($fh) or next;
+        next unless defined($line);
+        my $close_paren = rindex($line, ')');
+        next if $close_paren < 0;
+        my $rest = substr($line, $close_paren + 1);
+        $rest =~ s/\A\s+//;
+        my @fields = split(/\s+/, $rest);
+        next unless @fields >= 20;
+        my ($ppid, $pgrp, $start) = ($fields[1], $fields[2], $fields[19]);
+        next unless defined($start) && $start =~ /\A[0-9]+\z/;
+        next unless defined($pgrp) && $pgrp =~ /\A[0-9]+\z/;
+        next unless defined($ppid) && $ppid =~ /\A[0-9]+\z/;
+        push(@rows, [$entry + 0, $ppid + 0, $pgrp + 0, $start]);
+    }
+    closedir($dh);
+    return @rows;
+}
+
+# The recorded pgid carries no start-time identity of its own, so a bare
+# kill(0, -pgid) proves only that SOME process occupies that group-id slot,
+# not that the recorded owner's group survives. On Windows/MSYS the OS
+# recycles pids aggressively, so an unrelated later session leader (plus its
+# descendants) can occupy a dead owner's pgid slot indefinitely -- measured
+# 2026-08-31: claim-state printed "live" for a dead owner whose recorded
+# pgid slot was held by an unrelated leader, so the stale bootstrap lock was
+# never reclaimed and the next run timed out waiting for output ownership.
+#
+# When the claim was minted under portable-session-exec.pl the owner IS the
+# group leader (pid == pgid), so the recorded owner start-time identifies
+# the GROUP as well and the verdict can be refined. Refinement runs only
+# when ALL of the following hold; otherwise the kill()-based verdict is
+# returned byte-identically:
+#   - the recorded claim has pid == pgid (the shape our own create path
+#     produces via the session wrapper; foreign shapes keep old semantics),
+#   - kill(0, -pgid) SUCCEEDED (same-uid group, so /proc shows every
+#     member; the EPERM path is never refined -- under hidepid another
+#     user's members are invisible and demoting EPERM to dead would be the
+#     false-dead two-writers corruption this lock exists to prevent),
+#   - a /proc scan is available (Linux, MSYS/Cygwin; macOS opts out).
+# It demotes "live" to "dead" in exactly two positively-verified cases:
+#   (a) no process holds the pgid AND a re-check of kill(0, -pgid) now
+#       reports ESRCH (closes the scan-vs-kill race), or
+#   (b) the leader slot is held by a process whose start-time differs from
+#       the recorded owner's (an impostor from pid recycling), EVERY other
+#       member's parent chain leads into the impostor set, and a re-read of
+#       the impostor's start-time is unchanged (a pid recycled between the
+#       two reads cannot slip through).
+# Any member that cannot be positively attributed to the impostor --
+# reparented to pid 1, an unreadable row, a broken or over-long chain --
+# keeps the group "live" (fail closed), and the surviving member pids are
+# reported on stderr so an operator can act on a genuinely wedged group.
+sub refine_leader_group_state {
+    my ($pgid, $expected_start_hex) = @_;
+    my @rows = proc_table();
+    return 'live' unless @rows;
+    my %row_by_pid;
+    my @members;
+    for my $row (@rows) {
+        $row_by_pid{$row->[0]} = $row;
+    }
+    for my $row (@rows) {
+        push(@members, $row) if $row->[2] == $pgid;
+    }
+    if (!@members) {
+        return 'dead' if !kill(0, -$pgid) && $! == ESRCH;
+        return 'live';
+    }
+    my $leader = $row_by_pid{$pgid};
+    if (!defined($leader) || $leader->[2] != $pgid) {
+        print STDERR "portable-lock: owner pid is gone but group $pgid " .
+            'members survive (pids ' .
+            join(' ', map { $_->[0] } @members) .
+            "); lock stays held until they exit or are killed\n";
+        return 'live';
+    }
+    my $leader_start_hex = unpack('H*', $leader->[3]);
+    return 'live' if $leader_start_hex eq $expected_start_hex;
+    my %impostor = ($pgid => 1);
+    for my $member (@members) {
+        next if $impostor{$member->[0]};
+        my @chain = ($member->[0]);
+        my $cursor = $member->[1];
+        my $verdict = '';
+        for (my $hop = 0; $hop < 64; $hop++) {
+            if ($impostor{$cursor}) {
+                $verdict = 'impostor';
+                last;
+            }
+            if ($cursor <= 1 || !defined($row_by_pid{$cursor})) {
+                $verdict = 'genuine';
+                last;
+            }
+            push(@chain, $cursor);
+            $cursor = $row_by_pid{$cursor}->[1];
+        }
+        if ($verdict eq 'impostor') {
+            $impostor{$_} = 1 for @chain;
+            next;
+        }
+        print STDERR "portable-lock: recorded pgid $pgid leader was " .
+            "recycled, but member pid $member->[0] cannot be attributed to " .
+            "the recycled leader; keeping the lock held (fail closed)\n";
+        return 'live';
+    }
+    my ($leader_start_again) = proc_stat_snapshot($pgid);
+    return 'live' unless defined($leader_start_again) &&
+        unpack('H*', $leader_start_again) eq $leader_start_hex;
+    print STDERR "portable-lock: recorded pgid $pgid was recycled by an " .
+        "unrelated process (start-time mismatch); the recorded owner group " .
+        "is positively absent, allowing stale-lock reclaim\n";
+    return 'dead';
 }
 
 sub claim_fields {
@@ -154,7 +339,11 @@ if ($command eq 'claim-state') {
         print "unknown\n";
         exit 0;
     }
-    print group_state($pgid), "\n";
+    my ($group_verdict, $group_kill_ok) = group_state_detail($pgid);
+    if ($group_verdict eq 'live' && $group_kill_ok && "$pid" eq "$pgid") {
+        $group_verdict = refine_leader_group_state($pgid, $expected_start);
+    }
+    print "$group_verdict\n";
     exit 0;
 }
 

@@ -1,5 +1,10 @@
-# Todo (Legacy)
+# TODO tracking
 
-> **This directory is deprecated.** See [`../08_tracking/`](../08_tracking/) for current documentation.
+This is the canonical TODO tracking directory. `todo_db.sdn` contains numeric
+task IDs; records can cite a source marker or a curated document in this directory.
+The database is not a list of one document per task.
 
-Any remaining files here are historical artifacts. New tracking documentation should go in the numbered directory.
+Use the [tracking registration guide](../../07_guide/infra/tracking/sync_tracking_db_status.md)
+to audit missing links and malformed records. Registration repairs preserve
+existing lifecycle states. A missing file or changed description is not closure
+evidence.

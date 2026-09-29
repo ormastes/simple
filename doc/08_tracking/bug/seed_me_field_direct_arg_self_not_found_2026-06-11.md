@@ -1,6 +1,17 @@
 # Seed interpreter: `me.field` as direct arg to a nested `me fn` call → `self` not found
 
-- **Status:** fixed in seed — pending redeploy (2026-06-11)
+## Closed 2026-09-13 — fix is now IN the deployed seed; repro no longer fails
+
+- **measured** On `bin/simple` (Rust seed **v1.0.0-rc.1**, Windows), the entry shape
+  `me fn query(op): me._q(me.size_index, op)` with `Holder(size_index: 7).query(3)` prints
+  **`10`** — no `semantic: variable 'self' not found`.
+- **inferred** The only remaining blocker recorded here was "pending redeploy"; the binary in
+  `bin/` is built from this tree's `src/compiler_rust`, so the redeploy has happened.
+- Caveat, stated honestly: this is the Rust seed, not a self-hosted binary — but the seed is
+  the binary this bug was filed against, so the evidence is on-target.
+
+
+Status: closed 2026-09-13 (was: - **Status:** fixed in seed — pending redeploy (2026-06-11))
 - **Found:** 2026-06-11 while fixing
   `dbfs_checkpoint_facade_spec_self_not_found_2026-06-11.md`
 - **Severity:** medium — silent class of interpreter-mode failures; the error

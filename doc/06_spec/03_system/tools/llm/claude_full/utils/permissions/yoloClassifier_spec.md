@@ -1,0 +1,192 @@
+# Claude Full Yolo Classifier Slice
+
+> Focused Simple coverage for deterministic auto-mode classifier helpers from
+
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 3 | 3 | 0 | 0 |
+
+<details>
+<summary>Full Scenario Manual</summary>
+
+# Claude Full Yolo Classifier Slice
+
+Focused Simple coverage for deterministic auto-mode classifier helpers from
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Other |
+| Status | Active |
+| Source | `test/03_system/tools/llm/claude_full/utils/permissions/yoloClassifier_spec.spl` |
+| Updated | 2026-08-26 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+Focused Simple coverage for deterministic auto-mode classifier helpers from
+utils/permissions/yoloClassifier.ts.
+
+## Scenarios
+
+### Claude full yolo classifier parity
+
+#### should model default rule extraction
+
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- should model default rule extraction
+- Check rule defaults
+   - Expected: getDefaultExternalAutoModeRulesRoute(false, 0) equals `allow:0 block:0 ask:0`
+   - Expected: getDefaultExternalAutoModeRulesRoute(true, 2) equals `allow:2 block:2 ask:2`
+   - Expected: extractTaggedBulletsRoute("- one\nnot a bullet\n- two\n") equals `one|two`
+   - Expected: extractTaggedBulletsRoute("  - trimmed  \n\nx") equals `trimmed`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("should model default rule extraction")
+step("Check rule defaults")
+expect(getDefaultExternalAutoModeRulesRoute(false, 0)).to_equal("allow:0 block:0 ask:0")
+expect(getDefaultExternalAutoModeRulesRoute(true, 2)).to_equal("allow:2 block:2 ask:2")
+expect(extractTaggedBulletsRoute("- one\nnot a bullet\n- two\n")).to_equal("one|two")
+expect(extractTaggedBulletsRoute("  - trimmed  \n\nx")).to_equal("trimmed")
+```
+
+</details>
+
+#### should model external system prompt replacement
+
+- should model external system prompt replacement
+- Check prompt replacement
+   - Expected: buildDefaultExternalSystemPromptRoute("<permissions_template> <user_allow_to_replace> <user_block_to_replace> <user_ask_to_replace>") equals `default permissions default allow default block default ask`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("should model external system prompt replacement")
+step("Check prompt replacement")
+expect(buildDefaultExternalSystemPromptRoute("<permissions_template> <user_allow_to_replace> <user_block_to_replace> <user_ask_to_replace>")).to_equal("default permissions default allow default block default ask")
+```
+
+</details>
+
+#### should model transcript and action formatting
+
+- should model transcript and action formatting
+- Check transcript routes
+   - Expected: buildTranscriptEntriesRoute("queued_command", 1, 0) equals `user queued command`
+   - Expected: buildTranscriptEntriesRoute("user", 2, 0) equals `user text 2`
+   - Expected: buildTranscriptEntriesRoute("assistant", 0, 1) equals `assistant tool_use 1`
+   - Expected: buildTranscriptForClassifierRoute(true, "Bash") equals `tool:Bash`
+   - Expected: buildTranscriptForClassifierRoute(false, "Unknown") equals ``
+   - Expected: formatActionForClassifierRoute("Bash") equals `assistant tool_use Bash`
+   - Expected: yoloClassifierSourceLinesModeled() equals `1495`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("should model transcript and action formatting")
+step("Check transcript routes")
+expect(buildTranscriptEntriesRoute("queued_command", 1, 0)).to_equal("user queued command")
+expect(buildTranscriptEntriesRoute("user", 2, 0)).to_equal("user text 2")
+expect(buildTranscriptEntriesRoute("assistant", 0, 1)).to_equal("assistant tool_use 1")
+expect(buildTranscriptForClassifierRoute(true, "Bash")).to_equal("tool:Bash")
+expect(buildTranscriptForClassifierRoute(false, "Unknown")).to_equal("")
+expect(formatActionForClassifierRoute("Bash")).to_equal("assistant tool_use Bash")
+expect(yoloClassifierSourceLinesModeled()).to_equal(1495)
+```
+
+</details>
+
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 3 |
+| Active scenarios | 3 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
+
+
+</details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `cf18eb4846009bf6dfaff92c62e482f9b7e6ec543e623fa000659831c37d6185`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `cf18eb4846009bf6dfaff92c62e482f9b7e6ec543e623fa000659831c37d6185`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `cf18eb4846009bf6dfaff92c62e482f9b7e6ec543e623fa000659831c37d6185`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **88/100**; effective score: **88/100**; blockers: **0**.
+
+SSpec documentization score: 88/100
+source: test/03_system/tools/llm/claude_full/utils/permissions/yoloClassifier_spec.spl
+mirror: doc/06_spec/03_system/tools/llm/claude_full/utils/permissions/yoloClassifier_spec.md (current)
+findings: 9 blockers: 0
+  narrative=100 structure=85 oracle=90
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/tools/llm/claude_full/utils/permissions/yoloClassifier_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/tools/llm/claude_full/utils/permissions/yoloClassifier_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/tools/llm/claude_full/utils/permissions/yoloClassifier_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-10): 1 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/tools/llm/claude_full/utils/permissions/yoloClassifier_spec.spl:19:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should model default rule extraction' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/tools/llm/claude_full/utils/permissions/yoloClassifier_spec.spl:19:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should model default rule extraction' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/tools/llm/claude_full/utils/permissions/yoloClassifier_spec.spl:28:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should model external system prompt replacement' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/tools/llm/claude_full/utils/permissions/yoloClassifier_spec.spl:28:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should model external system prompt replacement' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/tools/llm/claude_full/utils/permissions/yoloClassifier_spec.spl:34:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should model transcript and action formatting' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/tools/llm/claude_full/utils/permissions/yoloClassifier_spec.spl:34:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should model transcript and action formatting' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

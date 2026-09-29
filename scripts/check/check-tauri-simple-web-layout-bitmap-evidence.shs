@@ -86,6 +86,20 @@ emit_unavailable() {
         sed 's/^/- /' "$BUILD_DIR/evidence.env"
     } >"$REPORT_PATH"
     cat "$BUILD_DIR/evidence.env"
+    # Verdict line (2026-09-06): this function used to end at the `cat` above,
+    # so every caller died on a bare `exit 1` with an env dump as the last
+    # stdout line and no PASS/FAIL/ERROR verdict at all. Absence of a runtime
+    # or a binary is absence of evidence, so it is ERROR (exit 2), never a pass.
+    case "$reason" in
+        *-failed|*-not-allowed|invalid-*)
+            echo "FAIL — 0 of 1 bitmap comparison(s) completed ($reason)"
+            exit 1
+            ;;
+        *)
+            echo "ERROR — nothing was checked ($reason)"
+            exit 2
+            ;;
+    esac
 }
 
 emit_fail() {
@@ -144,7 +158,6 @@ emit_fail() {
 require_cmd() {
     if ! command -v "$1" >/dev/null 2>&1; then
         emit_unavailable "$2"
-        exit 1
     fi
 }
 
@@ -166,18 +179,15 @@ esac
 
 if [ "$HTML_PATH" = "" ] || [ ! -s "$HTML_PATH" ]; then
     emit_unavailable "missing-layout-html"
-    exit 1
 fi
 if [ "$EXPECTED_ARGB" = "" ] || [ ! -s "$EXPECTED_ARGB" ]; then
     emit_unavailable "missing-expected-argb"
-    exit 1
 fi
 
 require_cmd node "node-unavailable"
 
 if [ ! -f "$VALIDATOR" ]; then
     emit_unavailable "missing-tauri-proof-validator"
-    exit 1
 fi
 
 case "$HOST_UNAME_S" in
@@ -185,7 +195,6 @@ case "$HOST_UNAME_S" in
         require_cmd swift "swift-unavailable"
         if [ ! -f tools/tauri-live-bitmap/capture_snapshot.swift ]; then
             emit_unavailable "missing-macos-wkwebview-snapshot-backend"
-            exit 1
         fi
         ;;
     Linux)
@@ -199,7 +208,6 @@ case "$HOST_UNAME_S" in
         ;;
     *)
         emit_unavailable "tauri-capture-host-backend-unimplemented"
-        exit 1
         ;;
 esac
 
@@ -503,4 +511,12 @@ fi
 } >"$REPORT_PATH"
 
 cat "$BUILD_DIR/evidence.env"
-[ "$status" = "pass" ]
+# Verdict line (2026-09-06): this script used to end on a bare
+# `[ "$status" = "pass" ]`, which under `set -e` exits 1 with an env dump as
+# the last stdout line and no PASS/FAIL/ERROR verdict.
+if [ "$status" = "pass" ]; then
+    echo "PASS — 1 evidence bundle checked (tauri-simple-web-layout-bitmap-evidence), 0 mismatches"
+else
+    echo "FAIL — 1 evidence bundle checked (tauri-simple-web-layout-bitmap-evidence), ${reason:-status=$status}"
+    exit 1
+fi

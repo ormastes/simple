@@ -1,0 +1,111 @@
+use std.spec.{describe, expect, it}
+use app.io.mod.{file_read}
+use app.test_audit.hal_branch_manifest.{
+    HAL_BRANCH_SOURCE_MANIFEST_PATH,
+    HalEvidenceScope,
+    HalSourceIdentity,
+    hal_source_identity,
+    hal_discover_source_inventory,
+    hal_render_source_manifest,
+    hal_exact_source_rejections,
+    hal_simple_decision_evidence,
+    hal_c_lcov_evidence,
+    hal_physical_board_contract,
+    hal_board_exclusion,
+    hal_validate_branch_manifest
+}
+
+val HASH_A = "a" * 64
+val HASH_B = "b" * 64
+val HASH_C = "c" * 64
+val SIMPLE_PATH = "src/lib/nogc_sync_mut/hal/qemu_mock.spl"
+val C_PATH = "src/os/kernel/arch/arm32/cosmos/cosmos_ftl.c"
+val BOARD_PATH = "src/os/kernel/arch/cortex_m33/cm33_shim.c"
+
+fn source(path: text, hash: text) -> HalSourceIdentity:
+    match hal_source_identity(path, hash):
+        case Ok(row): row
+        case Err(error): fail("invalid fixture source: {error}")
+
+fn complete_simple_sdn() -> text:
+    "# Coverage Report\nversion: 1.0\n\n" +
+    "decisions |id, file, line, column, true_count, false_count|\n" +
+    "    qemu.branch, " + SIMPLE_PATH + ", 10, 4, 2, 3\n"
+
+fn partial_c_lcov() -> text:
+    "TN:\nSF:" + C_PATH + "\n" +
+    "BRDA:10,0,0,1\nBRDA:10,0,1,-\nBRF:2\nBRH:1\nend_of_record\n"
+
+describe "checked exact-source HAL inventory":
+    it "matches the checked-in deterministic path and SHA-256 manifest":
+        val rows = match hal_discover_source_inventory():
+            case Ok(value): value
+            case Err(error): fail("HAL inventory discovery failed: {error}")
+        val rendered = match hal_render_source_manifest(rows):
+            case Ok(value): value
+            case Err(error): fail("HAL inventory render failed: {error}")
+        expect(rendered).to_equal(file_read(HAL_BRANCH_SOURCE_MANIFEST_PATH))
+
+    it "rejects zero, missing, stale, and unexpected exact-source inventories":
+        val a = source(SIMPLE_PATH, HASH_A)
+        val b = source(C_PATH, HASH_B)
+        expect(hal_exact_source_rejections([], []).contains("zero-source-denominator")).to_equal(true)
+        expect(hal_exact_source_rejections([a, b], [a]).contains("missing-source:" + C_PATH)).to_equal(true)
+        expect(hal_exact_source_rejections([a], [source(SIMPLE_PATH, HASH_C)]).contains("stale-source:" + SIMPLE_PATH)).to_equal(true)
+        expect(hal_exact_source_rejections([a], [a, b]).contains("unexpected-source:" + C_PATH)).to_equal(true)
+
+describe "real-tool HAL branch instrumentation binding":
+    it "derives host scope from Simple decision SDN and counts both outcomes":
+        val measured = hal_simple_decision_evidence(SIMPLE_PATH, HASH_A, complete_simple_sdn(), HASH_C)
+        expect(measured.scope).to_equal(HalEvidenceScope.HostExecutable)
+        expect(measured.covered_branch_outcomes).to_equal(2)
+        expect(measured.branch_outcomes).to_equal(2)
+
+    it "derives host scope from LLVM LCOV and refuses an unhit branch outcome":
+        val measured = hal_c_lcov_evidence(C_PATH, HASH_B, partial_c_lcov(), HASH_C)
+        expect(measured.scope).to_equal(HalEvidenceScope.HostExecutable)
+        expect(measured.covered_branch_outcomes).to_equal(1)
+        expect(measured.branch_outcomes).to_equal(2)
+        val summary = hal_validate_branch_manifest([source(C_PATH, HASH_B)], [measured], [])
+        expect(summary.coverage_basis_points).to_equal(5000)
+        expect(summary.full_coverage_proven).to_equal(false)
+
+    it "keeps board contracts outside the host denominator":
+        val board = source(BOARD_PATH, HASH_B)
+        val board_receipt = hal_physical_board_contract(BOARD_PATH, HASH_B, HASH_C)
+        val simple = source(SIMPLE_PATH, HASH_A)
+        val host = hal_simple_decision_evidence(SIMPLE_PATH, HASH_A, complete_simple_sdn(), HASH_C)
+        val summary = hal_validate_branch_manifest(
+            [simple, board], [host, board_receipt],
+            [hal_board_exclusion(BOARD_PATH, HASH_B, "physical interrupt controller required")])
+        expect(summary.host_source_files).to_equal(1)
+        expect(summary.board_source_files).to_equal(1)
+        expect(summary.branch_outcomes).to_equal(2)
+        expect(summary.full_coverage_proven).to_equal(true)
+
+    it "rejects zero instrumentation denominators and missing instrumentation":
+        val zero = hal_simple_decision_evidence(SIMPLE_PATH, HASH_A, "# Coverage Report\nversion: 1.0\n", HASH_C)
+        val zero_summary = hal_validate_branch_manifest([source(SIMPLE_PATH, HASH_A)], [zero], [])
+        expect(zero_summary.rejections.contains("zero-branch-denominator:" + SIMPLE_PATH)).to_equal(true)
+        val missing = hal_validate_branch_manifest([source(SIMPLE_PATH, HASH_A)], [], [])
+        expect(missing.rejections.contains("missing-instrumentation:" + SIMPLE_PATH)).to_equal(true)
+        expect(missing.full_coverage_proven).to_equal(false)
+
+    it "rejects stale instrumentation and exclusion drift":
+        val board = source(BOARD_PATH, HASH_B)
+        val stale_receipt = hal_physical_board_contract(BOARD_PATH, HASH_A, HASH_C)
+        val summary = hal_validate_branch_manifest(
+            [board], [stale_receipt],
+            [hal_board_exclusion(BOARD_PATH, HASH_A, "stale bound source")])
+        expect(summary.rejections.contains("stale-instrumentation:" + BOARD_PATH)).to_equal(true)
+        expect(summary.rejections.contains("board-exclusion-drift:" + BOARD_PATH)).to_equal(true)
+        expect(summary.full_coverage_proven).to_equal(false)
+
+    it "rejects caller attempts to exclude host-instrumented sources":
+        val host = hal_simple_decision_evidence(SIMPLE_PATH, HASH_A, complete_simple_sdn(), HASH_C)
+        val summary = hal_validate_branch_manifest(
+            [source(SIMPLE_PATH, HASH_A)], [host],
+            [hal_board_exclusion(SIMPLE_PATH, HASH_A, "caller says board-only")])
+        expect(summary.rejections.contains("host-source-excluded:" + SIMPLE_PATH)).to_equal(true)
+        expect(summary.rejections.contains("board-exclusion-drift:" + SIMPLE_PATH)).to_equal(true)
+        expect(summary.full_coverage_proven).to_equal(false)

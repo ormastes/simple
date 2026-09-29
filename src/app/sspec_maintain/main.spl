@@ -14,6 +14,7 @@ use app.sspec_maintain.report.{render_human_report, render_json_report,
 use app.sspec_maintain.scaffold.{scaffold_reference_text}
 use app.spipe_docgen.spipe_docgen.main.{run_spipe_docgen}
 use app.spipe_docgen.spipe_docgen.parser.{parse_spipe_file}
+use app.spipe_docgen.spipe_docgen.generator.{output_relative_path}
 use app.sspec_maintain.improve.{preview_sspec_text_result, safe_sspec_easyfixes,
     render_sspec_improvement_preview}
 use std.tooling.easy_fix.types.{easyfix_id}
@@ -475,6 +476,22 @@ fn _manual_relative_path(path: text) -> text:
     val prefix = "doc/06_spec/"
     if canonical.starts_with(prefix): canonical[prefix.len():] else: canonical
 
+fn _staged_manual_relative_path(path: text) -> Result<text, text>:
+    """Where `spipe-docgen` actually wrote the staged manual, asked of docgen
+    itself rather than re-derived here.
+
+    `derive_manual_path` strips the leading `test/` (mirrors live at
+    `doc/06_spec/03_system/...`) while `spipe-docgen` keeps it
+    (`<out>/test/03_system/...`, generator.spl:71). Documentize looked at the
+    stripped path, never found the staged file, and reported "canonical SPipe
+    manual was not produced" for every spec under `test/` -- so no mirror could
+    be regenerated at all. Deriving the path from the generator's own
+    `output_relative_path` makes the two sides impossible to drift apart again.
+    """
+    match parse_spipe_file(path):
+        case Ok(parsed): Ok(output_relative_path(parsed))
+        case Err(message): Err(message)
+
 fn _run_documentize(path: text, args: [text]) -> i64:
     match _read(path):
         case Err(message):
@@ -491,7 +508,13 @@ fn _run_documentize(path: text, args: [text]) -> i64:
                 dir_remove(staging_root, true)
                 _cli_eprint("sspec-maintain: SPipe manual generation failed")
                 return 3
-            val staged_path = staging_root + "/" + _manual_relative_path(path)
+            val staged_relative = match _staged_manual_relative_path(path):
+                case Ok(relative): relative
+                case Err(message):
+                    dir_remove(staging_root, true)
+                    _cli_eprint("sspec-maintain: cannot locate the staged SPipe manual for {path}: {message}")
+                    return 3
+            val staged_path = staging_root + "/" + staged_relative
             val spipe_manual = file_read(staged_path) ?? ""
             if spipe_manual == "":
                 dir_remove(staging_root, true)

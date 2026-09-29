@@ -6,9 +6,14 @@
 #   bin/simple run src/app/llm_caret/main.spl [options]
 #
 # Options:
-#   --provider <name>        dummy | claude_cli | opencode_cli | claude_api | openai |
-#                             openai_compat | local_torch (default: config file's
-#                             defaults.provider, else claude_cli)
+#   --provider <name>        dummy | claude_cli | codex_cli | opencode_cli | claude_api |
+#                             openai |
+#                             openai_compat | slang | slang_local | local_torch
+#                             (default: config file's defaults.provider, else
+#                             claude_cli)
+#                            slang       -- slang_server over HTTP (SLANG_BASE_URL)
+#                            slang_local -- slang in-process, no socket; scans
+#                                           SLANG_MODEL_ROOT for models
 #   --model <name>           model id (default: provider's configured model)
 #   --config <path>          load an llm_caret.sdn config file (config.spl)
 #   --system <prompt>        system prompt
@@ -22,6 +27,13 @@
 #   --electron               launch the GUI in the canonical Electron shell
 #   --metal-gui              use the GPU companion entry (not core Caret)
 #   --prompt <text>          send one prompt, print the response, and exit
+#   --workbench              launch an agent team into smux panes (one pane per
+#                             agent, the pane's child IS the agent) and render
+#                             the live workbench
+#   --agent <agent.md>       workbench agent, repeatable
+#   --agent-cmd <path>       binary launched per agent (default: claude)
+#   --send <text>            one line written to the selected agent's stdin
+#   --workbench-frames <n>   refresh iterations before the final frame (20)
 #   --server                 run the HTTP proxy (server.spl) instead of chat
 #   --port <n>                proxy port (default 8317, or $LLM_CARET_PORT)
 #   -h / --help              show this help
@@ -42,13 +54,22 @@ use std.common.string_core.{bytes_to_text}
 
 use app.llm_caret.config.{load_config, config_loaded,
     config_default_provider, config_claude_cli_path, config_claude_cli_model,
+    config_codex_cli_path, config_codex_cli_model,
     config_opencode_cli_path, config_opencode_cli_model,
     config_claude_api_key, config_claude_api_base_url, config_claude_api_model,
     config_openai_api_key, config_openai_base_url, config_openai_model,
-    config_compat_base_url, config_compat_model, config_compat_api_key}
-use app.llm_caret.provider.{LLMResponse, dispatch_send, is_valid_provider, list_providers}
+    config_compat_base_url, config_compat_model, config_compat_api_key,
+    config_kimi_base_url, config_kimi_model, config_kimi_api_key,
+    config_glm_base_url, config_glm_model, config_glm_api_key,
+    config_slang_base_url, config_slang_model, config_slang_api_key, config_slang_model_root,
+    config_image_read_api_key}
+use app.llm_caret.provider.{LLMResponse, dispatch_send, is_valid_provider, list_providers, new_llm_error}
+use app.llm_caret.image_profile.{configured_image_profile_v1}
+use app.llm_caret.multimodal_types.{validate_model_profile_v1}
+use app.llm_caret.multimodal_provider.{complete_multimodal_wire_v1}
 use app.llm_caret.tools.{PermissionPolicy, ModelResponse,
-    default_policy, allow_all_policy, parse_tool_use_blocks, new_model_text, new_model_tools}
+    default_policy, allow_all_policy, parse_tool_use_blocks, parse_tool_use_tags,
+    new_model_text, new_model_tools}
 use app.llm_caret.types.{Message}
 use app.llm_caret.chat_tui.{
     make_chat_tui_with_status,
@@ -57,13 +78,29 @@ use app.llm_caret.chat_tui.{
     SessionResumeResult,
     SessionHooks
 }
-use app.llm_caret.json_helpers.{build_message_json, ja}
+use app.llm_caret.json_helpers.{build_message_json, ja, extract_json_bool}
 use app.llm_caret.server.{handle_route, build_error_response,
     build_chat_completion_response, build_anthropic_response,
-    parse_chat_request_content, parse_chat_request_model}
+    build_models_response_with_image_v1,
+    build_chat_completion_stream_response, build_anthropic_stream_response,
+    parse_chat_request_content, parse_chat_request_model,
+    parse_chat_request_messages_json, multimodal_messages_have_image_v1,
+    validate_proxy_image_messages_v1, validate_proxy_image_messages_with_limits_v1,
+    openai_messages_to_anthropic_v1,
+    anthropic_messages_to_openai_v1, anthropic_system_text_v1,
+    parse_chat_request_system_text}
 use app.llm_caret.session.{Session, save_session, load_session, list_session_ids, gen_session_id}
 use app.llm_caret.gui.{caret_gui_html, caret_gui_prompt,
     caret_gui_json_content, caret_gui_json_error}
+use app.llm_caret.agent_plan.{AgentLaunchRequest}
+use app.llm_caret.workbench.pane_team.{launch_pane_team, poll_pane_team,
+    stop_pane_team, send_to_agent, publish_pane_team}
+use app.llm_caret.workbench.session_source.{live_sessions}
+use app.llm_caret.workbench.tui_entry.{render_live_workbench}
+use app.llm_caret.workbench.tui_layout.{CompactView}
+use app.io.process_ops.{process_pid_exists}
+use std.nogc_sync_mut.io.{thread_sleep_ms}
+use std.sffi.io.{file_write_text}
 use app.llm_caret.messaging.cli.{run_messaging_cli}
 use app.llm_caret.workspace_cli.{run_workspace_cli}
 
@@ -85,6 +122,15 @@ struct MainArgs:
     port: i64
     help: bool
     unknown: text        # first unrecognized --flag (empty if none)
+    # --workbench (lane A9): launch a real agent team into smux panes and
+    # render the live workbench. `agents` is repeatable --agent, `agent_cmd`
+    # overrides the provider binary, `send_text` is written to the selected
+    # agent's own stdin, `frames` bounds the refresh loop.
+    workbench: bool
+    agents: [text]
+    agent_cmd: text
+    send_text: text
+    frames: i64
 
 fn parse_main_args(args: [text]) -> MainArgs:
     var provider = ""
@@ -100,6 +146,11 @@ fn parse_main_args(args: [text]) -> MainArgs:
     var port: i64 = 0
     var help = false
     var unknown = ""
+    var workbench = false
+    var agents: [text] = []
+    var agent_cmd = ""
+    var send_text = ""
+    var frames: i64 = 0
     var i = 0
     while i < args.len():
         val arg = args[i]
@@ -159,6 +210,28 @@ fn parse_main_args(args: [text]) -> MainArgs:
             i = i + 1
         elif arg.starts_with("--port="):
             port = int(arg.substring(7)) ?? 0
+        elif arg == "--workbench":
+            workbench = true
+        elif arg == "--agent" and i + 1 < args.len():
+            agents.push(args[i + 1])
+            i = i + 1
+        elif arg.starts_with("--agent="):
+            agents.push(arg.substring(8))
+        elif arg == "--agent-cmd" and i + 1 < args.len():
+            agent_cmd = args[i + 1]
+            i = i + 1
+        elif arg.starts_with("--agent-cmd="):
+            agent_cmd = arg.substring(12)
+        elif arg == "--send" and i + 1 < args.len():
+            send_text = args[i + 1]
+            i = i + 1
+        elif arg.starts_with("--send="):
+            send_text = arg.substring(7)
+        elif arg == "--workbench-frames" and i + 1 < args.len():
+            frames = int(args[i + 1]) ?? 0
+            i = i + 1
+        elif arg.starts_with("--workbench-frames="):
+            frames = int(arg.substring(19)) ?? 0
         elif arg.starts_with("--") and unknown == "":
             unknown = arg
         i = i + 1
@@ -167,7 +240,9 @@ fn parse_main_args(args: [text]) -> MainArgs:
         system_prompt: system_prompt, resume_id: resume_id,
         workspace_root: workspace_root, prompt: prompt, allow_all: allow_all,
         ui_mode: ui_mode, server_mode: server_mode, port: port,
-        help: help, unknown: unknown
+        help: help, unknown: unknown,
+        workbench: workbench, agents: agents, agent_cmd: agent_cmd,
+        send_text: send_text, frames: frames
     )
 
 # ============================================================================
@@ -183,8 +258,11 @@ fn print_help():
     print "HTTP proxy."
     print ""
     print "Options:"
-    print "  --provider <name>        dummy | claude_cli | opencode_cli | claude_api |"
-    print "                           openai | openai_compat | local_torch"
+    print "  --provider <name>        dummy | claude_cli | codex_cli | opencode_cli |"
+    print "                           claude_api |"
+    print "                           openai | openai_compat | local_torch |"
+    print "                           slang (slang_server over HTTP) |"
+    print "                           slang_local (slang in-process, SLANG_MODEL_ROOT)"
     print "  --model <name>           model id (default: provider's configured model)"
     print "  --config <path>          load an llm_caret.sdn config file"
     print "  --system <prompt>        system prompt"
@@ -197,6 +275,12 @@ fn print_help():
     print "  --electron               launch the GUI in Electron"
     print "  --metal-gui              launch pure Simple Web/Draw IR/Metal GUI"
     print "  --prompt <text>          send one prompt, print the response, and exit"
+    print "  --workbench              launch an agent team into smux panes and render"
+    print "                           the live workbench (roster + active pane)"
+    print "  --agent <agent.md>       workbench agent (repeatable)"
+    print "  --agent-cmd <path>       binary to launch per agent (default: claude)"
+    print "  --send <text>            write one line to the selected agent's stdin"
+    print "  --workbench-frames <n>   refresh iterations before the final frame (20)"
     print "  --server                 run the HTTP proxy instead of interactive chat"
     print "  --port <n>               proxy port (default 8317, or $LLM_CARET_PORT)"
     print ""
@@ -234,6 +318,8 @@ fn _default_model(provider: text) -> text:
         return "dummy-hello"
     if provider == "claude_cli":
         return config_claude_cli_model()
+    if provider == "codex_cli":
+        return config_codex_cli_model()
     if provider == "opencode_cli":
         return config_opencode_cli_model()
     if provider == "claude_api":
@@ -242,6 +328,14 @@ fn _default_model(provider: text) -> text:
         return config_openai_model()
     if provider == "openai_compat":
         return config_compat_model()
+    if provider == "slang":
+        return config_slang_model()
+    if provider == "slang_local":
+        return config_slang_model()
+    if provider == "kimi":
+        return config_kimi_model()
+    if provider == "glm":
+        return config_glm_model()
     ""
 
 fn _effective_model(provider: text, args: MainArgs) -> text:
@@ -284,6 +378,8 @@ fn resolve_resume_backend(
 fn _effective_cli_path(provider: text) -> text:
     if provider == "claude_cli":
         return config_claude_cli_path()
+    if provider == "codex_cli":
+        return config_codex_cli_path()
     if provider == "opencode_cli":
         return config_opencode_cli_path()
     ""
@@ -295,6 +391,12 @@ fn _effective_api_key(provider: text) -> text:
         return config_openai_api_key()
     if provider == "openai_compat":
         return config_compat_api_key()
+    if provider == "slang":
+        return config_slang_api_key()
+    if provider == "kimi":
+        return config_kimi_api_key()
+    if provider == "glm":
+        return config_glm_api_key()
     ""
 
 fn _effective_base_url(provider: text) -> text:
@@ -304,6 +406,15 @@ fn _effective_base_url(provider: text) -> text:
         return config_openai_base_url()
     if provider == "openai_compat":
         return config_compat_base_url()
+    if provider == "slang":
+        return config_slang_base_url()
+    # slang_local has no transport; this slot carries its model ROOT directory.
+    if provider == "slang_local":
+        return config_slang_model_root()
+    if provider == "kimi":
+        return config_kimi_base_url()
+    if provider == "glm":
+        return config_glm_base_url()
     ""
 
 fn _effective_port(args: MainArgs) -> i64:
@@ -341,6 +452,8 @@ fn main_configure(provider: text, model: text, api_key: text, base_url: text,
     RT_SYSTEM_PROMPT = system_prompt
     RT_SESSION_ID = session_id
     RT_MAX_TOKENS = max_tokens
+    if RT_SYSTEM_PROMPT == "" and (provider == "slang_local" or provider == "local_torch"):
+        RT_SYSTEM_PROMPT = local_agent_tool_prompt()
 
 fn main_session_id() -> text:
     RT_SESSION_ID
@@ -355,7 +468,11 @@ fn main_session_id() -> text:
 fn build_model_response(resp: LLMResponse) -> ModelResponse:
     if resp.is_error:
         return new_model_text("ERROR: " + resp.error)
-    val calls = parse_tool_use_blocks(resp.raw)
+    var calls = parse_tool_use_blocks(resp.raw)
+    if calls.len() == 0:
+        # Local providers (slang_local, local_torch) carry no wire tool JSON;
+        # their tool calls arrive as <tool_use> tags in plain content.
+        calls = parse_tool_use_tags(resp.content)
     if calls.len() > 0:
         return new_model_tools(resp.content, calls)
     new_model_text(resp.content)
@@ -368,6 +485,42 @@ fn _last_user_content(msgs: [Message]) -> text:
         i = i - 1
     ""
 
+# slang_local's dispatch takes a single prompt (no messages transport), so the
+# running transcript -- including tool results -- must be flattened into it or
+# every turn after the first loses all context and the model hallucinates.
+fn _render_agent_transcript(msgs: [Message]) -> text:
+    var out = ""
+    if RT_SYSTEM_PROMPT != "":
+        out = "SYSTEM: " + RT_SYSTEM_PROMPT + "\n\n"
+    for m in msgs:
+        if m.content.trim() != "":
+            out = out + m.role + ": " + m.content + "\n"
+    # Raw-completion cue: without a trailing assistant marker the model sees a
+    # finished exchange and answers with an immediate EOS (measured 2026-09-16:
+    # empty Assistant turn the moment transcript flattening landed). The cue
+    # also PREFILLS the think-open: Qwen3.5 raw-completion otherwise sometimes
+    # emits "<think>" then EOS as its very next token (deterministic per
+    # prompt, measured 2026-09-16: caret a9/a10 both ended their first turn
+    # at exactly "<think>"). Prefilling puts the model INSIDE the think block,
+    # so it must continue; _dispatch_slang_local strips the closing tag.
+    out + "assistant: <think>\n"
+
+# Tool protocol for providers with no wire tool-call format: the system prompt
+# teaches the tag form, parse_tool_use_tags reads it back.
+fn local_agent_tool_prompt() -> text:
+    # NOTE: no bare {..} in these literals -- the language treats them as
+    # interpolation (`variable path not found`), so the example block is
+    # assembled by concatenation and tool args listed parenthesized.
+    val example = "<tool_use>" + "{\"name\": \"bash\", \"input\": {\"command\": \"ls\"}" + "}</tool_use>"
+    "You are a coding agent with tools, sandboxed to a workspace.\n" +
+    "To use a tool, emit exactly one block like this and stop:\n" +
+    example + "\n" +
+    "Tools: bash(command, timeout_ms) runs a shell command; read_file(path); " +
+    "write_file(path, content); list_dir(path); glob(pattern).\n" +
+    "Each call returns a [tool_result ...] block as the next user message. " +
+    "NEVER narrate a tool result you did not receive -- either call the tool or " +
+    "say you cannot. When the task is done, reply with plain text and no tool_use block."
+
 fn _messages_json(msgs: [Message]) -> text:
     var items: [text] = []
     for m in msgs:
@@ -379,7 +532,9 @@ fn _messages_json(msgs: [Message]) -> text:
 # the pure build_model_response tests; this just threads the running
 # transcript + session id through provider.dispatch_send.
 fn main_responder(msgs: [Message]) -> ModelResponse:
-    val prompt = _last_user_content(msgs)
+    var prompt = _last_user_content(msgs)
+    if RT_PROVIDER == "slang_local" or RT_PROVIDER == "local_torch":
+        prompt = _render_agent_transcript(msgs)
     val messages_json = _messages_json(msgs)
     val resp = dispatch_send(
         RT_PROVIDER, prompt, RT_MODEL, RT_API_KEY, RT_BASE_URL, RT_CLI_PATH,
@@ -412,10 +567,77 @@ fn proxy_handle(method: text, path: text, body: text,
         if resp.is_error:
             return (502, build_error_response(resp.error, 502))
         if path == "/v1/messages":
-            return (200, build_anthropic_response(resp.content, resp.model, resp.stop_reason))
-        return (200, build_chat_completion_response(resp.content, resp.model, resp.stop_reason))
+            return (200, build_anthropic_response(resp.content, resp.model, resp.stop_reason,
+                resp.input_tokens, resp.output_tokens))
+        return (200, build_chat_completion_response(resp.content, resp.model, resp.stop_reason,
+            resp.input_tokens, resp.output_tokens))
     val body_text = handle_route(method, path, body)
     (status_for_path(path), body_text)
+
+# SSE sibling of proxy_handle for `"stream": true` requests. Kept as a
+# separate function (not a proxy_handle branch) so proxy_handle's existing
+# (i64, text) signature and callers are untouched. Same content/model
+# extraction and error mapping as proxy_handle; only the success path
+# differs in body shape and content-type.
+fn proxy_handle_stream(path: text, body: text,
+                       dispatch: fn(text, text) -> LLMResponse) -> (i64, text, text):
+    val content = parse_chat_request_content(body)
+    if content == "":
+        return (400, "application/json; charset=utf-8", build_error_response("messages required", 400))
+    val model = parse_chat_request_model(body)
+    val resp = dispatch(content, model)
+    if resp.is_error:
+        return (502, "application/json; charset=utf-8", build_error_response(resp.error, 502))
+    if path == "/v1/messages":
+        return (200, "text/event-stream", build_anthropic_stream_response(resp.content, resp.model,
+            resp.stop_reason, resp.input_tokens, resp.output_tokens))
+    (200, "text/event-stream", build_chat_completion_stream_response(resp.content, resp.model, resp.stop_reason))
+
+# Production multimodal siblings preserve the incoming ordered message array.
+# The legacy two-argument handler above remains for text-only API/test
+# compatibility; the HTTP server uses these lossless variants.
+fn proxy_handle_multimodal(method: text, path: text, body: text,
+                           dispatch: fn(text, text, text) -> LLMResponse) -> (i64, text):
+    if method == "GET" and path == "/v1/models":
+        val profile = configured_image_profile_v1()
+        if validate_model_profile_v1(profile) == "":
+            return (200, build_models_response_with_image_v1(profile.profile_id,
+                profile.model_id, profile.provider))
+    if method == "POST" and (path == "/v1/chat/completions" or path == "/v1/messages"):
+        val messages_json = parse_chat_request_messages_json(body)
+        if messages_json == "" or messages_json == "[]":
+            return (400, build_error_response("messages required", 400))
+        val content = parse_chat_request_content(body)
+        val model = parse_chat_request_model(body)
+        var dispatch_messages = messages_json
+        val top_system = parse_chat_request_system_text(body)
+        if path == "/v1/messages" and top_system != "":
+            dispatch_messages = "[" + build_message_json("system", top_system) +
+                "," + messages_json.substring(1)
+        val resp = dispatch(content, model, dispatch_messages)
+        if resp.is_error: return (502, build_error_response(resp.error, 502))
+        if path == "/v1/messages":
+            return (200, build_anthropic_response(resp.content, resp.model, resp.stop_reason, resp.input_tokens, resp.output_tokens))
+        return (200, build_chat_completion_response(resp.content, resp.model, resp.stop_reason, resp.input_tokens, resp.output_tokens))
+    val body_text = handle_route(method, path, body)
+    (status_for_path(path), body_text)
+
+fn proxy_handle_stream_multimodal(path: text, body: text,
+                                  dispatch: fn(text, text, text) -> LLMResponse) -> (i64, text, text):
+    val messages_json = parse_chat_request_messages_json(body)
+    if messages_json == "" or messages_json == "[]":
+        return (400, "application/json; charset=utf-8", build_error_response("messages required", 400))
+    var dispatch_messages = messages_json
+    val top_system = parse_chat_request_system_text(body)
+    if path == "/v1/messages" and top_system != "":
+        dispatch_messages = "[" + build_message_json("system", top_system) +
+            "," + messages_json.substring(1)
+    val resp = dispatch(parse_chat_request_content(body), parse_chat_request_model(body), dispatch_messages)
+    if resp.is_error:
+        return (502, "application/json; charset=utf-8", build_error_response(resp.error, 502))
+    if path == "/v1/messages":
+        return (200, "text/event-stream", build_anthropic_stream_response(resp.content, resp.model, resp.stop_reason, resp.input_tokens, resp.output_tokens))
+    (200, "text/event-stream", build_chat_completion_stream_response(resp.content, resp.model, resp.stop_reason))
 
 fn _proxy_dispatch(content: text, model: text) -> LLMResponse:
     var use_model = model
@@ -423,10 +645,54 @@ fn _proxy_dispatch(content: text, model: text) -> LLMResponse:
         use_model = RT_MODEL
     val messages_json = ja([build_message_json("user", content)])
     dispatch_send(RT_PROVIDER, content, use_model, RT_API_KEY, RT_BASE_URL,
-                   RT_CLI_PATH, RT_SYSTEM_PROMPT, "", 0, RT_MAX_TOKENS, messages_json)
+        RT_CLI_PATH, RT_SYSTEM_PROMPT, "", 0, RT_MAX_TOKENS, messages_json)
+
+fn validate_proxy_image_model_selection_v1(requested_model: text,
+        profile: ModelProfileV1) -> text:
+    if requested_model != "" and requested_model != profile.model_id and
+            requested_model != profile.profile_id:
+        return "requested image model does not match the configured image-read profile"
+    ""
+
+fn _proxy_dispatch_multimodal(content: text, model: text, messages_json: text) -> LLMResponse:
+    var use_model = model
+    if use_model == "": use_model = RT_MODEL
+    val has_image = multimodal_messages_have_image_v1(messages_json)
+    if has_image:
+        val profile = configured_image_profile_v1()
+        val profile_error = validate_model_profile_v1(profile)
+        if profile_error != "": return new_llm_error(RT_PROVIDER, profile_error)
+        val model_error = validate_proxy_image_model_selection_v1(model, profile)
+        if model_error != "": return new_llm_error(profile.provider, model_error)
+        val image_error = validate_proxy_image_messages_with_limits_v1(messages_json,
+            profile.max_request_bytes, profile.max_images, profile.max_pixels)
+        if image_error != "": return new_llm_error(RT_PROVIDER, image_error)
+    if has_image:
+        # Dispatch the exact profile admitted above. Never validate one
+        # endpoint and then send image bytes with the text-runtime endpoint.
+        val profile = configured_image_profile_v1()
+        val provider_messages = if profile.provider == "claude_api":
+            openai_messages_to_anthropic_v1(messages_json)
+        else:
+            anthropic_messages_to_openai_v1(messages_json)
+        var image_system = RT_SYSTEM_PROMPT
+        if profile.provider == "claude_api":
+            val incoming_system = anthropic_system_text_v1(messages_json)
+            if image_system == "": image_system = incoming_system
+            elif incoming_system != "": image_system = image_system + "\n\n" + incoming_system
+        val completion = complete_multimodal_wire_v1(profile,
+            config_image_read_api_key(), provider_messages, image_system)
+        return LLMResponse(content: completion.content, model: completion.model_id,
+            provider: completion.provider, session_id: "",
+            stop_reason: if completion.error_code == "truncated_output": "max_tokens" else: "end_turn",
+            input_tokens: completion.input_tokens, output_tokens: completion.output_tokens,
+            error: completion.error_message, is_error: completion.error_code != "",
+            raw: completion.raw)
+    dispatch_send(RT_PROVIDER, content, use_model, RT_API_KEY, RT_BASE_URL,
+        RT_CLI_PATH, RT_SYSTEM_PROMPT, "", 0, RT_MAX_TOKENS, messages_json)
 
 fn _to_http_status(code: i64) -> HttpStatus:
-    if code == 200: return HttpStatus.OK
+    if code == 200: return HttpStatus.Ok
     if code == 400: return HttpStatus.BadRequest
     if code == 401: return HttpStatus.Unauthorized
     if code == 404: return HttpStatus.NotFound
@@ -444,7 +710,10 @@ fn _to_http_status(code: i64) -> HttpStatus:
 # is simpler and correctness-safe).
 # ============================================================================
 
-val MAX_BODY_BYTES: i64 = 1000000
+# A configured image may contain up to 20 MiB of decoded bytes. Base64 adds
+# roughly one third plus the JSON envelope; decoded-byte enforcement happens
+# after structural parsing in validate_proxy_image_messages_v1.
+val MAX_BODY_BYTES: i64 = 30000000
 val RATE_LIMIT_PER_MIN: i64 = 60
 val RATE_WINDOW_MS: i64 = 60000
 
@@ -523,16 +792,26 @@ fn _http_handle(req: HttpRequest) -> HttpResponse:
     val guard = guard_request(req.header("Authorization"), req.body, required_token(), req.remote_addr, current_time_ms())
     var code = guard.1
     var body = guard.2
+    var content_type = "application/json; charset=utf-8"
     if guard.0:
-        val result = proxy_handle(method, req.path, req.body, _proxy_dispatch)
-        code = result.0
-        body = result.1
+        val wants_stream = (method == "POST" and
+            (req.path == "/v1/chat/completions" or req.path == "/v1/messages") and
+            extract_json_bool(req.body, "stream"))
+        if wants_stream:
+            val result = proxy_handle_stream_multimodal(req.path, req.body, _proxy_dispatch_multimodal)
+            code = result.0
+            content_type = result.1
+            body = result.2
+        else:
+            val result = proxy_handle_multimodal(method, req.path, req.body, _proxy_dispatch_multimodal)
+            code = result.0
+            body = result.1
     # Access log: level-gated via SIMPLE_LOG (default off - std.log's
     # documented behavior), so this costs ~nothing when not enabled.
     log_info("llm_caret.server", method + " " + req.path + " " + req.remote_addr + " -> " + code.to_text())
     HttpResponse(
         status: _to_http_status(code),
-        headers: [("Content-Type", "application/json; charset=utf-8")],
+        headers: [("Content-Type", content_type)],
         body: body
     )
 
@@ -733,6 +1012,94 @@ fn run_gui(port: i64, shell: text) -> i64:
 # Session integration
 # ============================================================================
 
+# ============================================================================
+# --workbench: the production owner of a MultiCaretManager (lane A9)
+# ============================================================================
+#
+# Gap 1 of .spipe/caret_workbench/state.md: nothing in src/ ever launched a
+# manager, so `caret_gui_html()` and the TUI always served an EMPTY roster.
+# This is that owner. It launches the team through
+# `workbench.pane_team.launch_pane_team`, so the pane's child and the managed
+# agent are ONE process (gap 2), publishes each frame into
+# `workbench.session_source`'s live registry, and renders the workbench grid
+# the TUI and the GUI both read.
+#
+# ponytail: bounded refresh loop that prints the FINAL frame, rather than a
+# key-driven full-screen event loop -- input handling belongs to the IDE TUI
+# shell (AC-1, src/app/ide/main.spl) and forking a second one here would be
+# the two-owner error again. upgrade: drive render_live_workbench from that
+# shell's poll loop and route keystrokes through `send_to_agent`.
+fn _workbench_requests(paths: [text]) -> [AgentLaunchRequest]:
+    var reqs: [AgentLaunchRequest] = []
+    for p in paths:
+        reqs.push(AgentLaunchRequest(provider: "claude", agent_md_path: p,
+            skill_path: "", task_desc: "caret workbench session", model: "",
+            session_id: "", extra_args: []))
+    reqs
+
+fn run_workbench(args: MainArgs) -> i64:
+    if args.agents.len() == 0:
+        print "Error: --workbench needs at least one --agent <agent.md>"
+        return 2
+    # --agent-cmd overrides the provider binary; otherwise the configured
+    # claude path (or a bare `claude` on PATH) is launched for real.
+    var agent_cmd = args.agent_cmd
+    if agent_cmd == "":
+        agent_cmd = config_claude_cli_path()
+    var team = launch_pane_team("caret-workbench",
+        _workbench_requests(args.agents), 8, agent_cmd, "", "", "", "")
+    if not team.ok:
+        print "Error: workbench launch failed: {team.error}"
+        return 1
+
+    if args.send_text != "":
+        # Goes to the SELECTED agent's own stdin, because the pane's child is
+        # that agent.
+        val sent = send_to_agent(team, team.agents[0].agent_id, args.send_text)
+        if not sent:
+            print "Error: could not send to {team.agents[0].agent_id}"
+
+    var budget = args.frames
+    if budget <= 0:
+        budget = 20
+    var n: i64 = 0
+    while n < budget:
+        thread_sleep_ms(100)
+        team = poll_pane_team(team)
+        val _published = publish_pane_team(team)
+        if team.manager.status != "running" and team.manager.status != "degraded":
+            n = budget
+        n = n + 1
+
+    val lines = render_live_workbench(120, 40, CompactView.Session)
+    var grid = ""
+    for line in lines:
+        grid = grid + line + "\n"
+    val _wrote = file_write_text(
+        "build/test-artifacts/caret_workbench/live_workbench.txt", grid)
+    val _wrote_html = file_write_text(
+        "build/test-artifacts/caret_workbench/live_workbench.html",
+        caret_gui_html())
+    print "{grid}"
+    print "AGENT  PID  PANE  STATUS"
+    for a in team.agents:
+        print "  {a.agent_id}  {a.pid}  {a.pane_id}  {a.status}"
+    print "manager={team.manager.status} roster={live_sessions().len()}"
+    print "captures: build/test-artifacts/caret_workbench/live_workbench.{txt,html}"
+
+    val stopped = stop_pane_team(team)
+    var leaked = 0
+    for a in team.agents:
+        # OS truth, not the manager's self-report: a piped child's pid is
+        # invisible to process_is_running (different runtime registry), so
+        # process_exists -- a bare kill(pid,0) -- is the honest probe.
+        if a.pid > 0 and process_pid_exists(a.pid):
+            leaked = leaked + 1
+    print "teardown={stopped.manager.status} still_running={leaked}"
+    if leaked > 0:
+        return 1
+    0
+
 fn _resolve_workspace(args: MainArgs) -> text:
     if args.workspace_root != "":
         return args.workspace_root
@@ -895,6 +1262,12 @@ fn run_main_args(raw_args: [text]) -> i64:
         if err != "":
             print "Error: {err}"
             return 2
+
+    # Before provider validation on purpose: --workbench launches AGENT
+    # providers ("claude", "codex"), whose names are a different vocabulary
+    # from the chat providers ("claude_cli", ...) `is_valid_provider` checks.
+    if args.workbench:
+        return run_workbench(args)
 
     var provider = _effective_provider(args)
     if not is_valid_provider(provider):

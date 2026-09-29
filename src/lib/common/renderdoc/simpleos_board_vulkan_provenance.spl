@@ -1,0 +1,73 @@
+# Fail-closed classification for SimpleOS Vulkan execution evidence.
+#
+# Venus is a host-forwarded virtio-gpu protocol.  It may qualify a QEMU lane,
+# but it cannot be re-labelled as execution on a physical board.  Board Vulkan
+# requires a native SoC/PCI GPU transport and a separately validated physical
+# render-target receipt.
+
+use common.renderdoc.simpleos_render_target_evidence.{
+    SimpleOsRenderTargetEvidence,
+    simpleos_render_target_status
+}
+
+enum SimpleOsVulkanExecutionPlatform:
+    Qemu
+    PhysicalBoard
+
+enum SimpleOsVulkanTransport:
+    VenusVirtioGpu
+    NativeGpu
+
+struct SimpleOsBoardVulkanEvidence:
+    platform: SimpleOsVulkanExecutionPlatform
+    transport: SimpleOsVulkanTransport
+    backend: text
+    device_driver: text
+    device_identity: text
+    device_origin: bool
+    submit_count: i64
+    completed_fence: i64
+    target: SimpleOsRenderTargetEvidence
+
+struct SimpleOsBoardVulkanAdmission:
+    admitted: bool
+    status: text
+    reason: text
+
+fn _board_vulkan_reject(status: text, reason: text) -> SimpleOsBoardVulkanAdmission:
+    SimpleOsBoardVulkanAdmission(admitted: false, status: status, reason: reason)
+
+fn _board_vulkan_emulator_marker(value: text) -> bool:
+    val normalized = value.lower()
+    normalized.contains("qemu") or normalized.contains("virtio") or
+        normalized.contains("venus") or normalized.contains("vhost") or
+        normalized.contains("qmp") or normalized.contains("virtual")
+
+fn simpleos_board_vulkan_admit(evidence: SimpleOsBoardVulkanEvidence) -> SimpleOsBoardVulkanAdmission:
+    if evidence.backend != "vulkan":
+        return _board_vulkan_reject("fail", "backend-not-vulkan")
+    if evidence.device_driver == "" or evidence.device_identity == "":
+        return _board_vulkan_reject("fail", "device-provenance-missing")
+    if not evidence.device_origin or evidence.submit_count <= 0 or evidence.completed_fence <= 0:
+        return _board_vulkan_reject("fail", "device-execution-incomplete")
+    val target_status = simpleos_render_target_status(evidence.target)
+    match evidence.platform:
+        case SimpleOsVulkanExecutionPlatform.Qemu:
+            if evidence.target.runtime_kind != "qemu" or target_status != "qemu-verified":
+                return _board_vulkan_reject("fail", "qemu-target-provenance")
+            SimpleOsBoardVulkanAdmission(
+                admitted: true, status: "qemu-verified", reason: "ok:qemu-vulkan")
+        case SimpleOsVulkanExecutionPlatform.PhysicalBoard:
+            if evidence.transport == SimpleOsVulkanTransport.VenusVirtioGpu:
+                return _board_vulkan_reject("qemu-only", "venus-has-no-physical-board-transport")
+            if _board_vulkan_emulator_marker(evidence.device_driver)
+                or _board_vulkan_emulator_marker(evidence.device_identity):
+                return _board_vulkan_reject("qemu-only", "emulator-device-in-board-row")
+            if evidence.target.runtime_kind != "physical-board" or target_status != "board-verified":
+                return _board_vulkan_reject("fail", "physical-board-target-provenance")
+            SimpleOsBoardVulkanAdmission(
+                admitted: true, status: "board-verified", reason: "ok:board-native-vulkan")
+
+export SimpleOsVulkanExecutionPlatform, SimpleOsVulkanTransport
+export SimpleOsBoardVulkanEvidence, SimpleOsBoardVulkanAdmission
+export simpleos_board_vulkan_admit

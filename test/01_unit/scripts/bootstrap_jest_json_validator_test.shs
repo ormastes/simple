@@ -1,0 +1,23 @@
+#!/bin/sh
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+validator=$root/scripts/bootstrap/validate-jest-json.pl
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/jest-json-validator.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+fail() { printf 'bootstrap_jest_json_validator_test: FAIL: %s\n' "$*" >&2; exit 1; }
+
+printf '%s\n' '{"success":true,"numPassedTests":2,"numFailedTests":0,"numPendingTests":1}' >"$tmp/good.json"
+[ "$(perl "$validator" "$tmp/good.json")" = "2	0	1" ] || fail valid-counts
+
+for bad in false failed zero malformed duplicate; do
+  case "$bad" in
+    false) row='{"success":false,"numPassedTests":2,"numFailedTests":0,"numPendingTests":0}' ;;
+    failed) row='{"success":true,"numPassedTests":2,"numFailedTests":1,"numPendingTests":0}' ;;
+    zero) row='{"success":true,"numPassedTests":0,"numFailedTests":0,"numPendingTests":2}' ;;
+    malformed) row='{"success":true,"numPassedTests":2' ;;
+    duplicate) row='{"success":true,"success":true,"numPassedTests":2,"numFailedTests":0,"numPendingTests":0}' ;;
+  esac
+  printf '%s\n' "$row" >"$tmp/$bad.json"
+  if perl "$validator" "$tmp/$bad.json" >/dev/null 2>&1; then fail "$bad-admitted"; fi
+done
+printf 'bootstrap_jest_json_validator_test: PASS\n'

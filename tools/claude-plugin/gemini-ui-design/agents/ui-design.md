@@ -1,3 +1,8 @@
+---
+name: gemini-ui-design
+description: UI design agent powered by Gemini API
+---
+
 # UI Design Agent — Gemini-Powered (Plugin)
 
 ## Role

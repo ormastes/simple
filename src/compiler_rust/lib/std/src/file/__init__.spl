@@ -25,10 +25,12 @@
 # FileExists: boolean result for file existence/validity checks
 type FileExists = bool
 
-@unsafe(reason: "raw filesystem path validation ABI", capabilities: [ffi])
-extern fn rt_check_file_path(path: text) -> bool
+@unsafe(reason: "raw filesystem existence ABI; true when the path resolves to an existing file or directory", capabilities: [ffi])
+extern fn rt_file_exists(path: text) -> bool
 @unsafe(reason: "raw filesystem path/mode descriptor ABI", capabilities: [ffi])
 extern fn rt_file_open(path: text, mode: i32) -> i32
+@unsafe(reason: "raw path metadata-size ABI; negative return means the path does not resolve", capabilities: [ffi])
+extern fn rt_file_size(path: text) -> i64
 @unsafe(reason: "raw file-descriptor size ABI; negative return is failure", capabilities: [ffi])
 extern fn rt_file_get_size(fd: i32) -> i64
 @unsafe(reason: "raw file-descriptor close-status ABI", capabilities: [ffi])
@@ -103,21 +105,23 @@ pub fn is_file(path: text) -> FileExists:
     return check_file_path(path)
 
 # Get file size (sync)
-pub fn size(path: text) -> Result<usize, FileError>:
+pub fn size(path: text) -> Result<i64, FileError>:
     if not check_file_path(path):
         return Err(FileError.NotFound(path))
 
-    val fd = sys_open(path, OpenMode.ReadOnly)?
-    val size = sys_file_size(fd)?
-    sys_close(fd)
-    return Ok(size)
+    var sz: i64 = 0
+    unsafe(capabilities: [ffi]):
+        sz = rt_file_size(path)
+    if sz < 0:
+        return Err(FileError.IoError("Failed to get file size"))
+    return Ok(sz)
 
 # SFFI Placeholders (to be implemented in Rust runtime)
 
 # Check if file exists
 fn check_file_path(path: text) -> bool:
     unsafe(capabilities: [ffi]):
-        return rt_check_file_path(path)
+        return rt_file_exists(path)
 
 # Open file and return file descriptor
 fn sys_open(path: text, mode: OpenMode) -> Result<i32, FileError>:
@@ -128,7 +132,7 @@ fn sys_open(path: text, mode: OpenMode) -> Result<i32, FileError>:
     val fd = unsafe(capabilities: [ffi]):
         rt_file_open(path, mode_int)
     if fd == -1:
-        return Err(FileError.OpenFailed)
+        return Err(FileError.IoError("Failed to open file"))
     return Ok(fd)
 
 # Get file size

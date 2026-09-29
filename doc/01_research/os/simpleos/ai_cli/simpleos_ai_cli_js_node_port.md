@@ -34,7 +34,7 @@ SimpleOS under QEMU for RISC-V, x86, and ARM.
   `src/os/tls12/**`, and `src/os/tls13/**` provide protocol building blocks
   for HTTPS/API calls.
 - QEMU lanes:
-  `src/os/_QemuRunner/scenario_disks.spl` and `src/os/_QemuRunner/scenario_exec.spl` already
+  `src/os/qemu_runner_part4.spl` and `src/os/qemu_runner_part5.spl` already
   describe RISC-V, x86, and ARM fs-exec and desktop scenarios with serial
   marker contracts.
 - Guest toolchain status:

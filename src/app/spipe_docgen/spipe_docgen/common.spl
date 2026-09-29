@@ -3,7 +3,7 @@
 # Shared struct definitions, log helpers, and filesystem compatibility aliases.
 # Imported by parser.spl, generator.spl, and main.spl.
 
-use std.nogc_sync_mut.io.file_ops.{file_read, file_atomic_write, file_exists}
+use std.nogc_sync_mut.io.file_ops.{file_read, file_write, file_exists}
 use std.nogc_sync_mut.io.dir_ops.{dir_create}
 use std.nogc_sync_mut.io.env_ops.{env_get}
 
@@ -37,15 +37,34 @@ fn native_fs_read_string(path: text) -> text:
     result ?? ""
 
 fn native_fs_write_string(path: text, content: text) -> bool:
-    file_atomic_write(path, content)
+    file_write(path, content)
 
 fn native_fs_exists(path: text) -> bool:
     file_exists(path)
+
+fn native_fs_hash_sha256(path: text) -> text:
+    file_hash_sha256(path)
 
 fn native_fs_create_dir(path: text):
     val ok = dir_create(path, true)
     if not ok:
         spipe_err("could not create output directory: {path}")
+
+fn spec_kw_line(trimmed: text, keyword: text) -> bool:
+    """True when an already-trimmed source line opens the spec construct
+    `keyword` with a quoted title, e.g. `spec_kw_line("pending \\"x\\":",
+    "pending")`.
+
+    The keyword must be the whole leading token (a following space is
+    required) so that `pending_label = 1` or `pendingfoo "x"` are not
+    mistaken for a scenario. An empty keyword, or a line with no quoted
+    title, is never a match.
+    """
+    if keyword.len() == 0:
+        return false
+    if not trimmed.contains("\""):
+        return false
+    trimmed.starts_with(keyword + " ")
 
 # ============================================================================
 # TYPE DEFINITIONS
@@ -132,15 +151,3 @@ struct FeatureEntry:
     doc_lines: i64
     category: text
     test_count: i64
-
-# Does `trimmed` open a spec construct named `kw`?
-#
-# Two spellings are live in the tree and both must be recognised: the legacy
-# bare form (`it "name":`, `describe "name":`) and the modern call form
-# (`it("name"):`, `describe("name"):`). Recognising only the bare form made
-# spipe-docgen render every modern SSpec as a 100% stub — see
-# doc/08_tracking/bug/spipe_docgen_stale_syntax_detection_2026-07-19.md.
-fn spec_kw_line(trimmed: text, kw: text) -> bool:
-    if not trimmed.contains("\""):
-        return false
-    trimmed.starts_with(kw + " ") or trimmed.starts_with(kw + "(")

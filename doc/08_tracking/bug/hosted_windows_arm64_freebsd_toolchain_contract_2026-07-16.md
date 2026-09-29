@@ -1,7 +1,10 @@
 # Hosted Windows ARM64 and FreeBSD toolchain contracts
+## Open 2026-09-16 — needs owner triage
 
-Status: FIXED
-Status re-verified 2026-08-17 by source inspection (triage shard 01).
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
+
+**Status:** Source fixed fail-closed/corrected; executable proof pending  
 **Component:** compiler/backend hosted native linking  
 **Found:** 2026-07-16
 
@@ -36,3 +39,4 @@ metadata, fail every hosted ARMv7 route closed, and fail RV64 closed outside
 Linux with OS-correct diagnostic triples. The pure regression matrix covers
 these contracts. Executable proof remains pending repair of the pure-Simple
 runner.
+

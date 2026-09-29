@@ -65,7 +65,7 @@ viewer works on our traces. All rows config-gated, off by default. Exit:
 seeded device leak + OOB fixtures caught; snapshot opens in memory_viz;
 zero overhead with the gate off.
 
-## M8 — `simple mem` CLI (interactive interface, MED) — LANDED ef00d5e2094
+## M8 — `simple mem` CLI (interactive interface, MED)
 One entry point for ALL of the above, per
 `doc/02_requirements/runtime/memory_analysis/feature_simple_mem_cli.md`:
 `simple mem top|snapshot|diff|trace|gpu|gate` — Simple-TUI interactive top
@@ -74,9 +74,7 @@ trace record + query (data stays in files; CLI is the query surface),
 device rows from M7. Speaks to a live process via the existing MCP/socket
 plumbing or post-mortem via profile files. Exit: `simple mem trace prog.spl`
 then `simple mem top --profile <file>` shows the M1 fixture's owners; TUI
-interactive under plain terminal. **Status: verb dispatch complete, all
-help-listed verbs dispatch explicitly, unknown verb prints help and exits 1,
-`top --once` renders one frame without TUI loop. Spec test/03_system/app/mem_cli_spec.spl: 7/7.**
+interactive under plain terminal.
 
 ## WATCH (not scheduled)
 LLVM PGHO feed-back once the allocator grows partitioning hooks; HWASan/MTE
@@ -152,19 +150,17 @@ Raw in-process elapsed_ms samples (ABBA-interleaved, sorted):
    pre-feature baseline on this measurement pass, but the noise band swallows
    any OFF-path cost that could exist.**
 
-2. **ON cost is +36.6% (in-process median) on this allocation-heavy workload.** This is
+2. **ON cost is NOT under ~5% on this workload — it is ~31-37%.** This is
    expected once the code is read, not a surprise: this probe is
    allocation-heavy (90k array pushes; per the "seed `.push()` always clones"
    finding, `arr = arr.push(v)` reallocates/copies the whole backing buffer
    each call, so it's O(N²) allocations), and the ON path takes a global
    `Mutex` lock plus a `HashMap` insert/lookup on **every** heap alloc and
    free while enabled. The gate correctly keeps this cost opt-in (`OFF` by
-   default, satisfying the hard rule). M1's ON-path cost is a real,
-   allocation-rate-proportional burden, not a rounding error: the per-alloc
-   mutex is a fixed cost per operation. Lower-allocation-rate workloads would
-   show a smaller percentage, but the cost remains. No sharding attempted yet;
-   if lower overhead is needed later, sharding the global lock/map is the
-   first place to look. **Current status: OPEN ITEM, measured +36.6%, target <15%.**
+   default, satisfying the hard rule), but M1's ON-path cost model should be
+   documented as "real, allocation-rate-proportional," not "small" — a
+   lower-allocation-rate workload would show a smaller percentage, but the
+   per-alloc mutex is a real fixed cost per operation, not a rounding error.
 
 ### Caveats
 - Debug build (`cargo build`, not `--release`); absolute timings are not
@@ -179,153 +175,3 @@ Raw in-process elapsed_ms samples (ABBA-interleaved, sorted):
   session's in-flight edits) — the "OFF == pre-feature" claim rests on the
   code-structure argument above (§ finding 1), corroborated by, not proven
   by, the clean-env-vs-normal-env OFF comparison.
-
-## Overhead measurement (2026-07-30): landed M1 vs uncommitted RwLock+thread-local-cache redesign
-
-Three prior attempts to quantify `SIMPLE_MEM_ATTR` ON-overhead on this shared,
-heavily-loaded box produced three different figures (+36.6% for landed M1
-through an interpreter-level probe; ~83-120% for a rejected RwLock+16-shard
-design; ~40% for an uncommitted thread-local-cached-pointer redesign). This
-pass builds a dedicated, isolated, statistically-grounded harness to settle
-which of two *currently real* candidates — the **landed M1** design (single
-global `Mutex<AttrState>`, `HashMap<usize,u32>` by-ptr map, on
-`origin/main`) vs the **uncommitted working-copy redesign** (`RwLock<AttrRegistry>`
-+ 16-shard `Mutex` by-ptr map + per-thread cached `*const OwnerCounters`
-pointer, atomics on the hot path, present only in the dirty working copy —
-see `git diff FETCH_HEAD -- src/compiler_rust/runtime/src/value/heap.rs`,
-447 lines, uncommitted) — actually performs better, and by how much.
-**heap.rs's design was not modified by this lane**; both variants measured
-below are pre-existing code, read verbatim into isolated build copies.
-
-### Methodology
-
-**Isolation.** The working copy is shared with other active sessions, so
-building in place (even transiently swapping `heap.rs` back and forth) risked
-corrupting a concurrent session's build. Instead, the whole `compiler_rust`
-workspace source (excluding `target/`, ~1.5 GB with the mandatory vendored
-crates — this workspace builds `--offline` from `vendor/`, see
-`.cargo/config.toml`) plus the external path-dependency `src/runtime/`
-(C sources + `runtime/hosted`, ~313 MB) were `rsync`'d twice into
-`/tmp/bench_ws/{origin,wc}/`, each built with its own `CARGO_TARGET_DIR` so
-neither touched the shared `src/compiler_rust/target/`. `origin/heap.rs` was
-replaced with `git show FETCH_HEAD:.../heap.rs`; `wc/heap.rs` was replaced
-with the working copy's current (uncommitted) file, byte-for-byte (`diff`
-confirmed zero delta both ways after the copy). Each copy was compiled once
-with `cargo test --release -p simple-runtime --lib --no-run -- --ignored`
-(`abfall`/`ring`/`rayon`/etc. resolve from `vendor/`, no network needed).
-Build note for reproduction: a naive `rsync --exclude=target/` also excludes
-the vendored `cc` crate's *source* subdirectory `vendor/cc/src/target/` (name
-collision, not a build-output dir) — use `--exclude=/target/` (anchored)
-instead, or the vendor tree silently loses 4 files and the build fails on a
-missing `ar` input with a confusing "No such file" error.
-
-**Probe.** Both `heap.rs` copies already carry (working copy) or were given
-(origin copy, added only to the throwaway `/tmp` build, not the repo) matched
-`#[ignore]`d benches `bench_alloc_heavy_off`/`_on` that drive the actual
-malloc + heap-registry path — `Box::new(HeapHeader::new(...))` →
-`register_heap_ptr` → `unregister_heap_ptr` → `drop` — for 3,000,000
-alloc+free pairs per trial (both copies' `n` aligned to 3,000,000; the
-working copy's checked-in default was 1,000,000 in its own bench, bumped only
-in the `/tmp` measurement copy). This exercises the *whole* alloc/free path
-including both designs' attribution hooks, not the attribution call in
-isolation — closer to the M1 finding's own stated intent. Each trial's
-elapsed time and derived ns/pair is printed via `eprintln!` and parsed by the
-harness. Per-pair op count: 3,000,000 (every OFF trial: 328-438 ms observed;
-every ON trial: 488-752 ms observed — both comfortably over the ~200 ms
-floor).
-
-**A/B/A/B interleaving.** `ATTR_ENABLED` is a `OnceLock<bool>` latched once
-per process, so ON/OFF cannot be toggled inside one process — true
-interleaving requires a fresh process per trial. `/tmp/bench_ws/run_ab.sh`
-runs `OFF, ON, OFF, ON, ...` as 2×15 separate process invocations per binary
-(`env -u SIMPLE_MEM_ATTR` for OFF, `SIMPLE_MEM_ATTR=1` for ON), writing one
-CSV row per trial with `ns_per_pair`. Two independent 15-pair replicates were
-run per binary (run1, run2) back-to-back, then pooled (n=30) for the primary
-comparison. `/proc/loadavg` was captured at the start and end of every
-15-pair pass.
-
-**Machine load** (shared 32-core box): origin-run1 start `27.72 29.78 27.58`
-→ end `27.11 29.57 27.54`; wc-run1 start `27.11 29.57 27.54` → end
-`25.58 29.12 27.43`; origin-run2 start `21.94 27.43 26.94` → end
-`22.95 27.37 26.93`; wc-run2 start `22.95 27.37 26.93` → end
-`21.41 26.81 26.75`. Load was stable (~22-30) and did not trend
-monotonically across the run order, so A/B/A/B interleaving (rather than a
-before/after split) is what makes the OFF-vs-ON deltas trustworthy here.
-
-### Results (ns per alloc+free pair, median with IQR)
-
-| Design | Run | n pairs | OFF median | OFF IQR | ON median | ON IQR | ON-vs-OFF delta |
-|---|---|---|---|---|---|---|---|
-| M1 (landed, origin/main) | run1 | 15 | 120.6 | 9.8 | 183.2 | 13.7 | **+51.9%** |
-| M1 (landed, origin/main) | run2 | 15 | 139.5 | 22.4 | 196.1 | 38.0 | **+40.6%** |
-| M1 (landed, origin/main) | **pooled** | **30** | **126.4** | **24.1** | **190.3** | **23.2** | **+50.5%** |
-| Working-copy redesign (uncommitted) | run1 | 15 | 127.4 | 24.9 | 186.4 | 20.3 | **+46.3%** |
-| Working-copy redesign (uncommitted) | run2 | 15 | 117.7 | 6.1 | 175.0 | 16.8 | **+48.7%** |
-| Working-copy redesign (uncommitted) | **pooled** | **30** | **119.8** | **14.3** | **176.2** | **21.4** | **+47.1%** |
-
-Raw per-trial CSVs: `/tmp/bench_ws/results/{origin,wc}_run{1,2}.csv` and
-pooled `{origin,wc}_pooled.csv` (throwaway, not committed — reproduce via
-`/tmp/bench_ws/run_ab.sh <binary> <label> 15` against the two isolated
-builds described above).
-
-A rank-based two-sample check (Mann-Whitney U, normal approximation) on the
-pooled ON samples gives `z ≈ -2.74` (working-copy ON times are the lower
-group) — a real, if modest, signal that the working-copy redesign's ON path
-is genuinely faster, not noise. The pooled OFF samples give `z ≈ -1.63`,
-not distinguishable at the same threshold — consistent with both designs'
-OFF path being the same "single cached-bool early return," as required.
-
-### Findings
-
-1. **Neither design reaches the <15% target.** Pooled medians: M1 landed
-   +50.5%, working-copy redesign +47.1%. Both are far above the M2 exit
-   bar. This is a load-bearing conclusion, not an artifact of the specific
-   run picked — both 15-pair replicates for both designs independently land
-   in the 40-52% band, and the pooled n=30 IQRs (23.2 and 21.4 ns) are
-   narrow relative to the ~64 ns gap between OFF and ON medians for either
-   design.
-2. **The working-copy redesign is a modest, probably-real improvement over
-   the landed M1 design — not a large one.** Pooled delta drops from +50.5%
-   to +47.1% (≈3.4 percentage points, ≈7% relative), and the Mann-Whitney
-   check on ON-path times supports this being a genuine (if small) effect
-   rather than pure noise. It is **not** the dramatic win a "cut the lock
-   count from 2/pair to a lock-free atomic path" design might suggest on
-   paper — in this single-threaded, uncontended benchmark, an uncontended
-   `Mutex::lock()` is already cheap (no OS futex wait), so replacing it with
-   a `RwLock::read()` (for `set_current_owner`, off the hot path) plus a
-   sharded `Mutex` (still on the hot path, once per alloc and once per free,
-   same lock-op *count* as M1) mostly trades a `SipHash`-hashed
-   `HashMap<usize,u32>` for a custom-multiply-hashed sharded map and moves
-   the four counter updates (live/peak/allocs) off the lock onto atomics —
-   real wins, but on top of a floor cost (malloc + the existing heap
-   registry Mutex, present in *both* OFF numbers) that both designs still
-   pay identically.
-3. **This probe's absolute percentages are structurally not comparable to
-   the previously-recorded +36.6% M1 figure**, and that is expected, not a
-   contradiction: the 2026-07-29 entry above measured a 90k-element
-   `[text]` array push+sum running *through the interpreter*, where
-   interpreter dispatch overhead dilutes the attribution hooks' share of
-   total time. This pass measures `register_heap_ptr`/`note_attr_alloc` in
-   a tight Rust loop with no interpreter in between, isolating the
-   attribution mechanism itself — a higher, but more mechanism-accurate,
-   percentage. Both are legitimate measurements of different things; an
-   end-to-end `.spl` workload's overhead will sit somewhere below this
-   pass's number and (per the 07-29 entry) somewhere near or above the
-   90k-array-push figure depending on allocation density.
-4. **Zero-overhead-when-off holds for both designs**, and holds *equally*
-   for both: OFF medians (M1 126.4 ns, redesign 119.8 ns pooled) sit within
-   each other's IQR and are not separated by the significance check, both
-   dominated by the same underlying malloc + `register_heap_ptr` registry
-   cost that exists with or without `SIMPLE_MEM_ATTR`.
-
-**Conclusion for the M2/M1 decision:** on this measurement, the uncommitted
-redesign is a small, plausibly-real improvement (~3-8 percentage points,
-one-shard-mutex-plus-atomics vs one-global-mutex) over the landed M1 design,
-but **neither reaches the <15% target**, and the redesign's added complexity
-(RwLock, 16-way sharding, custom hasher, per-thread cached raw pointer with
-an `unsafe` dereference, +130 net lines) is a lot of surface area for a
-single-digit-percentage-point win in this benchmark. Getting under 15% needs
-a structurally different approach (e.g., batched/sampled attribution, or
-per-thread accumulation with periodic flush instead of per-alloc
-synchronization) rather than another lock-shape variant — that is the next
-open question for M2, not a design already in hand.

@@ -1,0 +1,335 @@
+"""U02 deterministic TestDouble owners. No host operations or live authority.
+
+Scripted receipts model transitions only. External scope/affected tokens are
+checked as fixture inputs, never authenticated as production issuer receipts.
+"""
+use std.spec.{expect}
+use compiler.common.cache_contract.semantic_scope_live_port_contract_v1.*
+use common.cache_daemon_host_authority_v1.{CacheNamespaceModeV3, CacheNamespaceExpectedHeadV3}
+use compiler.driver.cache.gateway.cooperative_namespace_gc_begin_authority_v1.{
+    L78NamespacePortV4, CacheCooperativeNamespaceGcRootUnionV3,
+    cache_cooperative_namespace_gc_root_union_decode_v3}
+use compiler.driver.cache.publication.three_payload_selected_head_publisher.{
+    L78PublicationPortV4, L78PublishReceiptV4, L78PublicationPhaseV4}
+use compiler.driver.cache.publication.three_payload_generation_publisher_v1.{
+    ThreePayloadDurablePublicationPacketV1}
+
+val L78_KIND_SCOPE_V4: L78TokenKindV4 = L78TokenKindV4.Scope
+
+fn limits_valid(limits: L78LimitsV4) -> bool:
+    (limits.max_items > 0 and limits.max_items <= 65536 and
+        limits.max_bytes > 0 and limits.max_bytes <= 16777216 and
+        limits.max_steps > 0 and limits.max_steps <= 65536)
+
+fn attempt_digest(attempt: L78AttemptKeyV4) -> text:
+    l78_attempt_key_digest_v4(attempt).unwrap()
+
+fn namespace_case_known(name: text) -> bool:
+    (name == "namespace_ok" or name == "namespace_unknown_finish" or
+        name == "namespace_unknown_abort" or name == "namespace_missing_artifact" or
+        name == "namespace_truncated_roots" or name == "namespace_unavailable")
+
+fn publication_case_known(name: text) -> bool:
+    (name == "publish_committed" or name == "publish_conflict" or name == "publish_cancelled" or
+        name == "publish_unknown" or name == "publish_unknown_then_committed" or
+        name == "publish_unavailable")
+
+fn fixture_token(kind: L78TokenKindV4, owner: i64, slot: i64,
+        epoch: i64, attempt: L78AttemptKeyV4) -> L78OwnerTokenV4:
+    L78OwnerTokenV4(domain: L78AuthorityDomainV4.TestDouble, kind: kind,
+        owner_instance: owner, slot: slot, epoch: epoch,
+        attempt_digest: attempt_digest(attempt))
+
+fn publication_seed_valid(seed: L78PublishReceiptV4, owner_instance: i64,
+        epoch: i64, slot: i64, attempt: L78AttemptKeyV4) -> bool:
+    if (seed.phase != L78PublicationPhaseV4.Committed and
+            seed.phase != L78PublicationPhaseV4.Replayed):
+        return false
+    if l78_attempt_key_digest_v4(seed.operation) != l78_attempt_key_digest_v4(attempt):
+        return false
+    match seed.authority:
+        case Some(token):
+            (token.domain == L78AuthorityDomainV4.TestDouble and
+                token.kind == L78TokenKindV4.Publication and
+                token.owner_instance == owner_instance and token.epoch == epoch and
+                token.slot == slot and token.attempt_digest == attempt_digest(attempt))
+        case nil: false
+
+pub class L78FakeNamespacePortV4:
+    case_name: text
+    owner_instance: i64
+    epoch: i64
+    next_slot: i64
+    attempt: L78AttemptKeyV4
+    limits: L78LimitsV4
+    events: [text]
+    active_slots: [i64]
+    revoked_slots: [i64]
+    step_count: i64
+    seed: CacheCooperativeNamespaceGcRootUnionV3
+
+    me touch(event: text) -> Result<(), L78BoundaryErrorV4>:
+        expect(namespace_case_known(self.case_name))
+        if (not limits_valid(self.limits) or self.step_count >= self.limits.max_steps or
+                self.owner_instance <= 0 or self.epoch <= 0 or self.next_slot <= 0):
+            return Err(L78BoundaryErrorV4.Bounds)
+        self.events.push(event)
+        self.step_count = self.step_count + 1
+        if self.case_name == "namespace_unavailable":
+            return Err(L78BoundaryErrorV4.Unavailable)
+        Ok(())
+
+    fn validate_namespace(token: L78OwnerTokenV4) -> Result<(), L78BoundaryErrorV4>:
+        if (token.domain != L78AuthorityDomainV4.TestDouble or
+                token.kind != L78TokenKindV4.Namespace or
+                token.owner_instance != self.owner_instance):
+            return Err(L78BoundaryErrorV4.ForeignToken)
+        if token.epoch != self.epoch:
+            return Err(L78BoundaryErrorV4.StaleToken)
+        if token.attempt_digest != attempt_digest(self.attempt):
+            return Err(L78BoundaryErrorV4.StaleToken)
+        if self.revoked_slots.contains(token.slot):
+            return Err(L78BoundaryErrorV4.ExpiredToken)
+        if token.slot <= 0 or not self.active_slots.contains(token.slot):
+            return Err(L78BoundaryErrorV4.ForeignToken)
+        if token.slot != self.active_slots[0]:
+            return Err(L78BoundaryErrorV4.ForeignToken)
+        Ok(())
+
+    fn checked_roots() -> Result<CacheCooperativeNamespaceGcRootUnionV3, L78BoundaryErrorV4>:
+        if (self.seed.members.len() > self.limits.max_items or
+                self.seed.canonical_bytes.len() > self.limits.max_bytes):
+            return Err(L78BoundaryErrorV4.Bounds)
+        if (self.case_name == "namespace_missing_artifact" or
+                self.case_name == "namespace_truncated_roots"):
+            return Err(L78BoundaryErrorV4.Incomplete)
+        val decoded = cache_cooperative_namespace_gc_root_union_decode_v3(
+            self.seed.canonical_bytes, self.limits.max_items)
+        val roots = match decoded:
+            case Ok(value): value
+            case Err(_): return Err(L78BoundaryErrorV4.Incomplete)
+        if (roots.members != self.seed.members or
+                roots.generation_roots != self.seed.generation_roots or
+                roots.protected_objects != self.seed.protected_objects):
+            return Err(L78BoundaryErrorV4.Incomplete)
+        Ok(roots)
+
+    fn checked_closure_roots() -> Result<(), L78BoundaryErrorV4>:
+        val roots = self.checked_roots()?
+        if roots.protected_objects.len() == 0:
+            return Err(L78BoundaryErrorV4.Incomplete)
+        var matched_attempt = false
+        for root in roots.generation_roots:
+            if (root.generation == self.attempt.generation and
+                    root.manifest_digest == self.attempt.manifest_digest):
+                matched_attempt = true
+        if not matched_attempt:
+            return Err(L78BoundaryErrorV4.Incomplete)
+        Ok(())
+
+    me revoke_all():
+        for slot in self.active_slots:
+            self.revoked_slots.push(slot)
+        self.active_slots = []
+
+impl L78NamespacePortV4 for L78FakeNamespacePortV4:
+    me begin(mode: CacheNamespaceModeV3, expected: CacheNamespaceExpectedHeadV3,
+            attempt: L78AttemptKeyV4, limits: L78LimitsV4
+    ) -> Result<L78OwnerTokenV4, L78BoundaryErrorV4>:
+        if self.revoked_slots.contains(self.next_slot):
+            return Err(L78BoundaryErrorV4.ExpiredToken)
+        expect(self.events == [])
+        self.touch("namespace.begin")?
+        expect(self.active_slots.len() == 0)
+        if (not limits_valid(limits) or limits.max_items > self.limits.max_items or
+                limits.max_bytes > self.limits.max_bytes or
+                limits.max_steps > self.limits.max_steps or self.next_slot > 65536):
+            return Err(L78BoundaryErrorV4.Bounds)
+        if l78_attempt_key_digest_v4(attempt)? != attempt_digest(self.attempt):
+            return Err(L78BoundaryErrorV4.StaleToken)
+        match expected:
+            case CacheNamespaceExpectedHeadV3.Selected(bytes):
+                if bytes.len() == 0: return Err(L78BoundaryErrorV4.InvalidRequest)
+            case CacheNamespaceExpectedHeadV3.Genesis: ()
+        if mode == CacheNamespaceModeV3.Recover:
+            return Err(L78BoundaryErrorV4.Rejected)
+        self.limits = limits
+        val token = fixture_token(L78TokenKindV4.Namespace, self.owner_instance,
+            self.next_slot, self.epoch, self.attempt)
+        self.active_slots.push(self.next_slot)
+        self.next_slot = self.next_slot + 1
+        Ok(token)
+
+    me roots(token: L78OwnerTokenV4
+    ) -> Result<CacheCooperativeNamespaceGcRootUnionV3, L78BoundaryErrorV4>:
+        self.validate_namespace(token)?
+        expect(self.events == ["namespace.begin"])
+        self.touch("namespace.roots")?
+        self.checked_roots()
+
+    me closure(token: L78OwnerTokenV4) -> Result<L78OwnerTokenV4, L78BoundaryErrorV4>:
+        self.validate_namespace(token)?
+        expect(self.events == ["namespace.begin", "namespace.roots"])
+        self.touch("namespace.closure")?
+        expect(self.active_slots.len() == 1)
+        self.checked_closure_roots()?
+        if self.active_slots.len() >= self.limits.max_items or self.next_slot > 65536:
+            return Err(L78BoundaryErrorV4.Bounds)
+        val result = fixture_token(L78TokenKindV4.Closure, self.owner_instance,
+            self.next_slot, self.epoch, self.attempt)
+        self.active_slots.push(self.next_slot)
+        self.next_slot = self.next_slot + 1
+        Ok(result)
+
+    me finish(token: L78OwnerTokenV4) -> Result<(), L78BoundaryErrorV4>:
+        self.validate_namespace(token)?
+        expect(self.events == ["namespace.begin", "namespace.roots", "namespace.closure"])
+        self.touch("namespace.finish")?
+        if self.case_name == "namespace_unknown_finish":
+            return Err(L78BoundaryErrorV4.Unknown)
+        self.revoke_all()
+        Ok(())
+
+    me abort(token: L78OwnerTokenV4) -> Result<(), L78BoundaryErrorV4>:
+        self.validate_namespace(token)?
+        expect(self.events == ["namespace.begin"] or
+            self.events == ["namespace.begin", "namespace.roots"] or
+            self.events == ["namespace.begin", "namespace.roots", "namespace.closure"])
+        self.touch("namespace.abort")?
+        if self.case_name == "namespace_unknown_abort":
+            return Err(L78BoundaryErrorV4.Unknown)
+        self.revoke_all()
+        Ok(())
+
+pub fn l78_fake_namespace_port_v4(case_name: text, owner_instance: i64,
+        attempt: L78AttemptKeyV4, limits: L78LimitsV4,
+        seed: CacheCooperativeNamespaceGcRootUnionV3) -> L78FakeNamespacePortV4:
+    expect(owner_instance > 0)
+    expect(limits_valid(limits))
+    expect(namespace_case_known(case_name))
+    expect(l78_attempt_key_digest_v4(attempt).is_ok())
+    L78FakeNamespacePortV4(case_name: case_name, owner_instance: owner_instance,
+        epoch: 1, next_slot: 1, attempt: attempt, limits: limits, events: [],
+        active_slots: [], revoked_slots: [], step_count: 0, seed: seed)
+
+pub class L78FakePublicationPortV4:
+    case_name: text
+    owner_instance: i64
+    epoch: i64
+    next_slot: i64
+    attempt: L78AttemptKeyV4
+    limits: L78LimitsV4
+    events: [text]
+    active_slots: [i64]
+    revoked_slots: [i64]
+    step_count: i64
+    seed: L78PublishReceiptV4
+
+    me touch(event: text) -> Result<(), L78BoundaryErrorV4>:
+        expect(publication_case_known(self.case_name))
+        if (not limits_valid(self.limits) or self.step_count >= self.limits.max_steps or
+                self.owner_instance <= 0 or self.epoch <= 0 or self.next_slot <= 0):
+            return Err(L78BoundaryErrorV4.Bounds)
+        self.events.push(event)
+        self.step_count = self.step_count + 1
+        if self.case_name == "publish_unavailable":
+            return Err(L78BoundaryErrorV4.Unavailable)
+        Ok(())
+
+    fn check_input(token: L78OwnerTokenV4, kind: L78TokenKindV4
+    ) -> Result<(), L78BoundaryErrorV4>:
+        if (token.domain != L78AuthorityDomainV4.TestDouble or token.kind != kind or
+                token.owner_instance <= 0 or token.slot <= 0):
+            return Err(L78BoundaryErrorV4.ForeignToken)
+        if token.epoch != self.epoch or token.attempt_digest != attempt_digest(self.attempt):
+            return Err(L78BoundaryErrorV4.StaleToken)
+        Ok(())
+
+    fn receipt(phase: L78PublicationPhaseV4) -> L78PublishReceiptV4:
+        expect(publication_seed_valid(self.seed, self.owner_instance,
+            self.epoch, self.active_slots[0], self.attempt))
+        val authority = if phase == L78PublicationPhaseV4.Unknown:
+            nil
+        else:
+            self.seed.authority
+        L78PublishReceiptV4(phase: phase, operation: self.attempt,
+            active_head: self.seed.active_head, authority: authority)
+
+impl L78PublicationPortV4 for L78FakePublicationPortV4:
+    me commit(namespace_token: L78OwnerTokenV4, scope: L78OwnerTokenV4,
+            affected: L78OwnerTokenV4, closure: L78OwnerTokenV4,
+            expected: CacheNamespaceExpectedHeadV3, packet: ThreePayloadDurablePublicationPacketV1
+    ) -> Result<L78PublishReceiptV4, L78BoundaryErrorV4>:
+        expect(self.events == [])
+        self.touch("publication.commit")?
+        self.check_input(namespace_token, L78TokenKindV4.Namespace)?
+        self.check_input(scope, L78_KIND_SCOPE_V4)?
+        self.check_input(affected, L78TokenKindV4.AffectedDomain)?
+        self.check_input(closure, L78TokenKindV4.Closure)?
+        if closure.owner_instance != namespace_token.owner_instance or closure.slot == namespace_token.slot:
+            return Err(L78BoundaryErrorV4.ForeignToken)
+        if not publication_seed_valid(self.seed, self.owner_instance,
+                self.epoch, self.next_slot, self.attempt):
+            return Err(L78BoundaryErrorV4.Rejected)
+        if (packet.root.generation != self.attempt.generation or
+                packet.root.manifest_digest != self.attempt.manifest_digest or
+                packet.durable.operation_digest != self.attempt.operation_digest):
+            return Err(L78BoundaryErrorV4.InvalidRequest)
+        if (packet.objects.len() > self.limits.max_items or
+                packet.journal.bytes.len() > self.limits.max_bytes or self.next_slot > 65536):
+            return Err(L78BoundaryErrorV4.Bounds)
+        var bytes = packet.journal.bytes.len()
+        for object in packet.objects:
+            if object.canonical_bytes.len() > self.limits.max_bytes - bytes:
+                return Err(L78BoundaryErrorV4.Bounds)
+            bytes = bytes + object.canonical_bytes.len()
+        match expected:
+            case CacheNamespaceExpectedHeadV3.Selected(bytes):
+                if bytes.len() == 0: return Err(L78BoundaryErrorV4.InvalidRequest)
+            case CacheNamespaceExpectedHeadV3.Genesis: ()
+        if self.case_name == "publish_conflict":
+            return Err(L78BoundaryErrorV4.Conflict)
+        if self.case_name == "publish_cancelled":
+            return Err(L78BoundaryErrorV4.Cancelled)
+        self.active_slots.push(self.next_slot)
+        self.next_slot = self.next_slot + 1
+        if self.case_name == "publish_unknown":
+            return Err(L78BoundaryErrorV4.Unknown)
+        if self.case_name == "publish_unknown_then_committed":
+            return Ok(self.receipt(L78PublicationPhaseV4.Unknown))
+        Ok(self.receipt(self.seed.phase))
+
+    me resolve(namespace_token: L78OwnerTokenV4, operation: L78AttemptKeyV4
+    ) -> Result<L78PublishReceiptV4, L78BoundaryErrorV4>:
+        expect(self.events == ["publication.commit"])
+        self.touch("publication.resolve")?
+        self.check_input(namespace_token, L78TokenKindV4.Namespace)?
+        if l78_attempt_key_digest_v4(operation)? != attempt_digest(self.attempt):
+            return Err(L78BoundaryErrorV4.StaleToken)
+        expect(self.active_slots.len() == 1)
+        if self.case_name == "publish_unknown":
+            return Err(L78BoundaryErrorV4.Unknown)
+        expect(self.case_name == "publish_unknown_then_committed" or self.case_name == "publish_committed")
+        Ok(self.receipt(self.seed.phase))
+
+pub fn l78_fake_publication_port_v4(case_name: text, owner_instance: i64,
+        attempt: L78AttemptKeyV4, limits: L78LimitsV4,
+        seed: L78PublishReceiptV4) -> L78FakePublicationPortV4:
+    expect(owner_instance > 0)
+    expect(limits_valid(limits))
+    expect(publication_case_known(case_name))
+    expect(l78_attempt_key_digest_v4(attempt).is_ok())
+    expect(publication_seed_valid(seed, owner_instance, 1, 1, attempt))
+    L78FakePublicationPortV4(case_name: case_name, owner_instance: owner_instance,
+        epoch: 1, next_slot: 1, attempt: attempt, limits: limits, events: [],
+        active_slots: [], revoked_slots: [], step_count: 0, seed: seed)
+
+pub fn l78_expect_namespace_retained_v4(port: L78FakeNamespacePortV4,
+        token: L78OwnerTokenV4) -> ():
+    expect(port.active_slots).to_contain(token.slot)
+    expect(port.revoked_slots.contains(token.slot)).to_equal(false)
+    expect(port.validate_namespace(token).is_ok()).to_equal(true)
+
+pub fn l78_expect_publication_phase_v4(receipt: L78PublishReceiptV4,
+        expected: L78PublicationPhaseV4) -> ():
+    expect(receipt.phase).to_equal(expected)

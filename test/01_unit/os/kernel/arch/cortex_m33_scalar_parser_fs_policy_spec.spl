@@ -1,0 +1,87 @@
+"""Cortex-M33 scalar/parser/FS-table pure-policy specification.
+
+The C shim remains the freestanding acquisition/writeback bridge.  These tests
+execute the production Simple policy and freeze the bridge boundary, decision
+inventory, and fail-closed verification contract.
+"""
+
+use std.spec.*
+use std.io_runtime.{file_read}
+use os.kernel.arch.cortex_m33.scalar_parser_fs_policy.{
+    cm33_policy_streq,
+    cm33_policy_starts_with,
+    cm33_policy_parse_hex_prefix,
+    cm33_policy_parse_hex_digit,
+    cm33_policy_strlen_simple,
+    cm33_policy_memcpy_simple,
+    cm33_policy_fs_add_file,
+    cm33_policy_fs_add_name,
+    cm33_policy_fs_init,
+    cm33_policy_fs_find
+}
+
+describe "Cortex-M33 scalar/parser/FS-table pure policy":
+    it "classifies text, prefix, hex, length, and copy scalar steps":
+        expect(cm33_policy_streq(65, 65)).to_equal(1)
+        expect(cm33_policy_streq(65, 66)).to_equal(0)
+        expect(cm33_policy_streq(0, 0)).to_equal(2)
+        expect(cm33_policy_starts_with(65, 65)).to_equal(1)
+        expect(cm33_policy_starts_with(65, 66)).to_equal(0)
+        expect(cm33_policy_starts_with(65, 0)).to_equal(2)
+        expect(cm33_policy_parse_hex_prefix(48, 120)).to_equal(2)
+        expect(cm33_policy_parse_hex_prefix(48, 88)).to_equal(2)
+        expect(cm33_policy_parse_hex_prefix(48, 113)).to_equal(0)
+        expect(cm33_policy_parse_hex_digit(48)).to_equal(0)
+        expect(cm33_policy_parse_hex_digit(57)).to_equal(9)
+        expect(cm33_policy_parse_hex_digit(97)).to_equal(10)
+        expect(cm33_policy_parse_hex_digit(70)).to_equal(15)
+        expect(cm33_policy_parse_hex_digit(71)).to_equal(0xffffffffu32)
+        expect(cm33_policy_strlen_simple(0)).to_equal(0)
+        expect(cm33_policy_strlen_simple(65)).to_equal(1)
+        expect(cm33_policy_memcpy_simple(0)).to_equal(0)
+        expect(cm33_policy_memcpy_simple(4)).to_equal(1)
+
+    it "admits, aligns, names, initializes, and searches the fixed FS table":
+        expect(cm33_policy_fs_add_file(0, 0, 5, 16, 4096)).to_equal(2048)
+        expect(cm33_policy_fs_add_file(16, 0, 1, 16, 4096)).to_equal(1)
+        expect(cm33_policy_fs_add_file(0, 4097, 0, 16, 4096)).to_equal(2)
+        expect(cm33_policy_fs_add_file(0, 4095, 2, 16, 4096)).to_equal(2)
+        expect(cm33_policy_fs_add_name(65, 30, 32)).to_equal(1)
+        expect(cm33_policy_fs_add_name(65, 31, 32)).to_equal(0)
+        expect(cm33_policy_fs_add_name(0, 0, 32)).to_equal(0)
+        expect(cm33_policy_fs_init(0)).to_equal(0)
+        expect(cm33_policy_fs_init(5)).to_equal(5)
+        expect(cm33_policy_fs_init(6)).to_equal(0xffffffffu32)
+        expect(cm33_policy_fs_find(0, 2, 0)).to_equal(0)
+        expect(cm33_policy_fs_find(1, 2, 1)).to_equal(1)
+        expect(cm33_policy_fs_find(2, 2, 0)).to_equal(2)
+
+    it "keeps only acquisition and writeback in the reviewed C helper bridge":
+        val shim = file_read("src/os/kernel/arch/cortex_m33/cm33_shim.c")
+        expect(shim).to_contain("extern uint32_t cm33_policy_streq")
+        expect(shim).to_contain("extern uint32_t cm33_policy_fs_add_file")
+        expect(shim).to_contain("cm33_policy_parse_hex_digit(c)")
+        expect(shim).to_contain("cm33_policy_fs_find(i, fs_count, names_equal)")
+        expect(shim.contains("if (c >= '0' && c <= '9')")).to_equal(false)
+        expect(shim.contains("if (fs_count >= FS_MAX_FILES) return")).to_equal(false)
+        expect(shim).to_contain("static void uart_init(void)")
+        expect(shim).to_contain("static void mpu_lockdown_for_app(void)")
+        expect(shim).to_contain("section(\".vector_table\")")
+        expect(shim).to_contain("__asm volatile")
+
+    it "pins 22 production decisions, 44 outcomes, parity, ABI, object, link, and Stage-4 admission":
+        val policy = file_read("src/os/kernel/arch/cortex_m33/scalar_parser_fs_policy.spl")
+        for decision in [
+            "D01", "D02", "D03", "D04", "D05", "D06", "D07", "D08",
+            "D09", "D10", "D11", "D12", "D13", "D14", "D15", "D16",
+            "D17", "D18", "D19", "D20", "D21", "D22"
+        ]:
+            expect(policy).to_contain("CM33-SPF-{decision}")
+        val gate = file_read("scripts/check/check-cm33-scalar-parser-fs-policy.shs")
+        expect(gate).to_contain("branch_outcomes=44/44")
+        expect(gate).to_contain("oracle_parity=exact")
+        expect(gate).to_contain("stage4_verify_candidate_provenance")
+        expect(gate).to_contain("--coverage --no-strip")
+        expect(gate).to_contain("coverage-probe-binary-missing")
+        expect(gate).to_contain("unexpected-policy-undefined-symbol")
+        expect(gate).to_contain("full-image-link-failed")

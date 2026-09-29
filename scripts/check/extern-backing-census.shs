@@ -61,6 +61,27 @@ fi
 cut -f2 "$W/decls.tsv" | sort -u > "$W/syms.txt"
 awk -F'\t' '$1=="bare"{print $2}' "$W/decls.tsv" | sort -u > "$W/bare.txt"
 nm -a --defined-only "$BIN" 2>/dev/null | awk '{print $NF}' | sort -u > "$W/bin.txt"
+# NON-VACUITY: `in_deployed_binary` is the census's PRIMARY evidence that a
+# declared extern is backed. If the binary carries no symbol table, every
+# lookup misses and the census silently reclassifies the whole tree as
+# unbacked -- a scan that found nothing because it scanned nothing.
+#
+# Measured 2026-09-02 on Windows/MSYS: `nm -a --defined-only bin/simple.exe`
+# answers "no symbols" (the deployed .exe is stripped), so bin.txt was EMPTY
+# and check-unbacked-extern-ratchet.shs reported "FAIL — 1603 symbol(s)
+# checked, 255 newly unbacked" naming symbols such as __rt_vec_push that are
+# demonstrably present. That is a false RED produced by absent evidence.
+# Absence of a symbol table is absence of evidence, never a finding.
+#
+# Cross-platform impact: none. An unstripped ELF or Mach-O `simple` defines
+# tens of thousands of symbols, so this floor is unreachable on Linux and
+# macOS; it fires only where the census had no evidence to begin with.
+BIN_SYMS=$(wc -l < "$W/bin.txt" | tr -d ' ')
+BIN_SYM_FLOOR=${EXTERN_CENSUS_BIN_SYM_FLOOR:-100}
+if [ "$BIN_SYMS" -lt "$BIN_SYM_FLOOR" ]; then
+  echo "ERROR — nothing was checked: $BIN yielded $BIN_SYMS defined symbol(s) (floor $BIN_SYM_FLOOR); it is stripped or not a readable object for this nm. Backing classification would be vacuous." >&2
+  exit 2
+fi
 for L in libc.so.6 libm.so.6 libgcc_s.so.1 libpthread.so.0 libdl.so.2; do
   [ -e "/lib/x86_64-linux-gnu/$L" ] && nm -D --defined-only "/lib/x86_64-linux-gnu/$L" 2>/dev/null | awk 'NF>=3{print $3}' | sed 's/@.*//'
 done | sort -u > "$W/libc.txt"

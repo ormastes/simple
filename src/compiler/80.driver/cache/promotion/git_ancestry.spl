@@ -1,3 +1,5 @@
+use std.io_runtime.{time_now_unix_micros}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
 # Git ancestry / freshness check — design §15.1:
 #
 #   git fetch --prune origin main
@@ -17,13 +19,8 @@
 # from a write path — read-only lookups and the eligibility gate are the
 # only consumers in this milestone.
 
-extern fn rt_time_now_unix_micros() -> i64
-extern fn rt_process_run(cmd: text, args: [text]) -> ProcessRunResult
-
-struct ProcessRunResult:
-    exit_code: i64
-    stdout: text
-    stderr: text
+val GIT_ANCESTRY_PROCESS_TIMEOUT_MS: i64 = 30000
+val GIT_ANCESTRY_PROCESS_OUTPUT_BYTES: i64 = 4096
 
 # A snapshot of the trusted `origin/main` ref at the moment it was fetched,
 # plus whether the given commit is reachable from it. `fetched_at_unix_micros`
@@ -102,24 +99,55 @@ struct RealGitAncestryOracle:
     remote_url: text
     repository_id: text
 
+pub fn git_ancestry_fetch_accepted_v1(
+    expected_remote_url: text, observed_remote_url: text,
+    remote_exit: i64, fetch_exit: i64, tip_exit: i64, tip_commit: text
+) -> bool:
+    val authenticated_transport = expected_remote_url.starts_with("https://") or
+        expected_remote_url.starts_with("ssh://") or expected_remote_url.starts_with("git@")
+    authenticated_transport and remote_exit == 0 and
+        observed_remote_url.trim() == expected_remote_url and
+        fetch_exit == 0 and tip_exit == 0 and tip_commit.trim() != ""
+
 impl GitAncestryOracle for RealGitAncestryOracle:
     fn fetch_main_snapshot() -> MainSnapshot:
-        rt_process_run("git", ["-C", self.repo_dir, "fetch", "--prune", "origin", "main"])
-        val tip = rt_process_run("git", ["-C", self.repo_dir, "rev-parse", "refs/remotes/origin/main"])
-        val ok = tip.exit_code == 0
+        val (observed_remote, _, remote_exit) = process_run_bounded(
+            "git", ["-C", self.repo_dir, "remote", "get-url", "origin"],
+            GIT_ANCESTRY_PROCESS_TIMEOUT_MS, GIT_ANCESTRY_PROCESS_OUTPUT_BYTES)
+        var fetch_exit: i64 = -1
+        var tip_exit: i64 = -1
+        var tip_commit = ""
+        if remote_exit == 0 and observed_remote.trim() == self.remote_url:
+            val (_, _, fetched) = process_run_bounded(
+                "git", ["-C", self.repo_dir, "fetch", "--prune", "origin", "main"],
+                GIT_ANCESTRY_PROCESS_TIMEOUT_MS, GIT_ANCESTRY_PROCESS_OUTPUT_BYTES)
+            fetch_exit = fetched
+            if fetch_exit == 0:
+                val (tip, _, resolved) = process_run_bounded(
+                    "git", ["-C", self.repo_dir, "rev-parse", "--verify", "refs/remotes/origin/main^{commit}"],
+                    GIT_ANCESTRY_PROCESS_TIMEOUT_MS, GIT_ANCESTRY_PROCESS_OUTPUT_BYTES)
+                tip_exit = resolved
+                tip_commit = tip.trim()
+        val ok = git_ancestry_fetch_accepted_v1(
+            self.remote_url, observed_remote, remote_exit, fetch_exit, tip_exit, tip_commit)
         MainSnapshot(
             remote_url: self.remote_url,
             repository_id: self.repository_id,
             ref_name: "refs/remotes/origin/main",
-            tip_commit: if ok: tip.stdout.trim() else: "",
-            fetched_at_unix_micros: rt_time_now_unix_micros(),
+            tip_commit: if ok: tip_commit else: "",
+            fetched_at_unix_micros: time_now_unix_micros(),
             fetch_authenticated: ok
         )
 
     fn is_ancestor(commit: text, snapshot: MainSnapshot) -> bool:
-        val result = rt_process_run("git", ["-C", self.repo_dir, "merge-base", "--is-ancestor", commit, snapshot.ref_name])
-        result.exit_code == 0
+        if not snapshot.fetch_authenticated or snapshot.tip_commit == "":
+            return false
+        val (_, _, exit_code) = process_run_bounded(
+            "git", ["-C", self.repo_dir, "merge-base", "--is-ancestor", commit, snapshot.tip_commit],
+            GIT_ANCESTRY_PROCESS_TIMEOUT_MS, GIT_ANCESTRY_PROCESS_OUTPUT_BYTES)
+        exit_code == 0
 
 export MainSnapshot, GitAncestryOracle, AncestryCheckResult, RealGitAncestryOracle
 export MAIN_SNAPSHOT_MAX_AGE_MICROS
 export snapshot_is_fresh, check_commit_reachable_from_main
+export git_ancestry_fetch_accepted_v1

@@ -1,4 +1,8 @@
 # Stage4 entry closure parses duplicate sources and exceeds bounded runtime
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-17  
 **Status:** OPEN — ARCHITECTURAL, confirmed out-of-scope for a source-only
@@ -203,3 +207,4 @@ time. Native execution is separately blocked by the missing canonical macOS
 `simple-core` runtime archive: the supported core-C lane lacks Metal symbols,
 while the removed legacy hosted lane is no longer selectable. This runtime
 packaging issue does not justify another monolithic Stage4 attempt.
+

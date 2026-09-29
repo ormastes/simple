@@ -47,11 +47,49 @@ original `itf` config format:
 
 ```bash
 devhub auth login --confluence --url https://company.atlassian.net/wiki --user you@co.com --token TOKEN
-devhub auth login --jira                                              # delegates to `acli jira auth login --web`
-devhub auth login --jira --url URL --user EMAIL --token TOKEN         # also wires the REST curl fallback acli lacks
+# Confluence Data Center: Bearer personal access token, no --user needed
+devhub auth login --confluence --url https://wiki.corp:8090/confluence --deployment datacenter --auth bearer --token PAT
+# Jira Data Center: Bearer personal access token, no --user needed
+devhub auth login --jira --url https://jira.corp:8443/jira --deployment datacenter --auth bearer --token PAT
+# Jira Cloud: basic auth, email + API token
+devhub auth login --jira --url https://company.atlassian.net --user you@co.com --token API_TOKEN
+devhub auth login --jira                                              # acli --web login; skipped when a jira token is already configured
+devhub auth login --jira --acli                                       # force the acli --web login even when a jira token exists
 devhub auth status
 devhub auth logout --confluence
 ```
+
+**Jira token auth (no acli login).** When `jira.url` and a Jira token are
+configured, every `jira` verb (`view`, `search`, `create`, `update`, `comment`,
+`transition`) and `tasks --backend jira` searches call the Jira REST API
+directly. acli is used only when no token is configured
+(`check_jira_auth` in `auth.spl`). A token resolves from `[token_env]`, then
+`[token_cmd]`, then `auth.sdn`. `jira.email` is required only for basic auth.
+
+```sdn
+# ~/.config/itf/config.sdn — Jira Data Center (REST v2, Bearer PAT)
+jira:
+    url: https://jira.corp:8443/jira      # any base URL; port and context path allowed
+    deployment: datacenter                # datacenter -> /rest/api/2 | cloud (default) -> /rest/api/3
+    auth: bearer                          # bearer (DC PAT) | basic (default)
+token_env:
+    jira: JIRA_TOKEN                      # or put `jira: token: ...` in auth.sdn
+```
+
+```sdn
+# ~/.config/itf/config.sdn — Jira Cloud (REST v3, basic email + API token)
+jira:
+    url: https://company.atlassian.net
+    deployment: cloud
+    auth: basic
+    email: you@company.com
+token_env:
+    jira: JIRA_API_TOKEN
+```
+
+On Data Center, `create`/`update`/`comment` send description and comment
+bodies as plain strings (v2 rejects ADF); Cloud gets ADF. Attachment download
+on Data Center follows the attachment metadata's `content` URL.
 
 Other backends have no `devhub auth` verb — their credentials go straight
 into `auth.sdn`/`email.sdn`, or an external tool's own login:
@@ -104,15 +142,131 @@ devhub tasks create --backend jira --project PROJ --title "New bug"
 devhub tasks close 42 --backend github
 ```
 
-Requires: `gh` CLI (github backend) or `acli`/Jira curl credentials (jira
-backend).
+Requires: `gh` CLI (github backend), or for the jira backend `jira.url` + a
+Jira token (REST, see Setup), with `acli` used only when no token is configured.
 
-## Facade: `git` — `github`/`gh` + `bb`/`b`
+## Facade: `git` — `gh`/`git` (routing) + `github`, `bb`/`b` (explicit)
 
-There is no `devhub git` verb — the "git" facade is two separate top-level
-commands, one per host.
+`devhub gh` (alias `devhub git`) is **one gh-shaped command that works against
+whichever backend this repository is on**. It resolves the backend, then either
+passes straight through to the real `gh` (GitHub) or translates gh's flags into
+Bitbucket's and normalises Bitbucket's JSON back into gh's field names.
 
-### `github` (alias `gh`)
+```bash
+devhub gh pr create --title T --body B --base main --head work/x
+devhub gh pr list --state open --json number,title,headRefName
+devhub gh pr merge 42 --squash
+```
+
+The two host-specific commands below (`github`, `bb`) still exist and are
+unchanged; use them to address one host explicitly.
+
+### Replacing `gh` outright (`bin/gh`)
+
+The reason devhub went unused was mechanical: people and agents type `gh`, and
+nothing was in the way. `bin/gh` is a shim that fixes that — put the repo's
+`bin/` ahead of the real `gh` on `PATH` and every existing habit, script, and
+agent instruction routes through devhub with **no change to what anyone types**:
+
+```bash
+export PATH="/path/to/repo/bin:$PATH"
+gh pr create --title T --base main --head work/x   # -> devhub, or -> real gh
+```
+
+Two properties worth knowing:
+
+- **It is free on GitHub.** The shim resolves the backend in POSIX shell
+  (~0.14 s) and, for `github`, `exec`s the real `gh` without entering Simple
+  at all — so it is byte-identical to not having a shim. Only a non-GitHub
+  backend pays the ~12 s interpreter startup, and only because there is real
+  translation to do.
+- **It cannot recurse.** devhub's GitHub adapter shells out to `gh`; with the
+  shim on `PATH` that would loop forever. The shim resolves the real binary
+  first and exports `DEVHUB_REAL_GH`, which the adapter prefers.
+
+Escape hatches: `DEVHUB_GH_PASSTHROUGH=1` forces the real `gh` unconditionally;
+`DEVHUB_GIT_BACKEND=<github|bitbucket>` overrides resolution for one command.
+
+### Which backend? (resolution order)
+
+Highest precedence first — the first rung that yields a known backend wins, and
+the source is named in errors so a surprising choice is traceable:
+
+| # | Rung | Set it with |
+|---|---|---|
+| 1 | `--backend` flag | `devhub gh --backend bitbucket pr list` |
+| 2 | environment | `DEVHUB_GIT_BACKEND=bitbucket` |
+| 3 | repo config (committed, shared) | `.spipe/config.sdn` → `devhub:` → `git_backend:` |
+| 4 | user config | `~/.config/itf/config.sdn` → `git:` → `default_backend:` |
+| 5 | remote host sniff | an `origin` pointing at `github.com` / `bitbucket.org` |
+
+Nothing resolved is an **error naming every way to fix it**, never a guess.
+
+Bitbucket coordinates resolve on the same shape:
+`--workspace`/`--repo` > `BB_WORKSPACE`/`BB_REPO` > `.spipe/config.sdn`
+(`bb_workspace`, `bb_repo`) > `~/.config/itf/config.sdn` (`[bitbucket]`).
+
+```sdn
+# .spipe/config.sdn — tracked by git, so NAMES of secrets only, never secrets
+devhub:
+  git_backend: bitbucket       # devhub gh / git
+  wiki_backend: confluence     # devhub wiki
+  tasks_backend: jira          # devhub tasks
+  bb_workspace: acme
+  bb_repo: widgets
+  bitbucket_token_env: BB_TOKEN
+```
+
+**This one committed section answers "which backends does this project use" for
+every facade.** `wiki` and `tasks` previously read the *user* config only, so a
+team could not record that its wiki is Confluence and its tracker is Jira —
+each developer configured it in their own home directory, and an agent in a
+fresh clone silently got the hardcoded default. Each facade now resolves:
+
+```
+--backend flag  >  DEVHUB_{GIT,WIKI,TASKS}_BACKEND  >  .spipe/config.sdn  >  ~/.config/itf/config.sdn  >  default
+```
+
+(`git` adds the origin-remote sniff before its default, and errors rather than
+defaulting.) Unset everywhere, every facade behaves exactly as it did before.
+
+Credentials resolve `[token_env]` (read `$NAME` from the environment) >
+`[token_cmd]` (run a command, e.g. `pass show ...`) > `auth.sdn` plaintext.
+
+### What translation does and does not do
+
+On a non-GitHub backend, gh flags are renamed (`--head`→`--source`,
+`--base`→`--dest`), `--state closed` becomes Bitbucket's `DECLINED`, and
+`gh pr merge`/`review --approve`/`comment` are renested onto Bitbucket's
+top-level `merge`/`approve`/`comment post`. `--json` output is re-keyed to gh's
+names (`number`, `headRefName`, `baseRefName`, `author.login`, `url`, `body`,
+`isDraft`).
+
+`--body-file F` / `-F F` is read and turned into an inline `--body`; a missing
+file is a **hard error**, never a silently empty PR description.
+
+**Every flag a verb cannot translate is refused by name, never dropped.** This
+is an allowlist, not a blocklist: each verb declares what it can translate and
+refuses everything else, including flags nobody anticipated. A silently-dropped
+`--base` would open a PR against the wrong branch and still exit 0; a refusal is
+strictly safer than an approximation.
+
+```
+$ gh pr create --title T --head work/x --assignee bob     # backend: bitbucket
+error: `gh pr create --assignee` is not translatable to the bitbucket backend.
+```
+
+Flags with a specific known reason (`--draft`, `--fill`, `--web`, `--template`,
+`--admin`, `--auto`, `--search`) get a message explaining it.
+
+### Which repository does `bin/gh` look at?
+
+**The one you are standing in**, not the Simple checkout the shim lives in. It
+walks up from `$PWD` for `.spipe/config.sdn` and reads `git remote` in the
+current directory. So Simple's `bin/` can be on your `PATH` permanently while
+each repository you `cd` into decides its own backend.
+
+### `github` (alias `gh` when routed — see above)
 
 Thin wrapper around the real `gh` CLI: `list` gets reformatted into a table
 (or `--json`/`--jq`). Most other verbs pass through to `gh`; `pr review
@@ -196,11 +350,41 @@ repository can satisfy its protected policy; enabling it merely queues the
 merge. `--no-verify` skips local Git hooks only; it does not satisfy or bypass
 GitHub checks.
 
-### `bb` (alias `b`) — Bitbucket Cloud
+### `bb` (alias `b`) — Bitbucket Cloud and Server / Data Center
 
-Real REST client (`adapter_bitbucket_curl.spl`), not a passthrough — requires
-`--workspace`/`BB_WORKSPACE`, `--repo`/`BB_REPO`, and a `bitbucket.token` in
-`auth.sdn`.
+Real REST client (`adapter_bitbucket.spl`, sending through `curl`), not a
+passthrough. It requires `--project`/`--workspace` (or `BB_PROJECT`/`BB_WORKSPACE`),
+`--repo`/`BB_REPO`, and a Bitbucket token. The token resolves from
+`[token_env]`, then `[token_cmd]`, then `auth.sdn`.
+
+**Server / Data Center (tested shape: 8.19).** Set `bitbucket.url` to your
+server. Port and context path are kept, and a trailing `/rest/api/1.0` is
+stripped. When `bitbucket.deployment` is unset, any URL that is not
+`bitbucket.org` is treated as Data Center. Requests go to
+`{url}/rest/api/1.0` with `Authorization: Bearer <HTTP access token>`.
+`--project` is the project key.
+
+```sdn
+# ~/.config/itf/config.sdn — Bitbucket Server/DC 8.19, Bearer PAT
+bitbucket:
+    url: https://host:222            # also ok: https://host:222/context
+    deployment: datacenter           # optional for non-bitbucket.org URLs
+    auth: bearer                     # default
+    project: PROJ
+    user: jdoe                       # optional; enables participant approve
+token_env:
+    bitbucket: BB_TOKEN
+```
+
+On Data Center:
+- `pr create` sends `fromRef`/`toRef`, and `--reviewer` takes user names.
+- `comment post` sends `text`, plus an `anchor` for inline comments.
+- `merge` reads the PR `version` and posts `strategyId`: `squash`→`squash`,
+  `fast_forward`→`ff-only`, anything else→`no-ff`.
+- `approve` uses `PUT .../participants/{bitbucket.user}`, falling back to the
+  deprecated `POST /approve` when no user is set.
+- `status` reads `/rest/build-status/1.0/commits/{sha}`.
+- Lists page with `isLastPage`/`nextPageStart`.
 
 | Verb | Flags |
 |---|---|
@@ -239,6 +423,70 @@ in config.sdn > `confluence`), `--space KEY` (Confluence), `--repo`/`-R
 OWNER/NAME` (GitHub — the repo whose `.wiki.git` to use), `--json`/`--jq`,
 `--web`, `--limit N` (default 25, Confluence only), `--push` (GitHub backend
 only — pushes local wiki-git commits back to GitHub; never implied).
+
+**Confluence Cloud and Data Center.** The Confluence backend
+(`adapter_confluence.spl`) calls the v1 content API `{confluence.url}/rest/api/content`
+through `curl` on both deployments. On Cloud, `url` includes `/wiki`; on Data
+Center it is the server base with any port and context path. Spaces are
+addressed by key. A configured token is used directly (`[token_env]` >
+`[token_cmd]` > `auth.sdn`), and no login is started. Auth is Basic
+`confluence.user:token` by default, or `Bearer <PAT>` with `confluence.auth: bearer`.
+
+Named targets use `confluence.<name>:` sections. `--host NAME` and
+`--profile NAME` are aliases; without either flag, `default_target` is used,
+then the first named target in file order. Repeated `header:` entries preserve
+multiple values and are attached automatically by both `wiki` and `api` when
+the selected target routes through its gateway. `gateway_url` is a complete API prefix; routing and headers stay in
+`config.sdn`, while target-scoped secrets stay in `auth.sdn`.
+
+```sdn
+confluence:
+    default_target: internal
+
+confluence.internal:
+    url: https://company.atlassian.net/wiki
+    gateway_url: https://gateway.corp/confluence
+    user: you@company.com
+    header: X-Classification: Internal
+    header: X-Scope: Engineering
+    header: X-Scope: Documentation
+
+confluence.public:
+    url: https://public.example/confluence
+    deployment: datacenter
+    auth: bearer
+```
+
+```sdn
+# ~/.config/itf/auth.sdn
+confluence.internal:
+    token: "..."
+confluence.public:
+    token: "..."
+```
+
+For example, `devhub wiki list --host internal` and
+`devhub api GET /content --profile internal` select the same target. `auth
+status --quiet` (or `--silent`) suppresses only deployment-shape warnings.
+
+```sdn
+# Confluence Data Center (Bearer PAT)
+confluence:
+    url: https://wiki.corp:8090/confluence
+    deployment: datacenter
+    auth: bearer
+token_env:
+    confluence: CONFLUENCE_PAT
+```
+
+```sdn
+# Confluence Cloud (Basic email + API token)
+confluence:
+    url: https://company.atlassian.net/wiki
+    user: you@company.com
+token_env:
+    confluence: CONFLUENCE_API_TOKEN
+```
 
 ```bash
 devhub wiki list --space ENG
@@ -360,7 +608,7 @@ directly (no `--backend` selection — each talks to exactly one system):
 
 | Command | Talks to | Notable verbs |
 |---|---|---|
-| `jira` (alias `j`) | Jira only | `view`, `search` (JQL), `create`, `update`, `comment`, `transition` — `update`/`comment`/`transition` try `acli` first, then fall back to REST v3 curl if `jira.url`+`jira.email`+a token are configured |
+| `jira` (alias `j`) | Jira only | `view`, `search` (JQL), `create`, `update`, `comment`, `transition` — all REST (DC `/rest/api/2`, Cloud `/rest/api/3`) when `jira.url` + a token are configured (plus `jira.email` for basic auth); `acli` only when no token is configured |
 | `minio` (alias `mio`) | MinIO/S3 only | `ls`, `get`, `put`, `stat`, `mb`, `rb`, `rm`, `presign`, `presign-put`, `health` |
 | `outlook` (alias `ol`) | Microsoft Graph only | `folders`, `messages <FID>`, `get <MID>`, `move <MID> --to F`, `mark <MID>` |
 | `api` | Raw REST | `api <GET\|POST\|PUT\|DELETE> <URL/path>` against Confluence (default) or Jira (`--jira`) — like `gh api` |
@@ -386,8 +634,26 @@ Honest, currently-open gaps — do not expect these to work:
 - **`rm --recursive`/`rb --force`/`mirror --remove`** are all capped at 1000
   objects per side (no batch `DeleteObjects` call in the adapter); over the
   cap, they refuse and point you at the real `mc` CLI.
+- **`std.nogc_sync_mut.http_client` `add_header` recurses forever.** Its
+  `request_add_header` alias resolves back onto itself, and the shim has no
+  transport. devhub's Confluence and Bitbucket adapters avoid it by using `curl`.
+  The stdlib bug itself is not fixed.
 - **`bb`**: no free-text search verb; list endpoints cap at 10 pages
   (`_capped:true` in `--json` past the cap).
+- **`gh` facade covers `pr` and `repo` only** on non-GitHub backends. `issue`
+  is not routed (Bitbucket issues are a different product from Jira, which the
+  `tasks` facade already covers). On the `github` backend everything works,
+  because it is a passthrough.
+- **`gh --json` is gh-shaped for PR objects only.** `pr view/list/create/merge`
+  are re-keyed to gh's field names; `approve`/`comment`/`status` still emit
+  backend-native JSON. gh's own JSON for those is minimal and nothing here
+  parses it.
+- **No `bin/mc` or `bin/jira` shim yet.** The same interception pattern applies
+  to the `storage` and `tasks` facades, which are already mc- and gh-shaped.
+  Only `gh` is shimmed, because that is where the demonstrated bypass was.
+- **`bin/gh` is opt-in.** Nothing puts `bin/` on `PATH` for you. On a GitHub
+  repo installing it changes no behaviour (it `exec`s the real `gh`); it earns
+  its keep when the backend is not GitHub.
 - **`email` on the `outlook` (Graph) provider**: only `inbox`/`read`/`archive`
   work; `search`/`send`/`reply`/`forward`/`label`/`star`/`draft` return an
   explicit gap error rather than running. Use `outlook_imap` (mail-cli) for

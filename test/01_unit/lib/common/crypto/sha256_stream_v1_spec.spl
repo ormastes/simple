@@ -2,7 +2,8 @@
 
 use std.spec.*
 use std.common.crypto.sha256.{
-    sha256_stream_v1_new, sha256_stream_v1_update, sha256_stream_v1_finish_hex
+    sha256_stream_v1_new, sha256_stream_v1_update, sha256_stream_v1_finish_hex,
+    sha256_u8_hex, sha256_text
 }
 
 fn stream_digest(parts: [[u8]]) -> text:
@@ -12,6 +13,51 @@ fn stream_digest(parts: [[u8]]) -> text:
     sha256_stream_v1_finish_hex(stream).unwrap()
 
 describe "SHA-256 stream block update contract":
+    it "hashes runtime-built archive member bytes across chunk boundaries":
+        val payload = "action|compile|function|foo|{sha256_text("compile")}"
+        val expected = "9f63f2e1edaf9e26d3742a826204a1375848dc984c759e6016fa91d6aa7bd77c"
+        var copied: [u8] = [0u8; payload.len()]
+        var stream = sha256_stream_v1_new()
+        var offset = 0
+        while offset < payload.len():
+            val remaining = payload.len() - offset
+            val chunk_len = if remaining < 7: remaining else: 7
+            var chunk: [u8] = [0u8; chunk_len]
+            var i = 0
+            while i < chunk_len:
+                val value = payload.byte_at(offset + i).to_u8()
+                copied[offset + i] = value
+                chunk[i] = value
+                i = i + 1
+            expect(sha256_stream_v1_update(stream, chunk)).to_be(true)
+            offset = offset + chunk_len
+        expect(sha256_text(payload)).to_equal(expected)
+        expect(sha256_u8_hex(copied)).to_equal(expected)
+        expect(stream_digest([copied])).to_equal(expected)
+        expect(sha256_stream_v1_finish_hex(stream).unwrap()).to_equal(expected)
+
+    it "matches a mixed-byte native known vector":
+        var bytes: [u8] = [0u8; 542]
+        var i: u64 = 0u64
+        while i < bytes.len():
+            bytes[i] = ((i * 17u64 + 29u64) % 127u64) as u8
+            i = i + 1u64
+        val expected = "8882ccf95f7bb43933d2451bb9481c5020fc73c075e212b90eea29fd1020eb65"
+        expect(sha256_u8_hex(bytes)).to_equal(expected)
+        expect(stream_digest([bytes])).to_equal(expected)
+
+    it "matches external known vectors beyond the empty message":
+        expect(stream_digest([[97u8; 3]])).to_equal(
+            "9834876dcfb05cb167a5c24953eba58c4ac89b1adf57f28f2f9d09af107ee8f0")
+        expect(stream_digest([[97u8; 64]])).to_equal(
+            "ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb")
+        expect(stream_digest([[97u8; 65]])).to_equal(
+            "635361c48bb9eab14198e76ea8ab7f1a41685d6ad62aa9146d301d4f17eb0ae0")
+        expect(stream_digest([[97u8; 63], [97u8; 66]])).to_equal(
+            "c12cb024a2e5551cca0e08fce8f1c5e314555cc3fef6329ee994a3db752166ae")
+        expect(stream_digest([[97u8; 542]])).to_equal(
+            "5d47043cbac0cd79ebff6f106cf31e3c43dc57d141884abbc18dfa4a631bac1a")
+
     it "preserves empty and complementary partial-block partitions":
         expect(stream_digest([[]])).to_equal(
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")

@@ -10,6 +10,7 @@ ROOT=$(CDPATH= cd -- "$ROOT" 2>/dev/null && pwd -P) || {
 }
 LEDGER_REL=${MUST_CHECK_LEDGER_REL:-doc/08_tracking/check/must_check_db.sdn}
 MANIFEST_REL=${MUST_CHECK_MANIFEST_REL:-config/check/must_check_gates.sdn}
+SELF_REL=scripts/check/check-push-must-pass.shs
 ZERO=0000000000000000000000000000000000000000
 MAX_PUSH_REF_ROWS=2
 MAX_EVIDENCE_BYTES=67108864
@@ -18,6 +19,13 @@ ALLOW_UNPROMOTED_LEDGER=0
 MUST_CHECK_CONFLICT_UNION_DONE=0
 RUNTIME_API_EXPECT_REMOVALS=${MUST_CHECK_EXPECT_RUNTIME_API_REMOVALS:-}
 EVIDENCE_REV=""
+MUST_CHECK_PUSH_BUDGET_S=${MUST_CHECK_PUSH_BUDGET_S:-10}
+MUST_CHECK_BUDGET_MS=0
+MUST_CHECK_BUDGET_SPENT_MS=0
+MUST_CHECK_BLOCKING_RUN=0
+MUST_CHECK_BUDGET_OVERRUN=""
+TIMEOUT_BIN=""
+REMOTE_QUERY_TIMEOUT_S=3
 REQUIRED_BOOTSTRAP_IDS='compiler-stage1
 compiler-stage2
 compiler-stage3
@@ -155,6 +163,16 @@ validate_ledger_text() {
         function unquote(v) { v=trim(v); sub(/^"/, "", v); sub(/"$/, "", v); return v }
         function fail() { bad=1 }
         FNR == NR {
+            # The column layout is PINNED, not inferred. Every field index below
+            # ($3 push_blocking, $5 command, $6 ci_job, $7 inputs) is only
+            # correct for this exact header, so a manifest whose header differs
+            # must be rejected rather than parsed with shifted fields — a
+            # shifted read is how a registry silently stops registering.
+            if ($0 ~ /^must_check_gates[[:space:]]*\|/) {
+                if ($0 != "must_check_gates |id, tier, push_blocking, mode, command, ci_job, inputs, description|") fail()
+                header_seen=1
+                next
+            }
             if ($0 ~ /^[[:space:]]+[a-z0-9][a-z0-9-]*,[[:space:]]*bootstrap,/) {
                 id=trim($1)
                 if (id in manifest_seen) fail()
@@ -162,6 +180,10 @@ validate_ledger_text() {
                 manifest_order[++manifest_count]=id
                 manifest_blocking[id]=trim($3)
                 manifest_command[id]=unquote($5)
+                # ci_job and inputs are bare tokens; a quote in either means the
+                # description leaked left because a column is missing.
+                if (trim($6) == "" || trim($6) ~ /"/) fail()
+                if (trim($7) == "" || trim($7) ~ /"/) fail()
             }
             next
         }
@@ -186,11 +208,16 @@ validate_ledger_text() {
         }
         END {
             if (schema != "simple.must-check-ledger/v3" || !manifest_count || !ledger_count) fail()
+            if (!header_seen) fail()
             unpromoted=(fingerprint == "unrecorded" && allow_unpromoted == 1)
             if (!unpromoted && fingerprint != want_fp) fail()
             if (manifest_count != ledger_count) fail()
-            # BSD awk rejects literal newlines in -v values; flatten the IDs
-            # before passing them in and split on whitespace here.
+            # Split on runs of space OR newline. `required` is handed in
+            # newline-flattened because a literal newline inside an awk -v
+            # assignment is a hard error on BSD awk (macOS): the whole guard died
+            # with "awk: newline in string compiler-stage1\ncomp... at source
+            # line 1" and every push from a mac was rejected as "ledger is
+            # malformed". gawk accepted it, which is why it went unnoticed.
             required_count=split(required, required_ids, /[ \n]+/)
             for (i=1; i<=required_count; i++)
                 if (required_ids[i] != "" && !(required_ids[i] in manifest_seen)) fail()
@@ -266,10 +293,52 @@ ledger_is_unpromoted_at_rev() {
 # line is emitted with the guard's real exit status so a human or a log scrape
 # can see it. The exit status is read directly into a variable on the line after
 # the invocation, never through a pipe — a pipeline's $? is the last command's.
+#
+# BLOCKING BUDGET (2026-09-24): every blocking gate together gets
+# MUST_CHECK_PUSH_BUDGET_S seconds (default 10), accounted in milliseconds of
+# blocking-gate time only (advisory gates, run with MUST_CHECK_ADVISORY=1, are
+# unbudgeted and do not consume it). Each blocking gate runs under timeout(1)
+# with whatever budget is left. An overrun is NEVER a pass: the gate is killed,
+# MUST_CHECK_BUDGET_OVERRUN is set, and the caller exits 2 with an ERROR verdict.
+# Slower gates live in the `local` tier of config/check/must_check_gates.sdn.
+push_now_ms() {
+    _ms=$(date +%s%N 2>/dev/null)
+    case "$_ms" in
+        *[!0-9]*|'') echo $(( $(date +%s) * 1000 )) ;;
+        *) echo $(( _ms / 1000000 )) ;;
+    esac
+}
+
 run_push_gate() {
     _gate_id=$1; _gate_blocking=$2; shift 2
-    sh "$@"
-    _gate_rc=$?
+    _gate_t0=$(push_now_ms)
+    if [ "$_gate_blocking" = true ]; then
+        _left=$(( MUST_CHECK_BUDGET_MS - MUST_CHECK_BUDGET_SPENT_MS ))
+        if [ "$_left" -le 0 ]; then
+            MUST_CHECK_BUDGET_OVERRUN=$_gate_id
+            echo "push-must-check: ERROR — blocking gate $_gate_id not run: the ${MUST_CHECK_BUDGET_MS}ms blocking budget is exhausted (${MUST_CHECK_BUDGET_SPENT_MS}ms spent)" >&2
+            return 1
+        fi
+        "$TIMEOUT_BIN" -k 2 "$(( _left / 1000 )).$(printf '%03d' $(( _left % 1000 )))" sh "$@"
+        _gate_rc=$?
+        _gate_ms=$(( $(push_now_ms) - _gate_t0 ))
+        MUST_CHECK_BUDGET_SPENT_MS=$(( MUST_CHECK_BUDGET_SPENT_MS + _gate_ms ))
+        MUST_CHECK_BLOCKING_RUN=$(( MUST_CHECK_BLOCKING_RUN + 1 ))
+        echo "push-must-check: gate $_gate_id exit=$_gate_rc ${_gate_ms}ms (blocking budget ${MUST_CHECK_BUDGET_SPENT_MS}/${MUST_CHECK_BUDGET_MS}ms)" >&2
+        case "$_gate_rc" in
+            124|137)
+                MUST_CHECK_BUDGET_OVERRUN=$_gate_id
+                echo "push-must-check: ERROR — blocking gate $_gate_id killed at the push budget (${MUST_CHECK_BUDGET_SPENT_MS}ms of ${MUST_CHECK_BUDGET_MS}ms); its verdict is UNKNOWN, not a pass. Split the push, or run the slow tier: sign-local-ci-receipt.shs --run --tier local" >&2
+                return 1 ;;
+        esac
+    else
+        sh "$@"
+        _gate_rc=$?
+        # Per-gate wall time on every push, so the cost of the push tier is
+        # measurable from any push log instead of by re-running it (until
+        # 2026-09-23 no push log carried a single duration).
+        echo "push-must-check: gate $_gate_id exit=$_gate_rc $(( $(push_now_ms) - _gate_t0 ))ms (advisory, unbudgeted)" >&2
+    fi
     if [ "$_gate_rc" -eq 0 ]; then
         return 0
     fi
@@ -281,6 +350,84 @@ run_push_gate() {
     return 0
 }
 
+
+# run_three_push_gates_parallel: PARALLEL fast path for the three blocking
+# gates that actually run through run_manifest_push_gates's loop (push-tree-size,
+# push-conflict-markers, push-runtime-api-regression -- push-conflict-tree is
+# the manifest's fourth blocking row but it is already run, unconditionally
+# sequentially, by run_conflict_tree_union BEFORE this function is ever
+# called, gated by MUST_CHECK_CONFLICT_UNION_DONE). Sequential on this host
+# measured push-tree-size alone at ~3.5s of a ~5s blocking-gate total; running
+# the three concurrently instead of one after another is the O1-approved fix
+# (push_hook_plan.md item2/O1). Never called directly by the manifest loop --
+# it is only entered from a fail-closed signature check at the top of
+# run_manifest_push_gates below, so any manifest/dispatcher drift away from
+# the exact three known rows falls straight back to the ordinary sequential
+# case-statement loop, unchanged.
+run_three_push_gates_parallel() {
+    _p_range=$1
+    _left=$(( MUST_CHECK_BUDGET_MS - MUST_CHECK_BUDGET_SPENT_MS ))
+    if [ "$_left" -le 0 ]; then
+        MUST_CHECK_BUDGET_OVERRUN=push-tree-size
+        echo "push-must-check: ERROR — blocking gate push-tree-size not run: the ${MUST_CHECK_BUDGET_MS}ms blocking budget is exhausted (${MUST_CHECK_BUDGET_SPENT_MS}ms spent)" >&2
+        return 1
+    fi
+    _left_s="$(( _left / 1000 )).$(printf '%03d' $(( _left % 1000 )))"
+    _pw=$(mktemp -d) || return 1
+    _t0=$(push_now_ms)
+
+    "$TIMEOUT_BIN" -k 2 "$_left_s" sh "$ROOT/scripts/check/check-tree-size-push.shs" --push-tip "$_p_range" \
+        >"$_pw/tree-size.out" 2>&1 &
+    _pid_ts=$!
+    "$TIMEOUT_BIN" -k 2 "$_left_s" sh "$ROOT/scripts/check/check-no-conflict-markers-push.shs" "$_p_range" \
+        >"$_pw/markers.out" 2>&1 &
+    _pid_cm=$!
+    if [ -n "$RUNTIME_API_EXPECT_REMOVALS" ]; then
+        "$TIMEOUT_BIN" -k 2 "$_left_s" sh "$ROOT/scripts/check/check-runtime-api-regression-push.shs" --scan-only --expect-removals "$RUNTIME_API_EXPECT_REMOVALS" "$_p_range" \
+            >"$_pw/rtapi.out" 2>&1 &
+    else
+        "$TIMEOUT_BIN" -k 2 "$_left_s" sh "$ROOT/scripts/check/check-runtime-api-regression-push.shs" --scan-only "$_p_range" \
+            >"$_pw/rtapi.out" 2>&1 &
+    fi
+    _pid_rt=$!
+
+    wait "$_pid_ts"; _rc_ts=$?
+    _ms_ts=$(( $(push_now_ms) - _t0 ))
+    wait "$_pid_cm"; _rc_cm=$?
+    _ms_cm=$(( $(push_now_ms) - _t0 ))
+    wait "$_pid_rt"; _rc_rt=$?
+    _ms_rt=$(( $(push_now_ms) - _t0 ))
+
+    _batch_ms=$(( $(push_now_ms) - _t0 ))
+    MUST_CHECK_BUDGET_SPENT_MS=$(( MUST_CHECK_BUDGET_SPENT_MS + _batch_ms ))
+    MUST_CHECK_BLOCKING_RUN=$(( MUST_CHECK_BLOCKING_RUN + 3 ))
+
+    cat "$_pw/tree-size.out" 2>/dev/null
+    echo "push-must-check: gate push-tree-size exit=$_rc_ts ${_ms_ts}ms (blocking budget ${MUST_CHECK_BUDGET_SPENT_MS}/${MUST_CHECK_BUDGET_MS}ms, parallel batch)" >&2
+    cat "$_pw/markers.out" 2>/dev/null
+    echo "push-must-check: gate push-conflict-markers exit=$_rc_cm ${_ms_cm}ms (blocking budget ${MUST_CHECK_BUDGET_SPENT_MS}/${MUST_CHECK_BUDGET_MS}ms, parallel batch)" >&2
+    cat "$_pw/rtapi.out" 2>/dev/null
+    echo "push-must-check: gate push-runtime-api-regression exit=$_rc_rt ${_ms_rt}ms (blocking budget ${MUST_CHECK_BUDGET_SPENT_MS}/${MUST_CHECK_BUDGET_MS}ms, parallel batch)" >&2
+    rm -rf "$_pw"
+
+    _fail=0
+    for _pair in "push-tree-size:$_rc_ts" "push-conflict-markers:$_rc_cm" "push-runtime-api-regression:$_rc_rt"; do
+        _gid=${_pair%%:*}; _grc=${_pair#*:}
+        case "$_grc" in
+            0) : ;;
+            124|137)
+                MUST_CHECK_BUDGET_OVERRUN=$_gid
+                echo "push-must-check: ERROR — blocking gate $_gid killed at the push budget (${MUST_CHECK_BUDGET_SPENT_MS}ms of ${MUST_CHECK_BUDGET_MS}ms); its verdict is UNKNOWN, not a pass. Split the push, or run the slow tier: sign-local-ci-receipt.shs --run --tier local" >&2
+                _fail=1 ;;
+            *)
+                echo "push-must-check: BLOCKING gate $_gid failed (exit $_grc)" >&2
+                _fail=1 ;;
+        esac
+    done
+    [ "$_fail" -eq 0 ] && return 0
+    return 1
+}
+
 run_manifest_push_gates() {
     _manifest=$1
     _range=$2
@@ -288,56 +435,542 @@ run_manifest_push_gates() {
     _push_rows=$(mktemp) || return 2
     printf '%s\n' "$_manifest" | awk '/^[[:space:]]+[a-z0-9][a-z0-9-]*,[[:space:]]*push,/ {print}' > "$_push_rows"
     [ -s "$_push_rows" ] || { rm -f "$_push_rows"; return 2; }
-    while IFS=, read -r _id _tier _blocking _mode _command _description; do
-        _id=$(printf '%s' "$_id" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-        _mode=$(printf '%s' "$_mode" | tr -d ' ')
-        _command=$(printf '%s' "$_command" | sed 's/^[[:space:]]*"//;s/"[[:space:]]*$//')
-        [ -n "$_command" ] || { rm -f "$_push_rows"; return 2; }
-        _blocking=$(printf '%s' "$_blocking" | tr -d ' ')
+    # Advisory rows (push_blocking=false) are SKIPPED on an ordinary push since
+    # 2026-09-23. Measured that day over 67 real pushes: 50 of 75 push rows were
+    # advisory, they never block, their verdicts were red for weeks with nothing
+    # acting (perf-regression 37/37 red, process-wait-eintr 37/37 "selftest
+    # failed"), and they were ~80% of a 10-15 minute push (plan-acceptance
+    # sweep, llm-caret ~122s, merge-content-conservation ~23s). The rows stay
+    # in the manifest — wiring is preserved and MUST_CHECK_ADVISORY=1 runs every
+    # one of them — but the default push runs only the blocking set. The skip
+    # is never silent: the count is printed once at the end of the loop.
+    _advisory_skipped=0
+    _advisory_run=${MUST_CHECK_ADVISORY:-0}
+    _dispatch_text=$(git -C "$ROOT" show "$_ref:$SELF_REL" 2>/dev/null) ||
+        _dispatch_text=$(cat "$ROOT/$SELF_REL" 2>/dev/null) ||
+        { rm -f "$_push_rows"; return 2; }
+    # The manifest carries `ci_job` and `inputs` between `command` and
+    # `description` (see the header of config/check/must_check_gates.sdn). They
+    # are read explicitly rather than swallowed into `_description` so a row
+    # that lost the columns is REJECTED here instead of silently reinterpreted:
+    # a shifted field would make the `$_id:$_mode:$_command` key stop matching
+    # its dispatch case, which lands on the fail-closed `*)` arm and blocks
+    # every push with no explanation.
+    #
+    # ONE awk pass (2026-09-24) normalises every push row and performs the
+    # advisory-row parity check. The previous per-row loop spawned ~8
+    # sed/tr/grep processes per row; with 84 push rows that was ~21s of the
+    # push hook on Windows before any gate ran. Same rules: fields split on
+    # `,` exactly as `IFS=, read` did (the 8th field absorbs the rest), an
+    # empty command or a missing/quoted ci_job/inputs column rejects the whole
+    # manifest (return 2), and a skipped advisory row must still name an exact
+    # `'<id>:<mode>:<command>')` arm in the COMMITTED dispatcher text.
+    _push_dispatch=$(mktemp) || { rm -f "$_push_rows"; return 2; }
+    _push_run=$(mktemp) || { rm -f "$_push_rows" "$_push_dispatch"; return 2; }
+    printf '%s\n' "$_dispatch_text" > "$_push_dispatch"
+    awk -F, -v advisory_run="$_advisory_run" -v ref="$_ref" -v self_rel="$SELF_REL" -v run_out="$_push_run" '
+        function trim(v) { gsub(/^[[:space:]]+|[[:space:]]+$/, "", v); return v }
+        function nosp(v) { gsub(/ /, "", v); return v }
+        FNR == NR { txt = txt $0 "\n"; next }
+        {
+            id = trim($1); blocking = nosp($3); mode = nosp($4)
+            cmd = $5; sub(/^[[:space:]]*"/, "", cmd); sub(/"[[:space:]]*$/, "", cmd)
+            ci = nosp($6); inp = nosp($7)
+            if (cmd == "" || ci == "" || ci ~ /"/ || inp == "" || inp ~ /"/) { bad = 1; exit }
+            if (blocking != "true" && advisory_run != "1") {
+                if (index(txt, "\047" id ":" mode ":" cmd "\047)") == 0) {
+                    printf "push-must-check: advisory manifest row \047%s\047 (mode %s, command \"%s\") at %s matches no dispatch arm in %s — refusing the row (fail-closed)\n", id, mode, cmd, ref, self_rel > "/dev/stderr"
+                    bad = 1; exit
+                }
+                skipped++
+                next
+            }
+            printf "%s\t%s\t%s\t%s\n", id, blocking, mode, cmd > run_out
+        }
+        END { if (bad) exit 2; printf "%d\n", skipped }' "$_push_dispatch" "$_push_rows" > "$_push_dispatch.count"
+    _norm_rc=$?
+    if [ "$_norm_rc" -ne 0 ]; then
+        rm -f "$_push_rows" "$_push_dispatch" "$_push_dispatch.count" "$_push_run"; return 2
+    fi
+    read -r _advisory_skipped < "$_push_dispatch.count" || _advisory_skipped=0
+    rm -f "$_push_dispatch" "$_push_dispatch.count"
+    mv -f "$_push_run" "$_push_rows" || { rm -f "$_push_run" "$_push_rows"; return 2; }
+    _tab=$(printf '\t')
+
+    # PARALLEL FAST PATH (2026-09-25, push_hook_plan.md item2/O1): only taken
+    # when the surviving push rows are EXACTLY the four known blocking rows,
+    # in their known manifest order, with their exact known commands, AND the
+    # conflict-tree union has already run (so the first row is a guaranteed
+    # no-op here). Any manifest edit, reorder, added row, or dispatcher drift
+    # away from this exact signature falls straight through to the unmodified
+    # sequential case-statement loop below -- fail-closed to the slower but
+    # certainly-correct path, never to skipping a gate. SIMPLE_PUSH_SEQUENTIAL_GATES=1
+    # forces the sequential path unconditionally, for A/B timing verification.
+    #
+    # `command -v run_three_push_gates_parallel` is a second, independent
+    # fail-closed belt: load_committed_dispatcher (above in this file) loads
+    # the helper from the committed copy alongside a committed
+    # run_manifest_push_gates, but this signature check itself can also be
+    # reached from an OLDER run_manifest_push_gates that a NEWER committed
+    # copy overwrote only partially in some future refactor, or from a caller
+    # that invokes this function directly (as the --self-test fixture below
+    # does) without going through load_committed_dispatcher at all. Taking
+    # the fast path when the helper function does not actually exist would
+    # resolve the call at line ~537 to a shell "command not found" (rc 127),
+    # which reads as a BLOCKING gate failure on an otherwise-clean push.
+    if [ "${SIMPLE_PUSH_SEQUENTIAL_GATES:-0}" != 1 ] && [ "${MUST_CHECK_CONFLICT_UNION_DONE:-0}" = 1 ] && \
+       command -v run_three_push_gates_parallel >/dev/null 2>&1; then
+        _rows_n=$(wc -l < "$_push_rows" | tr -d ' ')
+        if [ "$_rows_n" -eq 4 ]; then
+            _fp_r1=$(sed -n '1p' "$_push_rows")
+            _fp_r2=$(sed -n '2p' "$_push_rows")
+            _fp_r3=$(sed -n '3p' "$_push_rows")
+            _fp_r4=$(sed -n '4p' "$_push_rows")
+            _fp_want1=$(printf 'push-conflict-tree\ttrue\trange\tsh scripts/check/check-no-conflict-tree-push.shs {range}')
+            _fp_want2=$(printf 'push-tree-size\ttrue\trange\tsh scripts/check/check-tree-size-push.shs --push-tip {range}')
+            _fp_want3=$(printf 'push-conflict-markers\ttrue\trange\tsh scripts/check/check-no-conflict-markers-push.shs {range}')
+            _fp_want4=$(printf 'push-runtime-api-regression\ttrue\trange\tsh scripts/check/check-runtime-api-regression-push.shs --scan-only {range}')
+            if [ "$_fp_r1" = "$_fp_want1" ] && [ "$_fp_r2" = "$_fp_want2" ] && \
+               [ "$_fp_r3" = "$_fp_want3" ] && [ "$_fp_r4" = "$_fp_want4" ]; then
+                run_three_push_gates_parallel "$_range"
+                _fastpath_rc=$?
+                rm -f "$_push_rows"
+                [ "$_advisory_skipped" -eq 0 ] ||
+                    echo "push-must-check: $_advisory_skipped advisory gate(s) skipped on this push (MUST_CHECK_ADVISORY=1 runs them; they never block)" >&2
+                return "$_fastpath_rc"
+            fi
+        fi
+    fi
+
+    while IFS="$_tab" read -r _id _blocking _mode _command; do
         case "$_id:$_mode:$_command" in
-            'push-conflict-tree:range:sh scripts/check/check-no-conflict-tree-push.shs')
+            'push-conflict-tree:range:sh scripts/check/check-no-conflict-tree-push.shs {range}')
                 [ "${MUST_CHECK_CONFLICT_UNION_DONE:-0}" = 1 ] ||
                     run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-no-conflict-tree-push.shs" "$_range" || { rm -f "$_push_rows"; return 1; } ;;
-            'push-tree-size:range:sh scripts/check/check-tree-size-push.shs')
+            'push-tree-size:range:sh scripts/check/check-tree-size-push.shs --push-tip {range}')
                 run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-tree-size-push.shs" --push-tip "$_range" || { rm -f "$_push_rows"; return 1; } ;;
-            'push-conflict-markers:range:sh scripts/check/check-no-conflict-markers-push.shs')
+            'push-kernel-closure:tree:sh scripts/check/check-kernel-closure.shs')
+                # Advisory by manifest (push_blocking=false), OD-10 (kernel/plugin
+                # audit plan section 6): widened WP-05 checker (2026-09-24) is
+                # honestly RED on main pending WP-06/08 landing real K0/K1
+                # boundary edges. Recorded, not blocking, until then. The
+                # `|| { rm -f "$_push_rows"; return 1; }` tail matches every
+                # sibling case: without it, this row would fail OPEN if it is
+                # ever promoted to a blocking row later (push_blocking: true),
+                # since nothing here would stop the loop or propagate a
+                # non-zero status to the caller on a real failure.
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-kernel-closure.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-conflict-markers:range:sh scripts/check/check-no-conflict-markers-push.shs {range}')
                 run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-no-conflict-markers-push.shs" "$_range" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-no-document-symlinks:ref:sh scripts/check/check-no-document-symlinks-push.shs --rev')
+                # Mode-level damage every other guard is blind to: a 120000
+                # entry whose blob is the whole TEXT of the file it used to
+                # point at. Well-formed content, correct file count, no markers
+                # - and checkout dies with ENAMETOOLONG on macOS.
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-no-document-symlinks-push.shs" --rev "$_ref" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-merge-content-conservation:range:sh scripts/check/check-merge-content-conservation-push.shs --scan-only')
+                # The sibling of push-conflict-markers, for the damage that
+                # leaves NO marker: git auto-merged an add/add against an empty
+                # base and silently dropped a line neither parent deleted
+                # (7d40e71aa9c, session.retain()). Marker text, conflict trees,
+                # file counts and rt_* symbol sets are all blind to it.
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-merge-content-conservation-push.shs" --scan-only "$_range" || { rm -f "$_push_rows"; return 1; } ;;
             'push-rules-quick:ref:sh scripts/check/check-rules-sdl.shs --scan-only --group quick --ref')
                 run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-rules-sdl.shs" --scan-only --group quick --ref "$_ref" || { rm -f "$_push_rows"; return 1; } ;;
             'push-interpreter-module-owners:ref:sh scripts/check/check-interpreter-module-owners.shs --scan-only --ref')
                 run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-interpreter-module-owners.shs" --scan-only --ref "$_ref" || { rm -f "$_push_rows"; return 1; } ;;
-            'push-runtime-api-regression:range:sh scripts/check/check-runtime-api-regression-push.shs --scan-only')
+            'push-runtime-api-regression:range:sh scripts/check/check-runtime-api-regression-push.shs --scan-only {range}')
                 if [ -n "$RUNTIME_API_EXPECT_REMOVALS" ]; then
                     run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-runtime-api-regression-push.shs" --scan-only --expect-removals "$RUNTIME_API_EXPECT_REMOVALS" "$_range" || { rm -f "$_push_rows"; return 1; }
                 else
                     run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-runtime-api-regression-push.shs" --scan-only "$_range" || { rm -f "$_push_rows"; return 1; }
                 fi ;;
-            'push-no-direct-rt:tree:sh scripts/check/check-no-direct-rt.shs')
-                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-no-direct-rt.shs" || { rm -f "$_push_rows"; return 1; } ;;
-            'push-interpreter-extern-registry-gap:tree:sh scripts/check/check-interpreter-extern-registry-gap.shs --scan-only')
-                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-interpreter-extern-registry-gap.shs" --scan-only || { rm -f "$_push_rows"; return 1; } ;;
-            'push-signature-type-import-provenance:tree:sh scripts/check/check-signature-type-import-provenance.shs')
-                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-signature-type-import-provenance.shs" || { rm -f "$_push_rows"; return 1; } ;;
-            'push-type-walk-constructor-parity:tree:sh scripts/check/check-type-walk-constructor-parity.shs --scan-only')
-                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-type-walk-constructor-parity.shs" --scan-only || { rm -f "$_push_rows"; return 1; } ;;
+            'push-interpreter-extern-registry-gap:ref:sh scripts/check/check-interpreter-extern-registry-gap.shs --scan-only --rev')
+                # ref, not tree, since 2026-09-07 — same wrong-tree defect. The
+                # declared set, the registry AND the frozen baseline all come
+                # from the pushed sha. See
+                # doc/08_tracking/bug/push_gates_evaluate_working_checkout_not_pushed_commit_2026-09-06.md
+                _extern_gap_base=${_range%%..*}
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-interpreter-extern-registry-gap.shs" --scan-only --rev "$_ref" --baseline-rev "$_extern_gap_base" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-sffi-v2-authority:ref:sh scripts/check/check-sffi-v2-authority.shs --rev')
+                # ref, not tree, since 2026-09-07. The 46 sub-guards each
+                # resolve their own root from $0, so the wrapper materialises
+                # the revision and executes the COPIES INSIDE it — running
+                # $ROOT/scripts/audit/... with only the cwd changed would read
+                # the working copy straight back through $0. See
+                # doc/08_tracking/bug/push_gates_evaluate_working_checkout_not_pushed_commit_2026-09-06.md
+                _sffi_base=${_range%%..*}
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-sffi-v2-authority.shs" --rev "$_ref" --baseline-rev "$_sffi_base" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-type-walk-constructor-parity:ref:sh scripts/check/check-type-walk-constructor-parity.shs --scan-only --rev')
+                # ref, not tree, since 2026-09-06 — same wrong-tree defect. See
+                # doc/08_tracking/bug/push_gates_evaluate_working_checkout_not_pushed_commit_2026-09-06.md
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-type-walk-constructor-parity.shs" --scan-only --rev "$_ref" || { rm -f "$_push_rows"; return 1; } ;;
             'push-perf-regression-tests:tree:sh scripts/check/check-perf-regression-tests.shs')
                 run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-perf-regression-tests.shs" || { rm -f "$_push_rows"; return 1; } ;;
-            'push-use-target-resolves:tree:sh scripts/check/check-use-target-resolves.shs')
-                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-use-target-resolves.shs" || { rm -f "$_push_rows"; return 1; } ;;
-            'push-guard-wiring:tree:sh scripts/check/check-guard-wiring.shs')
-                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-guard-wiring.shs" || { rm -f "$_push_rows"; return 1; } ;;
-            'push-outline-parse-terminates:tree:sh scripts/check/check-outline-parse-terminates.shs')
-                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-outline-parse-terminates.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-entry-closure-ratchet:tree:sh scripts/check/check-entry-closure-ratchet.shs --quick')
+                # tree, not ref: an entry's import closure is only observable by
+                # RUNNING the entry, so there is nothing to materialise from a
+                # commit. Advisory (push_blocking: false) because it needs both
+                # strace and a simple binary carrying rt_env_vars; a host with
+                # neither answers ERROR, which would otherwise block every push
+                # from it — the same missing-tool class as push-dual-run-shadow.
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-entry-closure-ratchet.shs" --quick || { rm -f "$_push_rows"; return 1; } ;;
+            'push-shs-path-conversion-equivalence:tree:sh scripts/check/check-shs-path-conversion-equivalence.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-shs-path-conversion-equivalence.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-shs-native-tool-boundary-preserved:tree:sh scripts/check/check-shs-native-tool-boundary-preserved.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-shs-native-tool-boundary-preserved.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-guard-wiring:ref:sh scripts/check/check-guard-wiring.shs --rev')
+                # ref, not tree, since 2026-09-07 — but only the CONTENT half.
+                # The wiring graph (guards, roots, edges, opt-out, baseline) is
+                # a property of the pushed commit; "is a hook installed in this
+                # clone" stays on the real repository root, because that is a
+                # property of THIS MACHINE. See
+                # doc/08_tracking/bug/push_gates_evaluate_working_checkout_not_pushed_commit_2026-09-06.md
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-guard-wiring.shs" --rev "$_ref" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-sosix-capsule-boundaries:tree:sh scripts/check/check-sosix-capsule-boundaries.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-sosix-capsule-boundaries.shs" || { rm -f "$_push_rows"; return 1; } ;;
             'push-main-test-runnable:ref:sh scripts/check/check-main-test-runnable-push.shs --rev')
                 run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-main-test-runnable-push.shs" --rev "$_ref" || { rm -f "$_push_rows"; return 1; } ;;
-            'push-c-runtime-compiles:tree:sh scripts/check/check-c-runtime-compiles-push.shs')
-                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-c-runtime-compiles-push.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-c-runtime-compiles:ref:sh scripts/check/check-c-runtime-compiles-push.shs --rev')
+                # ref, not tree, since 2026-09-07. Still a TREE check, not a
+                # delta — compilability is a property of a tree — but of the
+                # COMMITTED tree, materialised with git archive so a real
+                # compiler gets real files. See
+                # doc/08_tracking/bug/push_gates_evaluate_working_checkout_not_pushed_commit_2026-09-06.md
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-c-runtime-compiles-push.shs" --rev "$_ref" || { rm -f "$_push_rows"; return 1; } ;;
             'push-process-wait-eintr-retry:tree:sh scripts/check/check-process-wait-eintr-retry.shs')
                 run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-process-wait-eintr-retry.shs" || { rm -f "$_push_rows"; return 1; } ;;
-            *) rm -f "$_push_rows"; return 2 ;;
+            'push-mir-transient-scope-boundary:tree:sh scripts/check/check-mir-transient-scope-boundary.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-mir-transient-scope-boundary.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-rt-hash-text-cross-lane:tree:sh scripts/check/check-rt-hash-text-cross-lane.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-rt-hash-text-cross-lane.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-transient-scope-reclaims:tree:sh scripts/check/check-transient-scope-reclaims.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-transient-scope-reclaims.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-simd-kernels-vectorized:tree:sh scripts/check/check-simd-kernels-vectorized.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-simd-kernels-vectorized.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-vulkan-compute-real:tree:sh scripts/check/check-vulkan-compute-real.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-vulkan-compute-real.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-rt-dual-implementation:ref:sh scripts/check/check-rt-dual-implementation-ratchet.shs --rev')
+                # ref, not tree, since 2026-09-06. As a tree row this gate scanned
+                # the shared working checkout, so under concurrent agent load it
+                # reported on content that was NOT being pushed while missing the
+                # regression in content that WAS -- see
+                # doc/08_tracking/bug/push_gates_evaluate_working_checkout_not_pushed_commit_2026-09-06.md
+                # DELTA vs the commit the push replaces since 2026-09-23: only a
+                # single-lane rt_* that is new relative to the base is fatal;
+                # frozen-baseline drift is printed as information. The frozen
+                # comparison blocked 15 unrelated pushes in one day once main
+                # itself was red. CI/bootstrap keep the frozen comparison.
+                _rt_dual_base=${_range%%..*}
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-rt-dual-implementation-ratchet.shs" --rev "$_ref" --baseline-rev "$_rt_dual_base" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-no-mock-file-system-io:ref:sh scripts/check/check-no-mock-file-system-io.shs --rev')
+                # ref, not tree, since 2026-09-06 — same wrong-tree defect the
+                # rt-dual-implementation row was moved off. See
+                # doc/08_tracking/bug/push_gates_evaluate_working_checkout_not_pushed_commit_2026-09-06.md
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-no-mock-file-system-io.shs" --rev "$_ref" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-dual-run-shadow:tree:sh scripts/check/check-dual-run-shadow.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-dual-run-shadow.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-rust-llvm23-binding:tree:sh scripts/check/check-rust-llvm23-binding.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-rust-llvm23-binding.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-windows-directx-d3d11-lifecycle:tree:sh scripts/check/check-windows-directx-d3d11-lifecycle.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-windows-directx-d3d11-lifecycle.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-stage3-hir-retained-parser-rss:tree:sh scripts/check/check-stage3-hir-retained-parser-rss.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-stage3-hir-retained-parser-rss.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-freebsd-phase2-test-runner-contract:tree:sh scripts/check/check-freebsd-phase2-test-runner-contract.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-freebsd-phase2-test-runner-contract.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-linux-phase2-test-runner-contract:tree:sh scripts/check/check-linux-phase2-test-runner-contract.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-linux-phase2-test-runner-contract.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-windows-msvc-toolchain-contract:tree:sh scripts/check/check-windows-msvc-toolchain-contract.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-windows-msvc-toolchain-contract.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-tracking-doc-registration:tree:sh scripts/check/check-tracking-doc-registration.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-tracking-doc-registration.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-nested-fn-jit-lowering:tree:sh scripts/check/check-nested-fn-jit-lowering.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-nested-fn-jit-lowering.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-bootstrap-lane-verdict-line:tree:sh scripts/check/check-bootstrap-lane-verdict-line.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-bootstrap-lane-verdict-line.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-runner-binary-extern-freshness:tree:sh scripts/check/check-runner-binary-extern-freshness.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-runner-binary-extern-freshness.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            # The five arms below lacked `|| return 1` until 2026-09-23, so a
+            # blocking verdict from them was silently swallowed (the loop went
+            # on and the function returned 0): their push_blocking flag was
+            # dead. Same shape as every other arm now.
+            'push-cross-unit-user-to-text-not-hijacked:tree:sh scripts/check/check-cross-unit-user-to-text-not-hijacked.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-cross-unit-user-to-text-not-hijacked.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-base64url-codegen-lane-perf:tree:sh scripts/check/check-base64url-codegen-lane-perf.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-base64url-codegen-lane-perf.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-native-build-entry-memory-budget:tree:sh scripts/check/check-native-build-entry-memory-budget.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-native-build-entry-memory-budget.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-tracking-db-unique-ids:tree:sh scripts/check/check-tracking-db-unique-ids.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-tracking-db-unique-ids.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-frontend-closure-memory-budget:tree:sh scripts/check/check-frontend-closure-memory-budget.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-frontend-closure-memory-budget.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-ui-slim-closure:tree:sh scripts/check/check-ui-slim-closure.shs src/app/ui.tui/async_app.spl src/os/compositor src/os/drivers src/os/kernel src/lib/skia src/lib/gc_async_mut/gpu')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-ui-slim-closure.shs" src/app/ui.tui/async_app.spl src/os/compositor src/os/drivers src/os/kernel src/lib/skia src/lib/gc_async_mut/gpu || { rm -f "$_push_rows"; return 1; } ;;
+            'push-ui-slim-closure-tui-entry:tree:sh scripts/check/check-ui-slim-closure.shs src/app/ui/backend_entry_tui.spl src/os/compositor src/os/drivers src/os/kernel src/lib/skia src/lib/gc_async_mut/gpu')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-ui-slim-closure.shs" src/app/ui/backend_entry_tui.spl src/os/compositor src/os/drivers src/os/kernel src/lib/skia src/lib/gc_async_mut/gpu || { rm -f "$_push_rows"; return 1; } ;;
+            'push-ui-slim-closure-cli-entry:tree:sh scripts/check/check-ui-slim-closure.shs src/app/ui/cli_entry.spl src/os/compositor src/os/drivers src/os/kernel src/lib/skia src/lib/gc_async_mut/gpu')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-ui-slim-closure.shs" src/app/ui/cli_entry.spl src/os/compositor src/os/drivers src/os/kernel src/lib/skia src/lib/gc_async_mut/gpu || { rm -f "$_push_rows"; return 1; } ;;
+            'push-ui-slim-pack-inventory:tree:sh scripts/check/check-ui-slim-pack-inventory.shs src/app/ui/cli_entry.spl src/app/ui/backend_entry_tui.spl')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-ui-slim-pack-inventory.shs" src/app/ui/cli_entry.spl src/app/ui/backend_entry_tui.spl || { rm -f "$_push_rows"; return 1; } ;;
+            'push-parser-source-global-ratchet:ref:sh scripts/check/check-parser-source-global-ratchet.shs --rev')
+                # ref, not tree, since 2026-09-07 — same wrong-tree defect. The
+                # scanned sources AND the frozen baseline both come from the
+                # pushed sha. Materialised with git ls-tree + git checkout-index
+                # rather than git archive, which export-ignore filters. See
+                # doc/08_tracking/bug/push_gate_tree_mode_row_census_2026-09-06.md
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-parser-source-global-ratchet.shs" --rev "$_ref" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-runtime-source-list-parity:ref:sh scripts/check/check-runtime-source-list-parity.shs --rev')
+                # ref, not tree, since 2026-09-06 — same wrong-tree defect. See
+                # doc/08_tracking/bug/push_gates_evaluate_working_checkout_not_pushed_commit_2026-09-06.md
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-runtime-source-list-parity.shs" --rev "$_ref" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-lifecycle-reachability:tree:sh scripts/check/check-lifecycle-reachability.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-lifecycle-reachability.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-windows-checkout-damage:range:sh scripts/check/check-windows-checkout-damage-push.shs --scan-only')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-windows-checkout-damage-push.shs" --scan-only "$_range" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-no-direct-rt:ref:sh scripts/check/check-no-direct-rt.shs --roots src --rev')
+                # --roots src reproduces the pre-2026-08-28 src-only scan scope so
+                # this MANDATORY pre-push gate keeps its existing meaning against
+                # the existing baseline. The widened default
+                # (src,examples,tools,scripts,test) is honestly RED against that
+                # baseline until a lane migrates the debt or the baseline is
+                # deliberately regenerated for the wider scope.
+                # ref, not tree, since 2026-09-07 — same wrong-tree defect. The
+                # sources, the allowlist AND the baseline all come from the
+                # pushed sha. Measured at conversion: the working checkout held
+                # 24 untracked .spl the commit does not (16342 vs 16318 files).
+                # See doc/08_tracking/bug/push_gates_evaluate_working_checkout_not_pushed_commit_2026-09-06.md
+                # Push admission is a delta ratchet against the outgoing
+                # range's committed base. The older tracked baseline remains
+                # authoritative for standalone/bootstrap and release lanes,
+                # but cannot block a zero-debt branch merely because main has
+                # independently moved above that frozen snapshot.
+                _direct_rt_base=${_range%%..*}
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-no-direct-rt.shs" --roots src --rev "$_ref" --baseline-rev "$_direct_rt_base" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-orphan-part-files:ref:sh scripts/check/check-orphan-part-files.shs --rev')
+                # A part-file nothing imports is never compiled, so every other
+                # gate is blind to it: it is well-formed, non-conflicted, inside
+                # the file-count band and symbol-preserving. One sat in the tree
+                # for six weeks holding the only copy of two fixes' rationale and
+                # had itself stopped compiling (sweep/seed.tsv recorded it as
+                # `compile failed`) with nothing acting on the row.
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-orphan-part-files.shs" --rev "$_ref" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-port-io-single-owner:ref:sh scripts/check/check-port-io-single-owner.shs --rev')
+                # ref, not tree, since 2026-09-07 — same wrong-tree defect the
+                # rt-dual-implementation row was moved off. See
+                # doc/08_tracking/bug/push_gates_evaluate_working_checkout_not_pushed_commit_2026-09-06.md
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-port-io-single-owner.shs" --rev "$_ref" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-local-ci-receipt-selftest:tree:sh scripts/check/verify-local-ci-receipt.shs --selftest')
+                # Advisory by manifest (push_blocking=false): the verifier lands
+                # in a parallel lane, and a blocking row pointing at a file that
+                # does not exist yet would block every push in between. The
+                # selftest is what is pinned here, not a live receipt — CI
+                # verifies receipts, the push tier only proves the verifier's
+                # fail-closed fixtures still discriminate.
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/verify-local-ci-receipt.shs" --selftest || { rm -f "$_push_rows"; return 1; } ;;
+            'push-rt-api-groups:tree:sh scripts/check/check-rt-api-groups.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-rt-api-groups.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-plan-acceptance-swept:tree:sh scripts/check/check-plan-acceptance-swept.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-plan-acceptance-swept.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-transient-scope-text-field-promotion:ref:sh scripts/check/check-transient-scope-text-field-promotion.shs --rev')
+                # ref, not tree, from the day it was wired — the "do not add a
+                # new blocking tree row" rule. The three sources are
+                # materialised out of the pushed sha with git show, and the
+                # guard's selftest fixtures 3 and 4 require the checkout and the
+                # revision to DISAGREE in both directions. See
+                # doc/08_tracking/bug/push_gates_evaluate_working_checkout_not_pushed_commit_2026-09-06.md
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-transient-scope-text-field-promotion.shs" --rev "$_ref" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-no-unwind-lib-dependency:tree:sh scripts/check/check-no-unwind-lib-dependency.shs')
+                # Advisory by manifest: the fatal selftest needs cc + readelf +
+                # a libunwind.so.8 on the compiler search path, and the optional
+                # artifact half reads build/ outputs no revision contains.
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-no-unwind-lib-dependency.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-native-text-abi-and-binary-read:tree:sh scripts/check/check-native-text-abi-and-binary-read.shs')
+                # Advisory by manifest: green and cheap, but it COMPILES
+                # src/runtime, and src/runtime is not self-contained — archiving
+                # it alone silently moved check-c-runtime-compiles-push from 130
+                # compiled/5 skipped to 128/7 while still printing PASS. Promote
+                # by reusing that guard's archive scope, not a new one.
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-native-text-abi-and-binary-read.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-aot-failure-speaks:tree:sh scripts/check/check-aot-failure-speaks.shs --selftest')
+                # --selftest, like push-local-ci-receipt-selftest: the scan half
+                # needs --candidate <a real rejected stage binary>, which a push
+                # does not have, so a bare row would print "ERROR — nothing was
+                # checked" every time. What is pinned here is the classifier.
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-aot-failure-speaks.shs" --selftest || { rm -f "$_push_rows"; return 1; } ;;
+            'push-runtime-shared-library:tree:sh scripts/check/check-runtime-shared-library.shs')
+                # Advisory by manifest: libsimple_runtime.so is a build output no
+                # checkout carries, so this honestly reports ERROR until a lane
+                # builds the cdylib and passes --lib. A ref conversion cannot fix
+                # that — a revision has no .so either.
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-runtime-shared-library.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-native-text-to-i64-parses:tree:sh scripts/check/check-native-text-to-i64-parses.shs')
+                # Advisory by manifest: it must EXECUTE a native simple binary,
+                # and bin/simple is untracked (setup.shs makes the symlink), so a
+                # fresh checkout has none. Its 7 fixtures still run every push.
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-native-text-to-i64-parses.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-scv-inventory-resource-profile:tree:sh scripts/check/check-scv-inventory-resource-profile.shs')
+                # Advisory by manifest: needs an admitted Stage 2 compiler with
+                # provenance+sanity receipts (SCV_PROFILE_COMPILER), which no
+                # ordinary push runner has; fails closed without one.
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-scv-inventory-resource-profile.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-stage4-dynamic-runtime-lane:tree:sh scripts/check/check-stage4-dynamic-runtime-lane.shs')
+                # Advisory by manifest: needs a seed binary that can run
+                # native-build — the same missing-binary blocker
+                # push-dual-run-shadow carries.
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-stage4-dynamic-runtime-lane.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-llm-caret-server-serves:tree:sh scripts/check/check-llm-caret-server-serves.shs')
+                # Advisory by manifest and deliberately the slowest row before
+                # push-plan-acceptance-swept (~122s). run_push_gate invokes every
+                # guard as `sh`, and this one speaks HTTP over bash's /dev/tcp;
+                # under dash it used to die at the socket open with EMPTY stdout
+                # and no verdict, so the guard now re-execs under bash. It also
+                # needs bin/simple, which a fresh checkout lacks.
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-llm-caret-server-serves.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-rect-batch-spirv-pinned:tree:sh scripts/check/check-rect-batch-spirv-pinned.shs')
+                # Blocking: fast (~1s), no device required, fail-closed with its
+                # own 4-fixture selftest run before every scan. Recompiles the
+                # checked-in GLSL shader and asserts the pinned SPIR-V words in
+                # backend_vulkan_rect_batch_spirv.spl are byte-identical to what
+                # glslangValidator produces from it right now.
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-rect-batch-spirv-pinned.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-blit-spirv-pinned:tree:sh scripts/check/check-blit-spirv-pinned.shs')
+                # Blocking: fast (~1s), no device required, fail-closed with its
+                # own 5-fixture selftest run before every scan. Recompiles the
+                # checked-in GLSL shader and asserts the pinned SPIR-V words in
+                # backend_vulkan_blit_spirv.spl are byte-identical to what
+                # glslangValidator produces from it right now.
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-blit-spirv-pinned.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-deployed-closure-dedup:tree:sh scripts/check/check-deployed-closure-dedup.shs')
+                # Advisory by manifest: honestly RED on this host (a stray
+                # backup binary under bin/release/aarch64-unknown-linux-gnu/
+                # duplicates the primary compiler's bytes on a distinct,
+                # non-hardlinked inode). See
+                # doc/07_guide/perf/deployed_closure_manifest_v1.md.
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-deployed-closure-dedup.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-blur-rect-spirv-pinned:tree:sh scripts/check/check-blur-rect-spirv-pinned.shs')
+                # Blocking: fast (~1s), no device required, fail-closed with its
+                # own 4-fixture selftest run before every scan. Recompiles
+                # shaders/blur_rect.comp and asserts the pinned SPIR-V words in
+                # backend_vulkan_blur_rect_spirv.spl are byte-identical to what
+                # glslangValidator produces from it right now.
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-blur-rect-spirv-pinned.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-shadow-rect-spirv-pinned:tree:sh scripts/check/check-shadow-rect-spirv-pinned.shs')
+                # Blocking: fast (~1s), no device required, fail-closed with its
+                # own 4-fixture selftest run before every scan. Recompiles
+                # shaders/shadow_rect.comp and asserts the pinned SPIR-V words in
+                # backend_vulkan_shadow_rect_spirv.spl are byte-identical to what
+                # glslangValidator produces from it right now.
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-shadow-rect-spirv-pinned.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-glass-material-spirv-pinned:tree:sh scripts/check/check-glass-material-spirv-pinned.shs')
+                # Blocking: same shape as the sibling SPIR-V pin gates above,
+                # for shaders/glass_material.comp ->
+                # backend_vulkan_glass_material_spirv.spl.
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-glass-material-spirv-pinned.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-chrome-dynlib-probe:tree:sh scripts/check/check-chrome-dynlib-probe.shs')
+                # Advisory by manifest: stage B needs a pinned CEF drop most
+                # push hosts lack, and stage A needs a runnable Simple binary a
+                # fresh checkout does not have (ERROR — nothing was checked, not
+                # a fabricated pass). Runs in well under a second when it cannot
+                # proceed, so it never adds meaningful latency to a push.
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-chrome-dynlib-probe.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-font-catalog-pointer-release-perf:tree:sh scripts/check/check-font-catalog-pointer-release-perf.shs')
+                # Advisory by manifest: the probe needs a self-hosted Simple
+                # binary plus prlimit for its hard address-space cap; without
+                # them it exits 2 (ERROR - nothing was checked), never a
+                # fabricated pass.
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-font-catalog-pointer-release-perf.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-simpleos-x86-kernel-elf-fixture:tree:sh scripts/check/check-simpleos-x86-kernel-elf-fixture.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-simpleos-x86-kernel-elf-fixture.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-hir-visitors-fresh:tree:sh scripts/check/check-hir-visitors-fresh.shs')
+                # Advisory by manifest: regenerates via a runnable Simple binary
+                # (~20s); without one it exits 2, never a fabricated pass.
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-hir-visitors-fresh.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-generated-visitors-fresh:tree:sh scripts/check/check-generated-visitors-fresh.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-generated-visitors-fresh.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-hir-codec-complete:tree:sh scripts/check/check-hir-codec-complete.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-hir-codec-complete.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-cache-writer-runtime-provisioning:tree:sh scripts/check/check-cache-writer-runtime-provisioning.shs')
+                # Advisory by manifest: a static grep over the cache-writer
+                # workflows that needs rg, which a bare push host may lack.
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-cache-writer-runtime-provisioning.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-simpleos-ssp-linkage:tree:sh scripts/check/check-simpleos-ssp-linkage.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-simpleos-ssp-linkage.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-simpleos-atomic-slot-owner-v2:tree:sh scripts/check/check-simpleos-atomic-slot-owner-v2.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-simpleos-atomic-slot-owner-v2.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-simpleos-multiplatform-atomic-provider:tree:sh scripts/check/check-simpleos-multiplatform-atomic-provider.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-simpleos-multiplatform-atomic-provider.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-simpleos-harden-probe-build-target:tree:sh scripts/check/check-simpleos-harden-probe-build-target.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-simpleos-harden-probe-build-target.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-allocation-registry-churn:tree:sh scripts/check/check-allocation-registry-churn.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-allocation-registry-churn.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-windows-coff-compat-alias-gc:tree:sh scripts/check/check-windows-coff-compat-alias-gc.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-windows-coff-compat-alias-gc.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-sdn-crc32-sealed:ref:sh scripts/check/check-sdn-crc32-sealed.shs --rev')
+                # Every sealed *.sdn at the pushed sha must verify: reseal-on-copy
+                # is a no-op. A stale #sdn-crc32 header makes the loader read the
+                # whole file as nil (bug_db.sdn 2026-09-23, test_db.sdn
+                # 2026-09-05); no other gate looks at the header. ~1s.
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-sdn-crc32-sealed.shs" --rev "$_ref" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-rust-duplicate-reexport:range:sh scripts/check/check-rust-duplicate-reexport.shs --range')
+                # The static, sub-second half of the "seed does not compile"
+                # class: a name re-exported twice in one file is rustc E0252
+                # (origin/main unbuildable 2026-09-23). Diff-scoped: only the
+                # Rust files the range touches are scanned (a duplicate is a
+                # per-file property); the whole-scope scan and the full cargo
+                # check belong to CI.
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-rust-duplicate-reexport.shs" --range "$_range" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-range-shs-hygiene:range:sh scripts/check/check-range-shs-hygiene-push.shs')
+                # Diff-scoped half of check-guard-wiring (35s whole-tree, now
+                # advisory here and whole-tree in the extended CI job): every
+                # touched .shs still parses and every ADDED guard script is
+                # mentioned by a root. ~1s.
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-range-shs-hygiene-push.shs" "$_range" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-no-stale-snapshot-rewind:range:sh scripts/check/check-no-stale-snapshot-rewind.shs --range')
+                # The stale-snapshot rewind class itself (e274cd33719 and two
+                # more, 2026-09-06): a single-parent commit that REWINDS work its
+                # own parent carried. push-runtime-api-regression sees only the
+                # rt_* symptom. ~5s on a 7-commit range; revert/trailer/bulk
+                # escapes are the script's own.
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-no-stale-snapshot-rewind.shs" --range "$_range" || { rm -f "$_push_rows"; return 1; } ;;
+            *)
+                # Fail-closed, and never silent: until 2026-09-06 this arm returned
+                # 2 without a word, so the caller reported "one or more gates
+                # failed" after a run in which no blocking gate had failed.
+                echo "push-must-check: manifest row '$_id' (mode $_mode, command \"$_command\") at $_ref matches no dispatch arm in $SELF_REL — refusing the row (fail-closed)" >&2
+                rm -f "$_push_rows"; return 2 ;;
         esac
     done < "$_push_rows"
     rm -f "$_push_rows"
+    [ "$_advisory_skipped" -eq 0 ] ||
+        echo "push-must-check: $_advisory_skipped advisory gate(s) skipped on this push (MUST_CHECK_ADVISORY=1 runs them; they never block)" >&2
+}
+
+# The manifest is read from the COMMIT being pushed, so the dispatch arms must be
+# the ones committed with it. The working tree can sit on another lineage (a
+# detached worktree, a peer session's branch): on 2026-09-06 a push of a commit
+# whose manifest declared push-parser-source-global-ratchet was refused because
+# the checked-out tree predated that gate and had no arm for it. Redefine
+# run_manifest_push_gates from the pushed commit's copy of this script when that
+# copy carries one; an older commit without it keeps the running definition.
+load_committed_dispatcher() {
+    _committed_self=$(git -C "$ROOT" show "$1:$SELF_REL" 2>/dev/null) || return 0
+    # Load the PARALLEL-BATCH HELPER first, and from the same committed text,
+    # if the committed copy carries one. Review finding (2026-09-25, WP3
+    # follow-up): a committed run_manifest_push_gates newer than the running
+    # script can call run_three_push_gates_parallel, a function the OLDER
+    # running script never defined -- eval'ing only the newer
+    # run_manifest_push_gates left that call resolving to nothing, i.e. a
+    # shell "command not found" (rc 127), which run_manifest_push_gates's own
+    # `|| { rm -f "$_push_rows"; return 1; }` tail turns into a FALSE BLOCK of
+    # an otherwise-clean push. Loading the helper's own committed definition
+    # alongside the function that calls it closes that gap; an older commit
+    # with neither block present leaves the running script's own definitions
+    # (if any) in place, unchanged.
+    _committed_helper=$(printf '%s\n' "$_committed_self" | sed -n '/^run_three_push_gates_parallel() {$/,/^}$/p')
+    [ -z "$_committed_helper" ] || eval "$_committed_helper"
+    _committed_fn=$(printf '%s\n' "$_committed_self" | sed -n '/^run_manifest_push_gates() {$/,/^}$/p')
+    [ -n "$_committed_fn" ] || return 0
+    eval "$_committed_fn"
 }
 
 run_conflict_tree_union() {
@@ -359,6 +992,11 @@ run_conflict_tree_union() {
             _has_new=1
         else
             set -- "$@" "$_remote_sha"
+            if ! git -C "$ROOT" merge-base --is-ancestor "$_remote_sha" "$_local_sha"; then
+                _rebased_base=$(rebased_push_published_base "$_local_sha") ||
+                    die "cannot verify published main as the base of rebased ref $_local_ref"
+                set -- "$@" "$_rebased_base"
+            fi
         fi
     done < "$_ref_file"
     if [ "$_has_new" -eq 1 ]; then
@@ -366,8 +1004,119 @@ run_conflict_tree_union() {
         case "$_push_remote" in ''|*[!A-Za-z0-9._/-]*) die "new ref requires the actual push remote name" ;; esac
         set -- "$@" "--remotes=$_push_remote"
     fi
+    # Merging main into a stale PR branch fast-forwards the branch, so
+    # old..new carries every main commit the merge brought in and trips the
+    # 64-commit bound. Those commits are already published on main and were
+    # gated when they landed; exclude them (2026-09-28).
+    _main_ref=$(published_main_ref) && set -- "$@" "$_main_ref"
     run_push_gate push-conflict-tree true "$ROOT/scripts/check/check-no-conflict-tree-push.shs" "$@"
 }
+
+# Prints refs/remotes/<push remote>/main when it resolves to a commit, so the
+# caller can exclude already-published main history from the outgoing range.
+# Fail-closed: without the ref (or a push remote name) nothing is excluded, the
+# pre-2026-09-28 range stands, and a NOTE says so on stderr.
+published_main_ref() {
+    _pm_remote=${MUST_CHECK_PUSH_REMOTE:-}
+    case "$_pm_remote" in
+        ''|*[!A-Za-z0-9._/-]*)
+            echo "push-must-check: NOTE — no push remote name; main history is not excluded from the outgoing range" >&2
+            return 1 ;;
+    esac
+    _pm_ref=refs/remotes/$_pm_remote/main
+    git -C "$ROOT" rev-parse --verify --quiet "$_pm_ref^{commit}" >/dev/null || {
+        echo "push-must-check: NOTE — cannot verify $_pm_ref; fetch it to exclude already-published main commits from the outgoing range" >&2
+        return 1
+    }
+    printf '%s\n' "$_pm_ref"
+}
+
+# Fast-forward counterpart for the per-ref range: when the tip merged published
+# main, use the unique merge-base of tip and main as the predecessor if it
+# descends from the old ref. Every commit this drops from old..tip is reachable
+# from published main; the branch's own commits all stay in range.
+main_merged_predecessor() {
+    _mm_tip=$1
+    _mm_old=$2
+    _mm_ref=$(published_main_ref) || return 1
+    _mm_base=$(git -C "$ROOT" merge-base --all "$_mm_ref" "$_mm_tip") || return 1
+    [ -n "$_mm_base" ] || return 1
+    [ "$(printf '%s\n' "$_mm_base" | wc -l | tr -d ' ')" -eq 1 ] || return 1
+    [ "$_mm_base" != "$_mm_tip" ] || return 1
+    # Only replace old when it is strictly narrower.
+    [ "$(git -C "$ROOT" rev-list --count "$_mm_base..$_mm_tip")" -lt "$(git -C "$ROOT" rev-list --count "$_mm_old..$_mm_tip")" ] || return 1
+    printf '%s\n' "$_mm_base"
+}
+
+# A non-fast-forward PR update replaces a branch built on an old main with a
+# branch built on current main. The old branch head excludes none of the main
+# commits merged since then, so old..new can exceed the 64-commit guard bound
+# even when the new branch adds one commit. Only use main as an exclusion after
+# asking the push remote for its actual main SHA and computing the unique
+# common ancestor with the new tip. That ancestor is published even when main
+# advances after the PR was rebased. A stale tracking ref, unrelated history,
+# ambiguous merge base, or unavailable remote remains a refusal. The entire
+# tip-side range from that published base is checked by every range guard.
+rebased_push_published_base() {
+    _rebased_tip=$1
+    _rebased_remote=${MUST_CHECK_PUSH_REMOTE:-}
+    case "$_rebased_remote" in ''|*[!A-Za-z0-9._/-]*) return 1 ;; esac
+    # This network call is outside run_push_gate's per-ref budget. Bound it
+    # independently so an unavailable remote cannot hang the pre-push hook.
+    _rebased_line=$("$TIMEOUT_BIN" -k 1s "${REMOTE_QUERY_TIMEOUT_S}s" git -C "$ROOT" ls-remote --exit-code "$_rebased_remote" refs/heads/main 2>/dev/null) || return 1
+    _rebased_sha=${_rebased_line%%[[:space:]]*}
+    _rebased_ref=${_rebased_line#*[[:space:]]}
+    [ "$_rebased_ref" = refs/heads/main ] || return 1
+    git -C "$ROOT" rev-parse --verify --quiet "$_rebased_sha^{commit}" >/dev/null || return 1
+    _rebased_base=$(git -C "$ROOT" merge-base --all "$_rebased_sha" "$_rebased_tip") || return 1
+    [ -n "$_rebased_base" ] || return 1
+    [ "$(printf '%s\n' "$_rebased_base" | wc -l | tr -d ' ')" -eq 1 ] || return 1
+    [ "$_rebased_base" != "$_rebased_tip" ] || return 1
+    printf '%s\n' "$_rebased_base"
+}
+
+# The blocking budget needs GNU timeout(1). Absence is an ERROR naming the
+# tool, never an unbudgeted run. Resolved here, BEFORE --self-test, so the
+# budget/dispatcher self-test fixtures below exercise the exact same
+# TIMEOUT_BIN and MUST_CHECK_BUDGET_MS the real push path uses.
+case "$MUST_CHECK_PUSH_BUDGET_S" in
+    ''|*[!0-9]*|0) echo "push-must-check: ERROR — nothing was checked (MUST_CHECK_PUSH_BUDGET_S must be a positive integer, got '$MUST_CHECK_PUSH_BUDGET_S')"; exit 2 ;;
+esac
+[ "$MUST_CHECK_PUSH_BUDGET_S" -eq 10 ] ||
+    echo "push-must-check: NOTE — blocking budget overridden to ${MUST_CHECK_PUSH_BUDGET_S}s via MUST_CHECK_PUSH_BUDGET_S (default 10s)" >&2
+MUST_CHECK_BUDGET_MS=$(( MUST_CHECK_PUSH_BUDGET_S * 1000 ))
+# Tool selection (2026-09-24 fix): `command -v timeout` alone is unsafe on two
+# real hosts. (1) Stock macOS has no `timeout` at all — only Homebrew's
+# coreutils `gtimeout` — so a bare `command -v timeout` finding nothing must
+# still fall back to `gtimeout`, not error before checking it. (2) On Windows,
+# `C:\Windows\System32\timeout.exe` is a DIFFERENT PROGRAM (an interactive
+# countdown/sleep command, not a process-timeout wrapper) and can win the PATH
+# race ahead of Git Bash's own MSYS2 coreutils `timeout`, silently turning
+# every gate invocation into a spurious FAIL instead of a real budget. Resolve
+# by IDENTITY, not by name: prefer `gtimeout`, then a `timeout` that actually
+# reports itself as GNU coreutils via `--version`, and never accept a
+# `timeout` that fails or omits that identification (System32's does both —
+# it accepts no `--version` flag and exits non-zero). No silent alternative if
+# neither identifies: fail fast naming the missing tool and the install hint,
+# per repo policy.
+_is_gnu_timeout() {
+    # $1 = candidate binary name/path already confirmed on PATH.
+    _tv=$("$1" --version 2>/dev/null)
+    _tv_rc=$?
+    [ "$_tv_rc" -eq 0 ] || return 1
+    case "$_tv" in
+        *coreutils*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+if command -v gtimeout >/dev/null 2>&1 && _is_gnu_timeout gtimeout; then
+    TIMEOUT_BIN=gtimeout
+elif command -v timeout >/dev/null 2>&1 && _is_gnu_timeout timeout; then
+    TIMEOUT_BIN=timeout
+else
+    echo "push-must-check: ERROR — nothing was checked (GNU timeout(1) not found or not identifiable via --version: install GNU coreutils so 'timeout' or 'gtimeout' resolves to it. On Windows this means Git Bash's own coreutils 'timeout' must precede C:\\Windows\\System32 on PATH — that System32 'timeout.exe' is an unrelated countdown command and is never accepted here. On stock macOS: 'brew install coreutils' provides 'gtimeout')"
+    exit 2
+fi
 
 if [ "${1:-}" = --self-test ]; then
     _tmp=$(mktemp -d) || exit 2
@@ -422,7 +1171,220 @@ if [ "${1:-}" = --self-test ]; then
     sed '/^[[:space:]]*rust-go-benchmark-parity,/d' "$_tmp/manifest" > "$_tmp/missing-required-manifest"
     sed '/^[[:space:]]*rust-go-benchmark-parity,/d' "$_tmp/ledger" > "$_tmp/missing-required-ledger"
     validate_ledger_text "$(cat "$_tmp/missing-required-manifest")" "$(cat "$_tmp/missing-required-ledger")" ignored && die "required TODO gate deletion accepted"
-    echo "push-must-check: PASS — 20 ledger fixtures checked"
+
+    # Budget-overrun fixture (review finding item2#4i, 2026-09-24): a
+    # blocking gate that sleeps past its budget must be killed and reported
+    # as an overrun -- an overrun is NEVER a pass, its rc must be non-zero,
+    # and MUST_CHECK_BUDGET_OVERRUN must name the exact gate. Uses the real
+    # TIMEOUT_BIN/run_push_gate the push path uses, resolved above this block.
+    MUST_CHECK_BUDGET_MS=500
+    MUST_CHECK_BUDGET_SPENT_MS=0
+    MUST_CHECK_BUDGET_OVERRUN=""
+    MUST_CHECK_BLOCKING_RUN=0
+    printf '#!/bin/sh\nsleep 3\nexit 0\n' > "$_tmp/slow-gate.shs"
+    run_push_gate "budget-overrun-fixture" true "$_tmp/slow-gate.shs"
+    _rc=$?
+    [ "$_rc" -ne 0 ] || die "budget-overrun gate reported success (rc=0), never a pass is required"
+    [ "$MUST_CHECK_BUDGET_OVERRUN" = "budget-overrun-fixture" ] || die "budget-overrun gate did not record MUST_CHECK_BUDGET_OVERRUN"
+
+    # Budget-exhausted fixture: once MUST_CHECK_BUDGET_SPENT_MS already meets
+    # or exceeds MUST_CHECK_BUDGET_MS (the overrun above left it there), the
+    # NEXT blocking gate must not even be attempted -- not run, overrun,
+    # never a pass. This is the `_left <= 0` branch of run_push_gate, distinct
+    # from the timeout-kill branch exercised just above.
+    MUST_CHECK_BUDGET_OVERRUN=""
+    printf '#!/bin/sh\nexit 0\n' > "$_tmp/fast-gate.shs"
+    run_push_gate "budget-exhausted-fixture" true "$_tmp/fast-gate.shs"
+    _rc=$?
+    [ "$_rc" -ne 0 ] || die "budget-exhausted gate reported success (rc=0), never a pass is required"
+    [ "$MUST_CHECK_BUDGET_OVERRUN" = "budget-exhausted-fixture" ] || die "budget-exhausted gate did not record MUST_CHECK_BUDGET_OVERRUN"
+
+    # Awk dispatcher parity fixture (review finding item2#4ii): a push-blocking
+    # manifest row whose `id:mode:command` key matches no exact arm in the
+    # dispatcher's case statement must fail closed with exit 2, never be
+    # silently skipped and never fall through to a pass. `HEAD` is a real
+    # revision in this checkout, so this exercises the actual
+    # `git show $ref:$SELF_REL` dispatch-text path, not a stub.
+    _no_arm_manifest='must_check_gates |id, tier, push_blocking, mode, command, ci_job, inputs, description|
+    push-no-such-fixture-gate, push, true, tree, "sh scripts/check/check-no-such-fixture-gate-9f3a1c.shs", -, -, "fixture row deliberately absent from the dispatcher"
+'
+    run_manifest_push_gates "$_no_arm_manifest" "base-oid..head-oid" "HEAD"
+    _rc=$?
+    [ "$_rc" -eq 2 ] || die "unmatched dispatch-arm row did not return 2 (got $_rc)"
+
+    # A force-with-lease PR update can replace an old branch commit with one
+    # commit on top of much newer main. The remote branch's old SHA is not a
+    # usable range base: it leaves every intervening main commit in the walk.
+    # Resolve the published merge base from the actual remote main instead.
+    _saved_root=$ROOT
+    _saved_remote=${MUST_CHECK_PUSH_REMOTE:-}
+    _rebased_repo="$_tmp/rebased/repo"
+    mkdir -p "$_rebased_repo"
+    git init -q --bare "$_tmp/rebased/remote.git" || die "rebased fixture remote init failed"
+    git -C "$_rebased_repo" init -q -b main || die "rebased fixture repo init failed"
+    git -C "$_rebased_repo" config user.email test@example.com
+    git -C "$_rebased_repo" config user.name Test
+    git -C "$_rebased_repo" remote add origin "$_tmp/rebased/remote.git"
+    git -C "$_rebased_repo" commit -q --allow-empty -m base || die "rebased fixture base failed"
+    git -C "$_rebased_repo" push -q origin main || die "rebased fixture initial push failed"
+    git -C "$_rebased_repo" switch -q -c old
+    git -C "$_rebased_repo" commit -q --allow-empty -m old || die "rebased fixture old branch failed"
+    _rebased_old=$(git -C "$_rebased_repo" rev-parse HEAD)
+    git -C "$_rebased_repo" push -q origin old || die "rebased fixture old push failed"
+    git -C "$_rebased_repo" switch -q main
+    _rebased_i=0
+    while [ "$_rebased_i" -lt 65 ]; do
+        git -C "$_rebased_repo" commit -q --allow-empty -m "main-$_rebased_i" || die "rebased fixture main commit failed"
+        _rebased_i=$((_rebased_i + 1))
+    done
+    _rebased_expected=$(git -C "$_rebased_repo" rev-parse HEAD)
+    git -C "$_rebased_repo" push -q origin main || die "rebased fixture advanced main push failed"
+    git -C "$_rebased_repo" switch -q -c replacement
+    git -C "$_rebased_repo" commit -q --allow-empty -m replacement || die "rebased fixture replacement failed"
+    _rebased_tip=$(git -C "$_rebased_repo" rev-parse HEAD)
+    ROOT=$_rebased_repo
+    MUST_CHECK_PUSH_REMOTE=origin
+    _rebased_actual=$(rebased_push_published_base "$_rebased_tip") || die "published rebase base rejected"
+    [ "$_rebased_actual" = "$_rebased_expected" ] || die "published rebase base was not current main"
+    [ "$(git -C "$ROOT" rev-list --count "$_rebased_old..$_rebased_tip")" -gt 64 ] || die "rebased fixture did not exceed old-head history bound"
+    [ "$(git -C "$ROOT" rev-list --count "$_rebased_actual..$_rebased_tip")" -eq 1 ] || die "published rebase range did not isolate replacement commit"
+    mkdir -p "$ROOT/scripts/check"
+    cp "$_saved_root/scripts/check/check-no-conflict-tree-push.shs" "$ROOT/scripts/check/" || die "rebased fixture guard copy failed"
+    printf 'refs/heads/replacement %s refs/heads/old %s\n' "$_rebased_tip" "$_rebased_old" > "$_tmp/rebased/refs"
+    (
+        cd "$ROOT" || exit 1
+        MUST_CHECK_BUDGET_MS=10000
+        MUST_CHECK_BUDGET_SPENT_MS=0
+        MUST_CHECK_BUDGET_OVERRUN=""
+        run_conflict_tree_union "$_tmp/rebased/refs"
+    ) || die "rebased outgoing union rejected a one-commit replacement"
+    git -C "$ROOT" switch -q main
+    git -C "$ROOT" commit -q --allow-empty -m later-main || die "rebased fixture later main failed"
+    git -C "$ROOT" push -q origin main || die "rebased fixture later main push failed"
+    [ "$(rebased_push_published_base "$_rebased_tip")" = "$_rebased_expected" ] || die "main advancing after rebase changed the published base"
+    MUST_CHECK_PUSH_REMOTE=missing-remote
+    rebased_push_published_base "$_rebased_tip" >/dev/null 2>&1 && die "missing remote accepted as rebase authority"
+    MUST_CHECK_PUSH_REMOTE=origin
+    mkdir -p "$_tmp/rebased/slow-bin"
+    _real_git=$(command -v git)
+    cat > "$_tmp/rebased/slow-bin/git" <<'SLOW_GIT'
+#!/bin/sh
+case " $* " in
+    *' ls-remote '*) sleep 5 ;;
+esac
+exec "$REBASE_FIXTURE_REAL_GIT" "$@"
+SLOW_GIT
+    chmod +x "$_tmp/rebased/slow-bin/git"
+    (
+        PATH="$_tmp/rebased/slow-bin:$PATH"
+        REBASE_FIXTURE_REAL_GIT=$_real_git
+        REMOTE_QUERY_TIMEOUT_S=1
+        export PATH REBASE_FIXTURE_REAL_GIT
+        _slow_start=$(date +%s)
+        if rebased_push_published_base "$_rebased_tip" >/dev/null 2>&1; then exit 1; fi
+        _slow_elapsed=$(( $(date +%s) - _slow_start ))
+        [ "$_slow_elapsed" -lt 5 ] || exit 1
+    ) || die "slow remote was accepted or not bounded"
+
+    # Stale-branch merge fixture (2026-09-28): a PR branch >64 commits behind
+    # main merges main and fast-forwards. old..new carries all of main's
+    # merged-in commits; only the merge commit is new and must be counted.
+    git -C "$ROOT" switch -q -c stale "$(git -C "$ROOT" rev-list --max-parents=0 main)"
+    git -C "$ROOT" commit -q --allow-empty -m stale-own || die "stale fixture commit failed"
+    git -C "$ROOT" push -q origin stale || die "stale fixture push failed"
+    _stale_old=$(git -C "$ROOT" rev-parse HEAD)
+    git -C "$ROOT" merge -q --no-ff -m merge-main main || die "stale fixture merge failed"
+    _stale_tip=$(git -C "$ROOT" rev-parse HEAD)
+    [ "$(git -C "$ROOT" rev-list --count "$_stale_old..$_stale_tip")" -gt 64 ] || die "stale fixture did not exceed the 64-commit bound"
+    [ "$(git -C "$ROOT" rev-list --count "$_stale_tip" --not "$_stale_old" refs/remotes/origin/main)" -eq 1 ] || die "stale fixture: own range is not just the merge commit"
+    [ "$(main_merged_predecessor "$_stale_tip" "$_stale_old")" = "$(git -C "$ROOT" rev-parse main)" ] || die "stale fixture: per-ref base is not published main"
+    printf 'refs/heads/stale %s refs/heads/stale %s\n' "$_stale_tip" "$_stale_old" > "$_tmp/rebased/stale-refs"
+    (
+        cd "$ROOT" || exit 1
+        MUST_CHECK_BUDGET_MS=10000; MUST_CHECK_BUDGET_SPENT_MS=0; MUST_CHECK_BUDGET_OVERRUN=""
+        run_conflict_tree_union "$_tmp/rebased/stale-refs"
+    ) >/dev/null 2>&1 || die "stale branch merging main was rejected by the commit bound"
+    (
+        cd "$ROOT" || exit 1
+        MUST_CHECK_PUSH_REMOTE=missing-remote
+        MUST_CHECK_BUDGET_MS=10000; MUST_CHECK_BUDGET_SPENT_MS=0; MUST_CHECK_BUDGET_OVERRUN=""
+        run_conflict_tree_union "$_tmp/rebased/stale-refs"
+    ) >/dev/null 2>&1 && die "stale merge admitted without a verifiable remote main"
+    git -C "$ROOT" switch -q -c big main
+    _big_old=$(git -C "$ROOT" rev-parse HEAD)
+    _big_i=0
+    while [ "$_big_i" -lt 65 ]; do
+        git -C "$ROOT" commit -q --allow-empty -m "big-$_big_i" || die "big fixture commit failed"
+        _big_i=$((_big_i + 1))
+    done
+    _big_tip=$(git -C "$ROOT" rev-parse HEAD)
+    printf 'refs/heads/big %s refs/heads/big %s\n' "$_big_tip" "$_big_old" > "$_tmp/rebased/big-refs"
+    (
+        cd "$ROOT" || exit 1
+        MUST_CHECK_BUDGET_MS=10000; MUST_CHECK_BUDGET_SPENT_MS=0; MUST_CHECK_BUDGET_OVERRUN=""
+        run_conflict_tree_union "$_tmp/rebased/big-refs"
+    ) >/dev/null 2>&1 && die "65 genuinely new commits passed the 64-commit bound"
+    ROOT=$_saved_root
+    MUST_CHECK_PUSH_REMOTE=$_saved_remote
+
+    # Committed-dispatcher-newer-than-running-script fixture (Opus review
+    # 2026-09-25, MUST finding #1): replays the exact incident shape --
+    # load_committed_dispatcher redefines run_manifest_push_gates from the
+    # PUSHED commit's copy of this file, and if that copy's
+    # run_manifest_push_gates calls run_three_push_gates_parallel while the
+    # RUNNING script (an older checkout mid-rollout) never defined that
+    # helper, the call used to resolve to a shell "command not found" (rc
+    # 127) -- read by every existing caller as a blocking gate FAILURE on an
+    # otherwise-clean push. load_committed_dispatcher now also loads the
+    # helper's own definition out of the same committed text, so this must
+    # PASS even when the in-memory (pre-fix-simulated) helper is absent.
+    # Placed LAST because it deliberately clobbers the in-memory
+    # run_manifest_push_gates/run_three_push_gates_parallel definitions this
+    # process started with; nothing after this point may depend on them.
+    _ncd_tmp=$(mktemp -d) || die "cannot create newer-committed-dispatcher fixture dir"
+    _ncd_repo="$_ncd_tmp/repo"
+    mkdir -p "$_ncd_repo/scripts/check"
+    _ncd_marker="$_ncd_tmp/marker"
+    (
+        cd "$_ncd_repo" || exit 1
+        git init -q
+        git config user.email t@example.com
+        git config user.name t
+        {
+            printf 'run_three_push_gates_parallel() {\n'
+            printf '    printf "%%s" "ncd-helper-ran" > "%s"\n' "$_ncd_marker"
+            printf '    return 0\n'
+            printf '}\n'
+            printf 'run_manifest_push_gates() {\n'
+            printf '    run_three_push_gates_parallel "$1"\n'
+            printf '}\n'
+        } > scripts/check/check-push-must-pass.shs
+        git add scripts/check/check-push-must-pass.shs
+        git commit -q -m fixture
+    ) >/dev/null 2>&1
+    _ncd_rev=$(git -C "$_ncd_repo" rev-parse HEAD 2>/dev/null)
+    [ -n "$_ncd_rev" ] || die "newer-committed-dispatcher fixture: could not create fixture commit"
+
+    # Simulate the OLDER running script: no run_three_push_gates_parallel at
+    # all, and a stale run_manifest_push_gates that must NOT be what runs.
+    unset -f run_three_push_gates_parallel 2>/dev/null
+    eval 'run_manifest_push_gates() { echo "push-must-check: FIXTURE BUG -- stale in-memory function ran instead of the committed copy" >&2; return 9; }'
+
+    _ncd_saved_root=$ROOT
+    ROOT=$_ncd_repo
+    load_committed_dispatcher "$_ncd_rev"
+    run_manifest_push_gates "irrelevant-range"
+    _ncd_rc=$?
+    ROOT=$_ncd_saved_root
+
+    if [ "$_ncd_rc" -ne 0 ]; then
+        die "committed-dispatcher-newer-than-running-script: run_manifest_push_gates returned $_ncd_rc (expected 0 -- rc 127 means the helper was never loaded)"
+    fi
+    [ -f "$_ncd_marker" ] && [ "$(cat "$_ncd_marker" 2>/dev/null)" = "ncd-helper-ran" ] ||
+        die "committed-dispatcher-newer-than-running-script: the committed run_three_push_gates_parallel never ran (marker missing or wrong)"
+    rm -rf "$_ncd_tmp"
+
+    echo "push-must-check: PASS — 32 ledger/budget/dispatcher/rebase/stale-merge fixtures checked"
     exit 0
 fi
 
@@ -451,31 +1413,97 @@ _ref_count=$(wc -l < "$_unique_refs" | tr -d ' ')
 [ "$_ref_count" -le "$MAX_PUSH_REF_ROWS" ] ||
     die "$_ref_count unique ref updates exceed the bounded limit $MAX_PUSH_REF_ROWS; split the push"
 
-run_conflict_tree_union "$_unique_refs" || die "outgoing commit union contains a conflict tree or exceeds its bounded history limit"
+budget_error_exit() {
+    echo "push-must-check: ERROR — blocking gate $MUST_CHECK_BUDGET_OVERRUN overran the ${MUST_CHECK_PUSH_BUDGET_S}s push budget; $MUST_CHECK_BLOCKING_RUN blocking gate(s) ran in ${MUST_CHECK_BUDGET_SPENT_MS}ms, verdict unknown (exit 2)"
+    exit 2
+}
+
+run_conflict_tree_union "$_unique_refs" || {
+    [ -z "$MUST_CHECK_BUDGET_OVERRUN" ] || budget_error_exit
+    die "outgoing commit union contains a conflict tree or exceeds its bounded history limit"
+}
 MUST_CHECK_CONFLICT_UNION_DONE=1
 export MUST_CHECK_CONFLICT_UNION_DONE
 
+MUST_CHECK_TOTAL_SPENT_MS=0
 while read -r _local_ref _local_sha _remote_ref _remote_sha; do
     [ "$_local_sha" = "$ZERO" ] && continue
+    # PER-REF BUDGET (2026-09-24 fix): the blocking budget is per PUSHED REF,
+    # not shared across the whole invocation. Sharing one MUST_CHECK_BUDGET_MS
+    # across `while read` iterations meant a legitimate 2-ref push (the bound
+    # is MAX_PUSH_REF_ROWS=2) always exceeded it — each ref's own blocking set
+    # already costs ~5s, so two refs together routinely ran past the single
+    # shared 10s window and every multi-ref push got a spurious ERROR exit 2,
+    # never a pass, regardless of gate correctness. Resetting the spent-ms and
+    # overrun trackers at the top of each ref iteration gives every ref the
+    # full MUST_CHECK_PUSH_BUDGET_S window, which matches how a human reads
+    # the contract ("10s per push" means per ref checked, not amortized across
+    # however many refs happen to land in one invocation) and keeps the guard
+    # fail-closed per ref rather than fail-closed in aggregate.
+    MUST_CHECK_BUDGET_SPENT_MS=0
+    MUST_CHECK_BUDGET_OVERRUN=""
+    # A tag push carries no new commits, and every range-scoped gate below is
+    # therefore vacuous on it: `<predecessor>..<tag>` resolves to 0 commits, the
+    # guards correctly report `ERROR — nothing was checked` (exit 2) rather than
+    # a false pass, and the first blocking row kills the push. Measured
+    # 2026-09-07 pushing `v1.0.1-beta.1`: `BLOCKING gate push-conflict-markers
+    # failed (exit 2)`, on a commit that was already on origin/main and had
+    # already passed these same gates through PR #457 and #458. The release
+    # contract needs to push exactly one tag ref, so this path has to work
+    # without `--no-verify` — a release that routes around the hook protects
+    # nothing, and `--no-verify` disables every gate, not just the vacuous ones.
+    #
+    # Fail-closed, not skipped-by-name: the tag is admitted ONLY when its target
+    # commit is already an ancestor of the push remote's main, i.e. the content
+    # was gated when it landed. A tag pointing at unpublished content is
+    # refused, because that content has never been through the gates and a tag
+    # push is not the place to admit it.
+    case "$_local_ref" in
+        refs/tags/*)
+            _tag_commit=$(git -C "$ROOT" rev-parse --verify --quiet "${_local_sha}^{commit}") ||
+                die "tag $_local_ref does not resolve to a commit"
+            _tag_remote=${MUST_CHECK_PUSH_REMOTE:-}
+            case "$_tag_remote" in
+                ''|*[!A-Za-z0-9._/-]*) die "tag push requires the actual push remote name" ;;
+            esac
+            _tag_base=refs/remotes/$_tag_remote/main
+            git -C "$ROOT" rev-parse --verify --quiet "$_tag_base" >/dev/null ||
+                die "cannot verify $_tag_base; fetch it before pushing a tag"
+            git -C "$ROOT" merge-base --is-ancestor "$_tag_commit" "$_tag_base" ||
+                die "tag $_local_ref points at $_tag_commit, which is not published on $_tag_base; land the commit through a pull request first"
+            echo "push-must-check: tag $_local_ref -> $_tag_commit is already published on $_tag_base; 0 new commits, range gates do not apply"
+            continue
+            ;;
+    esac
     _ledger=$(git -C "$ROOT" show "$_local_sha:$LEDGER_REL" 2>/dev/null) || die "ledger is missing from $_local_sha"
     _manifest=$(git -C "$ROOT" show "$_local_sha:$MANIFEST_REL" 2>/dev/null) || die "manifest is missing from $_local_sha"
+    load_committed_dispatcher "$_local_sha"
     _fp=$(fingerprint_rev "$_local_sha") || die "cannot fingerprint $_local_sha"
     EVIDENCE_REV=$_local_sha
     _predecessor=$_remote_sha
     if [ "$_predecessor" = "$ZERO" ]; then
         _predecessor=$(git -C "$ROOT" merge-base "$_local_sha" origin/main 2>/dev/null) || die "cannot derive new-ref base"
+    elif ! git -C "$ROOT" merge-base --is-ancestor "$_predecessor" "$_local_sha"; then
+        _predecessor=$(rebased_push_published_base "$_local_sha") ||
+            die "cannot verify published main as the base of rebased ref $_local_ref"
+    elif _mm_pred=$(main_merged_predecessor "$_local_sha" "$_predecessor"); then
+        echo "push-must-check: $_local_ref merged published main; range base $_predecessor -> $_mm_pred (already-published main commits excluded)"
+        _predecessor=$_mm_pred
     fi
     ALLOW_UNPROMOTED_LEDGER=0
     if ledger_is_unpromoted_at_rev "$_predecessor"; then
         ALLOW_UNPROMOTED_LEDGER=1
     fi
     validate_ledger_text "$_manifest" "$_ledger" "$_fp" || die "ledger is malformed stale or has a non-passing push-blocking row"
-    _range="$_remote_sha..$_local_sha"
-    if [ "$_remote_sha" = "$ZERO" ]; then
-        _range="$_predecessor..$_local_sha"
-    fi
-    run_manifest_push_gates "$_manifest" "$_range" "$_local_sha" ||
+    _range="$_predecessor..$_local_sha"
+    run_manifest_push_gates "$_manifest" "$_range" "$_local_sha"
+    _gates_rc=$?
+    if [ "$_gates_rc" -ne 0 ]; then
+        [ -z "$MUST_CHECK_BUDGET_OVERRUN" ] || budget_error_exit
+        [ "$_gates_rc" -ne 2 ] || { echo "push-must-check: ERROR — nothing was checked (manifest push rows at $_local_sha could not be dispatched)"; exit 2; }
         die "one or more manifest-declared push gates failed"
+    fi
+    MUST_CHECK_TOTAL_SPENT_MS=$(( MUST_CHECK_TOTAL_SPENT_MS + MUST_CHECK_BUDGET_SPENT_MS ))
 done < "$_unique_refs"
 
-echo "push-must-check: PASS — lightweight committed-tree and bootstrap-ledger checks passed"
+echo "push-must-check: PASS — $MUST_CHECK_BLOCKING_RUN blocking gate(s) checked in ${MUST_CHECK_TOTAL_SPENT_MS}ms total (each pushed ref got its own ${MUST_CHECK_PUSH_BUDGET_S}s budget), bootstrap ledger validated"

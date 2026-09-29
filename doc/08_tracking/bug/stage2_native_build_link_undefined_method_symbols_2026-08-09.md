@@ -273,3 +273,8 @@ sites measured per staged binary, 2026-08-17 — the pre-fix artifacts),
 `bytespan_starts_with_dropped_from_kernel_closure_weak_nil_stub_2026-07-28`,
 `freestanding_entry_module_constants_zero_stubs_2026-07-11`, and
 `native_build_llvm_explicit_return_lost_every_call_returns_zero`.
+
+## Triage 2026-09-13
+Reconfirmed: HIR/MIR method-symbol mangling gap for Stage-2 native-build
+link remains, per this record's own status. Rust-seed/native-build codegen
+work, out of scope. Left OPEN, no code change attempted.

@@ -91,3 +91,9 @@ P0 desugar work. So the doc's statement holds: only the library side ships the c
 shape, the API itself is unchanged.
 
 This needs the design correction the doc calls for, not a lint patch. No patch attempted.
+
+## Triage 2026-09-13
+Reconfirmed: design-level unsoundness (capability-group `.from()` assumes
+reference semantics on value-typed classes) affecting multiple downstream
+streams. Needs a design-level API change, not a quick fix. Left OPEN (P2),
+no code change attempted.

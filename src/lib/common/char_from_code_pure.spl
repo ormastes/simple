@@ -1,0 +1,45 @@
+# char_from_code_pure.spl — pure-Simple twin for rt_char_from_code, written
+# for the rt_* dual-implementation directive.
+#
+# Pair (see test/01_unit/lib/common/spec/dual_run_shadow_spec.spl):
+#   char_from_code <-> rt_char_from_code
+#
+# Oracle contract (interpreter_extern/conversion.rs:148, mirroring the C
+# runtime): `u32::try_from(code).ok().and_then(char::from_u32)` formatted to a
+# string, or the EMPTY string when that fails. So the empty string is the
+# answer for a negative code, for anything above U+10FFFF, and for a UTF-16
+# surrogate (U+D800..U+DFFF) — surrogates are not scalar values.
+#
+# SCOPE NOTE, stated rather than glossed: the UTF-8 encoding and the whole
+# admissibility decision are done here in Simple. Materialising the finished
+# byte buffer as `text` is delegated to the base_encoding UTF-8 decoder, which
+# bottoms out in rt_bytes_to_text — a DIFFERENT runtime symbol, never the
+# oracle under test. That is the same shape as the already-wired
+# utf8_validate_vs_rt_text_validate_utf8 pair, so the comparison is honest:
+# nothing in this file asks rt_char_from_code what the answer is.
+
+use std.common.base_encoding.utilities.{validated_utf8_bytes_to_text_linear}
+
+pub fn char_from_code(code: i64) -> text:
+    if code < 0 or code > 0x10FFFF:
+        return ""
+    if code >= 0xD800 and code <= 0xDFFF:
+        return ""
+    var buf: [u8] = []
+    if code <= 0x7F:
+        buf = buf.push(code.to_u8())
+    elif code <= 0x7FF:
+        buf = buf.push((0xC0 + (code / 64)).to_u8())
+        buf = buf.push((0x80 + (code % 64)).to_u8())
+    elif code <= 0xFFFF:
+        buf = buf.push((0xE0 + (code / 4096)).to_u8())
+        buf = buf.push((0x80 + ((code / 64) % 64)).to_u8())
+        buf = buf.push((0x80 + (code % 64)).to_u8())
+    else:
+        buf = buf.push((0xF0 + (code / 262144)).to_u8())
+        buf = buf.push((0x80 + ((code / 4096) % 64)).to_u8())
+        buf = buf.push((0x80 + ((code / 64) % 64)).to_u8())
+        buf = buf.push((0x80 + (code % 64)).to_u8())
+    match validated_utf8_bytes_to_text_linear(buf):
+        Ok(t) => t
+        Err(_) => ""

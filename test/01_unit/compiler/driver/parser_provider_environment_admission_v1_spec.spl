@@ -1,0 +1,99 @@
+use std.spec.*
+use compiler.driver.host_environment_snapshot_v1.*
+use compiler.driver.parser_provider_environment_admission_v1.*
+use std.nogc_sync_mut.composition.environment_variants.contracts_v1.*
+use std.nogc_sync_mut.composition.environment_variants.admission.{
+    ENV_ADMISSION_CPU_FEATURES_MISSING_V1, ENV_ADMISSION_DEVICE_UNAVAILABLE_V1
+}
+use std.nogc_sync_mut.composition.environment_variants.target_codegen_profile_v1.*
+
+fn d(value: u64) -> EnvironmentDigest256V1:
+    EnvironmentDigest256V1(w0: value, w1: 0u64, w2: 0u64, w3: 0u64)
+
+fn r(offset: u32 = 0u32, count: u32 = 0u32) -> EnvironmentArenaRangeV1:
+    EnvironmentArenaRangeV1(offset: offset, count: count)
+
+fn fs(architecture: u16, offset: u32 = 0u32, count: u32 = 1u32) -> EnvironmentFeatureSetV1:
+    EnvironmentFeatureSetV1(architecture: architecture, words: r(offset, count))
+
+fn host_authority() -> CompilerHostEnvironmentSnapshotV1:
+    compiler_host_environment_snapshot_from_facts_v1(
+        CompilerHostPlatformAuthorityV1(
+            execution_architecture: ENV_ARCH_X86_64_V1, os_id: 1u32, abi_id: 1u32,
+            object_format_id: 1u32, endian_id: 1u16, pointer_width_bits: 64u16,
+            snapshot_identity: d(1u64), snapshot_generation: 2u64,
+            execution_domain_identity: d(3u64), loader_permission_bits: 1u64,
+            allowed_effect_bits: 1u64, numerical_contract_id: 1u32,
+            resource_layout_digest: d(4u64)),
+        CompilerHostVectorFactsV1(
+            hardware_feature_bits: 1u64, os_usable_feature_bits: 1u64,
+            policy_allowed_feature_bits: 1u64,
+            vector_state_mode: ENV_VECTOR_FIXED_V1, vector_length_bits: 128u32)).unwrap()
+
+fn target_profile(architecture: u16) -> TargetCodegenProfileV1:
+    TargetCodegenProfileV1(
+        descriptor_size: TARGET_CODEGEN_PROFILE_DESCRIPTOR_BYTES_V1,
+        schema_version: TARGET_CODEGEN_PROFILE_SCHEMA_V1,
+        profile_identity: d(20u64), target_identity: d(21u64),
+        target_architecture: architecture, target_abi_id: 2u32,
+        target_object_format_id: 2u32, target_endian_id: 1u16,
+        target_pointer_width_bits: 64u16, requested_features: fs(architecture),
+        strict_requested_features: false, backend_identity: d(22u64),
+        semantic_identity: d(23u64), numerical_contract_id: 1u32)
+
+fn descriptor(device_api: u32) -> VariantDescriptorV1:
+    VariantDescriptorV1(
+        descriptor_size: 360u32, schema_version: ENV_VARIANT_SCHEMA_V1,
+        placement: ENV_PLACEMENT_STATIC_V1, provider_identity: d(30u64),
+        variant_identity: d(31u64), contract_identity: d(32u64),
+        contract_major: 1u16, contract_minor: 0u16, abi_digest: d(33u64),
+        semantic_identity: d(34u64), grammar_identity: d(35u64),
+        program_identity: d(36u64), artifact_digest: d(37u64),
+        artifact_location: r(0u32, 1u32), target_architecture: ENV_ARCH_X86_64_V1,
+        required_os_id: 1u32, required_abi_id: 1u32,
+        required_object_format_id: 1u32, required_endian_id: 1u16,
+        required_pointer_width_bits: 64u16, required_loader_permission_bits: 1u64,
+        required_cpu_features: fs(ENV_ARCH_X86_64_V1),
+        required_os_state_words: r(0u32, 1u32),
+        required_vector_state_mode: ENV_VECTOR_FIXED_V1,
+        required_vector_length_bits: 128u32, required_device_api: device_api,
+        minimum_device_api_version: if device_api == 0u32: 0u32 else: 1u32,
+        required_device_features: r(), required_memory_domain_bits: 0u64,
+        minimum_device_buffer_bytes: if device_api == 0u32: 0u64 else: 1u64,
+        minimum_workgroup_invocations: if device_api == 0u32: 0u32 else: 1u32,
+        minimum_queue_family_count: if device_api == 0u32: 0u32 else: 1u32,
+        required_effect_bits: 1u64, numerical_contract_id: 1u32,
+        resource_layout_digest: d(4u64), dependencies: r(),
+        assurance_receipt_digest: d(38u64), startup_budget_us: 1u64,
+        max_session_bytes: 1u64, max_inflight_operations: 1u32)
+
+describe "Parser provider environment admission V1":
+    it "admits a CPU parser from host authority while preserving a distinct target":
+        val receipt = parser_provider_admit_from_host_environment_v1(
+            host_authority(), target_profile(ENV_ARCH_RISCV64_V1), [1u64],
+            ParserProviderExecutionDomainV1.Cpu, descriptor(0u32), [1u64], []).unwrap()
+        expect(receipt.admitted).to_equal(true)
+        expect(receipt.target_architecture).to_equal(ENV_ARCH_RISCV64_V1)
+        expect(receipt.environment_identity).to_equal(d(1u64))
+        expect(receipt.gpu_inventory_present).to_equal(false)
+
+    it "keeps CPU and GPU execution domains orthogonal":
+        expect(parser_provider_admit_from_host_environment_v1(
+            host_authority(), target_profile(ENV_ARCH_X86_64_V1), [1u64],
+            ParserProviderExecutionDomainV1.Cpu, descriptor(1u32), [1u64], []))
+            .to_equal(Err(ParserProviderEnvironmentAdmissionErrorV1.ExecutionDomainMismatch))
+
+    it "does not fabricate GPU discovery from the CPU host adapter":
+        val receipt = parser_provider_admit_from_host_environment_v1(
+            host_authority(), target_profile(ENV_ARCH_X86_64_V1), [1u64],
+            ParserProviderExecutionDomainV1.Gpu, descriptor(1u32), [1u64], []).unwrap()
+        expect(receipt.admitted).to_equal(false)
+        expect(receipt.admission_reason_code).to_equal(ENV_ADMISSION_DEVICE_UNAVAILABLE_V1)
+        expect(receipt.gpu_inventory_present).to_equal(false)
+
+    it "keeps provider requirements outside the host fact ranges":
+        val receipt = parser_provider_admit_from_host_environment_v1(
+            host_authority(), target_profile(ENV_ARCH_X86_64_V1), [1u64],
+            ParserProviderExecutionDomainV1.Cpu, descriptor(0u32), [2u64], []).unwrap()
+        expect(receipt.admitted).to_equal(false)
+        expect(receipt.admission_reason_code).to_equal(ENV_ADMISSION_CPU_FEATURES_MISSING_V1)

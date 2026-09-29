@@ -3,11 +3,27 @@
 use super::error::{VulkanError, VulkanResult};
 use ash::vk;
 use parking_lot::Mutex;
-use std::ffi::{CStr, CString};
+use std::ffi::{c_char, CStr, CString};
 use std::sync::Arc;
 
 /// Global Vulkan instance (singleton)
 static VULKAN_INSTANCE: Mutex<Option<Arc<VulkanInstance>>> = Mutex::new(None);
+
+/// Candidate Vulkan loader names/paths beyond the platform-default soname.
+/// Mirrors the interpreter probe in `vulkan_graphics_runtime_core.rs`.
+#[cfg(target_os = "macos")]
+const VULKAN_LIB_CANDIDATES: &[&str] = &[
+    "libvulkan.1.dylib",
+    "libvulkan.dylib",
+    "/opt/homebrew/lib/libvulkan.1.dylib",
+    "/opt/homebrew/lib/libvulkan.dylib",
+    "/usr/local/lib/libvulkan.1.dylib",
+    "/usr/local/lib/libvulkan.dylib",
+];
+#[cfg(all(unix, not(target_os = "macos")))]
+const VULKAN_LIB_CANDIDATES: &[&str] = &["libvulkan.so.1", "libvulkan.so"];
+#[cfg(windows)]
+const VULKAN_LIB_CANDIDATES: &[&str] = &["vulkan-1.dll"];
 
 /// Vulkan instance wrapper with validation layers
 pub struct VulkanInstance {
@@ -37,12 +53,51 @@ impl VulkanInstance {
 
     /// Check if Vulkan is available on this system
     pub fn is_available() -> bool {
-        unsafe { ash::Entry::load().is_ok() }
+        if unsafe { ash::Entry::load() }.is_ok() {
+            return true;
+        }
+        // ash only dlopens the platform-default soname; on macOS with MoltenVK
+        // the loader typically lives in /opt/homebrew/lib and is not on the
+        // default dyld search path. Mirror the interpreter probe candidates.
+        VULKAN_LIB_CANDIDATES
+            .iter()
+            .any(|name| unsafe { libloading::Library::new(name).is_ok() })
+    }
+
+    /// Load the Vulkan loader, falling back to well-known install paths when
+    /// the platform-default soname is not on the dyld search path (MoltenVK via
+    /// Homebrew installs to /opt/homebrew/lib, which `ash::Entry::load` misses).
+    fn load_entry() -> VulkanResult<ash::Entry> {
+        if let Ok(entry) = unsafe { ash::Entry::load() } {
+            return Ok(entry);
+        }
+        for name in VULKAN_LIB_CANDIDATES {
+            let lib = match unsafe { libloading::Library::new(name) } {
+                Ok(lib) => lib,
+                Err(_) => continue,
+            };
+            let get_proc_addr = unsafe { lib.get::<vk::PFN_vkGetInstanceProcAddr>(b"vkGetInstanceProcAddr\0") };
+            if let Ok(get_proc_addr) = get_proc_addr {
+                let entry = unsafe {
+                    ash::Entry::from_static_fn(ash::StaticFn {
+                        get_instance_proc_addr: *get_proc_addr,
+                    })
+                };
+                // The entry holds a raw fn pointer into the library; keep the
+                // library mapped for the process lifetime (the instance is a
+                // global singleton, so this leaks at most one handle).
+                std::mem::forget(lib);
+                return Ok(entry);
+            }
+        }
+        Err(VulkanError::InitializationFailed(
+            "Failed to load Vulkan library: tried platform default and candidate paths".to_owned(),
+        ))
     }
 
     fn create() -> VulkanResult<Self> {
         // Load Vulkan library
-        let entry = unsafe { ash::Entry::load()? };
+        let entry = Self::load_entry()?;
 
         // Application info
         let app_name = CString::new("Simple Language").unwrap();
@@ -56,7 +111,7 @@ impl VulkanInstance {
 
         // Enable validation layers in debug builds
         let layer_names_raw: Vec<CString>;
-        let layer_names: Vec<*const i8>;
+        let layer_names: Vec<*const c_char>;
 
         #[cfg(debug_assertions)]
         {
@@ -101,16 +156,28 @@ impl VulkanInstance {
         #[cfg(feature = "vulkan")]
         {
             extension_names_raw.push(ash::khr::surface::NAME.to_owned());
-            let headless_available = unsafe {
+            // Enumerate ONCE, then gate every optional surface extension on what
+            // the loader actually advertises. Requesting an unadvertised
+            // extension makes vkCreateInstance fail outright, which took down
+            // the whole Vulkan path -- including headless compute rendering that
+            // needs no surface at all -- on any host without the matching
+            // windowing system. Measured 2026-09-06 on a headless box:
+            // "loader_validate_instance_extensions: Extension VK_KHR_xlib_surface
+            // not found in list of known instance extensions", rt_vulkan_init -> 0,
+            // and every engine2d Vulkan gate died with no verdict line.
+            let available_exts: Vec<std::ffi::CString> = unsafe {
                 entry
                     .enumerate_instance_extension_properties(None)
                     .map(|extensions| {
-                        extensions.iter().any(|extension| {
-                            CStr::from_ptr(extension.extension_name.as_ptr()) == ash::ext::headless_surface::NAME
-                        })
+                        extensions
+                            .iter()
+                            .map(|e| CStr::from_ptr(e.extension_name.as_ptr()).to_owned())
+                            .collect()
                     })
-                    .unwrap_or(false)
+                    .unwrap_or_default()
             };
+            let has_ext = |name: &CStr| available_exts.iter().any(|e| e.as_c_str() == name);
+            let headless_available = has_ext(ash::ext::headless_surface::NAME);
             if headless_available {
                 extension_names_raw.push(ash::ext::headless_surface::NAME.to_owned());
                 headless_surface_enabled = true;
@@ -122,11 +189,17 @@ impl VulkanInstance {
 
             #[cfg(target_os = "linux")]
             {
-                // Prefer Wayland if available, fall back to X11
-                if std::env::var("WAYLAND_DISPLAY").is_ok() {
+                // Prefer Wayland when the session advertises it, fall back to
+                // X11 -- but only ever request one the loader actually has. A
+                // headless host has neither, and that is not an error: the
+                // compute/offscreen paths do not need a window surface.
+                let want_wayland = std::env::var("WAYLAND_DISPLAY").is_ok();
+                if want_wayland && has_ext(ash::khr::wayland_surface::NAME) {
                     extension_names_raw.push(ash::khr::wayland_surface::NAME.to_owned());
-                } else {
+                } else if has_ext(ash::khr::xlib_surface::NAME) {
                     extension_names_raw.push(ash::khr::xlib_surface::NAME.to_owned());
+                } else if has_ext(ash::khr::wayland_surface::NAME) {
+                    extension_names_raw.push(ash::khr::wayland_surface::NAME.to_owned());
                 }
             }
 

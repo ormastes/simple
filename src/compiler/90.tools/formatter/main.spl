@@ -478,7 +478,59 @@ class Formatter:
         return [indent_str + line]
 
     fn add_expression_spacing(line: String) -> String:
-        # Add spaces around binary operators
+        # Spacing rewrites must never reach inside a string literal. The rules
+        # in space_code_segment (operator padding, and `,` -> `, `) are blind
+        # substring replaces, so on a line like `print "x={a},{b}"` they edit
+        # the literal's own text. That changes the string's runtime value,
+        # which formatter_require_lexical_equivalence correctly detects, and
+        # `fmt` then refuses the whole file with "formatter refused a
+        # semantics-changing rewrite" -- one such string is enough to make the
+        # file unformattable. Same bug class as the full-line-comment case
+        # handled in format_line.
+        #
+        # So split the line into alternating code / string-literal runs and
+        # rewrite only the code runs, copying literals through verbatim.
+        # (Trailing inline comments, and the middle lines of a multi-line
+        # docstring, are still not covered here -- the equivalence guard stays
+        # the backstop for those.)
+        var parts: [String] = []
+        var segment_start = 0
+        var i = 0
+        val line_len = line.len()
+        while i < line_len:
+            if line.byte_at(i) == 34:
+                if i > segment_start:
+                    parts.push(self.space_code_segment(line.substring(segment_start, i)))
+                # Scan to the closing quote, honouring backslash escapes.
+                var j = i + 1
+                var closed = false
+                while j < line_len and not closed:
+                    val b = line.byte_at(j)
+                    if b == 92:
+                        j = j + 2
+                    elif b == 34:
+                        closed = true
+                        j = j + 1
+                    else:
+                        j = j + 1
+                val literal_end = if j > line_len: line_len else: j
+                parts.push(line.substring(i, literal_end))
+                segment_start = literal_end
+                i = literal_end
+            else:
+                i = i + 1
+
+        if segment_start < line_len:
+            parts.push(self.space_code_segment(line.substring(segment_start, line_len)))
+
+        return parts.join("").trim()
+
+    fn space_code_segment(line: String) -> String:
+        # Add spaces around binary operators.
+        # Callers must pass a run of code that contains no string literal;
+        # add_expression_spacing is responsible for that split. This function
+        # deliberately does NOT trim -- a segment's boundary whitespace is
+        # significant once segments are rejoined (`print ` + `"x"`).
         var result = line
 
         # First, protect multi-character operators by replacing them with placeholders
@@ -523,7 +575,7 @@ class Formatter:
         result = result.replace(" .", ".")
         result = result.replace(". ", ".")
 
-        return result.trim()
+        return result
 
     fn is_indent_line(line: String) -> Bool:
         # Check if line should increase indent level

@@ -2,6 +2,30 @@
 
 > This scenario shows maintainers how a logical change becomes exact review and gate evidence, then a protected dry-run plan and a conflict-safe remote projection. It deliberately performs no Git/JJ/provider mutation.
 
+<!-- sdn-diagram:id=scv_jj_git_devhub_spipe_unified_lifecycle_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=scv_jj_git_devhub_spipe_unified_lifecycle_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+scv_jj_git_devhub_spipe_unified_lifecycle_spec -> std
+scv_jj_git_devhub_spipe_unified_lifecycle_spec -> app
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=scv_jj_git_devhub_spipe_unified_lifecycle_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 2 | 2 | 0 | 0 |
@@ -24,7 +48,7 @@ This scenario shows maintainers how a logical change becomes exact review and ga
 | Design | doc/05_design/app/tools/scv_jj_git_devhub_spipe_unified_lifecycle.md |
 | Research | doc/01_research/app/tools/scv/scv_jj_git_devhub_spipe_unified_lifecycle_2026-08-25.md |
 | Source | `test/03_system/app/scv/feature/scv_jj_git_devhub_spipe_unified_lifecycle_spec.spl` |
-| Updated | 2026-08-25 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -52,28 +76,14 @@ concurrent provider edit as a conflict.
 
 ## Example
 
-From the repository root, run the focused system scenario with the admitted
-pure-Simple Stage 4 CLI (the command must not print the Rust bootstrap-seed
-warning):
-
-```sh
-bin/simple test test/03_system/app/scv/feature/scv_jj_git_devhub_spipe_unified_lifecycle_spec.spl --mode=interpreter
-```
-
-Retain the CLI hash/provenance and complete test output. An authoritative pass
-reports two examples, zero failures, an exact-revision admitted dry-run, and a
-stale-CAS refusal. A seed result is diagnostic only.
+Run the focused system scenario with the admitted self-hosted Simple CLI. A
+successful run reports two examples, zero failures, an exact-revision admitted
+dry-run, and a stale-CAS refusal.
 
 ## Troubleshooting
 
 - `SJ_REMOTE_STALE` means the observed remote revision changed; fetch, refresh,
   and re-review rather than forcing the ref.
-- `SJ_OBSERVE_ONLY` means a caller requested live mutation before authority
-  promotion; keep `dry_run: true`.
-- `SJ_POLICY_UNKNOWN`, `SJ_POLICY_TARGET`, or `SJ_GATE_PROFILE` means the
-  request is not bound to the loaded policy, target ref, or required profile.
-- `SJ_GATE_MANIFEST` or `SJ_GATE_PIN_MISMATCH` means the canonical manifest is
-  malformed/incomplete or a gate was not bound to the exact BASE and HEAD.
 - `LIFECYCLE_GATE_INCOMPLETE` means a gate has no retained evidence, a verdict
   is not pass, or an approval is missing/stale.
 - A sync `conflict` is durable work to resolve, never permission to overwrite.
@@ -84,12 +94,17 @@ stale-CAS refusal. A seed result is diagnostic only.
 
 #### plans an exact reviewed integration without mutating protected state
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- plans an exact reviewed integration without mutating protected state
 - Load the unified lifecycle policy
 - Create stable change and immutable revision identities
 - Bind review and gate evidence to the exact revision
 - Plan a protected integration without mutating refs
    - Expected: plan.message equals `dry-run only; no refs mutated`
-   - Expected: every policy-marked gate is pinned to the same BASE and HEAD
+   - Expected: plan.gate_invocation_ids equals `["conflict-tree", "rules"]`
 - Project lifecycle state without silent conflict loss
    - Expected: sync.action equals `conflict`
 
@@ -97,10 +112,12 @@ stale-CAS refusal. A seed result is diagnostic only.
 <details>
 <summary>Executable SSpec</summary>
 
-Illustrative body excerpt. It is not a standalone program; imports, fixtures,
-and the `describe`/`it` wrapper remain in the linked executable source above.
+Runnable source: 35 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("plans an exact reviewed integration without mutating protected state")
 step("Load the unified lifecycle policy")
 val policy_payload = unified_policy_fixture()
 val policy = parse_lifecycle_vcs_policy(policy_payload)
@@ -140,13 +157,19 @@ expect(sync.action).to_equal("conflict")
 
 #### refuses stale remote compare-and-swap state
 
+- refuses stale remote compare-and-swap state
+   - Expected: plan_integration(request, [approval], bundle, true).code equals `SJ_REMOTE_STALE`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Illustrative body excerpt. Use the exact command above to execute the complete
-imports, fixtures, wrappers, and assertions from the linked `.spl` source.
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("refuses stale remote compare-and-swap state")
 val change = lifecycle_change_identity("stale-agent", "Stale integration", "dev-infra", "reject stale CAS")
 val revision = lifecycle_revision_identity(change.change_id, "tree-2", ["rev-base"], "metadata", lifecycle_aliases("", "", "", []))
 val review = lifecycle_open_review("REV-STALE", change.change_id, "rev-base", revision.revision_id, "integration/main", "standard")
@@ -172,10 +195,15 @@ expect(plan_integration(request, [approval], bundle, true).code).to_equal("SJ_RE
 
 ## Related Documentation
 
-- **Requirements:** `doc/02_requirements/feature/scv_jj_git_devhub_spipe_unified_lifecycle.md`
-- **Plan:** `doc/03_plan/sys_test/scv_jj_git_devhub_spipe_unified_lifecycle.md`
-- **Design:** `doc/05_design/app/tools/scv_jj_git_devhub_spipe_unified_lifecycle.md`
-- **Research:** `doc/01_research/app/tools/scv/scv_jj_git_devhub_spipe_unified_lifecycle_2026-08-25.md`
+- **Requirements:** [doc/02_requirements/feature/scv_jj_git_devhub_spipe_unified_lifecycle.md](doc/02_requirements/feature/scv_jj_git_devhub_spipe_unified_lifecycle.md)
+- **Plan:** [doc/03_plan/sys_test/scv_jj_git_devhub_spipe_unified_lifecycle.md](doc/03_plan/sys_test/scv_jj_git_devhub_spipe_unified_lifecycle.md)
+- **Design:** [doc/05_design/app/tools/scv_jj_git_devhub_spipe_unified_lifecycle.md](doc/05_design/app/tools/scv_jj_git_devhub_spipe_unified_lifecycle.md)
+- **Research:** [doc/01_research/app/tools/scv/scv_jj_git_devhub_spipe_unified_lifecycle_2026-08-25.md](doc/01_research/app/tools/scv/scv_jj_git_devhub_spipe_unified_lifecycle_2026-08-25.md)
 
 
 </details>
+
+## Generation history
+
+Generated by `simple spipe-docgen` (Simple).
+Source SHA-256: `a801dcb0a19e13474a979728a687b9061b8c7c2c379b5d53fb18f22c1f3b599c`

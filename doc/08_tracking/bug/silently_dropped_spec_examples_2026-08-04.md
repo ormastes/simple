@@ -1,4 +1,9 @@
 # Silently dropped spec examples report green, and `tail -1` misreports the file
+## Closed 2026-09-16 — Status FIXED on run+test paths; verdict line + drop guard with sabotage proof both directions
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-08-04
 **Status:** FIXED on both the `simple run` and `simple test` paths
@@ -229,3 +234,4 @@ None of the following are reported as drops:
 * `driver/src/cli/test_runner/execution.rs` — 8 tests mirroring those on the
   `simple test` path, plus: zero recorded examples is left to `--assert-ran`, and
   an existing failure is not relabelled as a drop.
+

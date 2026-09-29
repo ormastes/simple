@@ -1,0 +1,110 @@
+# Purpose: RowBitmap's word loops (the innermost work of every filtered scan,
+# posting-list intersect and union) now run as native AVX-512-dispatched
+# kernels. A dropped or short word silently drops up to 32 matching rows, so
+# these examples pin every kernel to its scalar twin across mismatched operand
+# lengths, tail words, and the lane boundaries.
+# @req REQ-SSPEC-LIB
+
+use std.spec.step
+use std.spec.{describe, it, assert_equal}
+use std.nogc_sync_mut.db.accel.{
+    row_bitmap_and_words, _scalar_row_bitmap_and_words,
+    row_bitmap_or_words, _scalar_row_bitmap_or_words,
+    row_bitmap_andnot_words, _scalar_row_bitmap_andnot_words
+}
+
+fn words(n: i64, seed: i64) -> [u32]:
+    var w: [u32] = []
+    var i: i64 = 0
+    while i < n:
+        w.push(((i * 2654435761 + seed * 40503) & 0xFFFFFFFF) as u32)
+        i = i + 1
+    w
+
+fn words_equal(a: [u32], b: [u32]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i: i64 = 0
+    while i < a.len():
+        if a[i.to_i32()] != b[i.to_i32()]:
+            return false
+        i = i + 1
+    true
+
+describe "RowBitmap AND kernel matches its scalar twin":
+    it "matches across word counts that straddle the 16-lane AVX-512 boundary":
+        step("16 u32 lanes is the ZMM width; sweep either side plus the tails")
+        var bad = 0
+        var n = 1
+        while n <= 40:
+            val l = words(n, 1)
+            val r = words(n, 2)
+            if not words_equal(row_bitmap_and_words(l, r, n), _scalar_row_bitmap_and_words(l, r, n)):
+                bad = bad + 1
+            n = n + 1
+        assert_equal(bad, 0)
+
+    it "returns an empty bitmap for a non-positive limit":
+        step("degenerate limits must not produce a short bitmap")
+        assert_equal(row_bitmap_and_words(words(8, 1), words(8, 2), 0).len(), 0)
+
+    it "falls back rather than truncating when the limit exceeds an operand":
+        step("a short result would silently drop up to 32 rows per missing word")
+        val l = words(4, 1)
+        val r = words(4, 2)
+        assert_equal(row_bitmap_and_words(l, r, 4).len(), 4)
+
+describe "RowBitmap OR kernel matches its scalar twin":
+    it "treats an index past either operand as a zero word, not as clamping":
+        step("or_with grows to the LONGER operand; the short side must read 0")
+        var bad = 0
+        var n = 1
+        while n <= 40:
+            val lw = if n > 3: n - 3 else: n
+            val rw = if n > 7: n - 7 else: n
+            val l = words(lw, 3)
+            val r = words(rw, 4)
+            if not words_equal(row_bitmap_or_words(l, r, n, lw, rw),
+                      _scalar_row_bitmap_or_words(l, r, n, lw, rw)):
+                bad = bad + 1
+            n = n + 1
+        assert_equal(bad, 0)
+
+    it "matches when one operand is empty":
+        step("an empty side must contribute only zero words")
+        val l = words(12, 5)
+        val r: [u32] = []
+        assert_equal(words_equal(row_bitmap_or_words(l, r, 12, 12, 0),
+                        _scalar_row_bitmap_or_words(l, r, 12, 12, 0)), true)
+
+describe "RowBitmap AND-NOT kernel matches its scalar twin":
+    it "matches across lengths, including a shorter right-hand operand":
+        step("and_not keeps the LEFT length; missing rhs words mean 'clear nothing'")
+        var bad = 0
+        var n = 1
+        while n <= 40:
+            val rw = if n > 5: n - 5 else: n
+            val l = words(n, 6)
+            val r = words(rw, 7)
+            if not words_equal(row_bitmap_andnot_words(l, r, n, rw),
+                      _scalar_row_bitmap_andnot_words(l, r, n, rw)):
+                bad = bad + 1
+            n = n + 1
+        assert_equal(bad, 0)
+
+    it "clears every bit when the operands are identical":
+        step("x AND NOT x is empty — a direct semantic check, not just parity")
+        val l = words(20, 8)
+        val out = row_bitmap_andnot_words(l, l, 20, 20)
+        var nonzero = 0
+        var i: i64 = 0
+        while i < 20:
+            if out[i.to_i32()] != 0u32:
+                nonzero = nonzero + 1
+            i = i + 1
+        assert_equal(nonzero, 0)
+
+    it "is a no-op when the right-hand operand contributes no words":
+        step("rhs_words = 0 must leave the left operand untouched")
+        val l = words(16, 9)
+        assert_equal(words_equal(row_bitmap_andnot_words(l, [], 16, 0), l), true)

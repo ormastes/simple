@@ -1,4 +1,8 @@
 # Bootstrap Stage 4 imported-call and runtime gap
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 The 2026-07-12 full bootstrap proves Stage 2 and Stage 3 succeed through the
 pure-Simple compiler. Stage 4 then fails while linking the full CLI.
@@ -49,3 +53,4 @@ linking, not an isolated function. Cross-referenced verification against
 
 **Status:** PARTIALLY-FIXED. Sub-issue (a) resolved; sub-issue (b) remains
 explicit open TODO per cross-referenced doc.
+

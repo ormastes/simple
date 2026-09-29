@@ -1,7 +1,8 @@
 # Native-build Stage 4 dispatch and strict-link blockers
+## Open 2026-09-16 — needs owner triage
 
-Status: OPEN (P2)
-Status re-verified 2026-08-17 by source inspection (triage shard 02).
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -10,15 +11,6 @@ composition remains blocked. The latest bounded exact-entry run resolved its
 source closure without an import or phase diagnostic, then terminated with
 SIGBUS before emitting objects. That post-resolution phase boundary is not yet
 localized.
-
-A later low-RSS phase-one stall exposed one remaining allocation amplifier in
-the shared import scanner: splitting the complete source into lines and
-trimming every line registered ordinary source text before testing whether it
-was an import. The scanner now performs one byte pass and materializes only an
-ASCII module token for a recognized declaration. It does not apply byte offsets
-to `text`, so Unicode on earlier lines has identical interpreter/native
-behavior. Focused source and behavior regressions are retained; a fresh Stage4
-execution is still pending.
 
 The 2026-07-15 source follow-up also routes the canonical Stage4 one-binary
 `--entry` through the existing in-process pure-Simple project driver and clears
@@ -828,3 +820,4 @@ runaway guard terminated it. This was the third bounded Stage 4 cycle, so no
 retry was made. The next fix must make the canonical Stage 4 wrapper use the
 same bounded pure-Simple closure path before strict provider/backfill linking;
 it must not re-enter the pre-object whole-tree bootstrap path.
+

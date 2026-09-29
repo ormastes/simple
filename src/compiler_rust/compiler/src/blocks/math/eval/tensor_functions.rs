@@ -306,13 +306,37 @@ pub fn eval_item(args: &[MathValue]) -> Result<MathValue, CompileError> {
 // ==========================================================================
 
 pub fn eval_sum_tensor(args: &[MathValue]) -> Result<MathValue, CompileError> {
+    if args.len() != 1 && args.len() != 2 {
+        return Err(CompileError::semantic(format!(
+            "sum requires a tensor and optional axis, got {} arguments",
+            args.len()
+        )));
+    }
     let t = get_tensor(&args[0])?;
+    if args.len() == 2 {
+        let axis = args[1].as_f64()?;
+        if axis < 0.0 || axis.fract() != 0.0 {
+            return Err(CompileError::semantic(
+                "sum axis must be a non-negative integer".to_string(),
+            ));
+        }
+        return Ok(MathValue::Tensor(t.sum_axis(axis as usize)?));
+    }
     Ok(MathValue::Float(t.sum()))
 }
 
 pub fn eval_mean(args: &[MathValue]) -> Result<MathValue, CompileError> {
-    if args.len() == 1 && args[0].is_tensor() {
+    if (args.len() == 1 || args.len() == 2) && args[0].is_tensor() {
         let t = get_tensor(&args[0])?;
+        if args.len() == 2 {
+            let axis = args[1].as_f64()?;
+            if axis < 0.0 || axis.fract() != 0.0 {
+                return Err(CompileError::semantic(
+                    "mean axis must be a non-negative integer".to_string(),
+                ));
+            }
+            return Ok(MathValue::Tensor(t.mean_axis(axis as usize)?));
+        }
         Ok(MathValue::Float(t.mean()))
     } else {
         // Mean of arguments
@@ -498,6 +522,21 @@ mod tests {
         match result {
             MathValue::Float(f) => assert!((f - 2.0).abs() < 0.001),
             _ => panic!("expected float"),
+        }
+    }
+
+    #[test]
+    fn test_tensor_axis_reductions() {
+        let tensor = Tensor::new(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]).unwrap();
+        let summed = eval_sum_tensor(&[MathValue::Tensor(tensor.clone()), MathValue::Int(0)]).unwrap();
+        let mean = eval_mean(&[MathValue::Tensor(tensor), MathValue::Int(1)]).unwrap();
+        match summed {
+            MathValue::Tensor(t) => assert_eq!(t.data, vec![4.0, 6.0]),
+            _ => panic!("expected sum tensor"),
+        }
+        match mean {
+            MathValue::Tensor(t) => assert_eq!(t.data, vec![1.5, 3.5]),
+            _ => panic!("expected mean tensor"),
         }
     }
 

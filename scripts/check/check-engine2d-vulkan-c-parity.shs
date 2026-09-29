@@ -1,0 +1,130 @@
+#!/bin/sh
+set -eu
+
+die() { echo "engine2d-vulkan-c-parity: FAIL — $*" >&2; exit 1; }
+value() { awk -F= -v key="$2" '$1 == key { if (seen++) exit 2; value=$2 } END { if (!seen) exit 3; print value }' "$1"; }
+uint() { case $1 in ''|*[!0-9]*) return 1;; esac; }
+sint_nonzero() {
+    case $1 in
+        -*) digits=${1#-}; uint "$digits" && [ "$digits" != 0 ] ;;
+        *) uint "$1" && [ "$1" != 0 ] ;;
+    esac
+}
+hash() { [ ${#1} -eq 64 ] && case $1 in *[!0-9a-f]*) return 1;; esac; }
+
+validate() {
+    file=$1 implementation=$2
+    [ -f "$file" ] || return 1
+    [ "$(value "$file" schema)" = engine2d-vulkan-feature-perf-v1 ] || return 1
+    [ "$(value "$file" implementation)" = "$implementation" ] || return 1
+    [ "$(value "$file" backend)" = vulkan ] || return 1
+    [ "$(value "$file" completion)" = known ] || return 1
+    [ "$(value "$file" fallback)" = none ] || return 1
+    [ "$(value "$file" timed_readback_bytes)" = 0 ] || return 1
+    [ "$(value "$file" mismatch_count)" = 0 ] || return 1
+    hash "$(value "$file" workload_hash)" || return 1
+    hash "$(value "$file" device_hash)" || return 1
+    for key in width height warmup_count sample_count p50_ns p95_ns submission_count fence_count evidence_readback_bytes; do
+        n=$(value "$file" "$key") || return 1
+        uint "$n" && [ "$n" -gt 0 ] || return 1
+    done
+    checksum=$(value "$file" checksum) || return 1
+    sint_nonzero "$checksum" || return 1
+    p50=$(value "$file" p50_ns) || return 1
+    p95=$(value "$file" p95_ns) || return 1
+    [ "$p50" -le "$p95" ] || return 1
+    # Bounds keep the 2x comparison and ratio arithmetic inside signed i64.
+    [ "$p95" -le 1000000000000000 ] || return 1
+    # Every receipt admitted by this comparator is an 8K frame feature.
+    [ "$p95" -le 12500000 ] || return 1
+    [ "$(value "$file" width)" = 7680 ] || return 1
+    [ "$(value "$file" height)" = 4320 ] || return 1
+    [ "$(value "$file" submission_count)" = "$(value "$file" sample_count)" ] || return 1
+    [ "$(value "$file" fence_count)" = "$(value "$file" sample_count)" ] || return 1
+    [ "$(value "$file" evidence_readback_bytes)" = 132710400 ] || return 1
+    [ "$(value "$file" presented)" = false ] || return 1
+    [ -n "$(value "$file" feature)" ] && [ -n "$(value "$file" timing_scope)" ]
+}
+
+compare() {
+    simple=$1 c=$2
+    validate "$simple" simple || die invalid-simple-receipt
+    validate "$c" c || die invalid-c-receipt
+    for key in feature workload_hash device_hash width height warmup_count sample_count timing_scope checksum submission_count fence_count evidence_readback_bytes presented; do
+        [ "$(value "$simple" "$key")" = "$(value "$c" "$key")" ] || die "$key-mismatch"
+    done
+    simple_p95=$(value "$simple" p95_ns)
+    c_p95=$(value "$c" p95_ns)
+    [ "$simple_p95" -le $((c_p95 * 2)) ] || die simple-p95-exceeds-2x-c
+    ratio_milli=$((simple_p95 * 1000 / c_p95))
+    echo engine2d_vulkan_c_parity_status=pass
+    echo engine2d_vulkan_c_parity_feature="$(value "$simple" feature)"
+    echo engine2d_vulkan_c_parity_simple_p95_ns="$simple_p95"
+    echo engine2d_vulkan_c_parity_c_p95_ns="$c_p95"
+    echo engine2d_vulkan_c_parity_ratio_milli="$ratio_milli"
+}
+
+self_test() {
+    dir=$(mktemp -d "${TMPDIR:-/tmp}/engine2d-vulkan-c-parity.XXXXXX")
+    trap 'rm -rf "$dir"' EXIT HUP INT TERM
+    write() { impl=$1 p95=$2 hash_value=$3 checksum_value=${4:-99} p50=${5:-1000}; cat <<EOF
+schema=engine2d-vulkan-feature-perf-v1
+implementation=$impl
+backend=vulkan
+feature=font-atlas-packed
+workload_hash=$hash_value
+device_hash=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+width=7680
+height=4320
+warmup_count=1
+sample_count=31
+timing_scope=vulkan-submit-and-fence
+p50_ns=$p50
+p95_ns=$p95
+submission_count=31
+fence_count=31
+evidence_readback_bytes=132710400
+presented=false
+timed_readback_bytes=0
+mismatch_count=0
+checksum=$checksum_value
+completion=known
+fallback=none
+EOF
+    }
+    write simple 1999 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa >"$dir/simple"
+    write c 1000 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa >"$dir/c"
+    compare "$dir/simple" "$dir/c" >/dev/null
+    sed 's/^submission_count=31$/submission_count=30/' "$dir/simple" >"$dir/simple-bad-count"
+    if (compare "$dir/simple-bad-count" "$dir/c") >/dev/null 2>&1; then die selftest-submit-count-drift-accepted; fi
+    write simple 2001 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa >"$dir/simple"
+    if (compare "$dir/simple" "$dir/c") >/dev/null 2>&1; then die selftest-over-2x-accepted; fi
+    write simple 1900 cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc >"$dir/simple"
+    if (compare "$dir/simple" "$dir/c") >/dev/null 2>&1; then die selftest-workload-drift-accepted; fi
+    write simple 1999 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -99 >"$dir/simple"
+    write c 1000 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -99 >"$dir/c"
+    compare "$dir/simple" "$dir/c" >/dev/null
+    write simple 1999 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa not-a-checksum >"$dir/simple"
+    write c 1000 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa not-a-checksum >"$dir/c"
+    if (compare "$dir/simple" "$dir/c") >/dev/null 2>&1; then die selftest-invalid-checksum-accepted; fi
+    write simple 1999 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa 99 3000 >"$dir/simple"
+    write c 1000 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa >"$dir/c"
+    if (compare "$dir/simple" "$dir/c") >/dev/null 2>&1; then die selftest-p50-over-p95-accepted; fi
+    write simple 1000000000000001 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa >"$dir/simple"
+    if (compare "$dir/simple" "$dir/c") >/dev/null 2>&1; then die selftest-overflow-timing-accepted; fi
+    write simple 12500001 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa >"$dir/simple"
+    write c 7000000 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa >"$dir/c"
+    if (compare "$dir/simple" "$dir/c") >/dev/null 2>&1; then die selftest-over-80fps-accepted; fi
+    echo engine2d_vulkan_c_parity_selftest=pass
+}
+
+case ${1:-} in
+    --self-test) self_test ;;
+    --compare)
+        shift; simple= c=
+        while [ $# -gt 0 ]; do case $1 in --simple) simple=$2; shift 2;; --c) c=$2; shift 2;; *) die unknown-argument;; esac; done
+        [ -n "$simple" ] && [ -n "$c" ] || die missing-receipt
+        compare "$simple" "$c"
+        ;;
+    *) die 'usage: --self-test | --compare --simple FILE --c FILE' ;;
+esac

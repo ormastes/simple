@@ -1,7 +1,8 @@
 # SimpleOS hosted FileSystem-layer trait dispatch still sentinels (ud2) after C8 BlockDevice fix
 
 - **ID:** simpleos_filesystem_trait_dispatch_sentinel_2026-07-20
-- **Status:** OPEN
+- **Status:** RESOLVED (compiler semantics; target boot remains a separate
+  integration gate)
 - **Severity:** high (blocks enabling the hosted FAT32 mount / app-surface
   materialization on evidence boots)
 - **Found by:** BROWSER-FS lane, 2026-07-20
@@ -138,3 +139,50 @@ OR fix the FileSystem-trait dispatch resolution itself (preferred).
 3. Interim: robustly gate `g_vfs_read_file_bytes` off the hosted trait path
    for pure-Simple boots (workaround above, once the const-fold issue is
    addressed).
+
+## Resolution evidence (2026-09-22)
+
+The semantic repair was already present on current `main` via
+`f7d68db89a65849062efdf6795415276761c3bac` (`fix(seed/mir): deterministic
+trait selection for unknown-receiver dispatch`). For an erased receiver,
+`find_trait_for_method_on_receiver` now filters candidates by explicit arity,
+prefers a trait with a recorded implementation over same-named impl-less
+traits, and uses deterministic trait-name ordering only as the final tie-break.
+An impl-less declaration therefore cannot replace the real `FileSystem`
+vtable owner with `DUCK_DISPATCH_UNSUPPORTED_SLOT`.
+
+Two focused executable regressions now pin the original filesystem shape:
+
+- MIR assertion: `open`, `read`, and `stat` lower to real slots `0`, `1`, and
+  `2`; none equals `DUCK_DISPATCH_UNSUPPORTED_SLOT`.
+- Cranelift JIT execution: a `Fat32` value erased to `Any` dispatches all three
+  methods correctly despite an earlier lexicographic, same-signature,
+  impl-less trait owning the same names.
+
+Commands (12 build jobs):
+
+```text
+CARGO_BUILD_JOBS=12 cargo test -p simple-compiler --lib \
+  mir::lower::tests::seed_regression_tests::erased_filesystem_receiver_prefers_implemented_trait_slots -- --exact
+PASS: 1 test; warm wall 0.81 s; max RSS 183,556 KiB
+
+CARGO_BUILD_JOBS=12 cargo test -p simple-compiler \
+  --test any_receiver_vtable_dispatch_jit \
+  filesystem_methods_on_erased_receiver_ignore_impl_less_name_collisions -- --exact
+PASS: 1 test; warm wall 1.11 s; max RSS 262,528 KiB
+```
+
+The initial cold 12-job build took 147.22 s and peaked at 5,986,052 KiB; that
+number includes compiling the isolated worktree's Rust dependency graph and is
+not dispatch-path runtime cost. No performance-sensitive production code was
+changed. A future full SimpleOS boot may still expose independent VFS, source
+selection, or fault-handler defects described above; those do not invalidate
+the now-executable trait-dispatch result.
+
+## Deferred environment verification TODO
+
+- [ ] When the admitted Phase 2 compiler and SimpleOS filesystem guest are
+  available, run the original filesystem workflow in QEMU and retain the guest
+  image/compiler digests plus serial evidence that `open`, `read`, and `stat`
+  dispatch without `DUCK_DISPATCH_UNSUPPORTED_SLOT` or `#UD`. This commit
+  claims only the focused compiler-regression coverage above.

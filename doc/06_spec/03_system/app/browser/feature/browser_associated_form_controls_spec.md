@@ -1,91 +1,139 @@
-# BrowserSession associated form controls
+# browser_associated_form_controls_spec
 
-Executable scenario: `test/03_system/app/browser/feature/browser_associated_form_controls_spec.spl`
+> Associated form-control submission system specification.
 
-**Docgen:** pending. The available self-hosted runtime crashes before producing
-SPipe output, so this checked-in manual mirrors the executable scenario.
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 1 | 1 | 0 | 0 |
 
-| Requirement | Executable evidence |
-| --- | --- |
-| REQ-WEB-BROWSER-007 | DOM click callback changes the document title. |
-| REQ-WEB-BROWSER-008 | UI-access click dispatches to the live visible submitter. |
-| REQ-WEB-BROWSER-010 | The resulting POST has the expected URL, body, and content type. |
-| REQ-WEB-BROWSER-021 | The visible `Send` button is found on the UI-access surface. |
+<details>
+<summary>Full Scenario Manual</summary>
 
-## Submit an externally associated control
+# browser_associated_form_controls_spec
 
-1. Open a profile form and assert the DOM was accepted. It has a visible
-   **Send** button and a `role` input outside the form but associated through
-   `form="profile"`. A `leak` input is explicitly owned by a different form.
-2. Find **Send** on the BrowserSession UI-access surface and dispatch its click.
-3. Verify the DOM click callback changes the title to `Sending`.
-4. Verify the resulting POST request targets `/save` and contains, in document
-   order, `name=Ada&role=editor&intent=publish`; it must not contain
-   `leak=blocked`.
-5. Verify the rendered 16×16 pixel buffer is unchanged by the non-navigated
-   dispatch.
+Associated form-control submission system specification.
 
-This scenario prevents the historical behavior where the submit button could
-activate its form but external associated controls were silently omitted from
-the serialized request body, while ensuring controls owned by another form are
-not accidentally included.
+## At a Glance
 
-## Executable source mirror
+| Field | Value |
+|-------|-------|
+| Category | Application |
+| Status | Active |
+| Source | `test/03_system/app/browser/feature/browser_associated_form_controls_spec.spl` |
+| Updated | 2026-08-26 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+Associated form-control submission system specification.
+
+checked through the UI access snapshot before its click event is dispatched.
+
+## Evidence
+
+Display policy: `embed_tui`
+
+| Category | Count |
+|----------|------:|
+| Screenshots | 2 |
+
+### Screenshots
+
+| Item | Kind | Path |
+|------|------|------|
+| `pixel oracle is retained in-memory` | Screenshot | `pixel oracle is retained in-memory` |
+| `the visible control is` | Screenshot | `the visible control is` |
+
+## Scenarios
+
+### BrowserSession associated form controls
+
+#### should submit an externally associated control after its visible click
+
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# codex-system-test
-# @req REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-021
-use std.spec.*
-use common.ui.access.{WinTextActionRequest, ui_access_find_nodes}
-use std.gc_async_mut.web.browser_session.{BrowserSession}
-use std.gc_async_mut.web.browser_session_ui_access.*
-
-fn _same_pixels(left: [u32], right: [u32]) -> bool:
-    if left.len() != right.len():
-        return false
-    var index = 0
-    while index < left.len():
-        if left[index] != right[index]:
-            return false
-        index = index + 1
-    true
-
-describe "BrowserSession associated form controls":
-    it "should submit an externally associated control after its visible click":
-        step("Render the browser form and locate its visible submit button")
-        var session = BrowserSession.new()
-        expect(session.open_html(
-            "https://example.com/profile",
-            "<html><body><form id='profile' action='/save' method='post'><input name='name' value='Ada'></form><input form='profile' name='role' value='editor'><input form='other' name='leak' value='blocked'><form id='other'></form><button form='profile' name='intent' value='publish' onclick=\"document.title='Sending'\">Send</button></body></html>"
-        ).is_ok()).to_equal(true)
-        val pixels_before = session.render_to_pixels(16, 16).pixels
-        val buttons = ui_access_find_nodes(
-            session.ui_access_snapshot(), "browser:session", "button", "Send", 1
-        )
-        expect(buttons.len()).to_equal(1)
-        expect(pixels_before.len()).to_equal(256)
-
-        step("Release the submit button through the DOM UI action route")
-        val activated = session.ui_access_act(WinTextActionRequest(
-            target_id: buttons[0].canonical_id, action: "click",
-            text_value: "", x: 0, y: 0
-        ))
-
-        step("Observe click state, serialized POST event, and unchanged page pixels")
-        expect(activated.ok).to_equal(true)
-        expect(session.current_title).to_equal("Sending")
-        if val request = session.take_pending_request():
-            expect(request.method).to_equal("POST")
-            expect(request.url).to_equal("https://example.com/save")
-            expect(request.body).to_equal("name=Ada&role=editor&intent=publish")
-            expect(request.body.contains("leak=blocked")).to_equal(false)
-            expect(request.content_type).to_equal("application/x-www-form-urlencoded")
-        else:
-            fail("missing form request")
-        expect(_same_pixels(
-            session.render_to_pixels(16, 16).pixels, pixels_before
-        )).to_equal(true)
+# @req REQ-SSPEC-SYSTEM
+# @req REQ-WEB-BROWSER-007
+# @req REQ-WEB-BROWSER-008
+# @req REQ-WEB-BROWSER-010
+# @req REQ-WEB-BROWSER-021
 ```
 
-Regenerate this manual with `simple spipe-docgen` once the self-hosted docgen
-runtime is repaired.
+</details>
+
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 1 |
+| Active scenarios | 1 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
+
+
+</details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+- `REQ-WEB-BROWSER-007`
+- `REQ-WEB-BROWSER-008`
+- `REQ-WEB-BROWSER-010`
+- `REQ-WEB-BROWSER-021`
+- `REQ-WEB-BROWSER-007:`
+- `REQ-WEB-BROWSER-008:`
+- `REQ-WEB-BROWSER-010:`
+- `REQ-WEB-BROWSER-021:`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `4a8a40b592e334bdeb4f31296b93e74a961562e91b2527ac3cc51c5a93e53820`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `4a8a40b592e334bdeb4f31296b93e74a961562e91b2527ac3cc51c5a93e53820`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `4a8a40b592e334bdeb4f31296b93e74a961562e91b2527ac3cc51c5a93e53820`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **84/100**; effective score: **49/100**; blockers: **1**.
+
+SSpec documentization score: 49/100
+source: test/03_system/app/browser/feature/browser_associated_form_controls_spec.spl
+mirror: doc/06_spec/03_system/app/browser/feature/browser_associated_form_controls_spec.md (current)
+findings: 5 blockers: 1
+  narrative=100 structure=85 oracle=50
+  traceability=100 evidence=100 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+  raw=84; blocker cap makes effective=49
+doc/06_spec/03_system/app/browser/feature/browser_associated_form_controls_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/app/browser/feature/browser_associated_form_controls_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/app/browser/feature/browser_associated_form_controls_spec.spl:1:1: blocker SSDOC-ORA-001 [oracle] (-50): no real executed assertion or compiler oracle
+  why: A passing-looking document without an oracle is not conformance evidence.
+  improve: Replace placeholders with an observable production assertion.
+test/03_system/app/browser/feature/browser_associated_form_controls_spec.spl:41:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'should submit an externally associated control after its visible click' has no visible step flow
+  why: Ordered visible actions make the manual operable.
+  improve: Add ordered step("...") calls for meaningful actions.
+test/03_system/app/browser/feature/browser_associated_form_controls_spec.spl:41:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should submit an externally associated control after its visible click' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+<!-- sspec-maintain:scorecard:end -->

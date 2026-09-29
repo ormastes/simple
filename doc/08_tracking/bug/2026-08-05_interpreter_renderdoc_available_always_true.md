@@ -6,6 +6,10 @@
 - **Severity:** Medium — one honesty-contract symbol out of ten, interpreter engine only
 - **Area:** `src/compiler_rust/compiler/src/interpreter_extern/gpu.rs` (`renderdoc_dlopen` module)
 
+## Closed 2026-09-13 — Already Fixed
+
+Fix verified in source: `renderdoc_dlopen::available()` function added and `rt_renderdoc_available_fn` now calls it instead of buggy `num_captures() != u32::MAX` comparison.
+
 ## Summary
 
 `rt_renderdoc_available_fn` (gpu.rs:4845-4852) reports RenderDoc as available

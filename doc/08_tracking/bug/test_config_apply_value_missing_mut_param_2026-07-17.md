@@ -1,4 +1,8 @@
 # test_config.spl: apply_test_config_value mutates its own stack frame only, never the caller's TestConfig
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-17
 **Severity:** medium (the `test:` section of `config/simple.test.sdn` never actually
@@ -6,11 +10,9 @@ changes runtime behavior for the keys routed through this helper, though the
 one current call site, `load_test_config_from_path`, has ALSO been hard-bypassed
 with an early `return config` before it ever calls the parser — see Notes — so
 this is not currently reachable in production)
-**Status:** fixed — owner `codex-par-testconfig` RESOLVED (2026-08-02).
-
-The config-core migration removed the mutation helpers. Typed entries now flow
-through `test_config_resolve` into a newly constructed `TestConfig`; the
-deterministic-startup bypass remains unchanged.
+**Status:** open — language/runtime defect, not fixed here (found while writing
+new hardening unit specs for `src/lib/nogc_sync_mut/test_runner/test_config.spl`,
+out of scope for that task)
 
 ## Symptom
 
@@ -83,12 +85,12 @@ contributor to whatever motivated that bypass. If/when the bypass is lifted,
 this defect would silently make every boolean/threshold key in
 `config/simple.test.sdn`'s `test:` section a no-op.
 
-## Resolution
+## Suggested fix direction (not implemented here)
 
-Regression coverage parses and resolves both `run_sdoctests` and nested
-`session_max_sessions.qemu_vm`, proving the former top-level and nested paths
-end to end without lifting the unrelated startup bypass. Focused tests passed
-10/10 and source lint passed.
+Add `mut` to the `config` parameter of `apply_test_config_value` and
+`_apply_session_max`, then re-verify `parse_test_config_content` end-to-end
+(a real regression test, not just checking the function compiles) before
+lifting the `load_test_config_from_path` bypass.
 
 ## Cross-refs
 
@@ -96,3 +98,4 @@ Found while writing `test/01_unit/lib/test_runner/test_config_spec.spl`
 (new hardening unit spec, task: pure-Simple test-runner engine package
 hardening). That spec pins the current (broken) contract explicitly rather
 than asserting the intended-but-unreachable behavior.
+

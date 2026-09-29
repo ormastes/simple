@@ -1,0 +1,59 @@
+use std.spec.{describe, it, expect}
+use compiler.driver.cache.package_tldr_metadata.{
+    ConfigVariantKeyV1, PackageSmfSectionV1, PackageTldrHeaderV1,
+    package_tldr_header_validate_v1}
+use std.common.crypto.sha256.{sha256_text}
+
+fn header() -> PackageTldrHeaderV1:
+    val digest = sha256_text("canonical-order-fixture")
+    PackageTldrHeaderV1(
+        schema_version: 1, producer_digest: digest,
+        package_identity: "pkg", module_identity: "pkg.main",
+        source_identity: "pkg/main.spl",
+        variant: ConfigVariantKeyV1("aarch64-unknown-linux-gnu", "cranelift",
+            [], "debug", "abi-v1", [], []),
+        source_digest: digest, source_witness_digest: digest,
+        smf_digest: digest,
+        smf_sections: [PackageSmfSectionV1("exports", 0, 1, digest)],
+        export_digest: digest, abi_digest: digest,
+        initializer_digest: digest, provider_digest: digest,
+        generated_source_digest: digest, reverse_projection_digest: digest,
+        direct_imports: ["a.dep", "z.dep"],
+        reverse_dependents: ["a.user", "z.user"],
+        scc_identity: "scc.pkg",
+        scc_members: ["pkg.main", "pkg.peer"],
+        interface_archive_digest: digest, action_archive_digest: digest)
+
+describe "canonical TLDR dependency order":
+    it "accepts one sorted unique header":
+        expect(package_tldr_header_validate_v1(header())).to_equal("ok")
+
+    it "rejects unsorted imports before index publication":
+        var value = header()
+        value.direct_imports = ["z.dep", "a.dep"]
+        expect(package_tldr_header_validate_v1(value)).to_equal("metadata-list-invalid")
+
+    it "rejects unsorted reverse dependents and SCC members":
+        var dependents = header()
+        dependents.reverse_dependents = ["z.user", "a.user"]
+        expect(package_tldr_header_validate_v1(dependents)).to_equal("metadata-list-invalid")
+        var members = header()
+        members.scc_members = ["pkg.peer", "pkg.main"]
+        expect(package_tldr_header_validate_v1(members)).to_equal("metadata-list-invalid")
+
+    it "validates digest bytes and SMF section order by identity bytes":
+        var malformed = header()
+        malformed.producer_digest = "G" + malformed.producer_digest[1:]
+        expect(package_tldr_header_validate_v1(malformed)).to_equal(
+            "metadata-digest-invalid")
+        var ordered = header()
+        val digest = ordered.smf_digest
+        ordered.smf_sections = [
+            PackageSmfSectionV1("exports", 0, 1, digest),
+            PackageSmfSectionV1("types", 1, 1, digest)]
+        expect(package_tldr_header_validate_v1(ordered)).to_equal("ok")
+        ordered.smf_sections = [
+            PackageSmfSectionV1("types", 0, 1, digest),
+            PackageSmfSectionV1("exports", 1, 1, digest)]
+        expect(package_tldr_header_validate_v1(ordered)).to_equal(
+            "metadata-smf-directory-invalid")

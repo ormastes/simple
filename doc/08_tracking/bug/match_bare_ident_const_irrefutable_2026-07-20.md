@@ -1,15 +1,11 @@
 # `match` arm naming a `val` constant lowers as an irrefutable capture
+## Open 2026-09-16 — needs owner triage
 
-Status: OPEN (P1)
-Status re-verified 2026-08-17 by source inspection (triage shard 02).
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status (2026-07-20):** OPEN. Worked around at every known call site; no root
 fix yet. Distinct from `native_const_pattern_lowers_irrefutably_2026-07-13.md`
-**Status (2026-08-17):** SOURCE FIXED / LIVE EVIDENCE PENDING by the
-`p2_match_const` SPipe lane. The pure-Simple MIR repair and exact/adjacent
-regressions are present; execution awaits a provenance-admitted pure-Simple
-CLI. The canonical BugDB row remains owned by the sweep merge owner. Distinct from
-`native_const_pattern_lowers_irrefutably_2026-07-13.md`
 (that one is enum-variant-vs-struct *name precedence* in native lowering, and is
 resolved) — this one is a **bare identifier that resolves to a `val` constant**
 being treated as a fresh binding name instead of a value to compare against.
@@ -63,28 +59,6 @@ equality test on that constant's value; only fall back to a capture binding when
 the name is genuinely unbound. A capture in a non-final arm that makes every
 later arm unreachable should also be a lint/warning in its own right.
 
-### Compiler trace and blocked verification (2026-07-27)
-
-The flat frontend currently converts every bare identifier pattern to
-`PatternKind.Binding` in `_FlatAstBridge.convert_flat_pattern`. HIR then creates
-a fresh variable for that binding. MIR treats it as the irrefutable/default arm.
-MIR also builds `norm_arms`, but the scalar dispatch loop iterates the original
-`arms`, so even successful normalization is discarded outside the enum path.
-
-The scoped repair is:
-
-1. resolve immutable current-module scalar constants before enum/capture
-   classification;
-2. dispatch the normalized arms rather than the original arms;
-3. add a strict native regression where the second constant arm returns `29`
-   and the wildcard remains reachable.
-
-Integer constant normalization was prototyped but not accepted: the available
-source-driver build failed on missing `rt_transient_array_scope_begin` after
-JIT fallback, so no green compiler artifact exists. Text and boolean constants
-also require their own non-integer literal lowering rather than being inferred
-from the integer candidate.
-
 ## Workaround (in use today)
 
 Compare explicitly with `==` in an `if`/`elif` chain. See `exit_code()` in
@@ -97,29 +71,51 @@ only those whose arm identifiers resolve to `val` constants (arms that are
 string/number literals or enum variants are unaffected). Each needs checking
 against this rule before it can be declared clean.
 
-## Pure-Simple repair (2026-08-17)
+## Re-measured 2026-09-07 on the pure-Simple interpreter — STILL OPEN, now pinned
 
-The MIR owner now resolves a Binding-shaped arm against the current module's
-folded scalar constants before enum or capture classification, converts exact
-int/bool/text values to literal patterns, and dispatches the resulting
-`norm_arms`. Scalar literal chains compare text through `rt_text_eq_any` and
-retain the existing integer jump-table path when every case is an integer.
+The bug DB routes this row to
+`src/compiler/10.frontend/core/interpreter/eval.spl`. That attribution is
+correct for the engine but the defect is NOT fixable there today, and this note
+records the measurement rather than leaving the row unexamined.
 
-Regression coverage is in
-`test/01_unit/compiler/codegen/match_bare_val_constant_spec.spl`: the exact
-two-text-constant failure, the previously requested second integer arm
-returning 29, adjacent boolean constants, wildcard reachability, and a genuine
-unbound capture (including a same-named mutable module `var`). Live execution
-remains pending because this worktree has no
-provenance-admitted pure-Simple CLI; the Rust seed was deliberately not used.
+**LANE:** pure-Simple tree-walk evaluator, `match_pattern` in
+`src/compiler/10.frontend/core/interpreter/eval.spl`, driven directly from a
+spec over a hand-built AST (`use compiler.core.interpreter.eval.{eval_expr}`).
+No deployed self-hosted binary is needed — the Rust seed is only the host.
+Binary identity: `bin/release/aarch64-unknown-linux-gnu/simple`, 50093192
+bytes, 2026-09-06 09:59.
 
-## Knowledge update scope
+Reproduced: `match 2:` with a single arm `case WS_OPCODE_TEXT:` binds `2` to
+`WS_OPCODE_TEXT` and takes the arm. `match_pattern`'s `EXPR_IDENT` branch ends
+in `env_define(name, value_id); return true` for any identifier that is not
+`_`, not `None`, and not a declared enum variant.
 
-- Match feature and MIR layer expert notes now record constant-before-capture
-  resolution and normalized-arm dispatch.
-- `doc/07_guide/`: N/A; this repairs existing language semantics and exposes no
-  new user command or capability.
-- Research/architecture/design: N/A; ownership remains in canonical MIR match
-  lowering.
-- Workflow/SPipe/manual docs: N/A; no workflow or scenario-manual contract
-  changed.
+**Why it is not fixed here.** The sibling row
+`case_bare_ident_is_irrefutable_binding_2026-08-01.md` WAS fixed on this engine
+on 2026-09-07, but only for its Probe-A half: a boxed-enum scrutinee gives the
+evaluator a discriminator (`val_is_boxed_enum`) it can key on. The const shape
+has no such discriminator:
+
+- the scrutinee is an `i64`/`text`, which carries no type identity to consult;
+- `env_lookup` cannot tell a module-level `val` constant from an ordinary outer
+  local, so "compare when the name resolves" would turn a legitimate shadowing
+  binder into a comparison — a feature deletion, not a fix;
+- spelling alone (`SCREAMING_SNAKE`) is a heuristic, not resolution, and would
+  reject valid code.
+
+This is the same call the Rust seed made and documented in the sibling record:
+"this seam cannot tell a const pattern from a binder without const resolution,
+and a false positive would reject valid code."
+
+**Unblock condition:** const resolution reaching `match_pattern` — the
+evaluator must be able to ask whether a bare identifier names a module-level
+constant declaration, not merely whether some binding of that name is
+reachable. Until then the `==`/`elif` workaround in
+`src/app/devhub/errors.spl` stays correct.
+
+**Pinned, so a future change is deliberate:**
+`test/01_unit/compiler_core/interpreter/bare_case_ident_variant_pattern_spec.spl`
+carries the row "leaves a capitalized arm on a NON-enum scrutinee a binder",
+which asserts today's (wrong) behaviour explicitly and names this record. A
+const-resolution fix must flip that row on purpose.
+

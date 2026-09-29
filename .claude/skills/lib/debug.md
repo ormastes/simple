@@ -1,5 +1,32 @@
 # Debug Skill
 
+## Evidence-Driven Workflow
+
+Run D0–D12: intake → preserve raw evidence/build identity → live doctor →
+classify → set perturbation/privacy/downtime/retention/token budgets → cheapest
+decisive observation → production-shaped reproduction → falsifiable hypothesis
+→ receipted probe/attach → root owner → justified test level → fix/verify →
+cleanup and knowledge extraction. Do not start with print statements or infer
+live support from source presence.
+
+Claim one bug record before editing. At completion persist provider-reported
+input/output/cache-read/cache-create token usage (or `unavailable`) per bug in
+the bug database and investigation log, then
+compare it with the rolling average for comparable completed bugs. If it exceeds
+2× average, update the owning feature/layer knowledge with the reusable lesson
+and link it from the bug. Never store prompt text or credentials.
+
+For externally visible bugs, reproduce the same mechanism first in a
+production-shaped System SSpec and then in the smallest owning-boundary
+Integration SSpec. If System reproduction cannot be faithful, debug the
+environment, evidence, and reachability; if Integration reproduction fails,
+debug the proposed boundary and hypothesis. Never substitute unrelated green
+tests. Only after faithful reproduction should adjacent tests expand the shared
+root-cause class.
+Then require a same-mechanism similar scenario at System, Integration, and Unit
+levels, 100% branch coverage for each changed unit owner, and one commit
+containing fix, tests, coverage evidence, and bug/token receipt.
+
 ## Logging & IR Export
 
 ```bash

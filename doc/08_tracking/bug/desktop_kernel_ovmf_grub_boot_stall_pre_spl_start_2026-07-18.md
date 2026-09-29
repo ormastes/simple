@@ -1,4 +1,9 @@
 # Desktop kernel stalls before spl_start under OVMF/GRUB boot (works under -kernel)
+## Closed 2026-09-16 — RESOLVED/not reproducible; readiness gate PASSES under OVMF; framebuffer suspect disproved
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-07-18
 **Status:** RESOLVED — not reproducible on current committed source (see Findings); remaining blocker is the shared first-frame heap exhaustion, tracked separately
@@ -155,3 +160,4 @@ Reclassify: the OVMF pre-spl_start stall/fault is RESOLVED / not reproducible.
 Open a separate bug for the shared first-frame heap exhaustion
 (`rt_array_repeat` in `render_baremetal_first_frame`, 192MB heap), which is what
 now prevents `desktop-ready` under both boot modes.
+

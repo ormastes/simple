@@ -1,0 +1,59 @@
+"""Native StructInit must use the receiver-checked allocator only."""
+
+use std.spec.*
+
+extern fn rt_file_read_text(path: text) -> text
+
+describe "StructInit checked allocator source contract":
+    it "routes native StructInit through the registered struct allocator":
+        val llvm = rt_file_read_text(
+            "src/compiler_rust/compiler/src/codegen/llvm/functions/objects.rs") ?? ""
+        val cranelift = rt_file_read_text(
+            "src/compiler_rust/compiler/src/codegen/instr/closures_structs.rs") ?? ""
+
+        expect(llvm).to_contain("get_function(\"rt_struct_alloc\")")
+        expect(llvm).to_contain("add_function(\"rt_struct_alloc\", alloc_fn_type, None)")
+        expect(llvm).to_contain("llvm_build_failed(\"rt_struct_alloc call\"")
+        expect(cranelift).to_contain(
+            "let ptr = call_runtime_1(ctx, builder, \"rt_struct_alloc\", size_val);")
+        expect(llvm).to_contain("let allocation_size = (struct_size as u64 + header_size).max(8);")
+        expect(cranelift).to_contain("let allocation_size = struct_size.max(8);")
+
+    it "registers module-global structs without changing their raw stored representation":
+        val backend = rt_file_read_text(
+            "src/compiler_rust/compiler/src/codegen/llvm/backend_core.rs") ?? ""
+
+        expect(backend).to_contain("let alloc = get_rt(\"rt_struct_alloc\", 1);")
+        expect(backend).to_contain("let size = (init.fields.len().max(1) * 8) as u64;")
+        expect(backend).to_contain("store_to_global(global_name, struct_pi)?;")
+
+    it "admits only raw and heap-tagged struct receivers in both C runtimes":
+        val native = rt_file_read_text("src/runtime/runtime_native.c") ?? ""
+        val memory = rt_file_read_text("src/runtime/runtime_memory.c") ?? ""
+
+        expect(native).to_contain("if (tag != 0 && tag != RT_VALUE_TAG_HEAP) return 0;")
+        expect(memory).to_contain("if (tag != 0 && tag != 1) return 0;")
+
+    it "keeps receiver validation registered and field access guarded":
+        val runtime = rt_file_read_text(
+            "src/compiler_rust/compiler/src/codegen/runtime_sffi.rs") ?? ""
+        val fields = rt_file_read_text(
+            "src/compiler_rust/compiler/src/codegen/instr/fields.rs") ?? ""
+
+        expect(runtime).to_contain(
+            "RuntimeFuncSpec::new(\"rt_struct_receiver_valid\", &[I64, I64, I64], &[I8])")
+        expect(fields).to_contain(
+            "call_runtime_3(ctx, builder, \"rt_struct_receiver_valid\", receiver, offset, width)")
+
+    it "preserves ordinary allocation for closures and nonstruct aggregate copies":
+        val llvm = rt_file_read_text(
+            "src/compiler_rust/compiler/src/codegen/llvm/functions/objects.rs") ?? ""
+        val cranelift = rt_file_read_text(
+            "src/compiler_rust/compiler/src/codegen/instr/closures_structs.rs") ?? ""
+
+        expect(cranelift).to_contain(
+            "let closure_ptr = call_runtime_1(ctx, builder, \"rt_alloc\", size_val);")
+        expect(cranelift).to_contain(
+            "let new_ptr = call_runtime_1(ctx, builder, \"rt_alloc\", size_val);")
+        expect(llvm).to_contain("build_call(alloc_fn, &[size_val.into()], \"aggcopy_alloc\")")
+        expect(llvm).to_contain("get_function(\"rt_alloc\")")

@@ -1,0 +1,151 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-LIB
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+
+
+# @tag: unit, io, text, interface, coverage
+# @req REQ-006 REQ-007 REQ-014 NFR-001 NFR-014
+# @cover src/lib/common/io/traits.spl interface-contract
+
+use std.spec.step
+
+use std.spec.*
+use std.io.traits.{Read, Write, Seek, Close}
+use std.io.types.{IoError, IoErrorKind, SeekFrom}
+
+fn contract_io_error(kind: IoErrorKind, message: text) -> IoError:
+    IoError(kind: kind, message: message, source: nil)
+
+class ContractMemoryStream with Read, Write, Seek, Close:
+    data: [u8]
+    text_value: text
+    pos: i64
+    open: bool
+
+    static fn new(data: [u8], text_value: text) -> ContractMemoryStream:
+        ContractMemoryStream(data: data, text_value: text_value, pos: 0, open: true)
+
+    fn read(size: i64) -> Result<[u8], IoError>:
+        if not self.open:
+            return Err(contract_io_error(IoErrorKind.Other, "closed"))
+        if size < 0:
+            return Err(contract_io_error(IoErrorKind.InvalidInput, "negative size"))
+        val requested_end = self.pos + size
+        val end = if requested_end > self.data.len(): self.data.len() else: requested_end
+        val chunk = self.data.slice(self.pos, end)
+        self.pos = end
+        Ok(chunk)
+
+    fn read_exact(size: i64) -> Result<[u8], IoError>:
+        val chunk = self.read(size)?
+        if chunk.len() != size:
+            return Err(contract_io_error(IoErrorKind.UnexpectedEof, "short read"))
+        Ok(chunk)
+
+    fn read_all() -> Result<[u8], IoError>:
+        self.read(self.data.len() - self.pos)
+
+    fn read_text() -> Result<text, IoError>:
+        if not self.open:
+            return Err(contract_io_error(IoErrorKind.Other, "closed"))
+        Ok(self.text_value)
+
+    fn read_line() -> Result<text, IoError>:
+        self.read_text()
+
+    fn write(input: [u8]) -> Result<i64, IoError>:
+        if not self.open:
+            return Err(contract_io_error(IoErrorKind.Other, "closed"))
+        self.data = self.data + input
+        Ok(input.len())
+
+    fn write_all(input: [u8]) -> Result<(), IoError>:
+        self.write(input)?
+        Ok(())
+
+    fn write_text(value: text) -> Result<(), IoError>:
+        if not self.open:
+            return Err(contract_io_error(IoErrorKind.Other, "closed"))
+        self.text_value = value
+        Ok(())
+
+    fn flush() -> Result<(), IoError>:
+        if not self.open:
+            return Err(contract_io_error(IoErrorKind.Other, "closed"))
+        Ok(())
+
+    fn seek(from: SeekFrom) -> Result<i64, IoError>:
+        if not self.open:
+            return Err(contract_io_error(IoErrorKind.Other, "closed"))
+        val target = match from:
+            case SeekFrom.Start(offset): offset
+            case SeekFrom.Current(offset): self.pos + offset
+            case SeekFrom.End(offset): self.data.len() + offset
+        if target < 0:
+            return Err(contract_io_error(IoErrorKind.InvalidInput, "negative position"))
+        self.pos = target
+        Ok(target)
+
+    fn position() -> Result<i64, IoError>:
+        if not self.open:
+            return Err(contract_io_error(IoErrorKind.Other, "closed"))
+        Ok(self.pos)
+
+    fn rewind() -> Result<(), IoError>:
+        self.seek(SeekFrom.Start(0))?
+        Ok(())
+
+    me close() -> Result<(), IoError>:
+        self.open = false
+        Ok(())
+
+    fn is_open() -> bool:
+        self.open
+
+describe "sync I/O trait interface contract":
+    # @manual scenario evidence
+    it "implements byte and text read/write behavior":
+        # @req REQ-SSPEC-LIB
+        # @req REQ-006
+        step("implements byte and text read/write behavior")
+        val stream = ContractMemoryStream.new([65u8, 66u8, 67u8], "ABC")
+        expect(stream.read_exact(2).unwrap()).to_equal([65u8, 66u8])
+        expect(stream.read_all().unwrap()).to_equal([67u8])
+        expect(stream.read_exact(1).is_err()).to_be(true)
+        expect(stream.read(-1).is_err()).to_be(true)
+        expect(stream.write([68u8]).unwrap()).to_equal(1)
+        expect(stream.write_all([69u8]).is_ok()).to_be(true)
+        expect(stream.write_text("안녕하세요").is_ok()).to_be(true)
+        expect(stream.read_text().unwrap()).to_equal("안녕하세요")
+        expect(stream.read_line().unwrap()).to_equal("안녕하세요")
+        expect(stream.flush().is_ok()).to_be(true)
+
+    it "implements all seek origins and rejects negative positions":
+        # @req REQ-SSPEC-LIB
+        # @req REQ-007
+        step("implements all seek origins and rejects negative positions")
+        val stream = ContractMemoryStream.new([1u8, 2u8, 3u8, 4u8], "")
+        expect(stream.seek(SeekFrom.Start(2)).unwrap()).to_equal(2)
+        expect(stream.seek(SeekFrom.Current(1)).unwrap()).to_equal(3)
+        expect(stream.seek(SeekFrom.End(-1)).unwrap()).to_equal(3)
+        expect(stream.position().unwrap()).to_equal(3)
+        expect(stream.rewind().is_ok()).to_be(true)
+        expect(stream.position().unwrap()).to_equal(0)
+        expect(stream.seek(SeekFrom.Current(-1)).is_err()).to_be(true)
+
+    it "closes deterministically and rejects every post-close operation":
+        # @req REQ-SSPEC-LIB
+        # @req REQ-014
+        step("closes deterministically and rejects every post-close operation")
+        val stream = ContractMemoryStream.new([65u8], "A")
+        expect(stream.is_open()).to_be(true)
+        expect(stream.close().is_ok()).to_be(true)
+        expect(stream.is_open()).to_be(false)
+        expect(stream.read(1).is_err()).to_be(true)
+        expect(stream.read_text().is_err()).to_be(true)
+        expect(stream.write([66u8]).is_err()).to_be(true)
+        expect(stream.write_text("B").is_err()).to_be(true)
+        expect(stream.flush().is_err()).to_be(true)
+        expect(stream.seek(SeekFrom.Start(0)).is_err()).to_be(true)
+        expect(stream.position().is_err()).to_be(true)

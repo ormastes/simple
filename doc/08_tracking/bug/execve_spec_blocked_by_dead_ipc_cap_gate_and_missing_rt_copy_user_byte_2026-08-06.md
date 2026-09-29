@@ -1,4 +1,8 @@
 # execve_spec 4/8 red: dead IPC capability gate, then a missing `rt_copy_user_byte` intrinsic
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-06
 **Status:** ALREADY-FIXED at the spec level, re-verified 2026-08-10 — fresh run:
@@ -571,3 +575,4 @@ blanket ambient authority if seeded naively. No behavior change landed.
 - A negative test on the REAL path: a task without the capability is denied,
   the same task with it granted succeeds — sabotage-verified.
 - `exec_cap_check` either receives a real caller id or is deleted.
+

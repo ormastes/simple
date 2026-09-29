@@ -264,6 +264,13 @@ Atomic operations:
    - `ExprKind.KernelLaunch` for launch expressions
    - `ExprKind.GpuIntrinsic` for GPU built-ins
 
+Shared declaration grammar is `shared let name: Type [= init]`, `shared val
+name: Type [= init]`, or `shared var name: Type [= init]`. The compatibility
+spelling `shared let` and explicit `shared var` are mutable (`SharedVar`);
+`shared val` is immutable (`SharedVal`). `shared` remains contextual outside
+these three two-token prefixes so an ordinary identifier named `shared` keeps
+its existing meaning.
+
 ### Phase 2: HIR Lowering
 
 1. Kernel functions get special treatment:

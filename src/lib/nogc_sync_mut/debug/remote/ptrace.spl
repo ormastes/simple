@@ -3,9 +3,20 @@
 # SFFI: extern fn rt_ptrace_* -> fn ptrace_*() wrappers
 # Uses Option pattern for error handling (nil = error, value = success).
 
-use std.sffi.debug.{rt_ptrace_attach, rt_ptrace_detach, rt_ptrace_continue,
-    rt_ptrace_single_step, rt_ptrace_wait_stop,
-    rt_ptrace_read_memory, rt_ptrace_write_memory}
+# Import the TYPED ptrace aliases, not the raw `rt_ptrace_*` externs. The raw
+# names are file-private `extern fn` declarations of the sync backend and are
+# not provided by `std.sffi.debug` in this context, so the previous import
+# resolved to nothing and every call below died with `unknown extern function:
+# rt_ptrace_attach` instead of returning the documented status.
+use std.sffi.debug.{
+    ptrace_attach as sffi_ptrace_attach,
+    ptrace_detach as sffi_ptrace_detach,
+    ptrace_continue as sffi_ptrace_continue,
+    ptrace_single_step as sffi_ptrace_single_step,
+    ptrace_wait_stop as sffi_ptrace_wait_stop,
+    ptrace_read_memory as sffi_ptrace_read_memory,
+    ptrace_write_memory as sffi_ptrace_write_memory,
+}
 
 # Status codes returned by ptrace operations
 # 0 = success, negative = error
@@ -32,12 +43,12 @@ impl PtraceSession:
         if self.attached:
             return ""
 
-        val result = rt_ptrace_attach(self.pid)
+        val result = sffi_ptrace_attach(self.pid)
         if result < 0:
             return "ptrace_attach failed for pid {self.pid}: error code {result}"
 
         # Wait for the process to stop after attach
-        val wait_result = rt_ptrace_wait_stop(self.pid)
+        val wait_result = sffi_ptrace_wait_stop(self.pid)
         if wait_result < 0:
             return "ptrace_wait_stop failed after attach for pid {self.pid}"
 
@@ -51,7 +62,7 @@ impl PtraceSession:
         if not self.attached:
             return "not attached to pid {self.pid}"
 
-        val result = rt_ptrace_detach(self.pid)
+        val result = sffi_ptrace_detach(self.pid)
         if result < 0:
             return "ptrace_detach failed for pid {self.pid}: error code {result}"
 
@@ -64,7 +75,7 @@ impl PtraceSession:
         if not self.attached:
             return "not attached to pid {self.pid}"
 
-        val result = rt_ptrace_continue(self.pid)
+        val result = sffi_ptrace_continue(self.pid)
         if result < 0:
             return "ptrace_continue failed for pid {self.pid}: error code {result}"
         ""
@@ -75,7 +86,7 @@ impl PtraceSession:
         if not self.attached:
             return "not attached to pid {self.pid}"
 
-        val result = rt_ptrace_single_step(self.pid)
+        val result = sffi_ptrace_single_step(self.pid)
         if result < 0:
             return "ptrace_single_step failed for pid {self.pid}: error code {result}"
         ""
@@ -86,7 +97,7 @@ impl PtraceSession:
         if not self.attached:
             return -1
 
-        val result = rt_ptrace_wait_stop(self.pid)
+        val result = sffi_ptrace_wait_stop(self.pid)
         if result >= 0:
             self.last_stop_status = result
         result
@@ -97,7 +108,7 @@ impl PtraceSession:
         if not self.attached:
             return []
 
-        rt_ptrace_read_memory(self.pid, addr, size)
+        sffi_ptrace_read_memory(self.pid, addr, size)
 
     # Write data to the traced process address space.
     # Returns 0 on success, negative on error.
@@ -108,7 +119,7 @@ impl PtraceSession:
         # Write each word individually
         var offset = 0
         for word in data:
-            val result = rt_ptrace_write_memory(self.pid, addr + offset * 8, word)
+            val result = sffi_ptrace_write_memory(self.pid, addr + offset * 8, word)
             if result < 0:
                 return result
             offset = offset + 1
@@ -130,34 +141,37 @@ impl PtraceSession:
 # These wrap the raw SFFI calls with error checking.
 
 # Attach to a process. Returns 0 on success, negative on error.
+# Invalid-pid rejection lives in the canonical `std.sffi.debug` alias.
 fn ptrace_attach(pid: i64) -> i64:
-    rt_ptrace_attach(pid)
+    sffi_ptrace_attach(pid)
 
 # Detach from a process. Returns 0 on success, negative on error.
 fn ptrace_detach(pid: i64) -> i64:
-    rt_ptrace_detach(pid)
+    sffi_ptrace_detach(pid)
 
 # Continue a traced process. Returns 0 on success, negative on error.
 fn ptrace_continue(pid: i64) -> i64:
-    rt_ptrace_continue(pid)
+    sffi_ptrace_continue(pid)
 
 # Single-step a traced process. Returns 0 on success, negative on error.
 fn ptrace_single_step(pid: i64) -> i64:
-    rt_ptrace_single_step(pid)
+    sffi_ptrace_single_step(pid)
 
 # Wait for a traced process to stop. Returns stop status or negative on error.
 fn ptrace_wait_stop(pid: i64) -> i64:
-    rt_ptrace_wait_stop(pid)
+    sffi_ptrace_wait_stop(pid)
 
 # Read memory from a traced process. Returns byte array or empty on error.
+# Invalid pid/address/extent rejection lives in the canonical
+# `std.sffi.debug` alias.
 fn ptrace_read_memory(pid: i64, addr: i64, size: i64) -> [i64]:
-    rt_ptrace_read_memory(pid, addr, size)
+    sffi_ptrace_read_memory(pid, addr, size)
 
 # Write a word to a traced process's memory. Returns 0 on success, negative on error.
 fn ptrace_write_memory(pid: i64, addr: i64, data: [i64]) -> i64:
     var offset = 0
     for word in data:
-        val result = rt_ptrace_write_memory(pid, addr + offset * 8, word)
+        val result = sffi_ptrace_write_memory(pid, addr + offset * 8, word)
         if result < 0:
             return result
         offset = offset + 1

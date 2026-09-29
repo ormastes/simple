@@ -1,4 +1,8 @@
 # Chaining a method off a static factory call fails to resolve the method
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-16
 **Status:** OPEN
@@ -67,3 +71,4 @@ compiler is therefore **unverified**.
 Preserve the declared return type of a `static fn` through nested call
 contexts so method resolution sees `Box`, not `object`. Re-run the
 reproduction above; both examples must pass.
+

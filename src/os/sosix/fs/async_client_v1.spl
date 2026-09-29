@@ -41,6 +41,7 @@ pub struct SosixFsAsyncClientV1:
     api_id: u32
     submission_attempted: bool
     submitted: bool
+    provider_retired: bool
 
 pub struct SosixFsAsyncClientStartResultV1:
     accepted: bool
@@ -68,13 +69,14 @@ fn _client(
     operation: SosixOperationId, operation_slot: SosixOperationSlot,
     transport_state: SosixFsTransportState, key: SosixFsRequestKey,
     service_endpoint: u64, reply_endpoint: u64, api_id: u32,
-    attempted: bool, submitted: bool
+    attempted: bool, submitted: bool, provider_retired: bool
 ) -> SosixFsAsyncClientV1:
     SosixFsAsyncClientV1(
         operation: operation, operation_slot: operation_slot,
         transport_state: transport_state, key: key,
         service_endpoint: service_endpoint, reply_endpoint: reply_endpoint,
-        api_id: api_id, submission_attempted: attempted, submitted: submitted)
+        api_id: api_id, submission_attempted: attempted, submitted: submitted,
+        provider_retired: provider_retired)
 
 pub fn sosix_fs_async_client_apply_send_result_v1(
     client: SosixFsAsyncClientV1, requested_length: u64,
@@ -91,7 +93,7 @@ pub fn sosix_fs_async_client_apply_send_result_v1(
             client: _client(
                 client.operation, client.operation_slot, client.transport_state,
                 client.key, client.service_endpoint, client.reply_endpoint,
-                client.api_id, true, true))
+                client.api_id, true, true, false))
     if status >= 0:
         return SosixFsAsyncClientStartResultV1(
             accepted: false, reason: "invalid-rejected-send-status", status: status,
@@ -109,7 +111,7 @@ pub fn sosix_fs_async_client_apply_send_result_v1(
         client: _client(
             client.operation, terminal_operation.slot, terminal_transport.state,
             client.key, client.service_endpoint, client.reply_endpoint,
-            client.api_id, true, false))
+            client.api_id, true, false, true))
 
 pub fn sosix_fs_async_client_start_v1(
     slot_index: u32, operation_slot: SosixOperationSlot,
@@ -129,13 +131,13 @@ pub fn sosix_fs_async_client_start_v1(
         return SosixFsAsyncClientStartResultV1(
             accepted: false, reason: begun.reason, status: -16,
             client: _client(begun.operation, begun.slot, transport_state, empty_key,
-                endpoints.service_endpoint, endpoints.reply_endpoint, api_id, false, false))
+                endpoints.service_endpoint, endpoints.reply_endpoint, api_id, false, false, false))
     val transport = sosix_fs_transport_submit(transport_state, begun.operation, length)
     if not transport.accepted:
         return SosixFsAsyncClientStartResultV1(
             accepted: false, reason: transport.reason, status: -16,
             client: _client(begun.operation, operation_slot, transport_state, empty_key,
-                endpoints.service_endpoint, endpoints.reply_endpoint, api_id, false, false))
+                endpoints.service_endpoint, endpoints.reply_endpoint, api_id, false, false, false))
     val plan: SosixFsClientOwnedSubmissionV1 = sosix_fs_client_plan_owned_submission_v1(
         table, owner_process_id, endpoints, receipt, begun.operation, api_id,
         file, buffer, file_offset, buffer_offset, length, deadline_ns,
@@ -144,11 +146,11 @@ pub fn sosix_fs_async_client_start_v1(
         return SosixFsAsyncClientStartResultV1(
             accepted: false, reason: plan.reason, status: plan.status as i64,
             client: _client(begun.operation, operation_slot, transport_state, empty_key,
-                endpoints.service_endpoint, endpoints.reply_endpoint, api_id, false, false))
+                endpoints.service_endpoint, endpoints.reply_endpoint, api_id, false, false, false))
     val sent = sosix_fs_client_execute_owned_v1(plan)
     val pending_client = _client(
         begun.operation, begun.slot, transport.state, transport.key,
-        plan.service_endpoint, plan.reply_endpoint, api_id, false, false)
+        plan.service_endpoint, plan.reply_endpoint, api_id, false, false, false)
     sosix_fs_async_client_apply_send_result_v1(
         pending_client, length, sent.accepted, sent.reason, sent.status)
 
@@ -159,7 +161,8 @@ fn _with_receive(
         client.operation, receive.pump.operation_slot,
         receive.pump.transport_state, client.key, client.service_endpoint,
         client.reply_endpoint, client.api_id,
-        client.submission_attempted, client.submitted)
+        client.submission_attempted, client.submitted,
+        client.provider_retired or receive.accepted)
     SosixFsAsyncClientProgressV1(
         accepted: receive.accepted, pending: receive.pending,
         reason: receive.reason, status: receive.status,
@@ -186,7 +189,7 @@ pub fn sosix_fs_async_client_progress_nonblocking_v1(
 pub fn sosix_fs_async_client_cancel_v1(
     client: SosixFsAsyncClientV1
 ) -> SosixFsAsyncClientTransitionV1:
-    """Atomically terminalize operation and transport state as canceled."""
+    """Publish cancellation; retain a submitted provider lease until its reply."""
     val progress = sosix_operation_record_progress(
         client.operation_slot, client.operation, client.transport_state.transferred)
     if not progress.accepted:
@@ -207,12 +210,12 @@ pub fn sosix_fs_async_client_cancel_v1(
         client: _client(
             client.operation, canceled.slot, completed.state, client.key,
             client.service_endpoint, client.reply_endpoint, client.api_id,
-            client.submission_attempted, client.submitted))
+            client.submission_attempted, client.submitted, client.provider_retired))
 
 pub fn sosix_fs_async_client_expire_deadline_v1(
     client: SosixFsAsyncClientV1, now_ns: u64
 ) -> SosixFsAsyncClientTransitionV1:
-    """Atomically terminalize operation and transport state after its deadline."""
+    """Publish timeout; retain a submitted provider lease until its reply."""
     val progress = sosix_operation_record_progress(
         client.operation_slot, client.operation, client.transport_state.transferred)
     if not progress.accepted:
@@ -234,7 +237,7 @@ pub fn sosix_fs_async_client_expire_deadline_v1(
         client: _client(
             client.operation, expired.slot, completed.state, client.key,
             client.service_endpoint, client.reply_endpoint, client.api_id,
-            client.submission_attempted, client.submitted))
+            client.submission_attempted, client.submitted, client.provider_retired))
 
 pub fn sosix_fs_async_client_consume_v1(
     client: SosixFsAsyncClientV1
@@ -244,11 +247,16 @@ pub fn sosix_fs_async_client_consume_v1(
         accepted: consumed.accepted, reason: consumed.reason,
         client: _client(client.operation, client.operation_slot, consumed.state,
             client.key, client.service_endpoint, client.reply_endpoint,
-            client.api_id, client.submission_attempted, client.submitted))
+            client.api_id, client.submission_attempted, client.submitted,
+            client.provider_retired))
 
 pub fn sosix_fs_async_client_release_v1(
     client: SosixFsAsyncClientV1
 ) -> SosixFsAsyncClientTransitionV1:
+    """Release only after consumer completion and submitted-provider retirement."""
+    if client.submitted and not client.provider_retired:
+        return SosixFsAsyncClientTransitionV1(
+            accepted: false, reason: "provider-retirement-unproven", client: client)
     val released_transport = sosix_fs_transport_release(client.transport_state, client.key)
     if not released_transport.accepted:
         return SosixFsAsyncClientTransitionV1(
@@ -264,7 +272,7 @@ pub fn sosix_fs_async_client_release_v1(
                 generation: released_operation.slot.generation),
             released_operation.slot, released_transport.state,
             SosixFsRequestKey(operation_slot: 0, operation_generation: 0, request_token: 0),
-            0, 0, 0, false, false))
+            0, 0, 0, false, false, true))
 
 export sosix_fs_async_client_start_v1
 export sosix_fs_async_client_apply_send_result_v1

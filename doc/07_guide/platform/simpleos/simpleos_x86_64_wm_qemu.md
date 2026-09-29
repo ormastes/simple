@@ -34,6 +34,15 @@ and has no EFI stub, so it is *not* board-runnable today. That gap is exactly th
 kind of thing the rule forbids leaving implicit — state it whenever an ARM64-only
 result is reported.
 
+The smaller named x86_64 smoke scenarios still use QEMU's direct Multiboot
+loader. Their target remains `x86_64-unknown-none`: after native linking, the
+QEMU runner atomically wraps the image as ELF32/little-endian/EM_386 with
+`llvm-objcopy -O elf32-i386`. The payload begins at the same Multiboot entry
+stub and transitions to x86_64 code. A cached or newly built ELF64 envelope is
+rejected and rebuilt/wrapped before QEMU starts; selecting the x86_32 target is
+not an acceptable substitute. Release and board qualification continue to use
+the OVMF/GRUB path above.
+
 ## Guest Entry Point and Event Loop
 
 | Piece | File |
@@ -465,11 +474,8 @@ and
 
 The canonical executable scenario and manual now fail closed through combined
 owner `scripts/check/check-simpleos-toolchain-desktop-boot.shs`; that production
-wrapper now implements canonical Stage-4 provenance admission, fail-closed
-artifact/receipt preflight, and a hermetic 16-case validator self-test. It does
-not claim live acceptance: the canonical fullscreen owner still uses
-`-net none`, terminates QEMU after capture, and `gui_entry_desktop.spl` has no
-cooperative SSHD poll. The remaining B-DESKTOP-LIVE implementation must preserve one
+wrapper does not exist yet and remains B-DESKTOP-LIVE. After implementation it
+must preserve one
 canonical `gui_entry_desktop.spl` OVMF CODE/per-run VARS/GRUB QEMU lifetime,
 bind `[desktop-gui]`, `[production-readiness]`, `[scanout-evidence]`, and
 framebuffer proof to the admitted kernel/image, then run the embedded toolchain

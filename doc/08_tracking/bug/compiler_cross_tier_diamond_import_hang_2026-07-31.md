@@ -1,4 +1,9 @@
 # Compiler hangs on cross-tier diamond import + call (2026-07-31)
+## Closed 2026-09-16 — ALREADY-FIXED re-verified 2026-08-10; reproducer and original spec pass 8/8
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** ALREADY-FIXED (re-verified 2026-08-10) — see "Re-verification 2026-08-10" below.
 **Impact:** `test/01_unit/lib/common/ui/widget_draw_ir_theme_spec.spl` can never
@@ -240,4 +245,5 @@ hang, no timeout, no workaround, spec is not skipped. Marking ALREADY-FIXED;
 regression coverage already exists as the real spec file
 (`widget_draw_ir_theme_spec.spl`), which now runs cleanly under normal `bin/simple
 test`.
+
 

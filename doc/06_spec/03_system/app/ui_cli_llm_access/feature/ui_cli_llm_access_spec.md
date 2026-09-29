@@ -34,6 +34,21 @@ ui_cli_llm_access_spec -> std
 
 # Ui Cli Llm Access Specification
 
+Exercises the live T32-style access loop for Simple GUI/TUI and host-WM
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Application |
+| Status | Active |
+| Source | `test/03_system/app/ui_cli_llm_access/feature/ui_cli_llm_access_spec.spl` |
+| Updated | 2026-08-26 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+Exercises the live T32-style access loop for Simple GUI/TUI and host-WM
+surfaces through the canonical focused gate.
+
 ## Evidence
 
 Display policy: `embed_tui`

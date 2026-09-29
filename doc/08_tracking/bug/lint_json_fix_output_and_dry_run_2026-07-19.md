@@ -1,7 +1,10 @@
 # lint JSON fix output was mixed and dry-run was inert
+## Open 2026-09-16 — needs owner triage
 
-Status: FIXED
-Status re-verified 2026-08-17 by source inspection (triage shard 02).
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
+
+**Status:** SOURCE FIXED / PURE-SIMPLE DEPLOY VERIFICATION PENDING
 **Severity:** P1 — structured output and advertised dry-run were incorrect
 
 ## Reproduction
@@ -29,3 +32,4 @@ Its parser-backed unit regression is included.
 - interpreter atomic provider regression: PASS
 - native-all atomic regression: authored; bounded execution cap already reached
 - pure-Simple JSON/fix CLI contract: pending an admitted Stage 4 executable
+

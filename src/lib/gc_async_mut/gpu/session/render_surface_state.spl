@@ -1,0 +1,399 @@
+# codex-impl
+"""Surface-owned bounded frame-ring lifecycle and retained-memory accounting."""
+
+use std.common.gpu.render_surface_contract.*
+
+struct GpuRenderSurfaceState:
+    surface: GpuRenderSurfaceId
+    slots: [GpuFrameSlot]
+    next_frame_generation: i64
+    next_capture_generation: i64
+    last_event_generation: i64
+    allocation_count: i64
+    retained_bytes: i64
+    staging_bytes: i64
+    alive: bool
+
+fn _empty_token(surface: GpuRenderSurfaceId) -> GpuSubmissionToken:
+    GpuSubmissionToken(surface_id: surface.surface_id,
+        device_generation: surface.device_generation, submission_id: 0,
+        fence_value: 0, backend: "", device_identity: "", submitted_ns: 0)
+
+fn _free_slot(surface: GpuRenderSurfaceId, index: i64) -> GpuFrameSlot:
+    GpuFrameSlot(slot_index: index, state: GPU_FRAME_FREE,
+        frame_generation: 0, event_generation: 0, damage_pixels: 0,
+        upload_bytes: 0, token: _empty_token(surface),
+        capture_generation: 0, capture_requested_ns: 0)
+
+fn gpu_render_surface_create(surface_id: i64, width: i64, height: i64,
+                             capacity: i64, retained_bytes: i64,
+                             staging_bytes: i64) -> GpuRenderSurfaceState:
+    val surface = GpuRenderSurfaceId(surface_id: surface_id,
+        device_generation: 1, width: width, height: height)
+    var slots: [GpuFrameSlot] = []
+    if gpu_surface_id_valid(surface) and gpu_frame_ring_capacity_valid(capacity):
+        var i: i64 = 0
+        while i < capacity:
+            slots.push(_free_slot(surface, i))
+            i = i + 1
+    GpuRenderSurfaceState(surface: surface, slots: slots,
+        next_frame_generation: 1, next_capture_generation: 1,
+        last_event_generation: 0,
+        allocation_count: if slots.len() > 0 then capacity else 0,
+        retained_bytes: if retained_bytes >= 0 then retained_bytes else 0,
+        staging_bytes: if staging_bytes >= 0 then staging_bytes else 0,
+        alive: slots.len() > 0)
+
+fn gpu_render_surface_begin(state: GpuRenderSurfaceState,
+                            event_generation: i64, damage_pixels: i64,
+                            upload_bytes: i64) -> (GpuRenderSurfaceState, i64, text):
+    if not state.alive:
+        return (state, -1, "surface-not-alive")
+    if event_generation <= state.last_event_generation:
+        return (state, -1, "stale-event-generation")
+    if damage_pixels < 0 or upload_bytes < 0:
+        return (state, -1, "negative-damage-or-upload")
+    var slots = state.slots
+    var selected: i64 = -1
+    var i: i64 = 0
+    while i < slots.len() and selected < 0:
+        if gpu_frame_slot_reusable(slots[i]):
+            selected = i
+        i = i + 1
+    if selected < 0:
+        return (state, -1, "frame-ring-full")
+    slots[selected] = GpuFrameSlot(slot_index: selected,
+        state: GPU_FRAME_RECORDING,
+        frame_generation: state.next_frame_generation,
+        event_generation: event_generation, damage_pixels: damage_pixels,
+        upload_bytes: upload_bytes, token: _empty_token(state.surface),
+        capture_generation: 0, capture_requested_ns: 0)
+    (GpuRenderSurfaceState(surface: state.surface, slots: slots,
+        next_frame_generation: state.next_frame_generation + 1,
+        next_capture_generation: state.next_capture_generation,
+        last_event_generation: event_generation,
+        allocation_count: state.allocation_count,
+        retained_bytes: state.retained_bytes, staging_bytes: state.staging_bytes,
+        alive: true), selected, "recording")
+
+fn gpu_render_surface_submit(state: GpuRenderSurfaceState, slot_index: i64,
+                             token: GpuSubmissionToken) -> (GpuRenderSurfaceState, text):
+    if not state.alive or slot_index < 0 or slot_index >= state.slots.len():
+        return (state, "invalid-slot")
+    val old = state.slots[slot_index]
+    if old.state != GPU_FRAME_RECORDING:
+        return (state, "slot-not-recording")
+    if not gpu_submission_token_device_proven(token) or
+       token.surface_id != state.surface.surface_id or
+       token.device_generation != state.surface.device_generation:
+        return (state, "invalid-submission-token")
+    var slots = state.slots
+    slots[slot_index] = GpuFrameSlot(slot_index: old.slot_index,
+        state: GPU_FRAME_SUBMITTED, frame_generation: old.frame_generation,
+        event_generation: old.event_generation, damage_pixels: old.damage_pixels,
+        upload_bytes: old.upload_bytes, token: token,
+        capture_generation: 0, capture_requested_ns: 0)
+    (GpuRenderSurfaceState(surface: state.surface, slots: slots,
+        next_frame_generation: state.next_frame_generation,
+        next_capture_generation: state.next_capture_generation,
+        last_event_generation: state.last_event_generation,
+        allocation_count: state.allocation_count, retained_bytes: state.retained_bytes,
+        staging_bytes: state.staging_bytes, alive: true), "submitted")
+
+fn gpu_render_surface_complete(state: GpuRenderSurfaceState, slot_index: i64,
+                               submission_id: i64,
+                               fence_value: i64) -> (GpuRenderSurfaceState, text):
+    if not state.alive or slot_index < 0 or slot_index >= state.slots.len():
+        return (state, "invalid-slot")
+    val old = state.slots[slot_index]
+    if old.state != GPU_FRAME_SUBMITTED:
+        return (state, "slot-not-submitted")
+    if old.token.submission_id != submission_id or old.token.fence_value != fence_value:
+        return (state, "completion-token-mismatch")
+    var slots = state.slots
+    slots[slot_index] = GpuFrameSlot(slot_index: old.slot_index,
+        state: GPU_FRAME_DEVICE_COMPLETE, frame_generation: old.frame_generation,
+        event_generation: old.event_generation, damage_pixels: old.damage_pixels,
+        upload_bytes: old.upload_bytes, token: old.token,
+        capture_generation: 0, capture_requested_ns: 0)
+    (GpuRenderSurfaceState(surface: state.surface, slots: slots,
+        next_frame_generation: state.next_frame_generation,
+        next_capture_generation: state.next_capture_generation,
+        last_event_generation: state.last_event_generation,
+        allocation_count: state.allocation_count, retained_bytes: state.retained_bytes,
+        staging_bytes: state.staging_bytes, alive: true), "device-complete")
+
+fn gpu_render_surface_present(state: GpuRenderSurfaceState,
+                              slot_index: i64) -> (GpuRenderSurfaceState, GpuPresentReceipt, text):
+    val invalid = GpuPresentReceipt(token: _empty_token(state.surface),
+        frame_generation: 0, event_generation: 0, damage_pixels: 0,
+        upload_bytes: 0, readback_bytes: 0, fallback_used: true,
+        completion_source: "invalid")
+    if not state.alive or slot_index < 0 or slot_index >= state.slots.len():
+        return (state, invalid, "invalid-slot")
+    val old = state.slots[slot_index]
+    if old.state != GPU_FRAME_DEVICE_COMPLETE:
+        return (state, invalid, "slot-not-device-complete")
+    val receipt = GpuPresentReceipt(token: old.token,
+        frame_generation: old.frame_generation,
+        event_generation: old.event_generation, damage_pixels: old.damage_pixels,
+        upload_bytes: old.upload_bytes, readback_bytes: 0,
+        fallback_used: false, completion_source: "device_fence")
+    var slots = state.slots
+    slots[slot_index] = GpuFrameSlot(slot_index: old.slot_index,
+        state: GPU_FRAME_PRESENTED, frame_generation: old.frame_generation,
+        event_generation: old.event_generation, damage_pixels: old.damage_pixels,
+        upload_bytes: old.upload_bytes, token: old.token,
+        capture_generation: old.capture_generation,
+        capture_requested_ns: old.capture_requested_ns)
+    slots[slot_index] = _free_slot(state.surface, slot_index)
+    (GpuRenderSurfaceState(surface: state.surface, slots: slots,
+        next_frame_generation: state.next_frame_generation,
+        next_capture_generation: state.next_capture_generation,
+        last_event_generation: state.last_event_generation,
+        allocation_count: state.allocation_count, retained_bytes: state.retained_bytes,
+        staging_bytes: state.staging_bytes, alive: true), receipt, "presented")
+
+# Explicit capture is a two-step post-completion operation.  Normal
+# presentation above never enters this path and therefore never copies pixels
+# to the host.  The request first parks the exact completed frame in
+# CAPTURE_PENDING; only a later provider receipt may acknowledge that request
+# and release the slot.  These helpers model ownership transitions only: they
+# do not perform readback and their return strings are not physical-device
+# evidence.
+fn _gpu_submission_token_same(left: GpuSubmissionToken,
+                              right: GpuSubmissionToken) -> bool:
+    left.surface_id == right.surface_id and
+        left.device_generation == right.device_generation and
+        left.submission_id == right.submission_id and
+        left.fence_value == right.fence_value and
+        left.backend == right.backend and
+        left.device_identity == right.device_identity and
+        left.submitted_ns == right.submitted_ns
+
+# Surface capture is fixed to one tightly packed ARGB8888 u32 row.  Returning
+# -1 keeps overflow distinct from an ordinary byte-count mismatch.
+fn _gpu_render_surface_full_argb8888_bytes(surface: GpuRenderSurfaceId) -> i64:
+    if (surface.width <= 0 or surface.height <= 0 or
+        surface.width > 9223372036854775807 / 4):
+        return -1
+    val row_stride_bytes = surface.width * 4
+    if surface.height > 9223372036854775807 / row_stride_bytes:
+        return -1
+    row_stride_bytes * surface.height
+
+fn gpu_render_surface_capture_request(state: GpuRenderSurfaceState,
+                                      slot_index: i64, pixel_format: text,
+                                      row_stride_bytes: i64,
+                                      requested_ns: i64
+                                      ) -> (GpuRenderSurfaceState,
+                                            i64, GpuSubmissionToken, text):
+    val invalid = _empty_token(state.surface)
+    if not state.alive or slot_index < 0 or slot_index >= state.slots.len():
+        return (state, 0, invalid, "invalid-slot")
+    val old = state.slots[slot_index]
+    if old.state != GPU_FRAME_DEVICE_COMPLETE:
+        return (state, 0, invalid, "capture-before-device-complete")
+    if not gpu_frame_slot_matches_surface(old, state.surface):
+        return (state, 0, invalid, "stale-device-generation")
+    if not gpu_submission_token_device_proven(old.token):
+        return (state, 0, invalid, "invalid-submission-token")
+    if requested_ns < old.token.submitted_ns:
+        return (state, 0, invalid, "invalid-capture-request-timestamp")
+    if state.next_capture_generation >= 9223372036854775807:
+        return (state, 0, invalid, "capture-generation-exhausted")
+    if pixel_format != "argb8888":
+        return (state, 0, invalid, "unsupported-capture-format")
+    val expected_bytes = _gpu_render_surface_full_argb8888_bytes(state.surface)
+    if expected_bytes < 0:
+        return (state, 0, invalid, "capture-size-overflow")
+    val expected_stride = state.surface.width * 4
+    if row_stride_bytes != expected_stride:
+        return (state, 0, invalid, "capture-stride-mismatch")
+    val capture_generation = state.next_capture_generation
+    var slots = state.slots
+    slots[slot_index] = GpuFrameSlot(slot_index: old.slot_index,
+        state: GPU_FRAME_CAPTURE_PENDING,
+        frame_generation: old.frame_generation,
+        event_generation: old.event_generation, damage_pixels: old.damage_pixels,
+        upload_bytes: old.upload_bytes, token: old.token,
+        capture_generation: capture_generation,
+        capture_requested_ns: requested_ns)
+    (GpuRenderSurfaceState(surface: state.surface, slots: slots,
+        next_frame_generation: state.next_frame_generation,
+        next_capture_generation: capture_generation + 1,
+        last_event_generation: state.last_event_generation,
+        allocation_count: state.allocation_count, retained_bytes: state.retained_bytes,
+        staging_bytes: state.staging_bytes, alive: true), capture_generation,
+        old.token,
+        "capture-pending")
+
+fn gpu_render_surface_capture(state: GpuRenderSurfaceState, slot_index: i64,
+                              capture: GpuCaptureReceipt
+                              ) -> (GpuRenderSurfaceState, text):
+    if not state.alive or slot_index < 0 or slot_index >= state.slots.len():
+        return (state, "invalid-slot")
+    val old = state.slots[slot_index]
+    if old.state != GPU_FRAME_CAPTURE_PENDING:
+        return (state, "capture-not-pending")
+    if not gpu_frame_slot_matches_surface(old, state.surface):
+        return (state, "stale-device-generation")
+    if not _gpu_submission_token_same(capture.token, old.token):
+        return (state, "capture-token-mismatch")
+    if capture.capture_generation != old.capture_generation:
+        return (state, "capture-generation-mismatch")
+    if capture.capture_requested_ns != old.capture_requested_ns:
+        return (state, "capture-request-timestamp-mismatch")
+    # This owner admits full-surface evidence only.  A smaller or larger
+    # readback is either stale/partial image data or an unbound region request;
+    # neither may be attached to this frame's full-surface token.
+    val expected_bytes = _gpu_render_surface_full_argb8888_bytes(state.surface)
+    if expected_bytes < 0:
+        return (state, "capture-size-overflow")
+    if (capture.pixel_width != state.surface.width or
+        capture.pixel_height != state.surface.height):
+        return (state, "capture-extent-mismatch")
+    if capture.readback_bytes != expected_bytes:
+        return (state, "capture-size-mismatch")
+    if not gpu_capture_receipt_admitted(capture):
+        return (state, "invalid-capture-receipt")
+    # The provider receipt is the only input that authorizes release.  This
+    # owner does not synthesize its source, byte count, checksum or token.
+    var slots = state.slots
+    slots[slot_index] = GpuFrameSlot(slot_index: old.slot_index,
+        state: GPU_FRAME_PRESENTED, frame_generation: old.frame_generation,
+        event_generation: old.event_generation, damage_pixels: old.damage_pixels,
+        upload_bytes: old.upload_bytes, token: old.token,
+        capture_generation: old.capture_generation,
+        capture_requested_ns: old.capture_requested_ns)
+    slots[slot_index] = _free_slot(state.surface, slot_index)
+    (GpuRenderSurfaceState(surface: state.surface, slots: slots,
+        next_frame_generation: state.next_frame_generation,
+        next_capture_generation: state.next_capture_generation,
+        last_event_generation: state.last_event_generation,
+        allocation_count: state.allocation_count, retained_bytes: state.retained_bytes,
+        staging_bytes: state.staging_bytes, alive: true), "captured")
+
+# A failed provider operation must be retired by the production owner before
+# it invokes this model rollback.  The exact request token prevents a stale
+# cancellation from reopening or freeing a newer frame.  Rollback restores the
+# already-device-complete frame so ordinary zero-readback presentation or a
+# fresh capture request remains possible; it never claims that bytes existed.
+fn gpu_render_surface_capture_abandon(state: GpuRenderSurfaceState,
+                                      slot_index: i64,
+                                      capture_generation: i64,
+                                      request_token: GpuSubmissionToken
+                                      ) -> (GpuRenderSurfaceState, text):
+    if not state.alive or slot_index < 0 or slot_index >= state.slots.len():
+        return (state, "invalid-slot")
+    val old = state.slots[slot_index]
+    if old.state != GPU_FRAME_CAPTURE_PENDING:
+        return (state, "capture-not-pending")
+    if not gpu_frame_slot_matches_surface(old, state.surface):
+        return (state, "stale-device-generation")
+    if capture_generation != old.capture_generation:
+        return (state, "capture-generation-mismatch")
+    if not _gpu_submission_token_same(request_token, old.token):
+        return (state, "capture-token-mismatch")
+    var slots = state.slots
+    slots[slot_index] = GpuFrameSlot(slot_index: old.slot_index,
+        state: GPU_FRAME_DEVICE_COMPLETE,
+        frame_generation: old.frame_generation,
+        event_generation: old.event_generation, damage_pixels: old.damage_pixels,
+        upload_bytes: old.upload_bytes, token: old.token,
+        capture_generation: 0, capture_requested_ns: 0)
+    (GpuRenderSurfaceState(surface: state.surface, slots: slots,
+        next_frame_generation: state.next_frame_generation,
+        next_capture_generation: state.next_capture_generation,
+        last_event_generation: state.last_event_generation,
+        allocation_count: state.allocation_count, retained_bytes: state.retained_bytes,
+        staging_bytes: state.staging_bytes, alive: true), "capture-abandoned")
+
+fn gpu_render_surface_resize(state: GpuRenderSurfaceState, width: i64,
+                             height: i64, retained_bytes: i64,
+                             staging_bytes: i64) -> (GpuRenderSurfaceState, text):
+    if not state.alive or width <= 0 or height <= 0:
+        return (state, "invalid-resize")
+    for slot in state.slots:
+        if slot.state != GPU_FRAME_FREE:
+            return (state, "frames-still-in-flight")
+    val next_retained_bytes = if retained_bytes >= 0: retained_bytes else: 0
+    val next_staging_bytes = if staging_bytes >= 0: staging_bytes else: 0
+    # An acknowledged duplicate resize does not invalidate otherwise-current
+    # tokens or churn retained allocations. In-flight validation intentionally
+    # precedes this no-op so a duplicate request cannot hide outstanding work.
+    if width == state.surface.width and height == state.surface.height and
+       next_retained_bytes == state.retained_bytes and
+       next_staging_bytes == state.staging_bytes:
+        return (state, "unchanged")
+    if state.surface.device_generation >= 9223372036854775807:
+        return (state, "device-generation-exhausted")
+    val next_surface = GpuRenderSurfaceId(surface_id: state.surface.surface_id,
+        device_generation: state.surface.device_generation + 1,
+        width: width, height: height)
+    var slots: [GpuFrameSlot] = []
+    var i: i64 = 0
+    while i < state.slots.len():
+        slots.push(_free_slot(next_surface, i))
+        i = i + 1
+    (GpuRenderSurfaceState(surface: next_surface, slots: slots,
+        next_frame_generation: state.next_frame_generation,
+        next_capture_generation: state.next_capture_generation,
+        last_event_generation: state.last_event_generation,
+        allocation_count: state.allocation_count,
+        retained_bytes: next_retained_bytes,
+        staging_bytes: next_staging_bytes,
+        alive: true), "resized")
+
+# Device loss is a generation transition even when the drawable extent does
+# not change. The old slots and their submission tokens are discarded only
+# after confirming that no frame is still in flight; callers must recover a
+# fresh backend before submitting work for the returned generation.
+fn gpu_render_surface_device_loss(state: GpuRenderSurfaceState
+                                  ) -> (GpuRenderSurfaceState, text):
+    if not state.alive:
+        return (state, "surface-not-alive")
+    for slot in state.slots:
+        if slot.state != GPU_FRAME_FREE:
+            return (state, "frames-still-in-flight")
+    if state.surface.device_generation >= 9223372036854775807:
+        return (state, "device-generation-exhausted")
+    val next_surface = GpuRenderSurfaceId(
+        surface_id: state.surface.surface_id,
+        device_generation: state.surface.device_generation + 1,
+        width: state.surface.width,
+        height: state.surface.height)
+    var slots: [GpuFrameSlot] = []
+    var i: i64 = 0
+    while i < state.slots.len():
+        slots.push(_free_slot(next_surface, i))
+        i = i + 1
+    (GpuRenderSurfaceState(surface: next_surface, slots: slots,
+        next_frame_generation: state.next_frame_generation,
+        next_capture_generation: state.next_capture_generation,
+        last_event_generation: state.last_event_generation,
+        allocation_count: state.allocation_count,
+        retained_bytes: state.retained_bytes,
+        staging_bytes: state.staging_bytes,
+        alive: true), "device-loss")
+
+fn gpu_render_surface_shutdown(state: GpuRenderSurfaceState) -> (GpuRenderSurfaceState, text):
+    for slot in state.slots:
+        if slot.state != GPU_FRAME_FREE:
+            return (state, "frames-still-in-flight")
+    (GpuRenderSurfaceState(surface: state.surface, slots: [],
+        next_frame_generation: state.next_frame_generation,
+        next_capture_generation: state.next_capture_generation,
+        last_event_generation: state.last_event_generation,
+        allocation_count: 0, retained_bytes: 0, staging_bytes: 0,
+        alive: false), "shutdown")
+
+fn gpu_render_surface_memory_receipt(state: GpuRenderSurfaceState,
+                                     cause: text) -> GpuSurfaceMemoryReceipt:
+    GpuSurfaceMemoryReceipt(surface: state.surface,
+        allocation_count: state.allocation_count,
+        retained_bytes: state.retained_bytes,
+        staging_bytes: state.staging_bytes, lifecycle_cause: cause)
+
+export gpu_render_surface_capture_request, gpu_render_surface_capture
+export gpu_render_surface_capture_abandon, gpu_render_surface_device_loss

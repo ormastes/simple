@@ -1,4 +1,9 @@
 # Bug: simple-core archive local runtime symbol resolution — 2026-07-23
+## Closed 2026-09-16 — Status "SOURCE FIXED"; fix + focused Rust regression described in body; archive probe tracked separately
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** SOURCE FIXED / ARCHIVE QUALIFICATION PENDING
 
@@ -26,3 +31,4 @@ with a locally defined `rt_native_neq`, asserting that no runtime import is used
 This does not prove the archive passes. Keep the existing exact archive probe
 as the qualification gate, and track its independent tuple-row failure in
 [`simple_core_value_memory_probe_dict_entries_failure_2026-07-19.md`](simple_core_value_memory_probe_dict_entries_failure_2026-07-19.md).
+

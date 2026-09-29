@@ -1,0 +1,206 @@
+# Purpose: executable evidence for the bounded provider-neutral loader seam.
+# @codex-impl
+# @req REQ-SIMPLE-LOADER-PROVIDER-V1
+
+use std.spec.*
+use std.common.contracts.execution.loader_provider_v1.*
+
+var read_calls: i64 = 0
+var map_calls: i64 = 0
+var protect_calls: i64 = 0
+var lookup_calls: i64 = 0
+var cache_calls: i64 = 0
+
+fn receipt(
+    operation: LoaderOperationV1,
+    generation: u64,
+    result_handle: u64 = 0u64,
+    bytes_processed: u64 = 0u64
+) -> LoaderOperationReceiptV1:
+    LoaderOperationReceiptV1(
+        ok: true, operation: operation, provider_generation: generation,
+        provider_identity: 77u64,
+        result_handle: result_handle, result_value: 0u64,
+        bytes_processed: bytes_processed, error: LoaderProviderErrorV1.None)
+
+fn read_callback(request: LoaderReadRequestV1) -> LoaderOperationReceiptV1:
+    read_calls = read_calls + 1
+    receipt(LoaderOperationV1.Read, request.provider_generation, 0u64, request.byte_count)
+
+fn leaking_failed_read_callback(request: LoaderReadRequestV1) -> LoaderOperationReceiptV1:
+    read_calls = read_calls + 1
+    LoaderOperationReceiptV1(
+        ok: false, operation: LoaderOperationV1.Read,
+        provider_identity: request.provider_identity,
+        provider_generation: request.provider_generation,
+        result_handle: 999u64, result_value: 888u64,
+        bytes_processed: 7u64, error: LoaderProviderErrorV1.ProviderRejected)
+
+fn map_callback(request: LoaderMapRequestV1) -> LoaderOperationReceiptV1:
+    map_calls = map_calls + 1
+    receipt(LoaderOperationV1.Map, request.provider_generation, 701u64, request.memory_bytes)
+
+fn protect_callback(request: LoaderProtectRequestV1) -> LoaderOperationReceiptV1:
+    protect_calls = protect_calls + 1
+    receipt(LoaderOperationV1.Protect, request.provider_generation, request.mapping_handle, request.byte_count)
+
+fn lookup_callback(request: LoaderLibraryLookupRequestV1) -> LoaderOperationReceiptV1:
+    lookup_calls = lookup_calls + 1
+    receipt(LoaderOperationV1.LibraryLookup, request.provider_generation, 991u64)
+
+fn malformed_lookup_callback(request: LoaderLibraryLookupRequestV1) -> LoaderOperationReceiptV1:
+    lookup_calls = lookup_calls + 1
+    receipt(LoaderOperationV1.Map, request.provider_generation, 991u64)
+
+fn cache_callback(request: LoaderCacheRequestV1) -> LoaderOperationReceiptV1:
+    cache_calls = cache_calls + 1
+    receipt(LoaderOperationV1.Cache, request.provider_generation, request.artifact_handle)
+
+fn provider(active: bool = true, allow_execute: bool = true) -> LoaderProviderV1:
+    val lifecycle = if active: LoaderProviderLifecycleV1.Active else: LoaderProviderLifecycleV1.Draining
+    LoaderProviderV1(
+        schema_version: LOADER_PROVIDER_SCHEMA_V1,
+        provider_identity: 77u64, generation: 4u64, lifecycle: lifecycle,
+        rights: LOADER_RIGHT_ALL_V1,
+        executable_memory_allowed: allow_execute,
+        max_read_bytes: 4096u64, max_map_bytes: 65536u64,
+        read_operation: read_callback, map_operation: map_callback,
+        protect_operation: protect_callback,
+        library_lookup_operation: lookup_callback,
+        cache_operation: cache_callback)
+
+fn valid_read() -> LoaderReadRequestV1:
+    LoaderReadRequestV1(
+        schema_version: LOADER_PROVIDER_SCHEMA_V1,
+        provider_identity: 77u64, provider_generation: 4u64,
+        capability_handle: 30u64,
+        rights: LOADER_RIGHT_READ_V1,
+        artifact_handle: 10u64, file_offset: 0u64, byte_count: 512u64,
+        destination_handle: 20u64)
+
+describe "LoaderProviderV1 callback boundary":
+    it "dispatches each valid operation through its injected provider callback":
+        read_calls = 0
+        map_calls = 0
+        protect_calls = 0
+        lookup_calls = 0
+        cache_calls = 0
+        val p = provider()
+        expect(loader_provider_read_v1(p, valid_read()).ok).to_equal(true)
+        val mapped = loader_provider_map_v1(p, LoaderMapRequestV1(
+            schema_version: LOADER_PROVIDER_SCHEMA_V1,
+            provider_identity: 77u64, provider_generation: 4u64,
+            capability_handle: 30u64,
+            rights: LOADER_RIGHT_MAP_V1 | LOADER_RIGHT_EXECUTE_V1,
+            artifact_handle: 10u64, file_offset: 0u64,
+            file_bytes: 4096u64, memory_bytes: 8192u64,
+            alignment: 4096u64, access: LoaderMemoryAccessV1.ReadExecute))
+        expect(mapped.result_handle).to_equal(701u64)
+        expect(loader_provider_protect_v1(p, LoaderProtectRequestV1(
+            schema_version: LOADER_PROVIDER_SCHEMA_V1,
+            provider_identity: 77u64, provider_generation: 4u64,
+            capability_handle: 30u64,
+            rights: LOADER_RIGHT_PROTECT_V1,
+            mapping_handle: 701u64, mapping_size: 8192u64,
+            mapping_offset: 0u64,
+            byte_count: 8192u64, access: LoaderMemoryAccessV1.ReadOnly)).ok).to_equal(true)
+        expect(loader_provider_library_lookup_v1(p, LoaderLibraryLookupRequestV1(
+            schema_version: LOADER_PROVIDER_SCHEMA_V1,
+            provider_identity: 77u64, provider_generation: 4u64,
+            capability_handle: 30u64,
+            rights: LOADER_RIGHT_LIBRARY_LOOKUP_V1,
+            library_handle: 90u64, symbol_name: "simple_entry")).result_handle).to_equal(991u64)
+        expect(loader_provider_cache_v1(p, LoaderCacheRequestV1(
+            schema_version: LOADER_PROVIDER_SCHEMA_V1,
+            provider_identity: 77u64, provider_generation: 4u64,
+            capability_handle: 30u64,
+            rights: LOADER_RIGHT_CACHE_WRITE_V1,
+            action: LoaderCacheActionV1.Publish, cache_key: "artifact:abc",
+            artifact_handle: 10u64)).ok).to_equal(true)
+        expect(read_calls).to_equal(1)
+        expect(map_calls).to_equal(1)
+        expect(protect_calls).to_equal(1)
+        expect(lookup_calls).to_equal(1)
+        expect(cache_calls).to_equal(1)
+
+    it "suppresses callbacks for stale generations and inactive providers":
+        read_calls = 0
+        var stale = valid_read()
+        stale.provider_generation = 3u64
+        expect(loader_provider_read_v1(provider(), stale).error).to_equal(
+            LoaderProviderErrorV1.StaleGeneration)
+        expect(loader_provider_read_v1(provider(false), valid_read()).error).to_equal(
+            LoaderProviderErrorV1.ProviderNotActive)
+        expect(read_calls).to_equal(0)
+
+    it "suppresses callbacks for a cross-provider request identity":
+        read_calls = 0
+        var wrong_provider = valid_read()
+        wrong_provider.provider_identity = 78u64
+        val result = loader_provider_read_v1(provider(), wrong_provider)
+        expect(result.error).to_equal(LoaderProviderErrorV1.InvalidProvider)
+        expect(result.provider_identity).to_equal(77u64)
+        expect(read_calls).to_equal(0)
+
+    it "suppresses callbacks for missing rights and out-of-bounds reads":
+        read_calls = 0
+        var denied = valid_read()
+        denied.rights = LOADER_RIGHT_MAP_V1
+        expect(loader_provider_read_v1(provider(), denied).error).to_equal(
+            LoaderProviderErrorV1.MissingRight)
+        var oversized = valid_read()
+        oversized.byte_count = 4097u64
+        expect(loader_provider_read_v1(provider(), oversized).error).to_equal(
+            LoaderProviderErrorV1.InvalidRange)
+        expect(read_calls).to_equal(0)
+
+    it "denies executable mappings before the provider observes them":
+        map_calls = 0
+        val denied = loader_provider_map_v1(provider(true, false), LoaderMapRequestV1(
+            schema_version: LOADER_PROVIDER_SCHEMA_V1,
+            provider_identity: 77u64, provider_generation: 4u64,
+            capability_handle: 30u64,
+            rights: LOADER_RIGHT_MAP_V1 | LOADER_RIGHT_EXECUTE_V1,
+            artifact_handle: 10u64, file_offset: 0u64,
+            file_bytes: 4096u64, memory_bytes: 4096u64,
+            alignment: 4096u64, access: LoaderMemoryAccessV1.ReadExecute))
+        expect(denied.error).to_equal(LoaderProviderErrorV1.ExecutableMemoryDenied)
+        expect(map_calls).to_equal(0)
+
+    it "suppresses protection outside the asserted mapping extent":
+        protect_calls = 0
+        val denied = loader_provider_protect_v1(provider(), LoaderProtectRequestV1(
+            schema_version: LOADER_PROVIDER_SCHEMA_V1,
+            provider_identity: 77u64, provider_generation: 4u64,
+            capability_handle: 30u64, rights: LOADER_RIGHT_PROTECT_V1,
+            mapping_handle: 701u64, mapping_size: 4096u64,
+            mapping_offset: 3072u64, byte_count: 2048u64,
+            access: LoaderMemoryAccessV1.ReadOnly))
+        expect(denied.error).to_equal(LoaderProviderErrorV1.InvalidRange)
+        expect(protect_calls).to_equal(0)
+
+    it "rejects malformed provider receipts instead of trusting callbacks":
+        lookup_calls = 0
+        var p = provider()
+        p.library_lookup_operation = malformed_lookup_callback
+        val result = loader_provider_library_lookup_v1(
+            p, LoaderLibraryLookupRequestV1(
+                schema_version: LOADER_PROVIDER_SCHEMA_V1,
+                provider_identity: 77u64, provider_generation: 4u64,
+                capability_handle: 30u64,
+                rights: LOADER_RIGHT_LIBRARY_LOOKUP_V1,
+                library_handle: 90u64, symbol_name: "simple_entry"))
+        expect(result.ok).to_equal(false)
+        expect(result.error).to_equal(LoaderProviderErrorV1.InvalidReceipt)
+        expect(lookup_calls).to_equal(1)
+
+    it "sanitizes failed provider receipts before returning them":
+        read_calls = 0
+        var p = provider()
+        p.read_operation = leaking_failed_read_callback
+        val result = loader_provider_read_v1(p, valid_read())
+        expect(result.error).to_equal(LoaderProviderErrorV1.ProviderRejected)
+        expect(result.result_handle).to_equal(0u64)
+        expect(result.result_value).to_equal(0u64)
+        expect(result.bytes_processed).to_equal(0u64)
+        expect(read_calls).to_equal(1)

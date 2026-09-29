@@ -1,4 +1,8 @@
 # Bug: sspec runner — process_run exit code unreliable + 3-way if/elif/else mis-evaluates
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Filed:** 2026-06-29
 **Severity:** medium (both have workarounds; the elif one is a real codegen/interp defect)
@@ -33,3 +37,4 @@ This is a real evaluation defect (the `elif` chain is not honored on this path),
 Both are worked around in the committed NVMe sspec system tests (the rv32 baremetal-boot spec branches
 on stdout tokens and uses nested if/else). A correct runner would surface child exit codes and evaluate
 `elif` chains.
+

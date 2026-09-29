@@ -22,6 +22,7 @@ use app.cli.repo_hygiene_gate.{run_repo_hygiene_gate}
 use app.cli.check_options.{check_option_error}
 use app.check.sspec_source.{check_sspec_guidance}
 use app.check.concurrency_lint.{run_concurrency_api_lint}
+use compiler.tools.lint.semantic_check.{simple_semantic_check_source, simple_check_is_clean}
 
 class CheckLogOptions:
     log_mode: text
@@ -43,7 +44,8 @@ fn log_options_help() -> [text]:
         "--human | --llm | --json     Shorthand log modes",
         "--progress <summary|count|dot|none>",
         "--dots | --count | --no-progress",
-        "--quiet | --verbose"
+        "--quiet | --verbose",
+        "--syntax-only                Parse only; semantic coverage is not claimed"
     ]
 
 fn parse_log_options(args: [text]) -> CheckLogOptions:
@@ -123,6 +125,8 @@ fn _is_log_option(arg: text) -> bool:
     if arg == "--count":
         return true
     if arg == "--no-progress":
+        return true
+    if arg == "--syntax-only":
         return true
     if arg == "--log-mode":
         return true
@@ -255,7 +259,7 @@ fn _concurrency_api_lint_errors(source: text) -> [text]:
         msgs.push("error[E-PAR-006]: multicore_green_spawn_sliced closure must not capture shared mutable state")
     msgs
 
-fn _check_path(path: text, as_json: bool) -> i64:
+fn _check_path(path: text, as_json: bool, syntax_only: bool) -> i64:
     if not file_exists(path):
         if not as_json:
             print "ERROR: {path}: file not found"
@@ -275,6 +279,16 @@ fn _check_path(path: text, as_json: bool) -> i64:
     val concurrency_errors = run_concurrency_api_lint(source, path)
 
     if errors.len() == 0 and host_gpu_errors.len() == 0 and concurrency_errors.len() == 0 and not parser_has_errors():
+        if not syntax_only:
+            ast_reset()
+            val semantic_result = simple_semantic_check_source(source, path)
+            if not simple_check_is_clean(semantic_result):
+                if not as_json:
+                    for diagnostic in semantic_result.diagnostics:
+                        print diagnostic
+                    if semantic_result.diagnostics.len() == 0:
+                        print "{path}: semantic check incomplete"
+                return if semantic_result.diagnostics.len() > 0: semantic_result.diagnostics.len() else: 1
         if not as_json:
             for warning in host_gpu_warnings:
                 print "{path}: {warning}"
@@ -322,6 +336,7 @@ fn run_check(args: [text]) -> i64:
         ai = ai + 1
 
     val as_json = log_opts.log_mode == "json"
+    val syntax_only = args.contains("--syntax-only")
     if file_args.len() == 0:
         if as_json:
             print "{\"command\":\"check\",\"status\":\"error\",\"checked\":0,\"files\":0,\"errors\":1,\"files_with_errors\":0}"
@@ -346,7 +361,7 @@ fn run_check(args: [text]) -> i64:
             files_checked = files_checked + 1
             if not as_json:
                 print "Checking {source_file}... "
-            val failed = _check_path(source_file, as_json)
+            val failed = _check_path(source_file, as_json, syntax_only)
             if failed != 0:
                 total_errors = total_errors + failed
                 files_with_errors = files_with_errors + 1
@@ -367,9 +382,14 @@ fn run_check(args: [text]) -> i64:
             if progress_line != "":
                 print progress_line
         if as_json:
-            print "{\"command\":\"check\",\"status\":\"ok\",\"checked\":{files_checked},\"files\":{file_args.len()},\"errors\":0,\"files_with_errors\":0}"
+            val coverage = if syntax_only: "syntax-only" else: "semantic"
+            val semantic_complete = if syntax_only: "false" else: "true"
+            print "{\"command\":\"check\",\"status\":\"ok\",\"coverage\":\"{coverage}\",\"semantic_complete\":{semantic_complete},\"checked\":{files_checked},\"files\":{file_args.len()},\"errors\":0,\"files_with_errors\":0}"
             return 0
-        print "\n✓ All checks passed ({files_checked} file(s))"
+        if syntax_only:
+            print "\n✓ Syntax-only check passed ({files_checked} file(s)); semantic coverage was not requested"
+        else:
+            print "\n✓ Semantic check passed with complete syntax and semantic coverage ({files_checked} file(s))"
         return 0
 
     if log_opts.progress != "summary" and not as_json:
@@ -378,7 +398,8 @@ fn run_check(args: [text]) -> i64:
             print progress_line
     if as_json:
         val status = _status_name(total_errors)
-        print "{\"command\":\"check\",\"status\":\"{status}\",\"checked\":{files_checked},\"files\":{file_args.len()},\"errors\":{total_errors},\"files_with_errors\":{files_with_errors}}"
+        val coverage = if syntax_only: "syntax-only" else: "semantic"
+        print "{\"command\":\"check\",\"status\":\"{status}\",\"coverage\":\"{coverage}\",\"semantic_complete\":false,\"checked\":{files_checked},\"files\":{file_args.len()},\"errors\":{total_errors},\"files_with_errors\":{files_with_errors}}"
         return 1
     print "\n✗ {total_errors} error(s) found in {files_with_errors} of {files_checked} file(s)"
     1

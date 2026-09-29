@@ -1,0 +1,62 @@
+#!/bin/sh
+# Proves that the exact native-all product has one linked struct-receiver
+# provider, calls the pair through its generated runtime-symbol table, and
+# excludes the broad runtime_native.c product (which owns an independent
+# bootstrap lane).
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)
+MANIFEST="$ROOT/src/compiler_rust/Cargo.toml"
+TARGET=${SIMPLE_NATIVE_ALL_PROVIDER_TEST_TARGET:-"$ROOT/target/native-all-struct-provider"}
+ARCHIVE="$TARGET/debug/libsimple_native_all.a"
+
+fail() {
+    echo "FAIL: $1" >&2
+    exit 1
+}
+
+command -v cargo >/dev/null 2>&1 || fail "cargo unavailable"
+command -v nm >/dev/null 2>&1 || fail "nm unavailable"
+command -v cc >/dev/null 2>&1 || fail "cc unavailable"
+
+# The native-all runtime is deliberately the focused memory capsule. Broad
+# runtime_native.c stays out because it would be a second strong provider.
+build_rs="$ROOT/src/compiler_rust/runtime/build.rs"
+native_sources=$(sed -n '/let mut c_sources = vec!\[/,/^    \];/p' "$build_rs")
+printf '%s\n' "$native_sources" | grep -Fq '"runtime_memory.c"' ||
+    fail "native-all runtime omits runtime_memory.c"
+if printf '%s\n' "$native_sources" | grep -Fq '"runtime_native.c"'; then
+    fail "native-all runtime admits excluded runtime_native.c"
+fi
+
+cargo build --locked --offline --manifest-path "$MANIFEST" \
+    -p simple-native-all --target-dir "$TARGET"
+[ -f "$ARCHIVE" ] || fail "native-all archive missing"
+
+# This is the product-level proof: the test depends on simple-native-all,
+# obtains both pointers from simple-runtime's generated table, asserts they
+# are non-null, then calls them. A direct C selfcheck cannot establish that
+# JIT-facing generated-table route.
+cargo test --locked --offline --manifest-path "$MANIFEST" \
+    -p simple-native-all --lib generated_table_calls_struct_receiver_provider_pair \
+    --target-dir "$TARGET"
+
+provider_count() {
+    nm -A -g --defined-only "$ARCHIVE" |
+        awk -v symbol="$1" '$NF == symbol && $(NF - 1) ~ /[Tt]/ { count++ } END { print count + 0 }'
+}
+
+for symbol in rt_struct_alloc rt_struct_receiver_valid; do
+    [ "$(provider_count "$symbol")" = 1 ] ||
+        fail "native-all must have one $symbol provider"
+done
+
+# A direct C link exercises the archive member that owns the pair. It remains
+# small: normal archive selection extracts only the C provider closure.
+selfcheck="$TARGET/rt_struct_receiver_valid_selfcheck"
+cc -std=gnu11 -O1 "$ROOT/src/runtime/test/rt_struct_receiver_valid_selfcheck.c" \
+    "$ARCHIVE" -lpthread -ldl -lm -o "$selfcheck"
+"$selfcheck" | grep -Fxq 'PASS concurrent_post_free_rejections=1024' ||
+    fail "native-all receiver selfcheck failed"
+
+echo "PASS native-all struct receiver provider"

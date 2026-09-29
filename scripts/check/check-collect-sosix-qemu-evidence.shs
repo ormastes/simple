@@ -1,0 +1,553 @@
+#!/bin/sh
+# Isolated acceptance and deliberate-red tests for the matrix importer.
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+collector=$repo_root/scripts/check/collect-sosix-qemu-evidence.shs
+work=$(mktemp -d "${TMPDIR:-/tmp}/sosix-qemu-collector-test.XXXXXX")
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+
+make_matrix() {
+    root=$1
+    for host in linux windows macos freebsd; do
+        for guest in x86_32 x86_64 arm32 arm64 riscv32 riscv64; do
+            dir=$root/$host/$guest/run-$host-$guest
+            mkdir -p "$dir"
+            boot_marker="boot-correlation-$host-$guest-unique"
+            execution_nonce="nonce-$host-$guest-correlation"
+            printf 'firmware-entry\nfirmware-handoff\n%s\nguest-entry\n%s\ntranscript for %s %s\n' "$boot_marker" "$execution_nonce" "$host" "$guest" > "$dir/transcript.log"
+            printf 'filesystem program for %s %s\n' "$host" "$guest" > "$dir/program.elf"
+            program_sum=$(sha256sum "$dir/program.elf" | awk '{print $1}')
+            printf 'target-native kernel payload for %s %s\n' "$host" "$guest" > "$dir/kernel.elf"
+            printf 'selected guest image for %s %s\n' "$host" "$guest" > "$dir/guest.img"
+            image_sum=$(sha256sum "$dir/guest.img" | awk '{print $1}')
+            kernel_sum=$(sha256sum "$dir/kernel.elf" | awk '{print $1}')
+            printf 'fixture firmware for %s %s\n' "$host" "$guest" > "$dir/firmware.bin"
+            firmware_sum=$(sha256sum "$dir/firmware.bin" | awk '{print $1}')
+            printf '%s\n' 'firmware-entry' 'firmware-handoff' "$boot_marker" 'guest-entry' > "$dir/required-markers.txt"
+            printf '%s\n' '-machine fixture -cpu fixture' > "$dir/qemu.argv"
+            printf '%s\n' 'qemu-9' > "$dir/qemu.version"
+            qemu_sum=$(printf '%s' "qemu-$host-$guest" | sha256sum | awk '{print $1}')
+            cat > "$dir/host-admission.env" <<EOF
+detected_host=$host
+requested_host=$host
+host_identity_status=pass
+host_identity_reason=fixture
+qemu_binary=fixture-qemu
+qemu_binary_resolved=/fixture/qemu
+qemu_sha256=$qemu_sum
+qemu_version=qemu-9
+requested_accelerator=tcg
+accelerator_advertised_status=pass
+accelerator_advertised_reason=fixture
+accelerator_probe_status=pass
+accelerator_probe_reason=fixture
+native_timing_applicable=false
+simple_qemu_storage_root=/fixture
+EOF
+            compiler_in_filesystem=false
+            compiler_identity="source-simple:sha256:$(printf '%s' "source-compiler-$host-$guest" | sha256sum | awk '{print $1}')"
+            compiler_identity_scope=source-toolchain
+            compiler_policy_sha256=$(sha256sum "$repo_root/scripts/check/lib/sosix-qemu-compiler-designation-v1.tsv" | awk '{print $1}')
+            compiler_policy_value=false
+            compiler_version_path=
+            compiler_hello_path=
+            compiler_artifacts=
+            compiler_designation_scope=live-policy
+            artifact_count=9
+            compiler_payload_identity=
+            compiler_image_identity=
+            compiler_alias_identity=
+            compiler_manifest_identity=
+            compiler_alias_path=
+            compiler_manifest_path=
+            source_identity_value=git:0123456789abcdef0123456789abcdef01234567:tree:89abcdef0123456789abcdef0123456789abcdef:clean
+            if [ "$host:$guest" = linux:x86_32 ]; then
+                identity="host=$host guest=$guest nonce=$execution_nonce"
+                printf '%s\n' \
+                    "SOSIX_QEMU_COMPILER_VERSION $identity path=/usr/bin/simple version=0.9.1 exit=0 target_native=true" \
+                    > "$dir/compiler-version.txt"
+                printf '%s\n' \
+                    "SOSIX_QEMU_HELLO_SOURCE $identity path=/tmp/sosix-hello.spl source_nonce=nonce-$host-$guest-correlation" \
+                    "SOSIX_QEMU_HELLO_COMPILE BEGIN $identity compiler=/usr/bin/simple source=/tmp/sosix-hello.spl output=/tmp/sosix-hello" \
+                    "SOSIX_QEMU_HELLO_COMPILE END $identity output=/tmp/sosix-hello exit=0 target_native=true" \
+                    "SOSIX_QEMU_PROGRAM BEGIN $identity path=/tmp/sosix-hello" \
+                    "SOSIX_QEMU_PROGRAM_STDOUT $identity text=hello-nonce-$host-$guest-correlation" \
+                    "SOSIX_QEMU_PROGRAM END $identity exit=0 target_native=true" \
+                    > "$dir/compiler-hello.txt"
+                payload_sum=$(printf '%s' "target-native-simple-$host-$guest" | sha256sum | awk '{print $1}')
+                interpreter_sum=$(printf '%s' "target-native-interpreter-$host-$guest" | sha256sum | awk '{print $1}')
+                loader_sum=$(printf '%s' "target-native-loader-$host-$guest" | sha256sum | awk '{print $1}')
+                tool_sum=$(printf '%s' "target-native-tool-manifest-$host-$guest" | sha256sum | awk '{print $1}')
+                {
+                    printf '%s\n' "SIMPLEOS_COMPILER_PLACEMENT schema=1 host=$host guest=$guest nonce=$execution_nonce image_identity=sha256:$image_sum"
+                    printf '%s\n' "SIMPLEOS_COMPILER_READBACK host=$host guest=$guest nonce=$execution_nonce path=/usr/bin/simple role=compiler sha256=$payload_sum target_native=true"
+                    printf '%s\n' "SIMPLEOS_COMPILER_READBACK host=$host guest=$guest nonce=$execution_nonce path=/bin/simple role=compiler-alias sha256=$payload_sum target_native=true"
+                    printf '%s\n' "SIMPLEOS_COMPILER_READBACK host=$host guest=$guest nonce=$execution_nonce path=/sys/apps/simple role=compiler-alias sha256=$payload_sum target_native=true"
+                    printf '%s\n' "SIMPLEOS_COMPILER_READBACK host=$host guest=$guest nonce=$execution_nonce path=/sys/apps/simple_compiler role=compiler-alias sha256=$payload_sum target_native=true"
+                    printf '%s\n' "SIMPLEOS_COMPILER_READBACK host=$host guest=$guest nonce=$execution_nonce path=/sys/apps/simple_interpreter role=interpreter sha256=$interpreter_sum target_native=true"
+                    printf '%s\n' "SIMPLEOS_COMPILER_READBACK host=$host guest=$guest nonce=$execution_nonce path=/sys/apps/simple_loader role=loader sha256=$loader_sum target_native=true"
+                    printf '%s\n' "SIMPLEOS_COMPILER_READBACK host=$host guest=$guest nonce=$execution_nonce path=/SYS/SIMPLETOOL.SDN role=toolchain-manifest sha256=$tool_sum target_native=true"
+                } > "$dir/compiler-aliases.txt"
+                alias_sum=$(sha256sum "$dir/compiler-aliases.txt" | awk '{print $1}')
+                printf '%s\n' "SIMPLEOS_COMPILER_MANIFEST schema=1 host=$host guest=$guest nonce=$execution_nonce source_identity=$source_identity_value payload_path=/usr/bin/simple payload_identity=sha256:$payload_sum image_path=guest.img image_identity=sha256:$image_sum placement_identity=sha256:$alias_sum" > "$dir/compiler-manifest.env"
+                manifest_sum=$(sha256sum "$dir/compiler-manifest.env" | awk '{print $1}')
+                compiler_identity="target-native-simple:payload=sha256:$payload_sum:image=sha256:$image_sum:alias=sha256:$alias_sum:manifest=sha256:$manifest_sum"
+                compiler_identity_scope=target-filesystem
+                compiler_payload_identity=sha256:$payload_sum
+                compiler_image_identity=sha256:$image_sum
+                compiler_alias_identity=sha256:$alias_sum
+                compiler_manifest_identity=sha256:$manifest_sum
+                compiler_alias_path=compiler-aliases.txt
+                compiler_manifest_path=compiler-manifest.env
+                cat "$dir/compiler-version.txt" "$dir/compiler-hello.txt" \
+                    "$dir/compiler-aliases.txt" "$dir/compiler-manifest.env" >> "$dir/transcript.log"
+                compiler_version_sum=$(sha256sum "$dir/compiler-version.txt" | awk '{print $1}')
+                compiler_hello_sum=$(sha256sum "$dir/compiler-hello.txt" | awk '{print $1}')
+                artifact_count=13
+                compiler_artifacts="artifact_10_path=compiler-version.txt
+artifact_10_sha256=$compiler_version_sum
+artifact_11_path=compiler-hello.txt
+artifact_11_sha256=$compiler_hello_sum
+artifact_12_path=compiler-aliases.txt
+artifact_12_sha256=$alias_sum
+artifact_13_path=compiler-manifest.env
+artifact_13_sha256=$manifest_sum"
+                compiler_in_filesystem=true
+                compiler_version_path=compiler-version.txt
+                compiler_hello_path=compiler-hello.txt
+                compiler_designation_scope=contract-fixture
+            fi
+            sum=$(sha256sum "$dir/transcript.log" | awk '{print $1}')
+            cat > "$dir/evidence.env" <<EOF
+schema_version=1
+host=$host
+guest=$guest
+status=pass
+reason=
+owner=host-owner-$host
+reviewer=matrix-reviewer
+resume_command=
+source_identity=$source_identity_value
+compiler_identity=$compiler_identity
+compiler_identity_scope=$compiler_identity_scope
+compiler_policy_sha256=$compiler_policy_sha256
+compiler_policy_value=$compiler_policy_value
+compiler_payload_identity=$compiler_payload_identity
+compiler_image_identity=$compiler_image_identity
+compiler_alias_identity=$compiler_alias_identity
+compiler_manifest_identity=$compiler_manifest_identity
+kernel_identity=sha256:$kernel_sum
+image_identity=sha256:$image_sum
+qemu_identity=sha256:$qemu_sum:version:qemu-9
+qemu_argv=-machine fixture -cpu fixture
+accelerator_identity=tcg
+firmware_identity=firmware:edk2-$guest
+firmware_mode=uefi-pflash
+firmware_path=/usr/share/firmware/edk2-$guest.fd
+firmware_version=version:2026.02
+firmware_sha256=sha256:$firmware_sum
+firmware_stage_markers=firmware-entry>firmware-handoff>guest-entry
+boot_correlation_marker=$boot_marker
+run_nonce=$execution_nonce
+transcript_identity=sha256:$sum
+program_identity=sha256:$program_sum
+compiler_in_filesystem=$compiler_in_filesystem
+compiler_designation_scope=$compiler_designation_scope
+compiler_version_evidence_path=$compiler_version_path
+compiler_hello_evidence_path=$compiler_hello_path
+compiler_alias_evidence_path=$compiler_alias_path
+compiler_manifest_evidence_path=$compiler_manifest_path
+artifact_count=$artifact_count
+artifact_1_path=host-admission.env
+artifact_1_sha256=$(sha256sum "$dir/host-admission.env" | awk '{print $1}')
+artifact_2_path=qemu.argv
+artifact_2_sha256=$(sha256sum "$dir/qemu.argv" | awk '{print $1}')
+artifact_3_path=qemu.version
+artifact_3_sha256=$(sha256sum "$dir/qemu.version" | awk '{print $1}')
+artifact_4_path=transcript.log
+artifact_4_sha256=$sum
+artifact_5_path=kernel.elf
+artifact_5_sha256=$kernel_sum
+artifact_6_path=guest.img
+artifact_6_sha256=$image_sum
+artifact_7_path=program.elf
+artifact_7_sha256=$program_sum
+artifact_8_path=firmware.bin
+artifact_8_sha256=$firmware_sum
+artifact_9_path=required-markers.txt
+artifact_9_sha256=$(sha256sum "$dir/required-markers.txt" | awk '{print $1}')
+EOF
+            if [ -n "$compiler_artifacts" ]; then
+                printf '%s\n' "$compiler_artifacts" >> "$dir/evidence.env"
+            fi
+        done
+    done
+}
+
+expect_reject() {
+    name=$1 root=$2
+    if SIMPLE_BIG_STORAGE_ROOT=$work/storage SOSIX_QEMU_TEST_MODE=1 "$collector" --compiler-designation-fixture linux:x86_32 --source-root "$root" --output "$work/out-$name" >"$work/$name.out" 2>&1; then
+        echo "FAIL: mutation accepted: $name" >&2
+        exit 1
+    fi
+}
+
+refresh_transcript_hash() {
+    env_file=$1 transcript_file=${env_file%/*}/transcript.log
+    fresh_sum=$(sha256sum "$transcript_file" | awk '{print $1}')
+    sed "s/^transcript_identity=.*/transcript_identity=sha256:$fresh_sum/; s/^artifact_4_sha256=.*/artifact_4_sha256=$fresh_sum/" "$env_file" > "$work/t"
+    mv "$work/t" "$env_file"
+}
+
+refresh_artifact_hash() {
+    env_file=$1 artifact_index=$2 artifact_file=$3
+    fresh_sum=$(sha256sum "$artifact_file" | awk '{print $1}')
+    sed "s/^artifact_${artifact_index}_sha256=.*/artifact_${artifact_index}_sha256=$fresh_sum/" "$env_file" > "$work/t"
+    mv "$work/t" "$env_file"
+}
+
+assert_admission_schema() {
+    record=$1 expected_artifact_count=$2
+    actual_keys=$work/admission-actual-keys
+    expected_keys=$work/admission-expected-keys
+    awk -F= '{print $1}' "$record" > "$actual_keys"
+    cat > "$expected_keys" <<'EOF'
+manifest_version
+host
+guest
+status
+reason
+resume_command
+owner
+reviewer
+evidence_path
+evidence_sha256
+artifact_count
+source_identity
+compiler_identity
+compiler_identity_scope
+compiler_policy_sha256
+compiler_policy_value
+compiler_payload_identity
+compiler_image_identity
+compiler_alias_identity
+compiler_manifest_identity
+kernel_identity
+image_identity
+qemu_identity
+qemu_argv
+accelerator_identity
+transcript_identity
+program_identity
+firmware_identity
+firmware_mode
+firmware_path
+firmware_version
+firmware_sha256
+firmware_stage_markers
+boot_correlation_marker
+run_nonce
+compiler_in_filesystem
+compiler_designation_scope
+compiler_version_evidence_path
+compiler_hello_evidence_path
+compiler_alias_evidence_path
+compiler_manifest_evidence_path
+EOF
+    admission_index=1
+    while [ "$admission_index" -le "$expected_artifact_count" ]; do
+        printf '%s\n' "artifact_${admission_index}_path" "artifact_${admission_index}_sha256" >> "$expected_keys"
+        admission_index=$((admission_index + 1))
+    done
+    cmp "$expected_keys" "$actual_keys"
+    [ "$(wc -c < "$record")" -le 32768 ]
+    awk 'length($0) > 8192 { exit 1 }' "$record"
+}
+
+assert_typed_source_contract() {
+    typed_contract=$repo_root/src/os/sosix/qemu_evidence/matrix_contract.spl
+    trusted_importer=$repo_root/src/os/sosix/qemu_evidence/trusted_importer.spl
+    typed_spec=$repo_root/test/01_unit/os/sosix/qemu_matrix_contract_spec.spl
+    grep -Fq 'pub val SOSIX_QEMU_ADMISSION_SCALAR_FIELD_COUNT: u32 = 41' "$typed_contract"
+    grep -Fq 'fn _sosix_qemu_expected_scalar_key(index: i32) -> text:' "$typed_contract"
+    grep -Fq 'expected_key = "artifact_{artifact_index}_{artifact_suffix}"' "$typed_contract"
+    grep -Fq 'collector_manifest_evidence_sha256 != receipt.evidence_sha256' "$typed_contract"
+    grep -Fq 'sosix_qemu_structural_row_from_collector_record' "$typed_contract"
+    ! grep -Fq 'sosix_qemu_pass_row_from_collector_record' "$typed_contract"
+    grep -Fq 'file_is_regular_no_follow(candidate)' "$trusted_importer"
+    grep -Fq 'path_absolute(candidate)' "$trusted_importer"
+    grep -Fq 'fn _sosix_qemu_manifest_wire_valid(manifest: text) -> bool:' "$trusted_importer"
+    grep -Fq 'SOSIX_QEMU_MATRIX_ROW_FIELD_COUNT: i64 = 42' "$trusted_importer"
+    grep -Fq 'sha256_u8_hex(bytes) != descriptor.admission_record_sha256' "$trusted_importer"
+    grep -Fq 'val record = bytes_to_text(bytes)' "$trusted_importer"
+    grep -Fq '_sosix_qemu_record_complete_for_descriptor(descriptor, record)' "$trusted_importer"
+    grep -Fq 'trusted-nonpass-imported' "$trusted_importer"
+    grep -Fq 'struct _SosixQemuTrustedMatrixResult:' "$trusted_importer"
+    grep -Fq 'pub fn sosix_qemu_collector_root_is_release_admissible(collector_root: text) -> bool:' "$trusted_importer"
+    grep -Fq 'val result = _sosix_qemu_trusted_matrix_evaluate(collector_root)' "$trusted_importer"
+    ! grep -Fq 'pub struct SosixQemuTrustedMatrixResult' "$trusted_importer"
+    ! grep -Fq 'pub fn sosix_qemu_trusted_result_is_release_admissible' "$trusted_importer"
+    ! grep -Fq 'sosix_qemu_matrix_evaluate' "$repo_root/src/os/sosix/qemu_evidence/__init__.spl"
+    grep -Fq 'collector_record("linux", "x86_64")' "$typed_spec"
+}
+
+manifest_value() {
+    manifest_file=$1 manifest_key=$2
+    awk -F= -v key="$manifest_key" '$1 == key { print substr($0, index($0, "=") + 1) }' "$manifest_file"
+}
+
+admission_value() {
+    admission_file=$1 admission_key=$2
+    awk -F= -v key="$admission_key" '$1 == key { print substr($0, index($0, "=") + 1) }' "$admission_file"
+}
+
+assert_manifest_admission_binding() {
+    manifest_file=$1 row_prefix=$2 admission_file=$3
+    for key in host guest status compiler_in_filesystem compiler_identity_scope compiler_policy_sha256 compiler_policy_value compiler_designation_scope evidence_sha256 artifact_count; do
+        manifest_bound_value=$(manifest_value "$manifest_file" "${row_prefix}_${key}")
+        admission_bound_value=$(admission_value "$admission_file" "$key")
+        [ "$manifest_bound_value" = "$admission_bound_value" ] || {
+            echo "FAIL: manifest/admission scalar mismatch: $key" >&2
+            return 1
+        }
+    done
+    for key in reason evidence_path resume_command owner reviewer compiler_version_evidence_path compiler_hello_evidence_path compiler_alias_evidence_path compiler_manifest_evidence_path source_identity compiler_identity compiler_payload_identity compiler_image_identity compiler_alias_identity compiler_manifest_identity kernel_identity image_identity qemu_identity qemu_argv accelerator_identity firmware_identity firmware_mode firmware_path firmware_version firmware_sha256 firmware_stage_markers boot_correlation_marker run_nonce transcript_identity program_identity; do
+        encoded=$(manifest_value "$manifest_file" "${row_prefix}_${key}_b64")
+        decoded=$(printf %s "$encoded" | base64 -d)
+        [ "$(printf %s "$decoded" | base64 | tr -d '\n')" = "$encoded" ] || {
+            echo "FAIL: noncanonical manifest base64: $key" >&2
+            return 1
+        }
+        [ "$decoded" = "$(admission_value "$admission_file" "$key")" ] || {
+            echo "FAIL: manifest/admission decoded mismatch: $key" >&2
+            return 1
+        }
+    done
+    [ "$(manifest_value "$manifest_file" "${row_prefix}_admission_record_sha256")" = "$(sha256sum "$admission_file" | awk '{print $1}')" ] || {
+        echo 'FAIL: manifest/admission record SHA-256 mismatch' >&2
+        return 1
+    }
+}
+
+make_matrix "$work/good"
+
+# The shared designation table is a closed 4x6 policy. Reject malformed and
+# duplicate rows before any collector can use them to authorize a claim.
+. "$repo_root/scripts/check/lib/sosix-qemu-compiler-designation.shs"
+policy=$repo_root/scripts/check/lib/sosix-qemu-compiler-designation-v1.tsv
+sosix_qemu_compiler_designation_policy_validate "$policy"
+cp "$policy" "$work/bad-policy"
+printf '%s\n' 'linux|x86_32|true' >> "$work/bad-policy"
+if sosix_qemu_compiler_designation_policy_validate "$work/bad-policy"; then
+    echo 'FAIL: duplicate compiler designation policy row accepted' >&2
+    exit 1
+fi
+sed 's/^linux|x86_32|false$/linux|x86_32|maybe/' "$policy" > "$work/bad-policy"
+if sosix_qemu_compiler_designation_policy_validate "$work/bad-policy"; then
+    echo 'FAIL: malformed compiler designation value accepted' >&2
+    exit 1
+fi
+
+# Replace the synthetic external-host PASS fixtures with retained, source-hashed
+# blockers.  The producer deliberately exits 2 because it never claims PASS.
+rm -rf "$work/good/windows" "$work/good/freebsd"
+if "$repo_root/scripts/check/prepare-sosix-qemu-external-blocked-bundles.shs" \
+    --host windows --output "$work/good" --owner windows-owner --reviewer matrix-reviewer \
+    >"$work/windows-blocked.out" 2>&1; then
+    echo 'FAIL: Windows blocked-bundle producer claimed success' >&2
+    exit 1
+fi
+if "$repo_root/scripts/check/prepare-sosix-qemu-external-blocked-bundles.shs" \
+    --host freebsd --output "$work/good" --owner freebsd-owner --reviewer matrix-reviewer \
+    >"$work/freebsd-blocked.out" 2>&1; then
+    echo 'FAIL: FreeBSD blocked-bundle producer claimed success' >&2
+    exit 1
+fi
+SIMPLE_BIG_STORAGE_ROOT=$work/storage SOSIX_QEMU_TEST_MODE=1 "$collector" --compiler-designation-fixture linux:x86_32 --source-root "$work/good" --output "$work/import" > "$work/good.out"
+manifest=$(awk -F= '$1 == "sosix_qemu_evidence_manifest" { print substr($0,index($0,"=")+1) }' "$work/good.out")
+[ -f "$manifest" ]
+[ "$(grep -c '^sosix_qemu_matrix_row_[0-9][0-9]*_host=' "$manifest")" -eq 24 ]
+import_dir=${manifest%/*}
+cmp "$work/good/linux/x86_32/run-linux-x86_32/transcript.log" \
+    "$import_dir/rows/linux/x86_32/artifacts/transcript.log"
+[ "$(grep -c '^sosix_qemu_matrix_row_[0-9][0-9]*_status=blocked$' "$manifest")" -eq 13 ]
+grep -q 'status=blocked' "$import_dir/rows/windows/x86_64/evidence.env"
+grep -q 'execution=not-executed' "$import_dir/rows/freebsd/arm64/artifacts/blocker.txt"
+[ "$(grep -c '^sosix_qemu_matrix_row_[0-9][0-9]*_compiler_in_filesystem=false$' "$manifest")" -eq 23 ]
+[ "$(grep -c '^sosix_qemu_matrix_row_[0-9][0-9]*_compiler_in_filesystem=true$' "$manifest")" -eq 1 ]
+[ "$(grep -c '^sosix_qemu_matrix_row_[0-9][0-9]*_compiler_designation_scope=contract-fixture$' "$manifest")" -eq 1 ]
+[ "$(grep -c '^sosix_qemu_matrix_row_[0-9][0-9]*_compiler_designation_scope=live-policy$' "$manifest")" -eq 23 ]
+admission_record="$import_dir/rows/linux/x86_32/admission.env"
+[ -f "$admission_record" ]
+[ "$(grep -c '^manifest_version=1$' "$admission_record")" -eq 1 ]
+[ "$(grep -c '^status=blocked$' "$admission_record")" -eq 1 ]
+[ "$(grep -c '^compiler_designation_scope=contract-fixture$' "$admission_record")" -eq 1 ]
+grep -q '^sosix_qemu_matrix_row_[0-9][0-9]*_reason_b64=Y29udHJhY3QtZml4dHVyZS1vbmx5$' "$manifest"
+grep -q '^sosix_qemu_matrix_row_[0-9][0-9]*_resume_command_b64=Y29udHJhY3QtZml4dHVyZS1pcy1ub3QtcmVsZWFzZS1hZG1pc3NpYmxl$' "$manifest"
+[ "$(grep -c '^sosix_qemu_matrix_row_[0-9][0-9]*_status=pass$' "$manifest")" -eq 11 ]
+[ "$(grep -c '^evidence_sha256=[0-9a-f]\{64\}$' "$admission_record")" -eq 1 ]
+[ "$(grep -c '^artifact_count=13$' "$admission_record")" -eq 1 ]
+[ "$(grep -c '^source_identity=.*:clean$' "$admission_record")" -eq 1 ]
+[ "$(grep -c '^transcript_identity=sha256:[0-9a-f]\{64\}$' "$admission_record")" -eq 1 ]
+[ "$(grep -c '^program_identity=sha256:[0-9a-f]\{64\}$' "$admission_record")" -eq 1 ]
+[ "$(grep -c '^firmware_identity=firmware:' "$admission_record")" -eq 1 ]
+[ "$(grep -c '^firmware_mode=uefi-pflash$' "$admission_record")" -eq 1 ]
+[ "$(grep -c '^firmware_sha256=sha256:[0-9a-f]\{64\}$' "$admission_record")" -eq 1 ]
+[ "$(grep -c '^firmware_stage_markers=firmware-entry>firmware-handoff>guest-entry$' "$admission_record")" -eq 1 ]
+assert_admission_schema "$admission_record" 13
+
+# The live-policy bridge cell is compiler-free Linux/x86_64. Its emitted
+# record is the canonical 9-artifact typed input, and the collector manifest
+# independently hashes both the evidence snapshot and admission-record bytes.
+live_admission_record="$import_dir/rows/linux/x86_64/admission.env"
+[ "$(grep -c '^status=pass$' "$live_admission_record")" -eq 1 ]
+[ "$(grep -c '^compiler_in_filesystem=false$' "$live_admission_record")" -eq 1 ]
+[ "$(grep -c '^compiler_designation_scope=live-policy$' "$live_admission_record")" -eq 1 ]
+[ "$(grep -c '^artifact_count=9$' "$live_admission_record")" -eq 1 ]
+assert_admission_schema "$live_admission_record" 9
+live_evidence_sha256=$(awk -F= '$1 == "evidence_sha256" { print $2 }' "$live_admission_record")
+live_prefix=$(awk -F= '
+    $1 ~ /^sosix_qemu_matrix_row_[0-9][0-9]*_host$/ {
+        prefix = $1
+        sub(/_host$/, "", prefix)
+        host = $2
+        next
+    }
+    $1 == prefix "_guest" && host == "linux" && $2 == "x86_64" {
+        print prefix
+        exit
+    }
+' "$manifest")
+[ -n "$live_prefix" ]
+[ "$(awk -F= -v key="${live_prefix}_evidence_sha256" '$1 == key { print $2 }' "$manifest")" = "$live_evidence_sha256" ]
+[ "$(awk -F= -v key="${live_prefix}_admission_record_sha256" '$1 == key { print $2 }' "$manifest")" = "$(sha256sum "$live_admission_record" | awk '{print $1}')" ]
+assert_manifest_admission_binding "$manifest" "$live_prefix" "$live_admission_record"
+assert_typed_source_contract
+
+# A PASS program identity must name one retained artifact rather than an
+# unattached label that cannot prove which filesystem program was exercised.
+cp -R "$work/good" "$work/unbacked-program"
+env=$work/unbacked-program/linux/arm32/run-linux-arm32/evidence.env
+sed 's/^program_identity=.*/program_identity=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/' "$env" > "$work/t" && mv "$work/t" "$env"
+expect_reject unbacked-program "$work/unbacked-program"
+
+# REQ-SQ-011 requires the selected guest image hash to identify retained bytes,
+# not an unattached digest-shaped label supplied by the producer.
+cp -R "$work/good" "$work/unbacked-image"
+env=$work/unbacked-image/linux/riscv32/run-linux-riscv32/evidence.env
+sed 's/^image_identity=.*/image_identity=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/' "$env" > "$work/t" && mv "$work/t" "$env"
+expect_reject unbacked-image "$work/unbacked-image"
+
+# A designation is a claim, not metadata decoration: sabotage one row by
+# designating it without the two artifact-backed in-guest proofs.
+cp -R "$work/good" "$work/compiler-designation"
+env=$work/compiler-designation/linux/x86_64/run-linux-x86_64/evidence.env
+sed 's/^compiler_in_filesystem=false$/compiler_in_filesystem=true/' "$env" > "$work/t" && mv "$work/t" "$env"
+expect_reject compiler-designation "$work/compiler-designation"
+
+# Compiler evidence is artifact content, so post-publication tampering must be
+# rejected even when the evidence paths and designation remain unchanged.
+cp -R "$work/good" "$work/compiler-tamper"
+echo tampered >> "$work/compiler-tamper/linux/x86_32/run-linux-x86_32/compiler-hello.txt"
+expect_reject compiler-tamper "$work/compiler-tamper"
+
+# Rehashing forged compiler receipts and their transcript cannot convert
+# syntactically valid bytes into evidence for the wrong row identity or output.
+cp -R "$work/good" "$work/compiler-rehashed-version-forgery"
+env=$work/compiler-rehashed-version-forgery/linux/x86_32/run-linux-x86_32/evidence.env
+version_file=${env%/*}/compiler-version.txt
+transcript_file=${env%/*}/transcript.log
+sed 's/host=linux guest=x86_32/host=windows guest=x86_32/' "$version_file" > "$work/t" && mv "$work/t" "$version_file"
+sed 's/SOSIX_QEMU_COMPILER_VERSION host=linux guest=x86_32/SOSIX_QEMU_COMPILER_VERSION host=windows guest=x86_32/' "$transcript_file" > "$work/t" && mv "$work/t" "$transcript_file"
+    refresh_artifact_hash "$env" 10 "$version_file"
+refresh_transcript_hash "$env"
+expect_reject compiler-rehashed-version-forgery "$work/compiler-rehashed-version-forgery"
+
+cp -R "$work/good" "$work/compiler-rehashed-hello-forgery"
+env=$work/compiler-rehashed-hello-forgery/linux/x86_32/run-linux-x86_32/evidence.env
+hello_file=${env%/*}/compiler-hello.txt
+transcript_file=${env%/*}/transcript.log
+sed 's/text=hello-nonce-linux-x86_32-correlation/text=forged-output/' "$hello_file" > "$work/t" && mv "$work/t" "$hello_file"
+sed 's/text=hello-nonce-linux-x86_32-correlation/text=forged-output/' "$transcript_file" > "$work/t" && mv "$work/t" "$transcript_file"
+    refresh_artifact_hash "$env" 11 "$hello_file"
+refresh_transcript_hash "$env"
+expect_reject compiler-rehashed-hello-forgery "$work/compiler-rehashed-hello-forgery"
+
+# REQ-SQ-005 is fail closed: a serial transcript and QEMU argv cannot stand in
+# for an explicit firmware identity or boot mode.
+cp -R "$work/good" "$work/missing-firmware-identity"
+env=$work/missing-firmware-identity/linux/x86_32/run-linux-x86_32/evidence.env
+sed '/^firmware_identity=/d' "$env" > "$work/t" && mv "$work/t" "$env"
+expect_reject missing-firmware-identity "$work/missing-firmware-identity"
+
+cp -R "$work/good" "$work/missing-firmware-mode"
+env=$work/missing-firmware-mode/linux/arm64/run-linux-arm64/evidence.env
+sed '/^firmware_mode=/d' "$env" > "$work/t" && mv "$work/t" "$env"
+expect_reject missing-firmware-mode "$work/missing-firmware-mode"
+
+cp -R "$work/good" "$work/placeholder-firmware"
+env=$work/placeholder-firmware/linux/arm64/run-linux-arm64/evidence.env
+sed 's/^firmware_identity=.*/firmware_identity=unrecorded/' "$env" > "$work/t" && mv "$work/t" "$env"
+expect_reject placeholder-firmware "$work/placeholder-firmware"
+
+cp -R "$work/good" "$work/missing-firmware-hash"
+env=$work/missing-firmware-hash/linux/x86_64/run-linux-x86_64/evidence.env
+sed 's/^firmware_sha256=.*/firmware_sha256=/' "$env" > "$work/t" && mv "$work/t" "$env"
+expect_reject missing-firmware-hash "$work/missing-firmware-hash"
+
+cp -R "$work/good" "$work/missing-firmware-stage"
+env=$work/missing-firmware-stage/linux/riscv64/run-linux-riscv64/evidence.env
+sed 's/^firmware_stage_markers=.*/firmware_stage_markers=opensbi-entry>opensbi-handoff>guest-entry/' "$env" > "$work/t" && mv "$work/t" "$env"
+expect_reject missing-firmware-stage "$work/missing-firmware-stage"
+
+cp -R "$work/good" "$work/relabel"
+sed 's/^host=linux$/host=windows/' "$work/relabel/linux/x86_32/run-linux-x86_32/evidence.env" > "$work/t" && mv "$work/t" "$work/relabel/linux/x86_32/run-linux-x86_32/evidence.env"
+expect_reject relabel "$work/relabel"
+
+cp -R "$work/good" "$work/hash"
+echo corrupt >> "$work/hash/linux/x86_32/run-linux-x86_32/transcript.log"
+expect_reject hash "$work/hash"
+
+cp -R "$work/good" "$work/missing"
+rm "$work/missing/macos/arm64/run-macos-arm64/evidence.env"
+expect_reject missing "$work/missing"
+
+cp -R "$work/good" "$work/duplicate"
+mkdir -p "$work/duplicate/linux/x86_32/another"
+cp "$work/duplicate/linux/x86_32/run-linux-x86_32/evidence.env" "$work/duplicate/linux/x86_32/another/evidence.env"
+expect_reject duplicate "$work/duplicate"
+
+cp -R "$work/good" "$work/nonpass"
+env=$(find "$work/nonpass/freebsd/riscv64" -mindepth 2 -maxdepth 2 -name evidence.env -print)
+sed 's/^status=pass$/status=blocked/; s/^owner=.*$/owner=/; s/^reviewer=.*$/reviewer=/; s/^resume_command=.*$/resume_command=/' "$env" > "$work/t" && mv "$work/t" "$env"
+expect_reject nonpass "$work/nonpass"
+
+cp -R "$work/good" "$work/dirty-source"
+env=$work/dirty-source/linux/arm32/run-linux-arm32/evidence.env
+sed 's/:clean$/:dirty/' "$env" > "$work/t" && mv "$work/t" "$env"
+expect_reject dirty-source "$work/dirty-source"
+
+cp -R "$work/good" "$work/stale-transcript"
+env=$work/stale-transcript/linux/riscv64/run-linux-riscv64/evidence.env
+sed 's/^run_nonce=.*/run_nonce=nonce-that-is-not-in-the-transcript/' "$env" > "$work/t" && mv "$work/t" "$env"
+expect_reject stale-transcript "$work/stale-transcript"
+
+for mutation in reversed duplicate missing nonce-before-entry duplicate-stage-one-line duplicate-boot-one-line; do
+    root=$work/firmware-$mutation
+    cp -R "$work/good" "$root"
+    env=$root/linux/arm64/run-linux-arm64/evidence.env
+    transcript=${env%/*}/transcript.log
+    case "$mutation" in
+        reversed) printf '%s\n' firmware-handoff firmware-entry boot-correlation-linux-arm64-unique guest-entry nonce-linux-arm64-correlation > "$transcript";;
+        duplicate) printf '%s\n' firmware-entry firmware-handoff firmware-handoff boot-correlation-linux-arm64-unique guest-entry nonce-linux-arm64-correlation > "$transcript";;
+        missing) printf '%s\n' firmware-entry boot-correlation-linux-arm64-unique guest-entry nonce-linux-arm64-correlation > "$transcript";;
+        nonce-before-entry) printf '%s\n' firmware-entry firmware-handoff boot-correlation-linux-arm64-unique nonce-linux-arm64-correlation guest-entry > "$transcript";;
+        duplicate-stage-one-line) printf '%s\n' firmware-entry 'firmware-handoff firmware-handoff' boot-correlation-linux-arm64-unique guest-entry nonce-linux-arm64-correlation > "$transcript";;
+        duplicate-boot-one-line) printf '%s\n' firmware-entry firmware-handoff 'boot-correlation-linux-arm64-unique boot-correlation-linux-arm64-unique' guest-entry nonce-linux-arm64-correlation > "$transcript";;
+    esac
+    refresh_transcript_hash "$env"
+    expect_reject "firmware-$mutation" "$root"
+done
+
+echo 'collect-sosix-qemu-evidence self-test: PASS'

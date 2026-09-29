@@ -1,8 +1,7 @@
 # Arity census re-audit: the declaration is not ground truth
 
 **Date:** 2026-08-04
-Status: OPEN (P3)
-Status re-verified 2026-08-17 by source inspection (triage shard 00).
+**Status:** 1 fix landed (`3c45274ba4b`); remainder filed below.
 
 ## Why this re-audit happened
 
@@ -259,3 +258,7 @@ the first place. Filed rather than guessed.
 3. **Prefer an external authority where one exists.** For `extern fn`, the C
    header settles it with no inference at all.
 4. **Re-derive the base from `ls-remote`** before scoring anything.
+
+## Triage 2026-09-13 (BUGFIX-7 lane)
+
+Already has 1 fix landed; remainder is a large repo-wide arity census (237,215 call sites checked) with filed residuals, beyond a single-bug budget. No change made.

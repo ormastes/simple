@@ -7,8 +7,9 @@
 #
 # Tiers (first milestone — local only, no remote client):
 #   L1 workspace  <workspace_root>/.simple/build-cache/
-#   L2 machine    $SIMPLE_CACHE, or <workspace_root>/.simple/machine-cache/
-#                 as a test-friendly fallback when the env var is unset.
+#   L2 machine    common host cache location (SIMPLE_CACHE override, otherwise
+#                 the platform user-local cache root).  If the common facade
+#                 cannot resolve an absolute root, L2 is disabled fail-closed.
 #
 # Lookup is EXACT ActionDigest only — no prefix or fallback matching of any
 # kind, per the plan's first-milestone scope.
@@ -32,7 +33,7 @@ use compiler.driver.cache.action_index.action_index.{
     action_index_get, action_index_put
 }
 use std.crypto.sha256.{sha256_text}
-use std.io_runtime.{env_get_opt}
+use std.env.platform.{get_cache_location}
 
 # ============================================================================
 # Root resolution
@@ -42,10 +43,7 @@ fn tier_router_l1_root(workspace_root: text) -> text:
     "{workspace_root}/.simple/build-cache"
 
 fn tier_router_l2_root(workspace_root: text) -> text:
-    val env = env_get_opt("SIMPLE_CACHE") ?? ""
-    if env != "":
-        return env
-    "{workspace_root}/.simple/machine-cache"
+    get_cache_location("simple/cache-manager")
 
 struct TierRouter:
     workspace_root: text
@@ -57,7 +55,8 @@ fn tier_router_open(workspace_root: text) -> TierRouter:
     val l1 = tier_router_l1_root(workspace_root)
     val l2 = tier_router_l2_root(workspace_root)
     cas_open(l1)
-    cas_open(l2)
+    if l2 != "":
+        cas_open(l2)
     TierRouter(workspace_root: workspace_root, l1_root: l1, l2_root: l2, memo: {})
 
 fn tier_router_memo_key(ns: CacheNamespace, action_digest: text) -> text:
@@ -132,6 +131,10 @@ fn tier_router_lookup(tr: TierRouter, ns: CacheNamespace, action_digest: text) -
                     pass_do_nothing
         case IndexLookupResult.Miss:
             pass_do_nothing
+
+    # An unavailable machine root is not replaced with a workspace path.
+    if tr.l2_root == "":
+        return TierLookupResult.Miss
 
     # L2 exact hit -> backfill into L1.
     match action_index_get(tr.l2_root, ns, action_digest):

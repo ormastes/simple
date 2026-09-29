@@ -1,7 +1,8 @@
 # Browser CSS animation clock is not connected
+## Open 2026-09-16 — needs owner triage
 
-Status: FIXED
-Status re-verified 2026-08-17 by source inspection (triage shard 00).
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -93,3 +94,4 @@ The session clock now demonstrably drives rAF and CSS keyframes:
   the same session; spec stays RED on that example until it lands.
 
 Remaining open: target-binary (native) evidence; non-hosted browser surfaces.
+

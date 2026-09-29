@@ -1,7 +1,8 @@
 # Bug: `expect(a == b).to_equal(false)` mis-evaluates the inline `==` argument
+## Open 2026-09-16 — needs owner triage
 
-Status: OPEN (P1)
-Status re-verified 2026-08-17 by source inspection (triage shard 01).
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-07
 **Severity:** Medium — false-RED on specs that assert inequality of two
@@ -64,3 +65,4 @@ surface symptom (`expect(a == b).to_equal(false)` false-failing) — that one
 is specific to the seed's per-example `BDD_EXPECT_FAILED` flag; this one is
 the self-hosted interpreter's chained-argument evaluation order. Do not
 conflate the two fixes.
+

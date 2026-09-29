@@ -1,0 +1,99 @@
+# Value-only execve wire plan. User addresses are added only by the scoped owner.
+
+use std.common.string_core.{text_to_utf8_bytes}
+use std.common.base_encoding.utilities.{validated_utf8_bytes_to_text_linear}
+
+# These are the kernel char** ABI limits, including the terminating NULL slot
+# and each terminating NUL byte. They are not the packed SpawnBinary ABI.
+pub val EXECVE_PATH_BYTES_V1: i64 = 256
+pub val EXECVE_ARG_SLOTS_V1: i64 = 64
+pub val EXECVE_ENV_SLOTS_V1: i64 = 128
+pub val EXECVE_STRING_BYTES_V1: i64 = 4096
+pub val EXECVE_VECTOR_BYTES_V1: i64 = 32768
+
+pub struct ExecvePlanV1:
+    bytes: [u8]
+    path_offset: i64
+    path_length: i64
+    env_table_offset: i64
+    argv_offsets: [i64]
+    envp_offsets: [i64]
+
+fn _execve_text_bytes_v1(value: text, limit: i64, size_errno: i64) -> Result<[u8], i64>:
+    if value.len() as i64 > limit:
+        return Err(size_errno)
+    val bytes = text_to_utf8_bytes(value)
+    if bytes.len() as i64 > limit:
+        return Err(size_errno)
+    for byte in bytes:
+        if byte == 0u8:
+            return Err(-22)
+    if validated_utf8_bytes_to_text_linear(bytes).is_err():
+        return Err(-22)
+    Ok(bytes)
+
+fn _execve_vector_bytes_v1(values: [text]) -> Result<[[u8]], i64>:
+    var copied: [[u8]] = []
+    var total: i64 = 0
+    for value in values:
+        val bytes = _execve_text_bytes_v1(value, EXECVE_STRING_BYTES_V1 - 1, -7)?
+        val size = bytes.len() as i64 + 1
+        if total > EXECVE_VECTOR_BYTES_V1 - size:
+            return Err(-7)
+        total = total + size
+        copied.push(bytes)
+    Ok(copied)
+
+pub fn execve_plan_v1(path: text, argv: [text], envp: [text]) -> Result<ExecvePlanV1, i64>:
+    """Copy bounded inputs into a pointer-free plan, before raw allocation/syscall.
+
+    Empty argv becomes [path]; a supplied empty argv[0] is invalid. Other empty
+    arguments and empty environment entries are preserved. Counts include the
+    NULL table terminator; string and per-vector limits include NUL bytes.
+    """
+    if path.len() == 0:
+        return Err(-22)
+    if argv.len() as i64 >= EXECVE_ARG_SLOTS_V1 or envp.len() as i64 >= EXECVE_ENV_SLOTS_V1:
+        return Err(-7)
+    val path_bytes = _execve_text_bytes_v1(path, EXECVE_PATH_BYTES_V1, -36)?
+    var effective_argv = argv
+    if argv.len() == 0:
+        effective_argv = [path]
+    elif argv[0].len() == 0:
+        return Err(-22)
+    val arg_bytes = _execve_vector_bytes_v1(effective_argv)?
+    val env_bytes = _execve_vector_bytes_v1(envp)?
+
+    val env_table_offset = (arg_bytes.len() as i64 + 1) * 8
+    val path_offset = env_table_offset + (env_bytes.len() as i64 + 1) * 8
+    var bytes: [u8] = []
+    var pad: i64 = 0
+    while pad < path_offset:
+        bytes.push(0u8)
+        pad = pad + 1
+    for byte in path_bytes:
+        bytes.push(byte)
+    bytes.push(0u8)
+
+    var argv_offsets: [i64] = []
+    for value in arg_bytes:
+        argv_offsets.push(bytes.len() as i64)
+        for byte in value:
+            bytes.push(byte)
+        bytes.push(0u8)
+    var envp_offsets: [i64] = []
+    for value in env_bytes:
+        envp_offsets.push(bytes.len() as i64)
+        for byte in value:
+            bytes.push(byte)
+        bytes.push(0u8)
+    while bytes.len() % 8 != 0:
+        bytes.push(0u8)
+    Ok(ExecvePlanV1(
+        bytes: bytes, path_offset: path_offset, path_length: path_bytes.len() as i64,
+        env_table_offset: env_table_offset, argv_offsets: argv_offsets, envp_offsets: envp_offsets
+    ))
+
+export ExecvePlanV1, execve_plan_v1
+export EXECVE_PATH_BYTES_V1, EXECVE_ARG_SLOTS_V1, EXECVE_ENV_SLOTS_V1
+export EXECVE_STRING_BYTES_V1, EXECVE_VECTOR_BYTES_V1

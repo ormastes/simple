@@ -1,0 +1,181 @@
+# S1-C balance score engine (advisory only — see plan §S1-C).
+#
+# Pure function of (artifacts/edges/reverse_index summarized as `ScopeInput`,
+# `BalanceConfig`). No filesystem, clock, or randomness. Points are int
+# tenths end to end (a `score_tenths` of 824 displays as 82.4) to avoid the
+# native f64 Dict gap and to make cross-platform determinism trivial — no
+# float summation order to worry about. Every deduction carries an SPK51x
+# code plus evidence; this package never raises a hard error (hard integrity
+# is S1-A/S1-D's job) and never mutates or rejects anything.
+
+use app.spipe.balance.score_types.ScopeInput
+use app.spipe.model.types.{ComponentScore, Deduction, ScoreReport}
+use std.common.sdn.value.{SdnValue, sdn_value_to_text}
+use app.spipe.model.canonical.{CanonicalValue, canonical_json, cfield}
+use app.spipe.balance.config.{BalanceConfig, default_config}
+use app.spipe.balance.components.cohesion.cohesion_raw
+use app.spipe.balance.components.trace_alignment.trace_alignment_raw
+use app.spipe.balance.components.shape.shape_raw_with_config
+use app.spipe.balance.components.axis_coverage.axis_coverage_raw
+
+val SCHEMA = "spipe-balance/1"
+
+# weight * raw_permille / 100, half-up (contract: §6.3 `ComponentScore.points_tenths`).
+fn tenths_half_up(weight: Int, raw_permille: Int) -> Int:
+    (weight * raw_permille + 50) / 100
+
+fn component_score(name: text, weight: Int, raw_permille: Int) -> ComponentScore:
+    ComponentScore(
+        name: name,
+        weight: weight,
+        raw_permille: raw_permille,
+        points_tenths: tenths_half_up(weight, raw_permille)
+    )
+
+fn max_tenths(weight: Int) -> Int:
+    tenths_half_up(weight, 1000)
+
+fn maybe_deduction(code: text, component: text, weight: Int, score: ComponentScore, evidence: text) -> [Deduction]:
+    val lost = max_tenths(weight) - score.points_tenths
+    if lost <= 0:
+        return []
+    [Deduction(code: code, component: component, points_tenths: lost, evidence: SdnValue.String(evidence))]
+
+# Byte-lexical `text` less-than. `text.len()` is BYTES and `s[i]` indexes
+# CHARS (`.claude/rules/commands.md` §3.5.1), so a scanner mixing the two
+# corrupts on multibyte paths; use `.bytes()[i]` consistently instead, same
+# pattern as `src/lib/common/encoding/bencode.spl:_benc_text_lt`.
+fn scope_text_less(a: text, b: text) -> bool:
+    val la = a.length()
+    val lb = b.length()
+    val ab = a.bytes()
+    val bb = b.bytes()
+    var i = 0
+    var result = false
+    var done = false
+    while i < la and i < lb and not done:
+        val ca = ab[i]
+        val cb = bb[i]
+        if ca < cb:
+            result = true
+            done = true
+        elif ca > cb:
+            done = true
+        else:
+            i = i + 1
+    if not done:
+        result = la < lb
+    result
+
+# Insertion sort by `scope` (byte-lexical `text` compare), stable, so a scope
+# with genuinely tied inputs still orders deterministically on its path — the
+# only tie-break axis available at this layer (no UID exists on `ScopeInput`;
+# S1-A/S1-E own UIDs). Mutates through a single owned local array (never a
+# temporary alias) per the COW hazard in `.claude/rules/code-style.md`.
+fn sorted_children(children: [ScopeInput]) -> [ScopeInput]:
+    var sorted: [ScopeInput] = []
+    for child in children:
+        var insert_at = sorted.len()
+        var i = 0
+        while i < sorted.len():
+            if scope_text_less(child.scope, sorted[i].scope):
+                insert_at = i
+                i = sorted.len()
+            else:
+                i = i + 1
+        sorted = sorted.slice(0, insert_at) + [child] + sorted.slice(insert_at, sorted.len())
+    sorted
+
+# Recursively scores one scope and all descendants (depth-first, path-sorted
+# children — §6.3 `ScoreReport.scopes` contract).
+fn score_scope(input: ScopeInput, config: BalanceConfig) -> ScoreReport:
+    val cohesion_score = component_score("cohesion", config.weight_cohesion, cohesion_raw(input))
+    val trace_score = component_score("trace_alignment", config.weight_trace_alignment, trace_alignment_raw(input))
+    val shape_score = component_score("shape", config.weight_shape, shape_raw_with_config(input, config))
+    val axis_score = component_score("axis_coverage", config.weight_axis_coverage, axis_coverage_raw(input))
+
+    val components = [cohesion_score, trace_score, shape_score, axis_score]
+
+    val cohesion_evidence = "eligible_weight={input.eligible_weight} cut_weight={input.cut_weight} raw_permille={cohesion_score.raw_permille}"
+    val trace_evidence = "trace_total={input.trace_total} trace_aligned={input.trace_aligned} raw_permille={trace_score.raw_permille}"
+    val shape_evidence = "depth={input.depth} direct_docs={input.direct_docs} child_dirs={input.child_dirs} tiny_sibling_dirs={input.tiny_sibling_dirs} raw_permille={shape_score.raw_permille}"
+    val axis_evidence = "axis_total={input.axis_total} axis_present={input.axis_present} raw_permille={axis_score.raw_permille}"
+
+    var deductions: [Deduction] = []
+    deductions = deductions + maybe_deduction("SPK511", "cohesion", config.weight_cohesion, cohesion_score, cohesion_evidence)
+    deductions = deductions + maybe_deduction("SPK512", "trace_alignment", config.weight_trace_alignment, trace_score, trace_evidence)
+    deductions = deductions + maybe_deduction("SPK513", "shape", config.weight_shape, shape_score, shape_evidence)
+    deductions = deductions + maybe_deduction("SPK514", "axis_coverage", config.weight_axis_coverage, axis_score, axis_evidence)
+
+    val score_tenths = cohesion_score.points_tenths + trace_score.points_tenths + shape_score.points_tenths + axis_score.points_tenths
+
+    var child_reports: [ScoreReport] = []
+    for child in sorted_children(input.children):
+        child_reports = child_reports + [score_scope(child, config)]
+
+    ScoreReport(
+        schema: SCHEMA,
+        scope: input.scope,
+        score_tenths: score_tenths,
+        components: components,
+        deductions: deductions,
+        scopes: child_reports
+    )
+
+# Public entrypoint: score the whole tree rooted at `input` (typically the
+# global scope, `scope: ""`) using the default renormalized-weight config.
+fn score_report(input: ScopeInput) -> ScoreReport:
+    score_scope(input, default_config())
+
+fn score_report_with_config(input: ScopeInput, config: BalanceConfig) -> ScoreReport:
+    score_scope(input, config)
+
+# --- Canonical serialization (determinism proof) --------------------------
+#
+# Delegates to model/canonical.spl, the single canonical encoder. This module
+# previously carried its own local fixed-order text join, written when
+# CanonicalValue had no object shape; that made two independent definitions of
+# "canonical bytes" in one codebase, which is precisely how cross-platform
+# determinism diverges without anyone noticing. CDict now exists, so the local
+# encoder is gone. Field ORDER here no longer matters -- CDict sorts keys by
+# byte order at emission -- but every collection below is still emitted in its
+# own explicitly-sorted order, which is what makes the report deterministic.
+fn canonical_component(c: ComponentScore) -> CanonicalValue:
+    CanonicalValue.CDict([
+        cfield("name", CanonicalValue.CText(c.name)),
+        cfield("weight", CanonicalValue.CInt(c.weight)),
+        cfield("raw_permille", CanonicalValue.CInt(c.raw_permille)),
+        cfield("points_tenths", CanonicalValue.CInt(c.points_tenths)),
+    ])
+
+fn canonical_deduction(d: Deduction) -> CanonicalValue:
+    CanonicalValue.CDict([
+        cfield("code", CanonicalValue.CText(d.code)),
+        cfield("component", CanonicalValue.CText(d.component)),
+        cfield("points_tenths", CanonicalValue.CInt(d.points_tenths)),
+        cfield("evidence", CanonicalValue.CText(sdn_value_to_text(d.evidence))),
+    ])
+
+fn canonical_value_of(report: ScoreReport) -> CanonicalValue:
+    var components = []
+    for c in report.components:
+        components.push(canonical_component(c))
+    var deductions = []
+    for d in report.deductions:
+        deductions.push(canonical_deduction(d))
+    var scopes = []
+    for s in report.scopes:
+        scopes.push(canonical_value_of(s))
+    CanonicalValue.CDict([
+        cfield("schema", CanonicalValue.CText(report.schema)),
+        cfield("scope", CanonicalValue.CText(report.scope)),
+        cfield("score_tenths", CanonicalValue.CInt(report.score_tenths)),
+        cfield("components", CanonicalValue.CList(components)),
+        cfield("deductions", CanonicalValue.CList(deductions)),
+        cfield("scopes", CanonicalValue.CList(scopes)),
+    ])
+
+fn canonical_bytes(report: ScoreReport) -> text:
+    canonical_json(canonical_value_of(report))
+
+export score_scope, score_report, score_report_with_config, canonical_bytes, tenths_half_up, sorted_children, scope_text_less

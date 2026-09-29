@@ -39,6 +39,7 @@ pub struct Lowerer {
     /// Set of function names that are marked with #[pure] (CTR-031)
     /// These functions can be called from contract expressions
     pub(super) pure_functions: HashSet<String>,
+    pub(super) proven_nonescaping_functions: HashSet<String>,
     /// Current class/struct type being lowered (for Self resolution)
     pub(super) current_class_type: Option<TypeId>,
     /// Current function/method name being lowered, used to enrich lowering diagnostics.
@@ -85,6 +86,11 @@ pub struct Lowerer {
     pub(super) type_aliases: HashMap<String, String>,
     /// Function aliases: alias_name -> original_name
     pub(super) function_aliases: HashMap<String, String>,
+    /// Free-function names THIS module's own source declares. Used to detect a
+    /// `use m.{f as g}` whose original name `f` is also defined locally: on the
+    /// non-flattened (native/AOT) lane, rewriting `g` back to the bare `f`
+    /// there binds the LOCAL `f` and silently loses the import.
+    pub(super) own_declared_function_names: std::collections::HashSet<String>,
     /// Reverse lookup for suggestions: original -> Vec<aliases>
     pub(super) type_aliases_reverse: HashMap<String, Vec<String>>,
     /// Reverse lookup for function suggestions: original -> Vec<aliases>
@@ -99,9 +105,14 @@ pub struct Lowerer {
     pub(super) method_return_types: HashMap<String, TypeId>,
     /// M12 3b: free-function parameter default-value expressions, keyed by
     /// function name (one Option per declared parameter; None = no default).
+    /// Keyed by the emitted owner-specific symbol for flattened definitions.
     /// Captured from the AST during module lowering so omitted trailing
     /// arguments can be filled at call sites (`lower_call`).
     pub(super) fn_param_defaults: HashMap<String, Vec<Option<Expr>>>,
+    /// Importing module identity -> visible name -> parameter defaults.
+    /// Separate from local declarations so cached facades and aliases retain
+    /// the selected import's contract without a process-wide bare-name lookup.
+    pub(super) imported_fn_param_defaults: HashMap<PathBuf, HashMap<String, Vec<Option<Expr>>>>,
     /// Whole-program map of free-function name -> declared return type,
     /// built by `build_import_map`. Functions reached via the global import map
     /// (called without a `use` import) otherwise have no return-type info, so
@@ -124,7 +135,30 @@ pub struct Lowerer {
     /// units have no interpreter to fall back to. Populated by
     /// `collect_flattened_import_aliases`, consumed by `lower_identifier`. See
     /// `doc/08_tracking/bug/aliased_use_import_does_not_bind_in_transitive_module_2026-08-10.md`.
+    /// Keyed by local name only: two importers binding the same local name
+    /// from different sources clobber each other here.
     pub(super) import_alias_bindings: HashMap<String, String>,
+    /// Flattened unit only: every free-function name -> the flatten owner of
+    /// each definition in item order (`None` = the untagged entry module).
+    /// A name whose owners differ is a cross-module collision; each colliding
+    /// definition is lowered under `flatten_emitted_symbol` so a selective
+    /// import can no longer make a same-named function in another module
+    /// override the importer's own (or vice versa). See
+    /// `doc/08_tracking/bug/selective_use_leaks_same_named_fn_2026-09-13.md`.
+    pub(super) flatten_fn_owners: HashMap<String, Vec<Option<String>>>,
+    /// Flattened unit only: importer owner -> local name -> (source owner,
+    /// source name), decoded from every `__simple_flatten_import_binding__`
+    /// marker. Keyed by importer, unlike `import_alias_bindings`.
+    pub(super) flatten_owner_import_bindings: HashMap<String, HashMap<String, (String, String)>>,
+    /// Flatten owner of the function whose body is being lowered.
+    pub(super) current_function_owner: Option<String>,
+    /// Flattened unit only: module-global name declared by two or more
+    /// distinct owners -> owner of each declaration in item order. Those
+    /// declarations are lowered under `flattened_global_symbol` (see
+    /// `module_lowering/flatten_global_owner.rs`).
+    pub(super) flatten_global_owners: HashMap<String, Vec<Option<String>>>,
+    /// Owner-exact symbol of each colliding flattened global -> its owner.
+    pub(super) flatten_global_symbol_owners: HashMap<String, Option<String>>,
     /// When true, unknown types resolve to ANY instead of erroring.
     /// This allows compilation to proceed even when imports can't be fully resolved.
     pub(super) lenient_types: bool,
@@ -212,6 +246,7 @@ impl Lowerer {
             local_globals: HashSet::new(),
             immutable_globals: HashSet::new(),
             pure_functions: HashSet::new(),
+            proven_nonescaping_functions: HashSet::new(),
             current_class_type: None,
             current_function_name: None,
             current_function_line: None,
@@ -227,7 +262,13 @@ impl Lowerer {
             capability_env: CapabilityEnv::new(),
             type_aliases: HashMap::new(),
             function_aliases: HashMap::new(),
+            own_declared_function_names: std::collections::HashSet::new(),
             import_alias_bindings: HashMap::new(),
+            flatten_fn_owners: HashMap::new(),
+            flatten_owner_import_bindings: HashMap::new(),
+            current_function_owner: None,
+            flatten_global_owners: HashMap::new(),
+            flatten_global_symbol_owners: HashMap::new(),
             type_aliases_reverse: HashMap::new(),
             function_aliases_reverse: HashMap::new(),
             deprecated_items: HashMap::new(),
@@ -235,6 +276,7 @@ impl Lowerer {
             type_inference_config: TypeInferenceConfig::default(),
             method_return_types: HashMap::new(),
             fn_param_defaults: HashMap::new(),
+            imported_fn_param_defaults: HashMap::new(),
             global_fn_return_types: None,
             qualified_import_functions: None,
             lenient_types: false,
@@ -267,6 +309,7 @@ impl Lowerer {
             local_globals: HashSet::new(),
             immutable_globals: HashSet::new(),
             pure_functions: HashSet::new(),
+            proven_nonescaping_functions: HashSet::new(),
             current_class_type: None,
             current_function_name: None,
             current_function_line: None,
@@ -282,7 +325,13 @@ impl Lowerer {
             capability_env: CapabilityEnv::new(),
             type_aliases: HashMap::new(),
             function_aliases: HashMap::new(),
+            own_declared_function_names: std::collections::HashSet::new(),
             import_alias_bindings: HashMap::new(),
+            flatten_fn_owners: HashMap::new(),
+            flatten_owner_import_bindings: HashMap::new(),
+            current_function_owner: None,
+            flatten_global_owners: HashMap::new(),
+            flatten_global_symbol_owners: HashMap::new(),
             type_aliases_reverse: HashMap::new(),
             function_aliases_reverse: HashMap::new(),
             deprecated_items: HashMap::new(),
@@ -290,6 +339,7 @@ impl Lowerer {
             type_inference_config: TypeInferenceConfig::default(),
             method_return_types: HashMap::new(),
             fn_param_defaults: HashMap::new(),
+            imported_fn_param_defaults: HashMap::new(),
             global_fn_return_types: None,
             qualified_import_functions: None,
             lenient_types: false,
@@ -345,6 +395,7 @@ impl Lowerer {
             local_globals: HashSet::new(),
             immutable_globals: HashSet::new(),
             pure_functions: HashSet::new(),
+            proven_nonescaping_functions: HashSet::new(),
             current_class_type: None,
             current_function_name: None,
             current_function_line: None,
@@ -360,7 +411,13 @@ impl Lowerer {
             capability_env: CapabilityEnv::new(),
             type_aliases: HashMap::new(),
             function_aliases: HashMap::new(),
+            own_declared_function_names: std::collections::HashSet::new(),
             import_alias_bindings: HashMap::new(),
+            flatten_fn_owners: HashMap::new(),
+            flatten_owner_import_bindings: HashMap::new(),
+            current_function_owner: None,
+            flatten_global_owners: HashMap::new(),
+            flatten_global_symbol_owners: HashMap::new(),
             type_aliases_reverse: HashMap::new(),
             function_aliases_reverse: HashMap::new(),
             deprecated_items: HashMap::new(),
@@ -368,6 +425,7 @@ impl Lowerer {
             type_inference_config: TypeInferenceConfig::default(),
             method_return_types: HashMap::new(),
             fn_param_defaults: HashMap::new(),
+            imported_fn_param_defaults: HashMap::new(),
             global_fn_return_types: None,
             qualified_import_functions: None,
             lenient_types: false,
@@ -418,10 +476,7 @@ impl Lowerer {
     /// instead of appearing with no source location at all.
     pub(super) fn record_lenient_global(&mut self, name: &str, kind: LenientGlobalKind) {
         let entry = LenientGlobal {
-            file: self
-                .current_file
-                .as_ref()
-                .map(|path| path.display().to_string()),
+            file: self.current_file.as_ref().map(|path| path.display().to_string()),
             function: self.current_function_name.clone(),
             function_line: self.current_function_line,
             name: name.to_string(),
@@ -744,6 +799,8 @@ impl Lowerer {
         // purpose: the resulting unresolved-symbol error is correct behaviour
         // compared to silently binding the wrong function. See
         // `doc/08_tracking/bug/flattened_lane_does_not_mangle_duplicate_function_names_2026-08-10.md`.
+        self.flatten_fn_owners.clear();
+        self.flatten_owner_import_bindings.clear();
         let mut definition_counts: HashMap<&str, usize> = HashMap::new();
         // Every name the flattened unit really DECLARES, function or value. The
         // alias branch in `lower_identifier` now runs ahead of the
@@ -757,6 +814,8 @@ impl Lowerer {
                 simple_parser::Node::Function(f) => {
                     *definition_counts.entry(f.name.as_str()).or_insert(0) += 1;
                     declared_names.insert(f.name.as_str());
+                    let owner = Self::flatten_owner_of(f.attributes.iter().map(|a| a.name.as_str()));
+                    self.flatten_fn_owners.entry(f.name.clone()).or_default().push(owner);
                 }
                 simple_parser::Node::Const(c) => {
                     declared_names.insert(c.name.as_str());
@@ -780,11 +839,19 @@ impl Lowerer {
             let simple_parser::Node::Const(marker) = item else {
                 continue;
             };
-            let Some((importer, local_name, source_owner, source_name)) =
-                decode_import_binding_marker(&marker.name)
+            let Some((importer, local_name, source_owner, source_name)) = decode_import_binding_marker(&marker.name)
             else {
                 continue;
             };
+            if local_name != "*" && source_name != "*" {
+                self.flatten_owner_import_bindings
+                    .entry(importer.to_string())
+                    .or_default()
+                    .insert(
+                        local_name.to_string(),
+                        (source_owner.to_string(), source_name.to_string()),
+                    );
+            }
             if local_name == "*" || source_name == "*" || local_name == source_name {
                 continue;
             }
@@ -805,6 +872,11 @@ impl Lowerer {
                 // Unmangled and unique in the flattened unit: the bare name is
                 // the only candidate, so binding it is safe.
                 source_name.to_string()
+            } else if self.flatten_owner_defines(Some(source_owner), source_name) {
+                // Ambiguous bare name, but the marker names the exact owner and
+                // `flatten_emitted_symbol` is the symbol that owner's definition
+                // is lowered under -- exact, not a guess.
+                self.flatten_emitted_symbol(Some(source_owner), source_name)
             } else {
                 // Absent or ambiguous. Do NOT guess -- leave the alias
                 // unresolved so the lane reports an unresolved symbol instead of
@@ -820,9 +892,146 @@ impl Lowerer {
         self.import_alias_bindings.get(name).map(|s| s.as_str())
     }
 
+    /// Flatten owner recorded on a definition by
+    /// `pipeline::module_loader::tag_node_function_owners`; `None` when untagged
+    /// (the entry module, or any non-flattened unit).
+    pub(super) fn flatten_owner_of<'a>(attribute_names: impl IntoIterator<Item = &'a str>) -> Option<String> {
+        attribute_names
+            .into_iter()
+            .find_map(|name| name.strip_prefix(crate::interpreter::FLATTEN_MODULE_OWNER_ATTR_PREFIX))
+            .map(str::to_string)
+    }
+
+    fn flatten_is_collision(&self, name: &str) -> bool {
+        self.flatten_fn_owners
+            .get(name)
+            .is_some_and(|owners| owners.iter().any(|owner| owner != &owners[0]))
+    }
+
+    fn flatten_owner_defines(&self, owner: Option<&str>, name: &str) -> bool {
+        self.flatten_fn_owners
+            .get(name)
+            .is_some_and(|owners| owners.iter().any(|o| o.as_deref() == owner))
+    }
+
+    /// Symbol the free function `name` defined by `owner` is lowered under.
+    ///
+    /// Unchanged (bare) unless several modules of the flattened unit define
+    /// `name`. Then every owner-tagged definition gets its owner-mangled symbol
+    /// (the scheme already shared by flattening and alias resolution), except
+    /// that one definition keeps the bare name for references nothing can
+    /// attribute to an owner (indirect uses, the entry module's own calls): the
+    /// entry module's definition when it has one, else the last definition --
+    /// exactly the definition bare-name last-write-wins picked before.
+    pub(super) fn flatten_emitted_symbol(&self, owner: Option<&str>, name: &str) -> String {
+        let Some(owner) = owner else {
+            return name.to_string();
+        };
+        if !self.flatten_is_collision(name) {
+            return name.to_string();
+        }
+        let owners = &self.flatten_fn_owners[name];
+        let entry_defines = owners.iter().any(Option::is_none);
+        if !entry_defines && owners.last().and_then(|o| o.as_deref()) == Some(owner) {
+            return name.to_string();
+        }
+        crate::interpreter::flatten_owner_mangled_name(owner, name)
+    }
+
+    /// Owner-exact symbol for a bare callable `name` referenced from the
+    /// function being lowered, or `None` to keep the historical lookup.
+    ///
+    /// 1. the current module defines a colliding `name` -> its own definition;
+    /// 2. the current module imports `name` (possibly as an alias) -> the
+    ///    definition in the module that import names;
+    /// 3. `name` is a function alias of a colliding name -> a definition from a
+    ///    module other than the importer (an import never names the importer's
+    ///    own function; this is the `fn f(): g()` recursion trap).
+    pub(super) fn resolve_flatten_owned_callable(&self, name: &str) -> Option<String> {
+        if self.flatten_fn_owners.is_empty() {
+            return None;
+        }
+        let current = self.current_function_owner.as_deref();
+        let resolved = if self.flatten_is_collision(name) && self.flatten_owner_defines(current, name) {
+            Some(self.flatten_emitted_symbol(current, name))
+        } else if let Some((source_owner, source_name)) = current
+            .and_then(|importer| self.flatten_owner_import_bindings.get(importer))
+            .and_then(|bindings| bindings.get(name))
+            .filter(|(source_owner, source_name)| self.flatten_owner_defines(Some(source_owner), source_name))
+        {
+            Some(self.flatten_emitted_symbol(Some(source_owner), source_name))
+        } else if !self.flatten_fn_owners.contains_key(name) {
+            self.resolve_function_alias(name)
+                .filter(|original| *original != name && self.flatten_is_collision(original))
+                .and_then(|original| {
+                    let owners = &self.flatten_fn_owners[original];
+                    owners
+                        .iter()
+                        .rev()
+                        .find(|owner| owner.is_some() && owner.as_deref() != current)
+                        .map(|owner| self.flatten_emitted_symbol(owner.as_deref(), original))
+                })
+        } else {
+            None
+        };
+        resolved.filter(|symbol| symbol != name)
+    }
+
+    /// Owner-exact symbol for a bare module-global `name` referenced from the
+    /// function being lowered, or `None` to keep the bare-name lookup.
+    ///
+    /// Mirrors `resolve_flatten_owned_callable` for globals (PR #1936 is the
+    /// interpreter twin): the current module's own colliding declaration wins,
+    /// else the declaration in the module a selective import of `name` names.
+    /// Untagged (entry-module) functions import under the `<entry>` key.
+    pub(super) fn resolve_flatten_owned_global(&self, name: &str) -> Option<String> {
+        use super::module_lowering::flattened_global_symbol;
+        if self.flatten_global_owners.is_empty() {
+            return None;
+        }
+        let current = self.current_function_owner.as_deref();
+        let resolved = if let Some(owners) = self
+            .flatten_global_owners
+            .get(name)
+            .filter(|owners| owners.iter().any(|owner| owner.as_deref() == current))
+        {
+            flattened_global_symbol(owners, current, name)
+        } else {
+            let (source_owner, source_name) = self
+                .flatten_owner_import_bindings
+                .get(current.unwrap_or("<entry>"))?
+                .get(name)?;
+            let owners = self.flatten_global_owners.get(source_name).filter(|owners| {
+                owners
+                    .iter()
+                    .any(|owner| owner.as_deref() == Some(source_owner.as_str()))
+            })?;
+            flattened_global_symbol(owners, Some(source_owner), source_name)
+        };
+        (resolved != name).then_some(resolved)
+    }
+
+    /// Type of module-global `name` as seen from the function being lowered:
+    /// its owner-exact symbol's type when it is a colliding flattened global.
+    pub(super) fn flatten_aware_global_type(&self, name: &str) -> Option<TypeId> {
+        self.resolve_flatten_owned_global(name)
+            .and_then(|symbol| self.globals.get(&symbol).copied())
+            .or_else(|| self.globals.get(name).copied())
+    }
+
     /// Resolve a function alias to its original function name
     pub fn resolve_function_alias(&self, name: &str) -> Option<&str> {
-        self.function_aliases.get(name).map(|s| s.as_str())
+        let mut current = self.function_aliases.get(name)?.as_str();
+        // Re-export facades can introduce multiple alias hops. Follow the
+        // complete chain while bounding malformed cycles fail-closed.
+        for _ in 0..=self.function_aliases.len() {
+            match self.function_aliases.get(current) {
+                Some(next) if next != current => current = next.as_str(),
+                Some(_) => return None,
+                None => return Some(current),
+            }
+        }
+        None
     }
 
     /// Find non-deprecated alternatives for a deprecated type

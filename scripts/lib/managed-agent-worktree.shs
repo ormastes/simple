@@ -1,0 +1,36 @@
+#!/bin/sh
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+. "$ROOT/scripts/lib/storage-roots.shs"
+storage_roots_init || { echo 'managed-worktree: storage root resolution failed' >&2; exit 2; }
+
+usage() { echo "usage: $0 create NAME [REV] | remove NAME" >&2; exit 2; }
+[ $# -ge 2 ] || usage
+action=$1
+name=$2
+storage_roots_safe_segment "$name" || { echo 'managed-worktree: unsafe name' >&2; exit 2; }
+base=$(storage_roots_user_path worktrees agents)
+mkdir -p "$base"
+target="$base/$name"
+
+case "$action" in
+    create)
+        [ $# -le 3 ] || usage
+        rev=${3:-HEAD}
+        [ ! -e "$target" ] || { echo "managed-worktree: target exists: $target" >&2; exit 1; }
+        git -C "$ROOT" worktree add --detach "$target" "$rev"
+        (umask 077; printf 'magic=simple-managed-worktree-v1\nowner=agent\nname=%s\n' "$name" >"$target/.simple-managed-worktree-v1")
+        printf '%s\n' "$target"
+        ;;
+    remove)
+        [ $# -eq 2 ] || usage
+        marker="$target/.simple-managed-worktree-v1"
+        [ -f "$marker" ] && grep -Fqx 'magic=simple-managed-worktree-v1' "$marker" || {
+            echo "managed-worktree: refusing unmarked target: $target" >&2; exit 1; }
+        find "$target" -name '.simple-live-lease*' -type f -print -quit | grep -q . && {
+            echo "managed-worktree: refusing live lease: $target" >&2; exit 1; }
+        git -C "$ROOT" worktree remove --force "$target"
+        ;;
+    *) usage ;;
+esac

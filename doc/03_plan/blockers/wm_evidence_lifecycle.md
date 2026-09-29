@@ -40,10 +40,7 @@ limit so the façade stays stable without creating a parallel WM owner. Codec he
 `pub(package)`; the façade exposes only `WmService`, `WmAction`, the launch
 notification, and the frozen damage/redraw contract. `WmService` also owns a bounded focus stack: focus
 raises a window deterministically, owner removal removes it, and fallback is
-the most-recent surviving stack-top window. Input adapters may propose a
-hit-tested target, but `WmService.accept_input_ingress` admits only the current
-focused window and does not consume sequence/queue capacity for a rejected
-stale target.
+the smallest surviving window.
 
 ## Evidence status
 

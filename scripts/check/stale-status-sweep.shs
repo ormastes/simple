@@ -1,0 +1,242 @@
+#!/bin/sh
+# stale-status-sweep.shs — mechanical first pass over open P0/P1 bug rows.
+#
+# Reads a list of `SEVERITY | id | file | reproducible_by` rows, resolves each
+# row's declared repro, runs it when it is a runnable spec, and records one
+# result line per row. Resumable: a row whose result file already exists is
+# skipped, so an interrupted sweep resumes where it stopped.
+#
+# Writes ONLY under build/sweep/. Never edits a bug row, spec, TODO or feature.
+#
+# Usage:
+#   sh scripts/check/stale-status-sweep.shs plan   <list>   # bucket only, no runs
+#   sh scripts/check/stale-status-sweep.shs run             # execute the runnable bucket
+#   sh scripts/check/stale-status-sweep.shs one    <id>     # run a single row (xargs worker)
+#   sh scripts/check/stale-status-sweep.shs report          # dump raw result lines
+
+set -u
+
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+OUT="$ROOT/build/sweep"
+RES="$OUT/res"
+LOG="$OUT/log"
+PLAN="$OUT/plan.txt"
+TIMEOUT_S=${SWEEP_TIMEOUT:-600}
+JOBS=${SWEEP_JOBS:-4}
+
+mkdir -p "$RES" "$LOG"
+
+# ---------------------------------------------------------------- bucketing --
+# Decide, for one row, which bucket it lands in and what command (if any) runs.
+# Emits: <id>|<bucket>|<repro>|<runner>
+bucket_row() {
+    _id=$1
+    _srcfile=$2
+    _repro=$3
+
+    if [ -z "$_repro" ] || [ "$_repro" = "NONE" ]; then
+        # Cheap breadth win: the DB says NONE, but the bug RECORD often names a
+        # spec. Tagged RUN-DERIVED so it is never conflated with a declared repro.
+        _rec="$ROOT/doc/08_tracking/bug/$_id.md"
+        if [ -f "$_rec" ]; then
+            _cand=$(grep -oE '(test|src)/[A-Za-z0-9_./-]*_spec\.spl' "$_rec" 2>/dev/null \
+                    | sort -u | while read -r c; do [ -f "$ROOT/$c" ] && echo "$c"; done | head -1)
+            if [ -n "${_cand:-}" ]; then
+                echo "$_id|RUN-DERIVED|$_cand|simple-test"
+                return 0
+            fi
+        fi
+        echo "$_id|MANUAL-NONE|-|-"
+        return 0
+    fi
+
+    if [ ! -e "$ROOT/$_repro" ]; then
+        echo "$_id|SPEC-MISSING|$_repro|-"
+        return 0
+    fi
+
+    case "$_repro" in
+        *.md|*.log|*.txt)
+            echo "$_id|MANUAL-DOC|$_repro|-" ;;
+        *.sh)
+            # The `.sh` rows are all bootstrap-from-scratch.sh. Running a
+            # bootstrap is forbidden here (one is already running on this host)
+            # and would take hours.
+            echo "$_id|MANUAL-BOOTSTRAP|$_repro|-" ;;
+        *_spec.spl)
+            echo "$_id|RUN|$_repro|simple-test" ;;
+        *.spl)
+            if grep -qE '^[[:space:]]*(describe|test_suite|it)[[:space:]]*\(' "$ROOT/$_repro" 2>/dev/null; then
+                echo "$_id|RUN|$_repro|simple-test"
+            else
+                case "$_repro" in
+                    src/*) echo "$_id|MANUAL-SOURCE|$_repro|-" ;;
+                    *)     echo "$_id|RUN|$_repro|simple-run" ;;
+                esac
+            fi ;;
+        *.shs)
+            case "$_repro" in
+                *bootstrap*|*seed*|*cargo*|*qemu*|*freebsd*)
+                    echo "$_id|MANUAL-HEAVY|$_repro|-" ;;
+                test/*|scripts/*)
+                    echo "$_id|RUN|$_repro|sh" ;;
+                *)
+                    echo "$_id|MANUAL-OTHER|$_repro|-" ;;
+            esac ;;
+        *)
+            echo "$_id|MANUAL-OTHER|$_repro|-" ;;
+    esac
+}
+
+# ------------------------------------------------------- lane-suspect logic --
+# Two independent triggers; either one flags the row. A LANE-SUSPECT pass is
+# never reported as LIKELY-FIXED: the test runner exports
+# SIMPLE_EXECUTION_MODE=interpret and children inherit it, so a spec that shells
+# out to the CLI can pass while blind to the codegen defect it claims to cover.
+lane_suspect() {
+    _id=$1; _srcfile=$2; _repro=$3
+    # (b) stage/self-host rows: the Rust seed cannot reproduce a stage1-4 or
+    #     self-hosted-binary defect at all, so a pass proves nothing.
+    case "$_id" in
+        *stage1*|*stage2*|*stage3*|*stage4*|*bootstrap*|*selfhost*|*self_host*)
+            echo "stage-lane"; return 0 ;;
+    esac
+    # (a) codegen-class row whose spec shells out.
+    _cg=0
+    case "$_id $_srcfile" in
+        *native*|*jit*|*codegen*|*mir*|*llvm*|*aot*|*link*|*compiler_rust*|*50.mir*|*60.*|*70.*)
+            _cg=1 ;;
+    esac
+    if [ "$_cg" = 1 ] && [ -f "$ROOT/$_repro" ]; then
+        if grep -qE 'Process|spawn|run_command|process_run|shell\(|bin/simple|native-build|exec' "$ROOT/$_repro" 2>/dev/null; then
+            echo "codegen-shellout"; return 0
+        fi
+    fi
+    echo ""
+}
+
+# ------------------------------------------------------------------- runner --
+run_one() {
+    _id=$1
+    _rf="$RES/$_id"
+    [ -f "$_rf" ] && return 0
+    # Prefer a RUN* row: 13 ids carry BOTH a superseded `|id|MANUAL-NONE|` line
+    # and a later `|id|RUN-DERIVED-SHS|` line, and a bare `|id|` grep would find
+    # the MANUAL one first and silently record `not-run`.
+    _line=$(grep -F "|$_id|RUN" "$PLAN" | head -1)
+    [ -z "$_line" ] && _line=$(grep -F "|$_id|" "$PLAN" | head -1)
+    if [ -z "$_line" ]; then
+        echo "$_id|ERROR|-|no plan row|-" > "$_rf"
+        return 0
+    fi
+    _bucket=$(echo "$_line" | cut -d'|' -f3)
+    _repro=$(echo "$_line" | cut -d'|' -f4)
+    _runner=$(echo "$_line" | cut -d'|' -f5)
+    _lane=$(echo "$_line" | cut -d'|' -f6)
+
+    case "$_runner" in
+        simple-test) _cmd="$ROOT/bin/simple test $_repro" ;;
+        simple-run)  _cmd="$ROOT/bin/simple run $_repro" ;;
+        sh)          _cmd="sh $_repro" ;;
+        *)           echo "$_id|$_bucket|-|not-run|$_lane" > "$_rf"; return 0 ;;
+    esac
+
+    _lg="$LOG/$_id.log"
+    ( cd "$ROOT" && timeout "$TIMEOUT_S" $_cmd ) > "$_lg" 2>&1
+    _rc=$?
+
+    # Verdict extraction, in priority order. The exit status is read directly
+    # into _rc on the line after the invocation — never through a pipe, whose
+    # $? is the last pipeline stage's status (a known false-green source here).
+    _verdict=$(grep -m1 'SPEC FILE VERDICT:' "$_lg" 2>/dev/null)
+    if [ -z "$_verdict" ]; then
+        _verdict=$(grep -aoE '^(PASS|FAIL|ERROR) —.*' "$_lg" 2>/dev/null | head -1)
+    fi
+    if [ -z "$_verdict" ]; then
+        _verdict=$(grep -a '^Results: ' "$_lg" 2>/dev/null | head -1)
+    fi
+    if [ -z "$_verdict" ]; then
+        _verdict=$(grep -aoE '(PASS|FAIL) [A-Za-z0-9_./-]+\.(spl|shs)' "$_lg" 2>/dev/null | head -1)
+    fi
+    if [ -z "$_verdict" ]; then
+        _verdict=$(tail -3 "$_lg" 2>/dev/null | tr '\n' ' ' | cut -c1-220)
+    fi
+    if [ -z "$_verdict" ]; then
+        _verdict="(no output)"
+    fi
+    _verdict=$(printf '%s' "$_verdict" | tr -d '\r' | sed 's/\x1b\[[0-9;]*m//g' | tr '|' '/' | cut -c1-260)
+
+    echo "$_id|$_bucket|$_rc|$_verdict|$_lane" > "$_rf"
+}
+
+# --------------------------------------------------------------- subcommands --
+cmd=${1:-}
+case "$cmd" in
+  plan)
+    list=$2
+    : > "$PLAN"
+    while IFS= read -r row; do
+        [ -z "$row" ] && continue
+        sev=$(echo "$row"   | cut -d'|' -f1 | sed 's/^ *//;s/ *$//')
+        id=$(echo "$row"    | cut -d'|' -f2 | sed 's/^ *//;s/ *$//')
+        sfile=$(echo "$row" | cut -d'|' -f3 | sed 's/^ *//;s/ *$//')
+        repro=$(echo "$row" | cut -d'|' -f4 | sed 's/^ *//;s/ *$//')
+        [ -z "$id" ] && continue
+        b=$(bucket_row "$id" "$sfile" "$repro")
+        eff=$(echo "$b" | cut -d'|' -f3)
+        lane=$(lane_suspect "$id" "$sfile" "$eff")
+        echo "$sev|$b|${lane:--}" >> "$PLAN"
+    done < "$list"
+    echo "plan rows: $(wc -l < "$PLAN")"
+    cut -d'|' -f3 "$PLAN" | sort | uniq -c | sort -rn
+    ;;
+  one)
+    run_one "$2"
+    ;;
+  run)
+    grep -E '\|RUN(-DERIVED(-SHS)?)?\|' "$PLAN" | cut -d'|' -f2 | sort -u \
+      | xargs -P "$JOBS" -n1 -I{} sh "$0" one {}
+    echo "results: $(ls -1 "$RES" | wc -l)"
+    ;;
+  jit-one)
+    # Second lane. MEASURED: under `bin/simple test` a spec body sees
+    # exec_mode=interpret; under `bin/simple run` it sees exec_mode unset, i.e.
+    # the seed's default JIT lane. So a codegen-class row that only ever ran
+    # under `test` was never exercised in the lane its defect lives in.
+    _id=$2
+    _rf="$OUT/res_jit/$_id"
+    mkdir -p "$OUT/res_jit"
+    [ -f "$_rf" ] && exit 0
+    _line=$(grep -F "|$_id|RUN" "$PLAN" | head -1)
+    _repro=$(echo "$_line" | cut -d'|' -f4)
+    case "$_repro" in
+        *.spl) ;;
+        *) echo "$_id|JIT|-|not a .spl repro|-" > "$_rf"; exit 0 ;;
+    esac
+    _lg="$LOG/$_id.jit.log"
+    ( cd "$ROOT" && timeout "$TIMEOUT_S" "$ROOT/bin/simple" run "$_repro" ) > "$_lg" 2>&1
+    _rc=$?
+    _v=$(grep -m1 'SPEC FILE VERDICT:' "$_lg" 2>/dev/null)
+    [ -z "$_v" ] && _v=$(tail -3 "$_lg" 2>/dev/null | tr '\n' ' ' | cut -c1-220)
+    [ -z "$_v" ] && _v="(no output)"
+    _v=$(printf '%s' "$_v" | tr -d '\r' | sed 's/\x1b\[[0-9;]*m//g' | tr '|' '/' | cut -c1-260)
+    echo "$_id|JIT|$_rc|$_v|jit-lane" > "$_rf"
+    ;;
+  jit)
+    # Re-run the codegen-lane rows in the JIT lane. `stage-lane` rows are NOT
+    # included: they need a deployed self-hosted binary, which this host lacks,
+    # so no lane available here can certify them.
+    sh "$ROOT/scripts/check/stale-status-classify.shs" \
+      | awk -F'|' '$3=="LANE-SUSPECT" && $7 ~ /codegen/ {print $2}' \
+      | sort -u | xargs -P "$JOBS" -I{} sh "$0" jit-one {}
+    echo "jit results: $(ls -1 "$OUT/res_jit" 2>/dev/null | wc -l)"
+    ;;
+  report)
+    for f in "$RES"/*; do
+        [ -f "$f" ] || continue
+        cat "$f"
+    done
+    ;;
+  *)
+    echo "usage: $0 plan|run|one|report ..." >&2; exit 2 ;;
+esac

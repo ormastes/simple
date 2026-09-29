@@ -1,0 +1,139 @@
+# Declarative build foundation for standalone Pure Simple primary tools.
+#
+# Plans are target-isolated and deliberately do not assert that an output was
+# built, admitted, or ready for loader execution. A later build/evidence owner
+# must produce bytes and promote those states through the existing artifact
+# admission contracts.
+
+use std.common.contracts.execution.simpleos_target_v1.{
+    SIMPLEOS_TARGET_V1_X86_64_TRIPLE,
+    SIMPLEOS_TARGET_V1_AARCH64_TRIPLE,
+    SIMPLEOS_TARGET_V1_RISCV64GC_TRIPLE,
+    SIMPLEOS_TARGET_V1_I686_TRIPLE,
+    SIMPLEOS_TARGET_V1_ARMV7_TRIPLE,
+    SIMPLEOS_TARGET_V1_RISCV32IMAC_TRIPLE,
+}
+use os.tools.shell.checksum.checksum_artifact_contract.{
+    checksum_tool_canonical_path_v1,
+}
+use os.tools.shell.grep.grep_artifact_contract.{text_tool_canonical_path_v1}
+use os.tools.shell.process.process_artifact_contract.{process_tool_canonical_path_v1}
+
+pub const PRIMARY_TOOL_BUILD_PLAN_SCHEMA_V1: i64 = 1
+pub const PRIMARY_TOOL_BUILD_PLAN_TOOL_COUNT_V1: i64 = 4
+pub const PRIMARY_TOOL_BUILD_PLAN_TARGET_COUNT_V1: i64 = 3
+
+pub struct PrimaryToolEntryManifestV1:
+    command: text
+    canonical_path: text
+    entry_source: text
+    entry_symbol: text
+
+pub struct PrimaryToolTargetBuildPlanV1:
+    schema_version: i64
+    command: text
+    target_triple: text
+    entry_source: text
+    entry_symbol: text
+    output_path: text
+    native_build_argv: [text]
+    artifact_built: bool
+    artifact_admitted: bool
+    loader_ready: bool
+
+pub fn primary_tool_entry_manifests_v1() -> [PrimaryToolEntryManifestV1]:
+    [
+        PrimaryToolEntryManifestV1(
+            command: "sha256sum",
+            canonical_path: checksum_tool_canonical_path_v1("sha256sum"),
+            entry_source: "src/os/apps/coreutils/entries/sha256sum_main.spl",
+            entry_symbol: "main"),
+        PrimaryToolEntryManifestV1(
+            command: "md5sum",
+            canonical_path: checksum_tool_canonical_path_v1("md5sum"),
+            entry_source: "src/os/apps/coreutils/entries/md5sum_main.spl",
+            entry_symbol: "main"),
+        PrimaryToolEntryManifestV1(
+            command: "grep", canonical_path: text_tool_canonical_path_v1("grep"),
+            entry_source: "src/os/apps/coreutils/entries/grep_main.spl",
+            entry_symbol: "main"),
+        PrimaryToolEntryManifestV1(
+            command: "ps", canonical_path: process_tool_canonical_path_v1("ps"),
+            entry_source: "src/os/apps/coreutils/entries/ps_main.spl",
+            entry_symbol: "main"),
+    ]
+
+pub fn primary_tool_supported_targets_v1() -> [text]:
+    [
+        SIMPLEOS_TARGET_V1_X86_64_TRIPLE,
+        SIMPLEOS_TARGET_V1_AARCH64_TRIPLE,
+        SIMPLEOS_TARGET_V1_RISCV64GC_TRIPLE,
+    ]
+
+pub fn primary_tool_unsupported_32bit_targets_v1() -> [text]:
+    [
+        SIMPLEOS_TARGET_V1_I686_TRIPLE,
+        SIMPLEOS_TARGET_V1_ARMV7_TRIPLE,
+        SIMPLEOS_TARGET_V1_RISCV32IMAC_TRIPLE,
+    ]
+
+pub fn primary_tool_target_linker_supported_v1(target_triple: text) -> bool:
+    val targets = primary_tool_supported_targets_v1()
+    targets.contains(target_triple)
+
+pub fn primary_tool_output_path_v1(command: text, target_triple: text) -> text:
+    if not primary_tool_target_linker_supported_v1(target_triple):
+        return ""
+    val entries = primary_tool_entry_manifests_v1()
+    for entry in entries:
+        if entry.command == command:
+            return "build/os/primary-tools/{target_triple}/usr/bin/{command}"
+    ""
+
+fn _primary_tool_native_build_argv_v1(
+    entry_source: text, target_triple: text, output_path: text
+) -> [text]:
+    [
+        "native-build", "--backend", "llvm",
+        "--source", "src/os", "--source", "src/lib",
+        "--entry", entry_source, "--entry-closure",
+        "--target", target_triple,
+        "--linker-script", "build/os/sysroot/share/simpleos/simpleos.ld",
+        "-o", output_path,
+    ]
+
+pub fn primary_tool_target_build_plan_v1(
+    command: text, target_triple: text
+) -> Result<PrimaryToolTargetBuildPlanV1, text>:
+    if not primary_tool_target_linker_supported_v1(target_triple):
+        return Err("primary-tool-build-target-linker-unsupported")
+    val entries = primary_tool_entry_manifests_v1()
+    for entry in entries:
+        if entry.command == command:
+            val output = primary_tool_output_path_v1(command, target_triple)
+            return Ok(PrimaryToolTargetBuildPlanV1(
+                schema_version: PRIMARY_TOOL_BUILD_PLAN_SCHEMA_V1,
+                command: command,
+                target_triple: target_triple,
+                entry_source: entry.entry_source,
+                entry_symbol: entry.entry_symbol,
+                output_path: output,
+                native_build_argv: _primary_tool_native_build_argv_v1(
+                    entry.entry_source, target_triple, output),
+                artifact_built: false,
+                artifact_admitted: false,
+                loader_ready: false,
+            ))
+    Err("primary-tool-build-command-unknown")
+
+pub fn primary_tool_all_target_build_plans_v1() -> [PrimaryToolTargetBuildPlanV1]:
+    var plans: [PrimaryToolTargetBuildPlanV1] = []
+    val targets = primary_tool_supported_targets_v1()
+    val entries = primary_tool_entry_manifests_v1()
+    for target in targets:
+        for entry in entries:
+            val plan = primary_tool_target_build_plan_v1(entry.command, target)
+            match plan:
+                case Ok(value): plans.push(value)
+                case Err(_): pass_do_nothing("bounded canonical inputs are validated above")
+    plans

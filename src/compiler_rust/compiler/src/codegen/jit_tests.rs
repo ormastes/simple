@@ -17,6 +17,77 @@ fn jit_compile(source: &str) -> JitResult<JitCompiler> {
 }
 
 #[test]
+fn stage2_nullable_named_unwrap_jit_preserves_present_values() {
+    use simple_runtime::value::{hash_variant_discriminant, rt_enum_new, rt_string_new, RuntimeValue};
+    let some = |payload| rt_enum_new(1, hash_variant_discriminant("Some"), payload);
+    let none = rt_enum_new(1, hash_variant_discriminant("None"), RuntimeValue::NIL);
+    let jit = jit_compile("enum UserKind:\n    Ok(value: i64)\n    Err(value: text)\n    None\n\nfn probe(value: UserKind?) -> UserKind:\n    value.unwrap()\n\nfn nested(value: Option<i64>?) -> Option<i64>:\n    value.unwrap()\n").unwrap();
+    for variant in ["Ok", "Err", "None"] {
+        let value = rt_enum_new(773, hash_variant_discriminant(variant), RuntimeValue::from_int(19));
+        for input in [value, some(value)] {
+            let actual = unsafe { jit.call_i64_i64("probe", input.to_raw() as i64).unwrap() };
+            assert_eq!(actual as u64, value.to_raw(), "present user variant {variant} remains intact");
+        }
+    }
+    // Exercise the runtime ABI with falsy and empty payload words: absence
+    // depends on nil/Option.None, never truthiness or collection length.
+    for value in [RuntimeValue::from_int(0), RuntimeValue::from_bool(false), rt_string_new(b"".as_ptr(), 0)] {
+        for input in [value, some(value)] {
+            let actual = unsafe { jit.call_i64_i64("probe", input.to_raw() as i64).unwrap() };
+            assert_eq!(actual as u64, value.to_raw());
+        }
+    }
+    for inner in [none, some(RuntimeValue::from_int(0))] {
+        let outer = some(inner);
+        let actual = unsafe { jit.call_i64_i64("nested", outer.to_raw() as i64).unwrap() };
+        assert_eq!(actual as u64, inner.to_raw(), "only the outer Option is unwrapped");
+    }
+}
+
+#[test]
+fn stage2_nullable_named_unwrap_jit_traps_absence() {
+    const MODE: &str = "SIMPLE_STAGE2_NULLABLE_TRAP_TEST";
+    if let Ok(mode) = std::env::var(MODE) {
+        let jit = jit_compile("enum UserKind:\n    Ok(value: i64)\n    None\n\nfn probe(value: UserKind?) -> UserKind:\n    value.unwrap()\n").unwrap();
+        use simple_runtime::value::{hash_variant_discriminant, rt_enum_new, RuntimeValue};
+        let value = if mode == "nil" { RuntimeValue::NIL } else { rt_enum_new(1, hash_variant_discriminant("None"), RuntimeValue::NIL) };
+        eprintln!("NULLABLE_TRAP_READY");
+        unsafe { jit.call_i64_i64("probe", value.to_raw() as i64).unwrap(); }
+        panic!("NULLABLE_TRAP_RETURNED");
+    }
+    for mode in ["nil", "none"] {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "codegen::jit::tests::stage2_nullable_named_unwrap_jit_traps_absence", "--nocapture"])
+            .env(MODE, mode).output().unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("NULLABLE_TRAP_READY"), "child must reach unwrap: {stderr}");
+        assert!(!output.status.success(), "{mode} must trap");
+        assert!(stderr.contains("unwrap"), "expected unwrap diagnostic: {stderr}");
+        assert!(!stderr.contains("NULLABLE_TRAP_RETURNED"), "{stderr}");
+    }
+}
+
+#[test]
+fn strict_all_marks_jit_fallbacks_as_hard_failures() {
+    // Keep this predicate test process-local: mutating the environment would
+    // race the parallel JIT test suite. The contained native-build worker
+    // exercises the env lookup; this covers its strictness policy.
+    assert!(super::jit_fallback_is_strict_for(true, false));
+    assert!(super::jit_fallback_is_strict_for(false, true));
+    assert!(!super::jit_fallback_is_strict_for(false, false));
+}
+
+#[test]
+fn symbol_trace_groups_private_helper_and_module_qualified_near_match() {
+    assert!(super::jit_symbol_trace_matches("sffi_env_get_i64", "_sffi_env_get_i64"));
+    assert!(super::jit_symbol_trace_matches(
+        "sffi_env_get_i64",
+        "compiler__frontend___sffi_env_get_i64"
+    ));
+    assert!(!super::jit_symbol_trace_matches("sffi_env_get_i64", "rt_env_get_i64"));
+}
+
+#[test]
 fn test_jit_simple_return() {
     let jit = jit_compile("fn answer() -> i64:\n    return 42\n").unwrap();
     let result = unsafe { jit.call_i64_void("answer").unwrap() };
@@ -65,6 +136,29 @@ fn test_jit_char_code_at_as_u8_and_enum_eq() {
         e2, 0,
         "enum == other variant must be false (discriminant must discriminate)"
     );
+}
+
+/// Regression: an or-pattern whose alternatives have DIFFERENT payload
+/// arities must bind per alternative. `build_pattern_binding_stmts` used to
+/// take the binding shape from the FIRST alternative only, so
+/// `case Two(x, _) | One(x):` read the one-field `One` payload (which is the
+/// value itself) through `rt_tuple_get(payload, 0)`: the runtime rejected the
+/// non-array handle and `x` stayed stale (`one_x` printed 3, the value bound
+/// by the previous `Two` call). In the stage-2 CLI the same shape in
+/// `hir_type_metadata_symbol_free` (`Array(inner, _) | ... | Optional(inner)`)
+/// turned `inner` into nil for every `T?` return type and crashed the MIR
+/// pre-scan with 0xC0000005.
+#[test]
+fn test_jit_or_pattern_mixed_arity_binds_per_alternative() {
+    let src = "enum Shape:\n    Two(x: i64, y: i64)\n    One(x: i64)\n\n\
+fn pick(v: Shape) -> i64:\n    match v:\n        case Two(x, _) | One(x): x\n        case _: -1\n\n\
+fn two_x() -> i64:\n    pick(Shape.Two(x: 3, y: 4))\n\n\
+fn one_x() -> i64:\n    val _warm = pick(Shape.Two(x: 3, y: 4))\n    pick(Shape.One(x: 7))\n";
+    let jit = jit_compile(src).unwrap();
+    let two = unsafe { jit.call_i64_void("two_x").unwrap() };
+    let one = unsafe { jit.call_i64_void("one_x").unwrap() };
+    assert_eq!(two, 3, "two-field alternative binds its first payload field");
+    assert_eq!(one, 7, "one-field alternative binds the payload itself (buggy=3 or nil)");
 }
 
 #[test]
@@ -168,6 +262,33 @@ fn main() -> i64:
     let jit = jit_compile(source).unwrap();
     let result = unsafe { jit.call_i64_void("main").unwrap() };
     assert_eq!(result, 1);
+}
+
+#[test]
+fn test_jit_module_init_struct_with_empty_array_field() {
+    // Module-level struct literals are initialized by __module_init rather
+    // than the ordinary MirInst::StructInit path.  Keep the fixture to the
+    // exact RuleRegistry shape that previously faulted during module init:
+    // one struct field containing an empty array.
+    let source = r#"
+struct RuleRegistry:
+    rules: [i64]
+
+var rule_registry: RuleRegistry = RuleRegistry(rules: [])
+
+fn rule_count() -> i64:
+    rule_registry.rules.len()
+"#;
+    let mut parser = Parser::new(source);
+    let ast = parser.parse().expect("parse module-init struct fixture");
+    let hir_module = hir::lower(&ast).expect("HIR lower module-init struct fixture");
+    let mir_module = lower_to_mir(&hir_module).expect("MIR lower module-init struct fixture");
+
+    let mut jit = JitCompiler::new_static().expect("create static JIT");
+    jit.compile_module(&mir_module)
+        .expect("compile module-init struct fixture without fallback");
+    let count = unsafe { jit.call_i64_void("rule_count") }.expect("module init must construct the global registry");
+    assert_eq!(count, 0);
 }
 
 #[test]
@@ -294,6 +415,70 @@ fn test_jit_static_provider_resolves_generic_rt_len() {
         provider.get_symbol("rt_time_now_unix_micros").is_some(),
         "rt_time_now_unix_micros must be registered so timing helpers do not NULL-jump in JIT"
     );
+    assert!(
+        provider.get_symbol("rt_struct_alloc").is_some(),
+        "rt_struct_alloc must be registered so struct-bearing frontend modules do not de-JIT"
+    );
+}
+
+#[test]
+fn test_jit_integer_chr_uses_registered_runtime_symbol() {
+    // The method-call codegen must use the canonical `rt_char_from_code`
+    // provider.  Its legacy implementation spelling (`text_dot_from_char_code`)
+    // is deliberately not in the static provider manifest, so compiling this
+    // exact `.chr()` shape fails under strict JIT if codegen bypasses the
+    // runtime-symbol ownership boundary.
+    simple_runtime::register_static_runtime_symbols();
+    let provider = static_provider();
+    assert!(provider.get_symbol("rt_char_from_code").is_some());
+    assert!(provider.get_symbol("text_dot_from_char_code").is_none());
+
+    let source = r#"
+fn codepoint_len() -> i64:
+    val code: i64 = 65
+    val rendered = code.chr()
+    rendered.len()
+"#;
+    let mut parser = Parser::new(source);
+    let ast = parser.parse().expect("parse chr fixture");
+    let hir_module = hir::lower(&ast).expect("HIR lower chr fixture");
+    let mir_module = lower_to_mir(&hir_module).expect("MIR lower chr fixture");
+
+    let mut jit = JitCompiler::new_static().expect("create static JIT");
+    jit.compile_module(&mir_module)
+        .expect("integer chr must resolve through rt_char_from_code");
+    let result = unsafe { jit.call_i64_void("codepoint_len") }.expect("run chr fixture");
+    assert_eq!(result, 1);
+}
+
+#[test]
+fn test_jit_sffi_env_i64_alias_uses_registered_runtime_provider() {
+    // Flattened `use std.sffi.system (env_get_i64 as sffi_env_get_i64)`
+    // preserves its import alias at the call site.  That spelling must route
+    // to the canonical registered provider rather than becoming an unresolved
+    // JIT import (which strict mode correctly rejects).
+    simple_runtime::register_static_runtime_symbols();
+    let provider = static_provider();
+    assert!(provider.get_symbol("rt_env_get_i64").is_some());
+    assert!(provider.get_symbol("sffi_env_get_i64").is_none());
+
+    let source = r#"
+@unsafe(reason: "test runtime ABI", capabilities: [ffi])
+extern fn sffi_env_get_i64(key: text, default_value: i64) -> i64
+
+fn env_helper() -> i64:
+    sffi_env_get_i64("SIMPLE_JIT_SFFI_ENV_I64_ABSENT", 41)
+"#;
+    let mut parser = Parser::new(source);
+    let ast = parser.parse().expect("parse env alias fixture");
+    let hir_module = hir::lower(&ast).expect("HIR lower env alias fixture");
+    let mir_module = lower_to_mir(&hir_module).expect("MIR lower env alias fixture");
+
+    let mut jit = JitCompiler::new_static().expect("create static JIT");
+    jit.compile_module(&mir_module)
+        .expect("env alias must not become an unresolved JIT import");
+    let result = unsafe { jit.call_i64_void("env_helper") }.expect("run env alias fixture");
+    assert_eq!(result, 41);
 }
 
 // Regression: an f64 function-call result was corrupted at the call boundary.
@@ -368,5 +553,72 @@ fn test_jit_f64_call_result_print() {
         "21.5",
         "print() of an f64 call result must format the value, got: '{}'",
         captured
+    );
+}
+
+// Regression coverage for:
+//   doc/08_tracking/bug/seed_jit_app_module_function_call_segfaults_windows_2026-09-13.md
+//   doc/08_tracking/bug/seed_jit_function_local_use_segfaults_2026-09-13.md
+//
+// Root cause: on Windows, `dlsym_resolves` unconditionally returned `true`
+// ("Conservative on Windows: assume resolvable"), so `jit_import_resolves`
+// could never say a directly-called `Linkage::Import` was unresolvable and
+// `first_unresolved_import_called` never fired on that platform. A call to a
+// cross-module Simple function symbol that cranelift-jit itself cannot
+// resolve (no registered runtime symbol, no process/CRT export — exactly the
+// shape of an `app.*`-module function call, or a function reached only
+// through a function-local `use`) therefore finalized with a NULL GOT slot
+// and SIGSEGV'd on first call, with nothing printed to stderr. The fix makes
+// `dlsym_resolves` on Windows actually probe resolvability via
+// `GetProcAddress`, mirroring cranelift-jit's own Windows fallback resolver
+// (`cranelift-jit::backend::lookup_with_dlsym`), so the existing guard can
+// do its job on Windows exactly as it already does on Unix.
+#[cfg(windows)]
+#[test]
+fn dlsym_resolves_rejects_a_nonexistent_symbol_on_windows() {
+    assert!(
+        !super::dlsym_resolves("simple_seed_jit_bug_nonexistent_symbol_zzqq"),
+        "a symbol name that is not a registered runtime symbol and not a real \
+         process/CRT export must NOT be reported as resolvable, or the \
+         unresolved-import guard can never fire on Windows"
+    );
+    assert!(
+        super::dlsym_resolves("malloc"),
+        "a genuine C runtime export must still resolve, so the guard does not \
+         force unnecessary interpreter fallbacks for symbols that really link"
+    );
+}
+
+#[test]
+fn test_jit_unresolved_extern_call_refuses_to_finalize_instead_of_null_jumping() {
+    // End-to-end shape of both bug reports: a direct call to an extern whose
+    // name resolves to neither a registered runtime symbol nor a real
+    // process/CRT export. `compile_module` must refuse (Err) so the driver
+    // falls back to the interpreter, matching non-Windows and AOT behaviour —
+    // never finalize a NULL import and let the first call SIGSEGV.
+    simple_runtime::register_static_runtime_symbols();
+    let provider = static_provider();
+    assert!(provider
+        .get_symbol("simple_seed_jit_bug_nonexistent_symbol_zzqq")
+        .is_none());
+
+    let source = r#"
+@unsafe(reason: "test unresolved extern", capabilities: [ffi])
+extern fn simple_seed_jit_bug_nonexistent_symbol_zzqq(x: i64) -> i64
+
+fn caller() -> i64:
+    simple_seed_jit_bug_nonexistent_symbol_zzqq(1)
+"#;
+    let mut parser = Parser::new(source);
+    let ast = parser.parse().expect("parse unresolved-extern fixture");
+    let hir_module = hir::lower(&ast).expect("HIR lower unresolved-extern fixture");
+    let mir_module = lower_to_mir(&hir_module).expect("MIR lower unresolved-extern fixture");
+
+    let mut jit = JitCompiler::new_static().expect("create static JIT");
+    let result = jit.compile_module(&mir_module);
+    assert!(
+        result.is_err(),
+        "an extern call that would NULL-jump at finalize time must be refused here, \
+         not silently accepted and left to SIGSEGV on first call"
     );
 }

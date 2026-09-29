@@ -1,0 +1,91 @@
+# SPipe admission verdict (S1-D owns this file).
+#
+# Pure function: (ScoreReport-shaped inputs, hard diagnostic count, Config) ->
+# AdmissionVerdict, per
+# doc/03_plan/infra/spipe/spipe_knowledge_compiler_refined_plan.md §6.4/§13.4.
+#
+# Types (Verdict, AdmissionReason, Thresholds, AdmissionVerdict, ScoreReport,
+# Deduction) come from S1-E's frozen `model/types.spl` -- never redeclared
+# here.
+
+use app.spipe.model.types.{
+    Verdict, AdmissionReason, Thresholds, AdmissionVerdict, ScoreReport,
+    Deduction,
+}
+use std.common.sdn.value.{SdnValue}
+
+# Default thresholds from plan §6.4 / research §13.4 (tenths).
+pub fn default_thresholds() -> Thresholds:
+    Thresholds(
+        target: 850,
+        floor: 800,
+        deny: 700,
+        max_global_regression_tenths: 5,
+        max_scope_regression_tenths: 10,
+        legacy_required_improvement_tenths: 20,
+    )
+
+fn _reason(code: text, scope: text, message_key: text) -> AdmissionReason:
+    AdmissionReason(code: code, scope: scope, message_key: message_key, details: SdnValue.Null)
+
+# Compute the admission verdict for a single scope's score report.
+#
+# `hard_diagnostic_count` is non-zero when link-safety or other hard
+# integrity diagnostics (owned by S1-A) fired for this scope -- that alone
+# forces Reject regardless of score, per §6.4.
+#
+# `previous_score_tenths` is `Option<i64>` -- None means "no baseline",
+# which skips the regression checks (nothing to regress against).
+pub fn compute_admission_verdict(
+    report: ScoreReport,
+    hard_diagnostic_count: i64,
+    previous_score_tenths: Option<i64>,
+    thresholds: Thresholds,
+) -> AdmissionVerdict:
+    var reasons = []
+
+    if hard_diagnostic_count > 0:
+        reasons.push(_reason("SPK532", report.scope, "hard_diagnostics_present"))
+
+    if report.score_tenths < thresholds.deny:
+        reasons.push(_reason("SPK530", report.scope, "score_below_deny_floor"))
+    elif report.score_tenths < thresholds.target:
+        reasons.push(_reason("SPK531", report.scope, "score_below_target_within_floor"))
+
+    if val Some(prev) = previous_score_tenths:
+        val regression = prev - report.score_tenths
+        val is_global = report.scope == ""
+        if is_global and regression > thresholds.max_global_regression_tenths:
+            reasons.push(_reason("SPK533", report.scope, "global_regression_exceeded"))
+        elif (not is_global) and regression > thresholds.max_scope_regression_tenths:
+            reasons.push(_reason("SPK534", report.scope, "scope_regression_exceeded"))
+
+    var verdict = Verdict.Accept
+    var has_error = false
+    var has_warning = false
+    for r in reasons:
+        if r.code == "SPK531":
+            has_warning = true
+        else:
+            has_error = true
+
+    if hard_diagnostic_count > 0 or report.score_tenths < thresholds.deny or has_error:
+        verdict = Verdict.Reject
+    elif has_warning:
+        verdict = Verdict.AcceptWithDebt
+    else:
+        verdict = Verdict.Accept
+
+    AdmissionVerdict(
+        schema: "spipe-admission/1",
+        verdict: verdict,
+        reasons: reasons,
+        thresholds: thresholds,
+        hard_diagnostic_count: hard_diagnostic_count,
+    )
+
+# The admission diagnostic codes S1-D emits -- merged into the diagnostics
+# registry (registry.sdn already carries them as rows; this table exists so
+# a registry spec can assert every code this module can emit is registered).
+pub fn admission_diagnostic_codes() -> [text]:
+    ["SPK530", "SPK531", "SPK532", "SPK533", "SPK534", "SPK535"]

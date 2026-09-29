@@ -1,4 +1,8 @@
 # `simple_portal` server: authorized playground run returns `200 OK` instead of expected `202 Accepted`
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-20
 **Component:** `src/app/simple_portal/*` server (`/api/playground/run` route)
@@ -37,3 +41,4 @@ handler.
 Spec left unmodified — `202` vs `200` for an async-flavored playground-run
 endpoint is a real protocol-contract question, not an obvious rename;
 flagged for the `simple_portal` owner to confirm the intended status code.
+

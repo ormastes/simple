@@ -1,4 +1,8 @@
 # Stage4 admitted no compiler-backfill capsule
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Symptom
 
@@ -21,10 +25,11 @@ deterministic one-member archive. Portable tool discovery covers configured,
 Homebrew LLVM/LLVM 18, versioned LLVM, and GNU `objcopy` forms.
 
 Final inventory rejects invalid envelopes, changed global symbol tables, and
-canonical overlap with the localized runtime-native owner plus every staged
-exact C provider. Transitive requested-owner resolution now feeds an exact
-requested-root projected capsule into strict final linking. All failure paths
+canonical overlap with the localized runtime-native owner plus all five staged
+capability providers. Transitive requested-owner resolution now runs,
+while exact projected-capsule linking remains fail-closed. All failure paths
 clean the owned transaction; the raw input is never copied, modified, or
-deleted. Complete-owner and executable proof remain open. No successful
-compiler, native, runtime, C, Cargo, or Simple execution is claimed for the
-projection slice.
+deleted. Projected linking and executable proof remain open. No compiler, native,
+runtime, C, Cargo, or Simple execution is claimed under this session's
+static-only restriction.
+

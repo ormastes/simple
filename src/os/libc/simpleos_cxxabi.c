@@ -15,7 +15,6 @@
 #include "include/stdlib.h"
 #include "include/string.h"
 #include "include/stdio.h"
-#include "include/stdint.h"
 
 /* ====================================================================
  * 1. DSO handle (required by __cxa_atexit)
@@ -153,24 +152,38 @@ void _ZdaPvm(void *ptr, unsigned long size) {
     free(ptr);
 }
 
-void *_ZnwmSt11align_val_t(unsigned long size, unsigned long align) {
-    (void)align;
-    return _Znwm(size);
-}
-
-void _ZdlPvmSt11align_val_t(void *ptr, unsigned long size, unsigned long align) {
-    (void)size;
-    (void)align;
-    free(ptr);
-}
-
+/* Nothrow forms (_ZnwmRKSt9nothrow_t et al). libc++'s freestanding
+ * operator new(size_t, const nothrow_t&) runs an __is_function_overridden
+ * check and executes `brk #1` when the throwing operator new resolves
+ * OUTSIDE libc++'s __lcxx_override section — which is exactly what happens
+ * here, because this archive's strong _Znwm above shadows libc++'s weak
+ * default. Providing strong nothrow forms here overrides those weak
+ * trapping definitions at link time, so a guest nothrow allocation calls
+ * malloc and returns NULL on failure (the nothrow contract) instead of
+ * trapping. Observed: in-guest lld died at 0x123e92f0
+ * (_ZnwmRKSt9nothrow_t+0x2c, brk #1) in its error-reporting path
+ * (run-20260926_102550 / _112856, R4b). */
 void *_ZnwmRKSt9nothrow_t(unsigned long size, const void *tag) {
     (void)tag;
+    if (size == 0) size = 1;
     return malloc(size);
 }
 
 void *_ZnamRKSt9nothrow_t(unsigned long size, const void *tag) {
     (void)tag;
+    if (size == 0) size = 1;
+    return malloc(size);
+}
+
+void *_ZnwmSt11align_val_tRKSt9nothrow_t(unsigned long size, unsigned long align, const void *tag) {
+    (void)align; (void)tag;
+    if (size == 0) size = 1;
+    return malloc(size);
+}
+
+void *_ZnamSt11align_val_tRKSt9nothrow_t(unsigned long size, unsigned long align, const void *tag) {
+    (void)align; (void)tag;
+    if (size == 0) size = 1;
     return malloc(size);
 }
 
@@ -184,17 +197,14 @@ void _ZdaPvRKSt9nothrow_t(void *ptr, const void *tag) {
     free(ptr);
 }
 
-int __cxa_thread_atexit(void (*destructor)(void *), void *arg, void *dso_handle) {
-    return __cxa_atexit(destructor, arg, dso_handle);
+void _ZdlPvSt11align_val_tRKSt9nothrow_t(void *ptr, unsigned long align, const void *tag) {
+    (void)align; (void)tag;
+    free(ptr);
 }
 
-extern int _Z4mainiPPc(int, char **) __attribute__((weak));
-extern int _Z4mainv(void) __attribute__((weak));
-
-__attribute__((weak)) int main(int argc, char **argv) {
-    if (_Z4mainiPPc) return _Z4mainiPPc(argc, argv);
-    if (_Z4mainv) return _Z4mainv();
-    return 0;
+void _ZdaPvSt11align_val_tRKSt9nothrow_t(void *ptr, unsigned long align, const void *tag) {
+    (void)align; (void)tag;
+    free(ptr);
 }
 
 /* ====================================================================
@@ -270,36 +280,7 @@ void __assert_fail(const char *expr, const char *file,
 extern int64_t simpleos_syscall(int64_t, int64_t, int64_t, int64_t,
                                  int64_t, int64_t);
 
-static int running_on_linux_host(void) {
-#if defined(__x86_64__)
-    uint64_t cs;
-    __asm__ volatile ("mov %%cs, %0" : "=r"(cs));
-    return cs == 0x33;
-#else
-    return 0;
-#endif
-}
-
-static int64_t linux_syscall1(int64_t id, int64_t a0) {
-#if defined(__x86_64__)
-    int64_t r;
-    __asm__ volatile (
-        "syscall"
-        : "=a"(r)
-        : "a"(id), "D"(a0)
-        : "rcx", "r11", "memory");
-    return r;
-#else
-    (void)id;
-    (void)a0;
-    return -38;
-#endif
-}
-
 void _Exit(int status) {
-    if (running_on_linux_host()) {
-        linux_syscall1(60, (int64_t)status);
-    }
     simpleos_syscall(0, (int64_t)status, 0, 0, 0, 0);
     __builtin_unreachable();
 }

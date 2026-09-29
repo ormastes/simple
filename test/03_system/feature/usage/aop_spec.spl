@@ -56,7 +56,23 @@ allow pc{ depend(within(api.**), within(core.**)) } "API can depend on core"
 # Test Group 1: Basic AOP Syntax
 # ============================================================================
 
+# Module-level recorders: closures capture enclosing locals by value and are
+# read-only (.claude/rules/language.md:22), so a write to a captured local
+# is a compile error. Examples reset these at the old declaration site.
+var advice_called_cw = false
+var executed_cw = false
+var executed_cw2 = false
+var error_logged_cw = false
+var called_cw = false
+var count_cw = 0
+var logged_cw = false
+var called_cw2 = false
+var count_cw2 = 0
+var count_cw3 = 0
+var woven_count_cw = 0
+
 describe "AOP Basic Syntax":
+    # @manual scenario evidence
     # ## Pointcut Expression Syntax
     #
     # Verifies parsing and lowering of AOP declarations including pointcut
@@ -72,7 +88,7 @@ describe "AOP Basic Syntax":
 
             on pc{ execution(* target_func(..)) } use log_entry before priority 10
 
-            expect target_func() == 42
+            expect(target_func()).to_equal(42)
 
         it "parses before advice with wildcard return type":
             fn trace():
@@ -83,7 +99,7 @@ describe "AOP Basic Syntax":
 
             on pc{ execution(* compute(..)) } use trace before priority 5
 
-            expect compute(21) == 42
+            expect(compute(21)).to_equal(42)
 
     context "after advice declaration":
         it "parses after_success advice":
@@ -95,7 +111,7 @@ describe "AOP Basic Syntax":
 
             on pc{ execution(* add(..)) } use log_exit after_success priority 10
 
-            expect add(20, 22) == 42
+            expect(add(20, 22)).to_equal(42)
 
         it "parses after_error advice":
             fn log_error():
@@ -109,7 +125,7 @@ describe "AOP Basic Syntax":
 
             on pc{ execution(* may_fail(..)) } use log_error after_error priority 10
 
-            expect may_fail(42).unwrap() == 42
+            expect(may_fail(42).unwrap()).to_equal(42)
 
 
 # ============================================================================
@@ -125,10 +141,10 @@ describe "Before Advice Execution":
     context "execution order":
         it "executes before advice before target":
             # Verify basic before advice execution
-            var advice_called = false
+            advice_called_cw = false
 
             fn before_advice():
-                advice_called = true
+                advice_called_cw = true
 
             fn target() -> i64:
                 42
@@ -136,8 +152,8 @@ describe "Before Advice Execution":
             on pc{ execution(* target(..)) } use before_advice before priority 10
 
             val result = target()
-            expect result == 42
-            expect advice_called == true
+            expect(result).to_equal(42)
+            expect(advice_called_cw).to_equal(true)
 
 
 # ============================================================================
@@ -151,10 +167,10 @@ describe "After Advice Execution":
 
     context "after_success execution":
         it "executes after_success when target succeeds":
-            var executed = false
+            executed_cw = false
 
             fn after_advice():
-                executed = true
+                executed_cw = true
 
             fn target() -> i64:
                 42
@@ -162,14 +178,14 @@ describe "After Advice Execution":
             on pc{ execution(* target(..)) } use after_advice after_success priority 10
 
             val result = target()
-            expect result == 42
-            expect executed == true
+            expect(result).to_equal(42)
+            expect(executed_cw).to_equal(true)
 
         it "does not execute after_success when target returns Err":
-            var executed = false
+            executed_cw2 = false
 
             fn after_advice():
-                executed = true
+                executed_cw2 = true
 
             fn failing_target() -> Result<i64, text>:
                 Err("intentional failure")
@@ -177,15 +193,15 @@ describe "After Advice Execution":
             on pc{ execution(* failing_target(..)) } use after_advice after_success priority 10
 
             val result = failing_target()
-            expect result.err.?
-            expect executed == false
+            assert_true(result.err.?)
+            expect(executed_cw2).to_equal(false)
 
     context "after_error execution":
         it "executes after_error when target returns Err":
-            var error_logged = false
+            error_logged_cw = false
 
             fn error_handler():
-                error_logged = true
+                error_logged_cw = true
 
             fn failing() -> Result<i64, text>:
                 Err("test error")
@@ -193,8 +209,8 @@ describe "After Advice Execution":
             on pc{ execution(* failing(..)) } use error_handler after_error priority 10
 
             val result = failing()
-            expect result.err.?
-            expect error_logged == true
+            assert_true(result.err.?)
+            expect(error_logged_cw).to_equal(true)
 
 
 # ============================================================================
@@ -209,10 +225,10 @@ describe "Pointcut Expressions":
 
     context "execution patterns":
         it "matches specific function name":
-            var called = false
+            called_cw = false
 
             fn marker():
-                called = true
+                called_cw = true
 
             fn specific_func() -> i64:
                 42
@@ -220,13 +236,13 @@ describe "Pointcut Expressions":
             on pc{ execution(* specific_func(..)) } use marker before priority 10
 
             specific_func()
-            expect called == true
+            expect(called_cw).to_equal(true)
 
         it "matches with wildcard in function name":
-            var count = 0
+            count_cw = 0
 
             fn counter():
-                count = count + 1
+                count_cw = count_cw + 1
 
             fn calc_add() -> i64:
                 1
@@ -238,33 +254,33 @@ describe "Pointcut Expressions":
 
             calc_add()
             calc_sub()
-            expect count == 2
+            expect(count_cw).to_equal(2)
 
     context "attribute patterns":
         it "matches functions with specific attribute":
-            var logged = false
+            logged_cw = false
 
             fn logger():
-                logged = true
+                logged_cw = true
 
-            @logged
+            @logged_cw
             fn important_operation() -> i64:
                 42
 
             fn regular_operation() -> i64:
                 0
 
-            on pc{ attr(logged) } use logger before priority 10
+            on pc{ attr(logged_cw) } use logger before priority 10
 
             important_operation()
-            expect logged == true
+            expect(logged_cw).to_equal(true)
 
     context "logical operators":
         it "combines pointcuts with AND":
-            var called = false
+            called_cw2 = false
 
             fn marker():
-                called = true
+                called_cw2 = true
 
             @critical
             fn critical_calc() -> i64:
@@ -273,13 +289,13 @@ describe "Pointcut Expressions":
             on pc{ execution(* critical*(..)) & attr(critical) } use marker before priority 10
 
             critical_calc()
-            expect called == true
+            expect(called_cw2).to_equal(true)
 
         it "combines pointcuts with OR":
-            var count = 0
+            count_cw2 = 0
 
             fn counter():
-                count = count + 1
+                count_cw2 = count_cw2 + 1
 
             fn func_a() -> i64:
                 1
@@ -291,13 +307,13 @@ describe "Pointcut Expressions":
 
             func_a()
             func_b()
-            expect count == 2
+            expect(count_cw2).to_equal(2)
 
         it "negates pointcuts with NOT":
-            var count = 0
+            count_cw3 = 0
 
             fn counter():
-                count = count + 1
+                count_cw3 = count_cw3 + 1
 
             fn should_skip() -> i64:
                 0
@@ -309,7 +325,7 @@ describe "Pointcut Expressions":
 
             should_skip()
             should_count()
-            expect count == 1
+            expect(count_cw3).to_equal(1)
 
 
 # ============================================================================
@@ -354,10 +370,10 @@ describe "Weaving Diagnostics":
 
     context "weaving reports":
         it "reports join points woven":
-            var woven_count = 0
+            woven_count_cw = 0
 
             fn track_weave():
-                woven_count = woven_count + 1
+                woven_count_cw = woven_count_cw + 1
 
             fn target1() -> i64:
                 1
@@ -369,7 +385,7 @@ describe "Weaving Diagnostics":
 
             target1()
             target2()
-            expect woven_count == 2
+            expect(woven_count_cw).to_equal(2)
 
         it "validates advice configuration":
             # Valid advice configuration should not produce errors
@@ -381,7 +397,7 @@ describe "Weaving Diagnostics":
 
             on pc{ execution(* target(..)) } use valid_advice before priority 10
 
-            expect target() == 42
+            expect(target()).to_equal(42)
 
 
 # ============================================================================
@@ -399,10 +415,10 @@ describe "Zero Overhead When Disabled":
                 42
 
             # No AOP declarations for this function
-            expect simple_func() == 42
+            expect(simple_func()).to_equal(42)
 
         it "disabled weaving produces no diagnostics":
             fn isolated_func() -> i64:
                 100
 
-            expect isolated_func() == 100
+            expect(isolated_func()).to_equal(100)

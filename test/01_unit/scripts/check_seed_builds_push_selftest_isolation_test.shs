@@ -1,0 +1,54 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+guard="$repo_root/scripts/check/check-seed-builds-push.shs"
+test_tmp=$(mktemp -d)
+trap 'rm -rf "$test_tmp"' EXIT HUP INT TERM
+
+fail() {
+    echo "FAIL: $*" >&2
+    exit 1
+}
+
+clean_git() {
+    env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE \
+        -u GIT_OBJECT_DIRECTORY -u GIT_ALTERNATE_OBJECT_DIRECTORIES \
+        -u GIT_COMMON_DIR -u GIT_NAMESPACE -u GIT_CONFIG \
+        -u GIT_CONFIG_COUNT git "$@"
+}
+
+victim="$test_tmp/victim"
+clean_git init -q "$victim" || fail "could not create victim repository"
+config="$victim/.git/config"
+config_before=$(cksum <"$config") || fail "could not checksum victim config"
+bare_before=$(clean_git -C "$victim" config --get core.bare) ||
+    fail "victim repository has no core.bare baseline"
+
+set +e
+GIT_DIR="$victim/.git/" \
+GIT_INDEX_FILE="$victim/.git/hostile.index" \
+    sh "$guard" --selftest >"$test_tmp/guard.out" 2>&1
+guard_status=$?
+set -e
+
+if [ "$guard_status" -ne 0 ]; then
+    cat "$test_tmp/guard.out" >&2
+    fail "guard selftest failed under an inherited trailing-slash GIT_DIR"
+fi
+grep -Fq 'check-seed-builds-push: PASS' "$test_tmp/guard.out" || {
+    cat "$test_tmp/guard.out" >&2
+    fail "guard did not emit its authoritative PASS verdict"
+}
+
+config_after=$(cksum <"$config") || fail "could not re-check victim config"
+bare_after=$(clean_git -C "$victim" config --get core.bare) ||
+    fail "victim repository lost its core.bare setting"
+[ "$config_after" = "$config_before" ] ||
+    fail "guard selftest mutated the victim Git config"
+[ "$bare_after" = "$bare_before" ] ||
+    fail "guard selftest changed victim core.bare ($bare_before -> $bare_after)"
+[ ! -e "$victim/.git/hostile.index" ] ||
+    fail "guard selftest wrote its fixture index into the victim repository"
+
+echo "PASS: seed-build guard selftest isolates inherited Git repository state"

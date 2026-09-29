@@ -110,6 +110,13 @@ struct DrawIrComposition:
     scene_key: text
     backend_target: text
     batches: [DrawIrBatch]
+    # Serial producer-domain identity of this composition VALUE, handed out by
+    # draw_ir_next_composition_generation(). 0 means "unassigned/exhausted" — a
+    # consumer must never memoize on 0. A non-zero value is not reused in that
+    # process domain; rebuilding identical content deliberately gets a new
+    # generation. This is a staleness token, never content-equality proof and
+    # never authority for concurrent producers without a higher-level owner.
+    generation: i64 = 0
 
 struct DrawIrEventTargetContext:
     schema: text
@@ -515,13 +522,27 @@ fn draw_ir_batch_with_source(batch_id: text, backend_target: text, embedding: Dr
 fn draw_ir_batch(batch_id: text, backend_target: text, embedding: DrawIrEmbeddingConfig, commands: [DrawIrCommand]) -> DrawIrBatch:
     draw_ir_batch_with_source(batch_id, backend_target, embedding, commands, draw_ir_source_manual())
 
+var _draw_ir_composition_generation: i64 = 0
+
+# Hand out the next composition generation in the current serial producer
+# domain. Exhaustion fails closed with 0 rather than wrapping to a reusable
+# positive identity. Concurrent render producers must obtain generations from
+# their session owner; this module-global compatibility allocator is not an
+# atomic cross-thread authority.
+pub fn draw_ir_next_composition_generation() -> i64:
+    if _draw_ir_composition_generation >= 9223372036854775807:
+        return 0
+    _draw_ir_composition_generation = _draw_ir_composition_generation + 1
+    _draw_ir_composition_generation
+
 fn draw_ir_composition(composition_id: text, scene_key: text, backend_target: text, batches: [DrawIrBatch]) -> DrawIrComposition:
     DrawIrComposition(
         schema: DRAW_IR_SCHEMA_VERSION,
         composition_id: composition_id,
         scene_key: scene_key,
         backend_target: backend_target,
-        batches: batches
+        batches: batches,
+        generation: draw_ir_next_composition_generation()
     )
 
 # Flatten a child composition into its embedding owner.  The flat batch order

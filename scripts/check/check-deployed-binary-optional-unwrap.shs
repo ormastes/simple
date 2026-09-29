@@ -1,0 +1,288 @@
+#!/bin/sh
+# check-deployed-binary-optional-unwrap.shs
+#
+# Guard: the DEPLOYED binary must yield an Option's PAYLOAD from `!`, on its own
+# default lane -- not the Option box.
+#
+# Why this exists, and why it is a guard rather than a spec: measured 2026-09-18,
+# the binary deployed at bin/simple (built 2026-09-06) returned the enum box from
+# `!` on the JIT lane, which is the DEFAULT lane for `bin/simple run`:
+# `Some(42)!` stringified as `<enum@0x...>`, `Some("hello")!.len()` answered -1,
+# `Some("hello")! == "hello"` answered false, and one `print` of a concatenated
+# unwrapped text emitted nothing at all -- every one of them silently, exit 0.
+# Seeds built from newer source answer all of it correctly on both lanes, so the
+# tree was never wrong: the deployed ARTIFACT was. A source spec cannot catch
+# that (and `bin/simple test` runs specs on the interpret route, where the defect
+# does not appear), so the only thing that can fail closed here is a check that
+# executes the deployed binary itself.
+#
+# The concrete casualty was SCV cold-init: it unwraps a `text?` git listing with
+# `!`, got length -1 and an empty split, published an EMPTY source inventory, and
+# wedged native-build permanently in that worktree.
+# See doc/08_tracking/bug/seed_jit_optional_unwrap_returns_enum_box_2026-09-18.md
+#
+# Oracle: the binary's own two lanes must agree, and both must equal the values
+# the language defines. Comparing the lanes against each other (rather than only
+# against expected text) also catches a binary that is uniformly wrong.
+#
+# usage: sh scripts/check/check-deployed-binary-optional-unwrap.shs [--binary PATH] [--selftest]
+# verdict (last line of stdout):
+#   PASS  — <n> row(s) checked on <binary>, default and interpret lanes agree
+#   FAIL  — <n> row(s) checked, <k> lost the payload: <rows>
+#   ERROR — nothing was checked (<reason>)            [exit 2]
+set -u
+
+BINARY=""
+SELFTEST=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --binary) BINARY="${2:-}"; shift 2 ;;
+        --selftest) SELFTEST=1; shift ;;
+        -h|--help) sed -n '1,40p' "$0"; exit 0 ;;
+        *) echo "ERROR — nothing was checked (unknown argument: $1)"; exit 2 ;;
+    esac
+done
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd) || {
+    echo "ERROR — nothing was checked (cannot resolve repo root)"; exit 2; }
+
+# The probe deliberately covers one payload type per representation class:
+# scalar int, bool, text, and a container. The container row is the control --
+# it kept working on the broken binary, so a probe without the scalar rows
+# would have reported green.
+write_probe() {
+    cat > "$1" <<'PROBE'
+fn opt_i64() -> i64?:
+    Some(42)
+
+fn opt_text() -> text?:
+    Some("hello")
+
+fn opt_bool() -> bool?:
+    Some(true)
+
+fn opt_array() -> [i64]?:
+    Some([1, 2, 3])
+
+fn main() -> i64:
+    print "int=" + (opt_i64()!).to_text()
+    print "bool=" + (opt_bool()!).to_text()
+    print "arraylen=" + (opt_array()!).len().to_text()
+    print "textlen=" + (opt_text()!).len().to_text()
+    print "texteq=" + ((opt_text()!) == "hello").to_text()
+    print "textcat=" + ("[" + (opt_text()!) + "]")
+    0
+PROBE
+}
+
+# Expected values, one per probe row, AFTER normalization.
+#
+# Booleans are normalized because the two lanes spell a true boolean differently
+# -- the interpret lane prints `true`, the JIT lane prints `1` -- and both are
+# legitimate renderings of the same payload. Comparing them raw made this guard
+# fail a binary that was in fact correct, so normalize first and compare second.
+# What a LOST payload looks like is entirely different and is what the box check
+# below catches: `<enum@0x...>`, `<value:0x5>`, a length of -1, or a row that
+# never printed at all.
+normalize_value() {
+    case "$1" in
+        1|true) echo "true" ;;
+        0|false) echo "false" ;;
+        *) echo "$1" ;;
+    esac
+}
+
+# A value that is a box, a sentinel, or an absent row -- never a real payload.
+value_is_lost() {
+    case "$1" in
+        "<missing>"|"<enum@"*|"<value:"*|"<struct@"*|"<object@"*) return 0 ;;
+        -1) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+expected_for() {
+    case "$1" in
+        int) echo "42" ;;
+        bool) echo "true" ;;
+        arraylen) echo "3" ;;
+        textlen) echo "5" ;;
+        texteq) echo "true" ;;
+        textcat) echo "[hello]" ;;
+        *) echo "" ;;
+    esac
+}
+
+ROWS="int bool arraylen textlen texteq textcat"
+
+# Run the probe on one binary+lane and echo "row=value" lines. A row the run
+# never printed comes back as the literal `<missing>` -- the broken binary
+# dropped an entire print statement, so an absent row is a failure signal, not
+# an excuse to skip.
+run_probe() {
+    _rp_binary=$1
+    _rp_probe=$2
+    _rp_mode=$3
+    _rp_out=$4
+    if [ -z "$_rp_mode" ]; then
+        timeout 300 "$_rp_binary" run "$_rp_probe" >"$_rp_out" 2>/dev/null
+    else
+        SIMPLE_EXECUTION_MODE="$_rp_mode" timeout 300 "$_rp_binary" run "$_rp_probe" >"$_rp_out" 2>/dev/null
+    fi
+    _rp_status=$?
+    [ "$_rp_status" -eq 0 ] || return 1
+    return 0
+}
+
+value_of() {
+    _vo_file=$1
+    _vo_row=$2
+    _vo_line=$(grep -m1 "^${_vo_row}=" "$_vo_file" 2>/dev/null)
+    if [ -z "$_vo_line" ]; then
+        echo "<missing>"
+    else
+        echo "${_vo_line#*=}"
+    fi
+}
+
+# Returns 0 when the binary keeps every payload, 1 when it loses one.
+# Echoes the offending rows on failure.
+check_binary() {
+    _cb_binary=$1
+    _cb_work=$(mktemp -d) || return 2
+    _cb_probe="$_cb_work/probe.spl"
+    write_probe "$_cb_probe"
+
+    if ! run_probe "$_cb_binary" "$_cb_probe" "" "$_cb_work/default.txt"; then
+        rm -rf "$_cb_work"
+        echo "run-failed"
+        return 2
+    fi
+    if ! run_probe "$_cb_binary" "$_cb_probe" "interpret" "$_cb_work/interpret.txt"; then
+        rm -rf "$_cb_work"
+        echo "interpret-run-failed"
+        return 2
+    fi
+
+    _cb_bad=""
+    _cb_bad_count=0
+    for _cb_row in $ROWS; do
+        _cb_default_raw=$(value_of "$_cb_work/default.txt" "$_cb_row")
+        _cb_interp_raw=$(value_of "$_cb_work/interpret.txt" "$_cb_row")
+        _cb_default=$(normalize_value "$_cb_default_raw")
+        _cb_interp=$(normalize_value "$_cb_interp_raw")
+        _cb_want=$(expected_for "$_cb_row")
+        if value_is_lost "$_cb_default_raw"; then
+            _cb_bad="$_cb_bad ${_cb_row}[default=${_cb_default_raw};interpret=${_cb_interp_raw}]"
+            _cb_bad_count=$((_cb_bad_count + 1))
+            continue
+        fi
+        if [ "$_cb_default" != "$_cb_interp" ]; then
+            _cb_bad="$_cb_bad ${_cb_row}[lanes-disagree;default=${_cb_default_raw};interpret=${_cb_interp_raw}]"
+            _cb_bad_count=$((_cb_bad_count + 1))
+            continue
+        fi
+        if [ -n "$_cb_want" ] && [ "$_cb_default" != "$_cb_want" ]; then
+            _cb_bad="$_cb_bad ${_cb_row}[got=${_cb_default_raw};want=${_cb_want}]"
+            _cb_bad_count=$((_cb_bad_count + 1))
+        fi
+    done
+    BAD_COUNT=$_cb_bad_count
+    rm -rf "$_cb_work"
+    if [ -n "$_cb_bad" ]; then
+        echo "$_cb_bad"
+        return 1
+    fi
+    echo ""
+    return 0
+}
+
+selftest() {
+    # Fixture 1: a binary that is not executable must ERROR, never pass.
+    _st_dir=$(mktemp -d) || { echo "selftest: mktemp failed"; return 1; }
+    printf 'not a binary\n' > "$_st_dir/fake"
+    chmod 0644 "$_st_dir/fake"
+    _st_out=$(check_binary "$_st_dir/fake" 2>/dev/null)
+    _st_rc=$?
+    if [ "$_st_rc" -ne 2 ]; then
+        echo "selftest FAILED: a non-executable binary returned rc=$_st_rc, expected 2"
+        rm -rf "$_st_dir"; return 1
+    fi
+    echo "selftest ok   [non-executable binary is ERROR, not PASS]"
+
+    # Fixture 2: value_of must report an absent row as <missing> rather than
+    # silently yielding the empty string, because the real defect DROPPED a
+    # whole print statement.
+    printf 'int=42\n' > "$_st_dir/partial.txt"
+    _st_missing=$(value_of "$_st_dir/partial.txt" "textcat")
+    if [ "$_st_missing" != "<missing>" ]; then
+        echo "selftest FAILED: absent row reported as '$_st_missing', expected <missing>"
+        rm -rf "$_st_dir"; return 1
+    fi
+    echo "selftest ok   [an absent probe row is <missing>, not empty]"
+
+    # Fixture 3: the comparison must reject the exact values the broken binary
+    # produced, and accept the correct ones.
+    if [ "$(expected_for textlen)" != "5" ] || [ "$(expected_for texteq)" != "true" ]; then
+        echo "selftest FAILED: expectation table lost a row"
+        rm -rf "$_st_dir"; return 1
+    fi
+    echo "selftest ok   [expectation table pins textlen=5 and texteq=true]"
+
+    # Fixture 4: the two lanes' legitimate boolean spellings must NOT be read as
+    # a lost payload -- an earlier revision of this guard failed a correct binary
+    # on exactly that.
+    if [ "$(normalize_value 1)" != "$(normalize_value true)" ]; then
+        echo "selftest FAILED: boolean spellings 1 and true did not normalize alike"
+        rm -rf "$_st_dir"; return 1
+    fi
+    echo "selftest ok   [1 and true normalize to the same boolean]"
+
+    # Fixture 5: every shape the broken binary produced must read as lost.
+    for _st_lost in "<missing>" "<enum@0x5ca5204adc0>" "<value:0x5>" "-1"; do
+        if ! value_is_lost "$_st_lost"; then
+            echo "selftest FAILED: '$_st_lost' was not recognised as a lost payload"
+            rm -rf "$_st_dir"; return 1
+        fi
+    done
+    for _st_ok in "42" "true" "5" "[hello]" "3"; do
+        if value_is_lost "$_st_ok"; then
+            echo "selftest FAILED: real payload '$_st_ok' was called lost"
+            rm -rf "$_st_dir"; return 1
+        fi
+    done
+    echo "selftest ok   [box/sentinel shapes are lost, real payloads are not]"
+
+    rm -rf "$_st_dir"
+    echo "selftest: 5 fixture(s) passed"
+    return 0
+}
+
+selftest || { echo "ERROR — nothing was checked (selftest failed)"; exit 2; }
+[ "$SELFTEST" -eq 1 ] && exit 0
+
+if [ -z "$BINARY" ]; then
+    BINARY="$repo_root/bin/simple"
+fi
+if [ ! -e "$BINARY" ]; then
+    echo "ERROR — nothing was checked (no binary at $BINARY)"
+    exit 2
+fi
+if [ ! -x "$BINARY" ]; then
+    echo "ERROR — nothing was checked ($BINARY is not executable)"
+    exit 2
+fi
+
+offenders=$(check_binary "$BINARY")
+rc=$?
+row_count=$(echo "$ROWS" | wc -w | tr -d ' ')
+
+case "$rc" in
+    0) echo "PASS — $row_count row(s) checked on $BINARY, default and interpret lanes agree" ; exit 0 ;;
+    1)
+        bad_count=$(echo "$offenders" | tr ' ' '\n' | grep -c '\[' )
+        echo "FAIL — $row_count row(s) checked, $bad_count lost the payload:$offenders"
+        echo "       See doc/08_tracking/bug/seed_jit_optional_unwrap_returns_enum_box_2026-09-18.md"
+        exit 1 ;;
+    *) echo "ERROR — nothing was checked ($offenders on $BINARY)" ; exit 2 ;;
+esac

@@ -35,7 +35,7 @@ export use os.tls13.server_handshake.*
 
 use os.tls13.handshake13.{GROUP_X25519, GROUP_SECP256R1}
 use os.tls13.key_schedule.{tls13_finished_key}
-use os.crypto.entropy.{crypto_entropy_bytes}
+use os.crypto.random.{random_bytes}
 
 extern fn rt_tls13_recv_record(sock_fd: i64) -> [u8]
 extern fn rt_net_send_bytes(sock_fd: i64, data: [u8]) -> i64
@@ -53,28 +53,16 @@ val HS_SERVER_HELLO: u8         = 2
 val HS_ENCRYPTED_EXTENSIONS: u8 = 8
 val TLS_CONTENT_HANDSHAKE: u8   = 0x16
 val TLS_MAX_RECORD_PAYLOAD: u64 = 18432
-val TLS_SERVER_SEND_RETRY_WINDOW: u64 = 4096u64
-val TLS_SERVER_SEND_MAX_ZERO_WRITES: u64 = 16u64
-# RFC 8446 section 5.2: TLSCiphertext.length is at most 2^14 + 256;
-# add the five-byte record header at this wire-facing send boundary.
-val TLS13_SERVER_MAX_WIRE_RECORD: u64 = 16645u64
 
 # ServerHello extension type bytes (RFC 8446 §4.2)
 val EXT_SUPPORTED_VERSIONS: u16 = 43
 val EXT_KEY_SHARE: u16          = 51
 
 # ============================================================================
-# Private byte helpers (module-unique names: the flat cross-module function
-# registry is keyed on the bare name, so a shared `_u8_at` here would silently
-# win or lose against the 33 other same-signature definitions. This one is the
-# only OOB-tolerant variant (returns 0), so sharing the name could swap a
-# trapping read for a silent zero anywhere in the crypto stack.)
-# TODO: `_srv_u8_at` currently has no in-file call site even though the old
-# comment claimed `_send_all_record` and `_validate_server_config` used it —
-# re-point those or remove the helper.
+# Private byte helpers (used by _send_all_record and _validate_server_config)
 # ============================================================================
 
-fn _srv_u8_at(data: [u8], offset: u64) -> u8:
+fn _u8_at(data: [u8], offset: u64) -> u8:
     if offset >= data.len():
         return 0u8
     data[offset]
@@ -87,36 +75,6 @@ fn _slice(data: [u8], offset: u64, length: u64) -> [u8]:
         i = i + 1
     out
 
-pub fn tls13_server_entropy_admits(material: [u8]) -> text:
-    """Admit one 32-byte server handshake secret, or name why it is unusable.
-
-    `tls13_accept` used to draw its ServerHello random and its ECDH private
-    scalar from `os.crypto.random.random_bytes`, whose API cannot report an
-    entropy failure: a short or zeroed draw was indistinguishable from a good
-    one and would have been used as a private scalar. The canonical owner
-    `os.crypto.entropy.crypto_entropy_bytes` returns a typed failure, and this
-    admission rejects a degenerate draw before it reaches key derivation.
-    """
-    if material.len() != 32u64:
-        return "server_entropy_wrong_length"
-    var i: u64 = 0
-    while i < material.len():
-        if material[i] != 0u8:
-            return ""
-        i = i + 1u64
-    "server_entropy_all_zero"
-
-fn _entropy_pair_distinct(a: [u8], b: [u8]) -> bool:
-    """The ServerHello random and the private scalar must not be the same draw."""
-    if a.len() != b.len():
-        return true
-    var i: u64 = 0
-    while i < a.len():
-        if a[i] != b[i]:
-            return true
-        i = i + 1u64
-    false
-
 fn _validate_server_config(server_config: Tls13ServerConfig) -> text:
     if server_config.cert_chain.len() == 0:
         return "missing_certificate_chain"
@@ -127,31 +85,26 @@ fn _validate_server_config(server_config: Tls13ServerConfig) -> text:
     ""
 
 fn _send_all_record(socket_fd: i64, record: [u8]) -> bool:
-    if record.len() == 0u64 or record.len() > TLS13_SERVER_MAX_WIRE_RECORD:
+    if record.len() == 0u64:
         return false
     var sent: u64 = 0
     var zero_writes: u64 = 0
     while sent < record.len():
-        # Preserve the zero-copy common case by passing the original record on
-        # the first write.  After a short write, copy at most one fixed window
-        # rather than the complete remainder on every retry: the latter turns
-        # adversarial transport progress into quadratic transient allocation.
-        val remaining = if sent == 0u64:
-            record
-        else:
-            _slice(record, sent, TLS_SERVER_SEND_RETRY_WINDOW)
+        val remaining = _slice(record, sent, record.len() - sent)
         val wrote_i = rt_net_send_bytes(socket_fd, remaining)
         if wrote_i < 0:
             return false
         val wrote = wrote_i.to_u64()
-        if wrote > remaining.len():
-            return false
         if wrote == 0u64:
             zero_writes = zero_writes + 1u64
-            if zero_writes > TLS_SERVER_SEND_MAX_ZERO_WRITES:
+            if zero_writes > 1024u64:
                 return false
         else:
-            sent = sent + wrote
+            zero_writes = 0u64
+            if wrote > remaining.len():
+                sent = record.len()
+            else:
+                sent = sent + wrote
     true
 
 fn _send_server_flight(socket_fd: i64, material: Tls13ServerHandshakeMaterial) -> text:
@@ -204,30 +157,11 @@ fn tls13_accept(socket_fd: i64, server_config: Tls13ServerConfig) -> Tls13Accept
     val ch_result = validate_client_hello_record_sh(ch_record)
     if ch_result.is_err():
         return Tls13AcceptResult.Failed(ch_result.err().unwrap())
-    # Draw both server secrets through the canonical typed entropy owner and
-    # fail the handshake closed on any entropy fault. Never derive keys from a
-    # short, zeroed, or duplicated draw.
-    val random_draw = crypto_entropy_bytes(32u64)
-    if random_draw.is_err():
-        return Tls13AcceptResult.Failed("server_entropy_unavailable")
-    val scalar_draw = crypto_entropy_bytes(32u64)
-    if scalar_draw.is_err():
-        return Tls13AcceptResult.Failed("server_entropy_unavailable")
-    val server_random = random_draw.unwrap()
-    val server_scalar = scalar_draw.unwrap()
-    val random_error = tls13_server_entropy_admits(server_random)
-    if random_error != "":
-        return Tls13AcceptResult.Failed(random_error)
-    val scalar_error = tls13_server_entropy_admits(server_scalar)
-    if scalar_error != "":
-        return Tls13AcceptResult.Failed(scalar_error)
-    if not _entropy_pair_distinct(server_random, server_scalar):
-        return Tls13AcceptResult.Failed("server_entropy_repeated_draw")
     val prep = prepare_server_handshake_from_client_hello_record(
         ch_result.unwrap(),
         server_config,
-        server_random,
-        server_scalar
+        random_bytes(32u64),
+        random_bytes(32u64)
     )
     match prep:
         case Tls13ServerHandshakeResult.Failed(reason):

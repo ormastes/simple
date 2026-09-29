@@ -1,0 +1,122 @@
+"""
+## Purpose and audience
+Documents the S1-E UID derivation parity contract in `app.spipe.model.uid`
+for engineers maintaining the spipe_knowledge_compiler graph model. Parity
+oracle: test/fixture/spipe/uid_vectors.sdn, generated once from the JS
+implementation (examples/05_stdlib/spipe/src/model/identity.js) per
+doc/03_plan/infra/spipe/spipe_knowledge_compiler_refined_plan.md §3.2. The
+JS `deriveCanonicalUid(prefix, domain, value)` hashes
+`domain + "\0" + JSON.stringify(value)`; the Simple port takes the
+already-canonicalized JSON text as `value`, so each vector is checked via
+`derive_canonical_uid(prefix, domain, canonical_json(CText(value)))`.
+## Operator workflow
+bin/simple test test/01_unit/app/spipe/model_identity_spec.spl
+## Compatibility and limitations
+Runs under the pure-Simple interpreter test runner; no filesystem, network,
+or platform-specific dependency. The vector literals below are fixed points
+copied from the JS parity fixture and must not be regenerated ad hoc.
+## Verification guidance and troubleshooting
+A failure means the derived UID no longer matches the JS reference for that
+vector — regenerate test/fixture/spipe/uid_vectors.sdn from the JS
+implementation and re-diff before changing any literal here.
+"""
+# Lifecycle: doc/01_research/infra/spipe/spipe_knowledge_compiler.md ;
+# doc/03_plan/infra/spipe/spipe_knowledge_compiler_refined_plan.md ;
+# doc/04_architecture/infra/spipe/spipe_knowledge_compiler.md ;
+# doc/05_design/infra/spipe/spipe_knowledge_compiler.md
+# @manual_section: identity-uid
+
+use std.spec.{describe, it, expect}
+use app.spipe.model.types.{
+    EdgeType, EdgeOrigin, EdgeStatus, EdgeRecord, SourceRange, LinkForm
+}
+use app.spipe.model.uid.{crockford_digest_payload, derive_canonical_uid}
+use app.spipe.model.canonical.{CanonicalValue, canonical_json}
+
+describe("spipe model identity"):
+    it("derives UID vector: artifact path doc/00_readme.md"):
+        # @req REQ-SPKC-039
+        step("Canonicalize the artifact path and derive its UID")
+        val value = canonical_json(CanonicalValue.CText("doc/00_readme.md"))
+        val uid = derive_canonical_uid("A", "spipe-artifact", value)
+        # @capture(protocol_json): derive_canonical_uid result for a plain artifact path
+        expect(uid.is_ok()).to_equal(true)
+        expect(uid.unwrap()).to_equal("A-CWJ8CP34WYZHD1HJ2AFVQ44H06")  # oracle: JS parity fixture vector for this path
+
+    it("derives UID vector: artifact path doc/glossary.md"):
+        step("Canonicalize the artifact path and derive its UID")
+        val value = canonical_json(CanonicalValue.CText("doc/glossary.md"))
+        val uid = derive_canonical_uid("A", "spipe-artifact", value)
+        # @capture(protocol_json): derive_canonical_uid result for the glossary path
+        expect(uid.unwrap()).to_equal("A-WY6BG6DCCYSCM9N63KWJS51549")  # oracle: JS parity fixture vector for this path
+
+    it("derives UID vector: section with heading fragment"):
+        step("Canonicalize a path-with-fragment value and derive its UID")
+        val value = canonical_json(CanonicalValue.CText("doc/00_readme.md#introduction"))
+        val uid = derive_canonical_uid("S", "spipe-section", value)
+        # @capture(protocol_json): derive_canonical_uid result for a heading-fragment section
+        expect(uid.unwrap()).to_equal("S-GJGQAXZ5EHVY5PQXAHJY55WHZW")  # oracle: JS parity fixture vector for this fragment
+
+    it("derives UID vector: edge occurrence key"):
+        step("Canonicalize an edge occurrence key and derive its UID")
+        val value = canonical_json(CanonicalValue.CText("links_to|doc/a.md|doc/b.md"))
+        val uid = derive_canonical_uid("E", "spipe-edge", value)
+        # @capture(protocol_json): derive_canonical_uid result for an edge occurrence key
+        expect(uid.unwrap()).to_equal("E-RW11VPSEQ3MZN8T6TWKJC7CYSC")  # oracle: JS parity fixture vector for this key
+
+    it("derives UID vector: empty value"):
+        step("Canonicalize an empty text value and derive its UID")
+        val value = canonical_json(CanonicalValue.CText(""))
+        val uid = derive_canonical_uid("A", "spipe-artifact", value)
+        # @capture(protocol_json): derive_canonical_uid result for an empty value
+        expect(uid.unwrap()).to_equal("A-677N60PD96W6BJYA55PACQM8S0")  # oracle: JS parity fixture vector for the empty value
+
+    it("derives UID vector: multibyte text value"):
+        step("Canonicalize a multibyte text value and derive its UID")
+        val value = canonical_json(CanonicalValue.CText("unicode: café → 日本語"))
+        val uid = derive_canonical_uid("A", "spipe-artifact", value)
+        # @capture(protocol_json): derive_canonical_uid result for a multibyte value
+        expect(uid.unwrap()).to_equal("A-SRGTA25WG64E6MXEXH046C63ZK")  # oracle: JS parity fixture vector for this value
+
+    it("rejects the W prefix (Workspace is not a derivable UID)"):
+        step("Attempt to derive a UID using the reserved Workspace prefix")
+        val value = canonical_json(CanonicalValue.CText("x"))
+        val uid = derive_canonical_uid("W", "spipe-workspace", value)
+        # @capture(protocol_json): derive_canonical_uid outcome for the Workspace prefix
+        expect(uid.is_err()).to_equal(true)
+
+    it("rejects an unknown prefix"):
+        step("Attempt to derive a UID using a prefix not in the known table")
+        val value = canonical_json(CanonicalValue.CText("x"))
+        val uid = derive_canonical_uid("ZZ", "spipe-artifact", value)
+        # @capture(protocol_json): derive_canonical_uid outcome for an unknown prefix
+        expect(uid.is_err()).to_equal(true)
+
+    it("crockford payload is always exactly 26 characters"):
+        step("Digest a fixed byte string and measure the payload length")
+        val payload = crockford_digest_payload("hello".bytes())
+        # @capture(bit_table): crockford_digest_payload length for a fixed input
+        expect(payload.len()).to_equal(26)  # oracle: Crockford base32 encoding of a 160-bit digest is fixed at 26 chars
+
+    it("smoke: SourceRange constructs and reads back fields"):
+        step("Construct a SourceRange and read its fields back")
+        val r = SourceRange(
+            path: "doc/x.md", start_offset: 0, end_offset: 10,
+            target_start: 2, target_end: 8, link_form: LinkForm.Inline,
+            raw_target: "y.md", fragment: None
+        )
+        # @capture(protocol_json): SourceRange field readback
+        expect(r.path).to_equal("doc/x.md")
+        expect(r.end_offset).to_equal(10)  # oracle: matches the end_offset: 10 passed to the constructor
+
+    it("smoke: EdgeRecord constructs with LinksTo"):
+        step("Construct an EdgeRecord with a LinksTo type and read its uid back")
+        val e = EdgeRecord(
+            uid: "E-TESTTESTTESTTESTTESTTESTTE",
+            edge_type: EdgeType.LinksTo,
+            from_uid: "A-1", to_uid: "A-2",
+            origin: EdgeOrigin.Explicit, status: EdgeStatus.Accepted,
+            source_range: None
+        )
+        # @capture(protocol_json): EdgeRecord uid readback
+        expect(e.uid).to_equal("E-TESTTESTTESTTESTTESTTESTTE")

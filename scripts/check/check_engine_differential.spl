@@ -168,6 +168,39 @@ fn run_interpreted(binary: text, path: text, engine: text) -> LaneResult:
         return LaneResult(lane: engine, output: stdout, normalized: norm, ok: false, note: "no stdout (build or codegen failure)")
     LaneResult(lane: engine, output: stdout, normalized: norm, ok: true, note: "")
 
+# One-time SCV admission preparation for the native lane.
+#
+# `native-build` refuses to run until this checkout has an admitted source
+# inventory, and says so: "compile-event-journal-missing (first build in this
+# checkout: rerun with SIMPLE_SCV_INVENTORY_COLD_INIT=1)". The harness never did
+# that, so in any checkout without a warm journal EVERY native build failed
+# identically and the lane answered 0 of N fixtures -- the gate correctly
+# reported DEGRADED COVERAGE, but a third of its comparison surface was simply
+# unavailable. Measured 2026-09-18: 19 of 19 native lanes errored this way.
+#
+# This runs the remedy the tool itself names, ONCE, before the fixture loop --
+# the walk costs minutes because it hashes every compilable source, so doing it
+# per fixture would multiply that by the corpus size. It is a precondition, not
+# a lane substitute: the fixtures still go through a real `native-build`, which
+# is what the lane contract above requires.
+fn prepare_native_lane(binary: text) -> bool:
+    val probe = ARTIFACT_DIR + "/.scv_admission_probe.spl"
+    process_run("/bin/sh", ["-c", "mkdir -p " + ARTIFACT_DIR])
+    process_run("/bin/sh", ["-c",
+        "printf 'fn main() -> i64:\\n    0\\n' > " + probe])
+    val log = ARTIFACT_DIR + "/.scv_admission_probe.log"
+    val cmd = "SIMPLE_SCV_INVENTORY_COLD_INIT=1 SIMPLE_SCV_FREEZE_FALLBACK=1 " +
+        binary + " native-build " + probe + " -o " +
+        ARTIFACT_DIR + "/.scv_admission_probe.bin > " + log + " 2>&1"
+    process_run("/bin/sh", ["-c", cmd])
+    # Success is judged by whether the admission error is GONE, not by the exit
+    # status: the probe build may still fail for unrelated reasons and the lane
+    # would then report its own real cause per fixture.
+    val (still_blocked, _s, _c) = process_run("/bin/sh", ["-c",
+        "grep -cE 'compile-event-journal-missing|inventory-publication-failed' " +
+        log + " 2>/dev/null || echo 0"])
+    still_blocked.trim() == "0"
+
 fn run_native(binary: text, path: text, name: text) -> LaneResult:
     val artifact = ARTIFACT_DIR + "/" + name + ".bin"
     process_run("/bin/sh", ["-c", "mkdir -p " + ARTIFACT_DIR + " && rm -f " + artifact])
@@ -181,7 +214,15 @@ fn run_native(binary: text, path: text, name: text) -> LaneResult:
     # 11 fixtures failed that way at once and the reason was invisible in the
     # gate output, which is the difference between a finding and a shrug.
     val log = ARTIFACT_DIR + "/" + name + ".build.log"
-    val build_cmd = binary + " native-build " + path + " -o " + artifact + " > " + log + " 2>&1"
+    # SIMPLE_SCV_FREEZE_FALLBACK=1 is the documented opt-in for "SCV freeze has
+    # no admitted source inventory to freeze the entry closure against". These
+    # fixtures live under test/, which is outside the `src` source root the
+    # native-build admission freezes over, so without the opt-in every fixture
+    # fails closed with an empty entry closure and this lane answers nothing.
+    # The knob is explicit and prints its own warning line; it scans the working
+    # tree directly instead of a frozen snapshot, which is the right trade for a
+    # harness building 19 one-file fixtures.
+    val build_cmd = "SIMPLE_SCV_FREEZE_FALLBACK=1 " + binary + " native-build " + path + " -o " + artifact + " > " + log + " 2>&1"
     process_run("/bin/sh", ["-c", build_cmd])
     val (exists, _e, _c) = process_run("/bin/sh", ["-c", "test -s " + artifact + " && echo YES || echo NO"])
     if not exists.trim().contains("YES"):
@@ -259,6 +300,16 @@ fn main() -> i64:
             print("ERROR — unknown lane '{lane}' in DIFF_LANES; SIMPLE_EXECUTION_MODE would silently run the JIT for it and report a phantom agreeing lane. Valid: interpret, interpreter, jit, native. Nothing was checked.")
             return 2
     print("fixtures: {fixtures.len()}")
+    var native_selected = false
+    for lane in lanes:
+        if lane == "native":
+            native_selected = true
+    if native_selected:
+        val prepared = prepare_native_lane(binary)
+        if prepared:
+            print("native lane: SCV admission prepared (one-time cold init)")
+        else:
+            print("native lane: SCV admission NOT prepared — every native build will fail closed; see " + ARTIFACT_DIR + "/.scv_admission_probe.log")
     print("")
 
     # Per-lane tally of how many fixtures that lane actually ANSWERED. A lane

@@ -1,4 +1,8 @@
 # check-push-must-pass requires a bootstrap fingerprint no tree can produce (2026-08-22)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN (blocks every push through the tracked pre-push dispatcher)
 **Introduced by:** 09e879ff838 `fix(check): harden must-check ledger ownership`
@@ -34,9 +38,9 @@ shape of `fourth_tree_wipe_6f86ff32a7d_guard_not_enforced_2026-08-11.md`).
 
 ## Secondary wiring defects seen on the same push
 
-- Shared `.git/hooks/pre-push` symlinks to `/mnt/data/worktrees/codex-01a023a8/scripts/hooks/pre-push`
-  (another session's tree); `check-hook-installation` FAILs on it, and
-  `install-must-check-hooks.shs --install` refuses because a `pre-push.local` exists.
+- The shared-worktree absolute-hook defect is resolved separately in
+  `shared_worktree_pre_push_absolute_symlink_2026-08-22.md`; it does not resolve
+  this ledger-fingerprint bootstrap cycle.
 - `land.shs` pushes via `sj`, which segfaults in a plain `git worktree` (no `.jj`).
 
 ## Proposed fix
@@ -48,3 +52,4 @@ the same promotion discipline used for `check-stage-binaries-runnable.shs`
 and `check-no-unresolved-runtime-symbols.shs` (landed advisory while honestly
 RED, promoted once green). Keep the structural guards mandatory; they must
 not be skipped as collateral of an unobtainable gate.
+

@@ -1,7 +1,9 @@
 # lint PARSE001 false positive on `use std.spec.*` describe-specs (2026-07-29)
+## Closed 2026-09-16 — Item 1 (PARSE001 false positive) FIXED by commit f4adc39bf39, verified; items 2-3 tracked separately
 
-Status: FIXED
-Status re-verified 2026-08-17 by source inspection (triage shard 02).
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status Update (2026-07-30)
 
@@ -13,7 +15,7 @@ pass lint (0 PARSE001 errors), invalid specs are correctly rejected with PARSE00
 ---
 
 Found during lane L5 (stage4 memory gate spec). Three related lint/tooling
-defects, items 2-3 remain report-only:
+defects, all report-only so far:
 
 1. **PARSE001 false positive:** `bin/simple lint` reports
    `error[PARSE001]: Source did not parse` on ANY describe-spec importing
@@ -36,3 +38,4 @@ defects, items 2-3 remain report-only:
 Repro for (1): `bin/simple lint test/03_system/check/stage4_memory_gate_spec.spl`
 (errors) vs `SIMPLE_EXECUTION_MODE=interpreter bin/simple test <same file>`
 (Results: 2 total, 2 passed).
+

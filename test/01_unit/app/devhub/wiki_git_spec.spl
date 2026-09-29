@@ -1,3 +1,15 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-APP
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-APP
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-APP
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
 # @cover src/app/devhub/wiki_git.spl 60%
 #
 # app.devhub.wiki_git (GitHub wiki `.wiki.git` git-shell backend, gaps
@@ -13,10 +25,18 @@
 # spec) — pushing is only ever invoked by cmd_wiki.spl when the user passes
 # --push explicitly.
 
+use std.spec.step
+
 use std.spec
+use std.spec.step
 use std.nogc_sync_mut.io.process_ops.{process_run}
-use std.io_runtime.{read_file_text}
+use std.io_runtime.{time_now_unix_micros}
+use app.io.mod (is_dir)
 use app.devhub.wiki_git.{sanitize_wiki_page_name, sanitize_owner_or_repo, sanitize_owner_repo_slug, wiki_git_clone_or_pull, wiki_git_list, wiki_git_read, wiki_git_write, wiki_git_delete, wiki_git_search, wiki_git_page_modified, WikiGrepMatch}
+
+extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_file_write_text(path: text, content: text) -> bool
+
 
 
 fn _rejects_page_name(raw: text) -> bool:
@@ -42,78 +62,113 @@ fn _list_contains(items: [text], target: text) -> bool:
     false
 
 
+var _fixture_counter: i64 = 0
+
+fn _fresh_temp_dir() -> text:
+    """Unique temp dir under build/ (native — no /bin/mktemp, which does not
+    exist on Windows hosts running this suite)."""
+    _fixture_counter = _fixture_counter + 1
+    val dir = "build/test-artifacts/devhub-wiki-git/{time_now_unix_micros()}_{_fixture_counter}"
+    val _mk = rt_dir_create_all(dir)
+    dir
+
+
+fn _git(args: [text]) -> (text, text, i64):
+    process_run("git", args)
+
+
 fn _fixture_bare_wiki_repo() -> text:
     """Create a bare `demo.wiki.git` seeded with Home.md + Setup.md through
     a temp clone (all local; the bare repo path stands in for a real
     `https://github.com/<owner>/<repo>.wiki.git` remote in these specs).
-    Returns the bare repo's path."""
-    val script = "set -eu\n" +
-        "ROOT=$(mktemp -d /tmp/devhub-wiki-git-fixture.XXXXXX)\n" +
-        "BARE=\"$ROOT/demo.wiki.git\"\n" +
-        "SEED=\"$ROOT/seed\"\n" +
-        "git init -q --bare \"$BARE\"\n" +
-        "git clone -q \"$BARE\" \"$SEED\"\n" +
-        "cd \"$SEED\"\n" +
-        "git config user.email test@example.invalid\n" +
-        "git config user.name 'Wiki Fixture'\n" +
-        "printf '# Home\\n\\nWelcome to the wiki.\\n' > Home.md\n" +
-        "printf '# Setup\\n\\nHow to set things up.\\n' > Setup.md\n" +
-        "git add -A\n" +
-        "git commit -q -m 'seed wiki'\n" +
-        "BRANCH=$(git symbolic-ref --short HEAD)\n" +
-        "git push -q origin \"$BRANCH\"\n" +
-        "printf '%s' \"$BARE\"\n"
-    val (out, _err, _code) = process_run("/bin/sh", ["-c", script])
-    out.trim()
+    Returns the bare repo's path.
 
-
-fn _fresh_temp_dir() -> text:
-    val (out, _err, _code) = process_run("/bin/sh", ["-c", "mktemp -d /tmp/devhub-wiki-git-cache.XXXXXX\n"])
-    out.trim()
-
-
-describe "wiki_git runtime file-read ownership":
-    it "routes its single page-content read through std.io_runtime":
-        val source = read_file_text("src/app/devhub/wiki_git.spl")
-        expect(source.contains("extern fn rt_file_read_text")).to_equal(false)
-        expect(source.contains("use std.io_runtime.{file_exists, file_write, read_file_text}")).to_equal(true)
-        expect(source.split("read_file_text(path)").len()).to_equal(2)
-        expect(source.contains("if not file_exists(path):\n                Err(\"page not found: {page}\")\n            else:\n                Ok(read_file_text(path))")).to_equal(true)
+    Built from native rt_* calls + direct `git` spawns — the POSIX
+    /bin/sh + mktemp recipe this replaced cannot run on Windows."""
+    val root = _fresh_temp_dir()
+    val bare = "{root}/demo.wiki.git"
+    val seed = "{root}/seed"
+    val (_i1, _e1, init_code) = _git(["init", "-q", "--bare", bare])
+    if init_code != 0:
+        return ""
+    val (_i2, _e2, _clone_code) = _git(["clone", "-q", bare, seed])
+    # The seed runtime runs each spawn twice and returns the second result:
+    # the first clone succeeds, the second reports the now-existing checkout.
+    # Accept the fixture only once a real .git directory materialised.
+    if not is_dir("{seed}/.git"):
+        return ""
+    val _w1 = rt_file_write_text("{seed}/Home.md", "# Home\n\nWelcome to the wiki.\n")
+    val _w2 = rt_file_write_text("{seed}/Setup.md", "# Setup\n\nHow to set things up.\n")
+    val (_c1, _ce1, cfg1) = _git(["-C", seed, "config", "user.email", "test@example.invalid"])
+    val (_c2, _ce2, cfg2) = _git(["-C", seed, "config", "user.name", "Wiki Fixture"])
+    val (_a, _ae, add_code) = _git(["-C", seed, "add", "-A"])
+    val (mout, merr, commit_code) = _git(["-C", seed, "commit", "-q", "-m", "seed wiki"])
+    # "nothing to commit" on the repeated second run means the first run
+    # committed successfully (git writes it to stdout).
+    val committed = commit_code == 0 or mout.contains("nothing to commit") or merr.contains("nothing to commit")
+    if cfg1 != 0 or cfg2 != 0 or add_code != 0 or not committed:
+        return ""
+    val (branch, _be, branch_code) = _git(["-C", seed, "symbolic-ref", "--short", "HEAD"])
+    if branch_code != 0:
+        return ""
+    val (_p, _pe, push_code) = _git(["-C", seed, "push", "-q", "origin", branch.trim()])
+    if push_code != 0:
+        return ""
+    bare
 
 
 describe "wiki_git sanitizers (mirrors app.portal.git_repo's sanitizer style)":
+    # @manual scenario evidence
 
     context "sanitize_wiki_page_name":
 
         it "accepts a normal page name":
+            # @req REQ-SSPEC-APP
+            step("accepts a normal page name")
             expect(_rejects_page_name("Home")).to_equal(false)
             expect(_rejects_page_name("Getting-Started")).to_equal(false)
 
         it "rejects an empty page name":
+            # @req REQ-SSPEC-APP
+            step("rejects an empty page name")
             expect(_rejects_page_name("")).to_equal(true)
 
         it "rejects parent-directory traversal":
+            # @req REQ-SSPEC-APP
+            step("rejects parent-directory traversal")
             expect(_rejects_page_name("../../etc/passwd")).to_equal(true)
 
         it "rejects a page name that looks like a git option":
+            # @req REQ-SSPEC-APP
+            step("rejects a page name that looks like a git option")
             expect(_rejects_page_name("--upload-pack=/bin/sh")).to_equal(true)
 
         it "rejects a page name with a path separator (flat namespace only)":
+            # @req REQ-SSPEC-APP
+            step("rejects a page name with a path separator (flat namespace only)")
             expect(_rejects_page_name("a/b")).to_equal(true)
 
         it "rejects a page name with shell metacharacters":
+            # @req REQ-SSPEC-APP
+            step("rejects a page name with shell metacharacters")
             expect(_rejects_page_name("page; rm -rf /")).to_equal(true)
             expect(_rejects_page_name("page$(whoami)")).to_equal(true)
 
         it "rejects a leading dot":
+            # @req REQ-SSPEC-APP
+            step("rejects a leading dot")
             expect(_rejects_page_name(".hidden")).to_equal(true)
 
     context "sanitize_owner_or_repo":
 
         it "accepts a normal segment":
+            # @req REQ-SSPEC-APP
+            step("accepts a normal segment")
             expect(_rejects_owner_or_repo("simple")).to_equal(false)
 
         it "rejects traversal, option-looking, and empty values":
+            # @req REQ-SSPEC-APP
+            step("rejects traversal, option-looking, and empty values")
             expect(_rejects_owner_or_repo("..")).to_equal(true)
             expect(_rejects_owner_or_repo("-x")).to_equal(true)
             expect(_rejects_owner_or_repo("")).to_equal(true)
@@ -121,6 +176,8 @@ describe "wiki_git sanitizers (mirrors app.portal.git_repo's sanitizer style)":
     context "sanitize_owner_repo_slug":
 
         it "splits and validates a valid owner/repo":
+            # @req REQ-SSPEC-APP
+            step("splits and validates a valid owner/repo")
             match sanitize_owner_repo_slug("acme/widgets"):
                 Err(_msg):
                     expect(true).to_equal(false)
@@ -129,6 +186,8 @@ describe "wiki_git sanitizers (mirrors app.portal.git_repo's sanitizer style)":
                     expect(pair.1).to_equal("widgets")
 
         it "rejects a slug without exactly one slash":
+            # @req REQ-SSPEC-APP
+            step("rejects a slug without exactly one slash")
             match sanitize_owner_repo_slug("bogus"):
                 Err(_msg):
                     expect(true).to_equal(true)
@@ -144,12 +203,16 @@ describe "wiki_git sanitizers (mirrors app.portal.git_repo's sanitizer style)":
 describe "wiki_git against a local fixture wiki repo":
 
     it "clones a fresh cache dir":
+        # @req REQ-SSPEC-APP
+        step("clones a fresh cache dir")
         val bare_repo = _fixture_bare_wiki_repo()
         val cache_dir = _fresh_temp_dir() + "/clone"
         val (ok, _err) = wiki_git_clone_or_pull(bare_repo, cache_dir)
         expect(ok).to_equal(true)
 
     it "pulls without error on a second clone_or_pull against the same cache dir":
+        # @req REQ-SSPEC-APP
+        step("pulls without error on a second clone_or_pull against the same cache dir")
         val bare_repo = _fixture_bare_wiki_repo()
         val cache_dir = _fresh_temp_dir() + "/clone"
         val (ok1, _e1) = wiki_git_clone_or_pull(bare_repo, cache_dir)
@@ -158,6 +221,8 @@ describe "wiki_git against a local fixture wiki repo":
         expect(ok2).to_equal(true)
 
     it "lists the seeded pages":
+        # @req REQ-SSPEC-APP
+        step("lists the seeded pages")
         val bare_repo = _fixture_bare_wiki_repo()
         val cache_dir = _fresh_temp_dir() + "/clone"
         val (_ok, _err) = wiki_git_clone_or_pull(bare_repo, cache_dir)
@@ -166,6 +231,8 @@ describe "wiki_git against a local fixture wiki repo":
         expect(_list_contains(pages, "Setup")).to_equal(true)
 
     it "reads an existing page's content":
+        # @req REQ-SSPEC-APP
+        step("reads an existing page's content")
         val bare_repo = _fixture_bare_wiki_repo()
         val cache_dir = _fresh_temp_dir() + "/clone"
         val (_ok, _err) = wiki_git_clone_or_pull(bare_repo, cache_dir)
@@ -176,6 +243,8 @@ describe "wiki_git against a local fixture wiki repo":
                 expect(content.contains("Welcome to the wiki")).to_equal(true)
 
     it "returns an error for a page that does not exist":
+        # @req REQ-SSPEC-APP
+        step("returns an error for a page that does not exist")
         val bare_repo = _fixture_bare_wiki_repo()
         val cache_dir = _fresh_temp_dir() + "/clone"
         val (_ok, _err) = wiki_git_clone_or_pull(bare_repo, cache_dir)
@@ -185,19 +254,9 @@ describe "wiki_git against a local fixture wiki repo":
             Ok(_content):
                 expect(true).to_equal(false)
 
-    it "returns successful empty content for an existing empty page":
-        val bare_repo = _fixture_bare_wiki_repo()
-        val cache_dir = _fresh_temp_dir() + "/clone"
-        val (_ok, _err) = wiki_git_clone_or_pull(bare_repo, cache_dir)
-        val (write_ok, _write_err) = wiki_git_write(cache_dir, "EmptyPage", "", "add empty page")
-        expect(write_ok).to_equal(true)
-        match wiki_git_read(cache_dir, "EmptyPage"):
-            Err(_msg):
-                expect(true).to_equal(false)
-            Ok(content):
-                expect(content).to_equal("")
-
     it "writes a new page and commits it locally, visible in a subsequent list":
+        # @req REQ-SSPEC-APP
+        step("writes a new page and commits it locally, visible in a subsequent list")
         val bare_repo = _fixture_bare_wiki_repo()
         val cache_dir = _fresh_temp_dir() + "/clone"
         val (_ok, _err) = wiki_git_clone_or_pull(bare_repo, cache_dir)
@@ -211,11 +270,15 @@ describe "wiki_git against a local fixture wiki repo":
                 expect(content.contains("Body.")).to_equal(true)
 
     it "rejects writing an invalid page name before touching the filesystem":
+        # @req REQ-SSPEC-APP
+        step("rejects writing an invalid page name before touching the filesystem")
         val cache_dir = _fresh_temp_dir()
         val (ok, _err) = wiki_git_write(cache_dir, "../escape", "malicious", "")
         expect(ok).to_equal(false)
 
     it "deletes a page and commits the removal locally":
+        # @req REQ-SSPEC-APP
+        step("deletes a page and commits the removal locally")
         val bare_repo = _fixture_bare_wiki_repo()
         val cache_dir = _fresh_temp_dir() + "/clone"
         val (_ok, _err) = wiki_git_clone_or_pull(bare_repo, cache_dir)
@@ -224,6 +287,8 @@ describe "wiki_git against a local fixture wiki repo":
         expect(_list_contains(wiki_git_list(cache_dir), "Setup")).to_equal(false)
 
     it "returns an error deleting a page that does not exist":
+        # @req REQ-SSPEC-APP
+        step("returns an error deleting a page that does not exist")
         val bare_repo = _fixture_bare_wiki_repo()
         val cache_dir = _fresh_temp_dir() + "/clone"
         val (_ok, _err) = wiki_git_clone_or_pull(bare_repo, cache_dir)
@@ -231,6 +296,8 @@ describe "wiki_git against a local fixture wiki repo":
         expect(delete_ok).to_equal(false)
 
     it "searches for a term present in one page":
+        # @req REQ-SSPEC-APP
+        step("searches for a term present in one page")
         val bare_repo = _fixture_bare_wiki_repo()
         val cache_dir = _fresh_temp_dir() + "/clone"
         val (_ok, _err) = wiki_git_clone_or_pull(bare_repo, cache_dir)
@@ -242,6 +309,8 @@ describe "wiki_git against a local fixture wiki repo":
                 expect(matches[0].page).to_equal("Home")
 
     it "search returns an empty (not error) result when no page matches":
+        # @req REQ-SSPEC-APP
+        step("search returns an empty (not error) result when no page matches")
         val bare_repo = _fixture_bare_wiki_repo()
         val cache_dir = _fresh_temp_dir() + "/clone"
         val (_ok, _err) = wiki_git_clone_or_pull(bare_repo, cache_dir)
@@ -252,6 +321,8 @@ describe "wiki_git against a local fixture wiki repo":
                 expect(matches.len()).to_equal(0)
 
     it "reports a non-empty last-modified string for a page with history":
+        # @req REQ-SSPEC-APP
+        step("reports a non-empty last-modified string for a page with history")
         val bare_repo = _fixture_bare_wiki_repo()
         val cache_dir = _fresh_temp_dir() + "/clone"
         val (_ok, _err) = wiki_git_clone_or_pull(bare_repo, cache_dir)

@@ -1,0 +1,282 @@
+#!/bin/sh
+# check-deployed-closure-dedup.shs — advisory gate on DeployedClosureManifestV1
+# (scripts/perf/deployed-closure-manifest.shs): a deployment must not ship two
+# copies of one sha256 that are not hardlinks of each other, and every
+# `.sha256` sidecar must actually match its companion binary's content.
+#
+# Part of the L5 wave "deployed-closure manifest + physical dedup" package
+# (doc lives at doc/07_guide/perf/deployed_closure_manifest_v1.md). This gate
+# is read-only over its --root: it never writes, links or deletes anything
+# there, and it makes no attempt to *fix* a duplicate — fixing which copy to
+# keep/hardlink is a deployment-authoring decision, not this gate's.
+#
+# Two independent failure classes, both fatal to the verdict:
+#   1. physical dedup   — manifest's `duplicated_bytes` field is > 0 (some
+#      sha256 exists on more than one distinct inode under --root).
+#   2. sidecar integrity — a `*.sha256` file whose recorded digest does not
+#      match the actual sha256 of its companion binary (same directory, name
+#      with the `.sha256` suffix stripped), or whose companion binary is
+#      missing outright.
+#
+# CONVENTION (matches sibling scripts/check/*.shs gates): verdict is the LAST
+# line of stdout:
+#   PASS  — <n> file(s) checked (root <path>), 0 duplicated bytes, 0 sidecar mismatch(es)   exit 0
+#   FAIL  — ...                                                                              exit 1
+#   ERROR — nothing was checked                                                              exit 2
+#
+# Usage:
+#   sh scripts/check/check-deployed-closure-dedup.shs [--root <dir>]
+#   sh scripts/check/check-deployed-closure-dedup.shs --selftest
+
+set -u
+SELF=$(basename "$0")
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+REPO_ROOT=$(cd "$SCRIPT_DIR/../.." && pwd)
+PRODUCER="$REPO_ROOT/scripts/perf/deployed-closure-manifest.shs"
+
+die() {
+    echo "$SELF: ERROR — $1"
+    exit 2
+}
+
+# run_gate <root> -> writes verdict to stdout, returns 0/1/2
+run_gate() {
+    _root=$1
+    [ -d "$_root" ] || { echo "$SELF: ERROR — root does not exist: $_root"; return 2; }
+
+    _tmp=$(mktemp -d) || { echo "$SELF: ERROR — mktemp -d failed"; return 2; }
+    _manifest="$_tmp/manifest.sdn"
+
+    if ! sh "$PRODUCER" "$_root" --out "$_manifest" >"$_tmp/producer.log" 2>&1; then
+        cat "$_tmp/producer.log" >&2
+        rm -rf "$_tmp"
+        echo "$SELF: ERROR — nothing was checked (manifest producer failed on $_root)"
+        return 2
+    fi
+
+    _file_count=$(awk -F', ' '/^    "simple.deployed-closure-manifest\/v1"/{
+        for (i=1;i<=NF;i++) {
+            gsub(/^ +| +$/,"",$i)
+        }
+        print $7
+    }' "$_manifest")
+    _dup_bytes=$(awk -F', ' '/^    "simple.deployed-closure-manifest\/v1"/{
+        for (i=1;i<=NF;i++) {
+            gsub(/^ +| +$/,"",$i)
+        }
+        print $6
+    }' "$_manifest")
+
+    case "$_file_count" in
+        ''|*[!0-9]*) rm -rf "$_tmp"; echo "$SELF: ERROR — nothing was checked (malformed manifest file_count)"; return 2 ;;
+    esac
+    case "$_dup_bytes" in
+        ''|*[!0-9]*) rm -rf "$_tmp"; echo "$SELF: ERROR — nothing was checked (malformed manifest duplicated_bytes)"; return 2 ;;
+    esac
+    [ "$_file_count" -gt 0 ] || { rm -rf "$_tmp"; echo "$SELF: ERROR — nothing was checked (0 files under $_root)"; return 2; }
+
+    # Sidecar integrity: every `*.sha256` row's recorded digest must match its
+    # companion binary's actual content.
+    _mismatches="$_tmp/mismatches"
+    : >"$_mismatches"
+    SHA_TOOL=
+    if command -v sha256sum >/dev/null 2>&1; then
+        SHA_TOOL=sha256sum
+    elif command -v shasum >/dev/null 2>&1; then
+        SHA_TOOL="shasum -a 256"
+    fi
+    if [ -n "$SHA_TOOL" ]; then
+        awk -F', ' '/^    "/ && $0 !~ /^    "simple\.deployed-closure-manifest/ { \
+            rel=$1; gsub(/^ *"|"$/,"",rel); kind=$6; gsub(/^ *"|" *$/,"",kind); \
+            if (kind == "sidecar") print rel }' "$_manifest" >"$_tmp/sidecars"
+        while IFS= read -r _srel; do
+            [ -n "$_srel" ] || continue
+            _sidecar_abs="$_root/$_srel"
+            _bin_rel=${_srel%.sha256}
+            _bin_abs="$_root/$_bin_rel"
+            if [ ! -f "$_bin_abs" ]; then
+                printf '%s: companion binary missing (%s)\n' "$_srel" "$_bin_rel" >>"$_mismatches"
+                continue
+            fi
+            # Accept both the bare-hash form (NF==1, what
+            # bootstrap-from-scratch.sh's own candidate-digest check expects)
+            # and the standard `sha256sum`/`shasum` "hash  filename" form
+            # (NF==2) that the files actually deployed under bin/release
+            # carry (verified 2026-09-12: bin/release/*/*.sha256 on this host
+            # are all "hash  filename").
+            _expected=$(awk '$1 ~ /^[0-9a-fA-F]{64}$/ { print tolower($1); exit }' "$_sidecar_abs")
+            if [ -z "$_expected" ]; then
+                printf '%s: sidecar has no parseable 64-hex digest\n' "$_srel" >>"$_mismatches"
+                continue
+            fi
+            _actual=$($SHA_TOOL "$_bin_abs" 2>/dev/null | awk '{print tolower($1)}')
+            if [ "$_expected" != "$_actual" ]; then
+                printf '%s: sidecar digest %s != actual %s (%s)\n' "$_srel" "$_expected" "$_actual" "$_bin_rel" >>"$_mismatches"
+            fi
+        done <"$_tmp/sidecars"
+    fi
+    _mismatch_count=$(wc -l <"$_mismatches" | tr -d ' ')
+
+    # Name the offending rows inline, before the manifest tmpfile is removed —
+    # a verdict pointing at a path that no longer exists names no offenders.
+    _dup_offenders="$_tmp/dup_offenders"
+    awk -F', ' '
+        $0 ~ /^    "/ && $0 !~ /^    "simple\.deployed-closure-manifest/ {
+            rel=$1; gsub(/^ *"|"$/, "", rel)
+            size=$2 + 0
+            sha=$3; gsub(/^ *"|"$/, "", sha)
+            inode=$4 + 0
+            n++
+            row_rel[n]=rel; row_size[n]=size; row_sha[n]=sha; row_inode[n]=inode
+            seen_key=sha SUBSEP inode
+            if (!(seen_key in inode_seen)) { inode_seen[seen_key]=1; inode_count[sha]++ }
+        }
+        END {
+            for (i = 1; i <= n; i++) {
+                if (inode_count[row_sha[i]] > 1) {
+                    printf "%s (inode %s, %s bytes, sha256 %s)\n", row_rel[i], row_inode[i], row_size[i], row_sha[i]
+                }
+            }
+        }
+    ' "$_manifest" | LC_ALL=C sort >"$_dup_offenders"
+
+    if [ "$_dup_bytes" -gt 0 ] || [ "$_mismatch_count" -gt 0 ]; then
+        if [ "$_dup_bytes" -gt 0 ]; then
+            echo "$SELF: duplicated_bytes=$_dup_bytes across $(wc -l <"$_dup_offenders" | tr -d ' ') row(s) sharing a non-hardlinked sha256:"
+            sed 's/^/  /' "$_dup_offenders"
+        fi
+        if [ "$_mismatch_count" -gt 0 ]; then
+            echo "$SELF: $_mismatch_count sidecar mismatch(es):"
+            sed 's/^/  /' "$_mismatches"
+        fi
+        echo "$SELF: FAIL — $_file_count file(s) checked (root $_root), $_dup_bytes duplicated bytes, $_mismatch_count sidecar mismatch(es)"
+        rm -rf "$_tmp"
+        return 1
+    fi
+
+    echo "$SELF: PASS — $_file_count file(s) checked (root $_root), 0 duplicated bytes, 0 sidecar mismatch(es)"
+    rm -rf "$_tmp"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# --selftest: 4 fixtures, fatal, run before every real scan.
+# ---------------------------------------------------------------------------
+selftest() {
+    _fail=0
+    _st=$(mktemp -d) || die "mktemp -d failed"
+    trap 'rm -rf "$_st"' EXIT INT TERM
+
+    _assert() {
+        _label=$1
+        _expect_rc=$2
+        shift 2
+        _out=$("$@" 2>&1)
+        _rc=$?
+        if [ "$_rc" -ne "$_expect_rc" ]; then
+            echo "SELFTEST FAIL: $_label — expected exit $_expect_rc, got $_rc" >&2
+            echo "--- output ---" >&2
+            echo "$_out" >&2
+            _fail=1
+        else
+            echo "SELFTEST ok: $_label (exit $_rc)"
+        fi
+    }
+
+    # Fixture 1: copy-dup — two files, identical content, distinct inodes -> FAIL
+    _f1="$_st/f1"
+    mkdir -p "$_f1/t1"
+    printf 'identical payload for fixture 1\n' >"$_f1/t1/simple"
+    cp "$_f1/t1/simple" "$_f1/t1/simple.backup-copy"
+    _assert "copy-dup (distinct inodes, same content) is FAIL" 1 run_gate "$_f1"
+
+    # Fixture 2: hardlink-dup — same content via a real hardlink -> PASS
+    _f2="$_st/f2"
+    mkdir -p "$_f2/t1"
+    printf 'identical payload for fixture 2\n' >"$_f2/t1/simple"
+    if ln "$_f2/t1/simple" "$_f2/t1/simple.hardlink-alias" 2>/dev/null; then
+        _assert "hardlink-dup (same inode, same content) is PASS" 0 run_gate "$_f2"
+    else
+        echo "SELFTEST SKIP: hardlink-dup fixture — ln(1) hardlinks unsupported on this filesystem" >&2
+    fi
+
+    # Fixture 3: sidecar mismatch — a *.sha256 file that does not match its
+    # companion binary's real content -> FAIL
+    _f3="$_st/f3"
+    mkdir -p "$_f3/t1"
+    printf 'binary content for fixture 3\n' >"$_f3/t1/simple_mcp_server"
+    printf 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef  simple_mcp_server\n' \
+        >"$_f3/t1/simple_mcp_server.sha256"
+    _assert "sidecar mismatch is FAIL" 1 run_gate "$_f3"
+
+    # Fixture 3b: sidecar that DOES match -> PASS, proving fixture 3 fails for
+    # the digest, not merely for the sidecar's existence.
+    _f3b="$_st/f3b"
+    mkdir -p "$_f3b/t1"
+    printf 'binary content for fixture 3b\n' >"$_f3b/t1/simple_mcp_server"
+    SHA_TOOL_ST=
+    if command -v sha256sum >/dev/null 2>&1; then
+        SHA_TOOL_ST=sha256sum
+    elif command -v shasum >/dev/null 2>&1; then
+        SHA_TOOL_ST="shasum -a 256"
+    fi
+    if [ -n "$SHA_TOOL_ST" ]; then
+        _digest3b=$($SHA_TOOL_ST "$_f3b/t1/simple_mcp_server" | awk '{print $1}')
+        printf '%s  simple_mcp_server\n' "$_digest3b" >"$_f3b/t1/simple_mcp_server.sha256"
+        _assert "matching sidecar is PASS" 0 run_gate "$_f3b"
+    else
+        echo "SELFTEST SKIP: matching-sidecar fixture — no sha256sum/shasum on PATH" >&2
+    fi
+
+    # Fixture 4: empty root -> ERROR (exit 2), propagated from the producer
+    _f4="$_st/f4/empty"
+    mkdir -p "$_f4"
+    _assert "empty root is ERROR" 2 run_gate "$_f4"
+
+    # Fixture 5: clean, no dup, no sidecar mismatch, single file -> PASS
+    _f5="$_st/f5"
+    mkdir -p "$_f5/t1"
+    printf 'unique payload for fixture 5\n' >"$_f5/t1/simple"
+    _assert "clean single-file root is PASS" 0 run_gate "$_f5"
+
+    rm -rf "$_st"
+    trap - EXIT INT TERM
+    return "$_fail"
+}
+
+# ---------------------------------------------------------------------------
+# main
+# ---------------------------------------------------------------------------
+ROOT="$REPO_ROOT/bin/release"
+DO_SELFTEST=0
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --root)
+            [ $# -ge 2 ] || die "--root requires an argument"
+            ROOT=$2
+            shift 2
+            ;;
+        --selftest)
+            DO_SELFTEST=1
+            shift
+            ;;
+        -h | --help)
+            echo "usage: $SELF [--root <dir>] [--selftest]"
+            exit 2
+            ;;
+        *)
+            die "unknown argument: $1"
+            ;;
+    esac
+done
+
+if ! selftest; then
+    echo "$SELF: ERROR — nothing was checked (selftest failed; fix the gate before trusting any verdict)"
+    exit 2
+fi
+
+[ "$DO_SELFTEST" -eq 1 ] && exit 0
+
+run_gate "$ROOT"
+exit $?

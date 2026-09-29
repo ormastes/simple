@@ -1,0 +1,61 @@
+# Generalization spec for
+# doc/08_tracking/bug/stage2_candidate_env_get_infinite_recursion_sigill_2026-09-26.md
+#
+# `_io_runtime_process_run_raw` is the process primitive under `shell_output`,
+# `shell_exec`-style helpers and `process_run`. Anything it calls that itself
+# spawns a process (host_os -> shell_output, shell_output) re-enters it and
+# recurses forever on the host that does not short-circuit. Pin the primitive
+# to spawn-free platform detection, and pin the sibling entry points that
+# route through it.
+
+use std.spec.step
+
+use std.io_runtime.{process_run, read_file_text, platform_name}
+
+
+fn function_body(source: text, name: text) -> text:
+    val lines = source.split("\n")
+    var out: [text] = []
+    var inside = false
+    for line in lines:
+        if line.starts_with("fn {name}(") or line.starts_with("pub fn {name}("):
+            inside = true
+            continue
+        if inside:
+            if line.starts_with("fn ") or line.starts_with("pub fn ") or line.starts_with("# ") or line.starts_with("@"):
+                break
+            # Comments are prose, not calls.
+            if line.trim().starts_with("#"):
+                continue
+            out = out.push(line)
+    out.join("\n")
+
+
+describe "std.io_runtime process primitive does not re-enter itself":
+    # @manual scenario evidence
+    it "_io_runtime_process_run_raw never calls a helper that spawns a process":
+        # @req REQ-SSPEC-LIB
+        step("read the io_runtime source")
+        val source = read_file_text("src/lib/nogc_sync_mut/io_runtime.spl")
+        val body = function_body(source, "_io_runtime_process_run_raw")
+        step("the body was located")
+        expect(body.len()).to_be_greater_than(0)
+        step("no spawning helper is referenced from the primitive")
+        expect(body.contains("host_os(")).to_equal(false)
+        expect(body.contains("shell_output(")).to_equal(false)
+        expect(body.contains("shell_exec(")).to_equal(false)
+
+    it "process_run through the primitive returns a real exit code":
+        # @req REQ-SSPEC-LIB
+        step("run uname via process_run")
+        val (stdout, _stderr, code) = process_run("uname", ["-s"])
+        step("exit 0 and a kernel name")
+        expect(code).to_equal(0)
+        expect(stdout.trim().len()).to_be_greater_than(0)
+
+    it "platform_name is the compiled-in, spawn-free detector":
+        # @req REQ-SSPEC-LIB
+        step("ask the compiled-in platform string")
+        val name = platform_name()
+        val known = ["linux", "macos", "freebsd", "windows", "illumos", "solaris"]
+        expect(known.contains(name)).to_equal(true)

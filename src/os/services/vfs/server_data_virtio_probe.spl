@@ -1,0 +1,236 @@
+# Pure deterministic server-data media discovery model.
+#
+# This module does not read PCI configuration space, MMIO registers, a DBFS
+# superblock, or construct a live BlockDevice.  Target transport owners may
+# translate already-verified facts into these fixed scalar records.  A future
+# namespace owner must acquire and revalidate the selected locator itself.
+
+pub val SERVER_DATA_VIRTIO_CANDIDATE_LIMIT_V1: u32 = 64u32
+pub val SERVER_DATA_VIRTIO_SERIAL_ID_V1: u64 = 0x534F534441544131u64
+pub val SERVER_DATA_DBFS_ROLE_ID_V1: u64 = 0x5344524F4C453031u64
+pub val SERVER_DATA_SECTOR_SIZE_V1: u32 = 512u32
+
+pub val SERVER_DATA_TRANSPORT_X86_VIRTIO_PCI_V1: u32 = 1u32
+pub val SERVER_DATA_TRANSPORT_ARM_VIRTIO_MMIO_V1: u32 = 2u32
+pub val SERVER_DATA_TRANSPORT_RV_VIRTIO_MMIO_V1: u32 = 3u32
+
+pub enum ServerDataVirtioProbeErrorV1:
+    None
+    InvalidRequest
+    CandidateLimitExceeded
+    InvalidCandidate
+    DuplicateIdentity
+    RootDeviceRejected
+    ReadOnlyRejected
+    FlushUnsupported
+    SectorSizeUnsupported
+    TransportUnsupported
+    NoMatchingMedia
+
+@repr("C")
+pub struct ServerDataMediaIdentityV1:
+    # These are closed vocabulary codes, not hashes.  A transport owner may
+    # emit them only after exact bounded-byte comparison with the canonical
+    # serial and on-media role strings; arbitrary strings cannot be folded in.
+    serial_id: u64
+    role_id: u64
+    uuid_hi: u64
+    uuid_lo: u64
+
+@repr("C")
+pub struct ServerDataVirtioCandidateV1:
+    identity: ServerDataMediaIdentityV1
+    transport: u32
+    locator_hi: u64
+    locator_lo: u64
+    sector_size: u32
+    writable: u32
+    flush_supported: u32
+
+@repr("C")
+pub struct ServerDataBlockAcquisitionV1:
+    identity: ServerDataMediaIdentityV1
+    transport: u32
+    locator_hi: u64
+    locator_lo: u64
+    sector_size: u32
+    writable: u32
+    flush_supported: u32
+
+pub struct ServerDataVirtioProbeResultV1:
+    ok: bool
+    error: ServerDataVirtioProbeErrorV1
+    acquisition: ServerDataBlockAcquisitionV1
+    visited: u32
+
+fn _server_data_empty_identity_v1() -> ServerDataMediaIdentityV1:
+    ServerDataMediaIdentityV1(serial_id: 0u64, role_id: 0u64, uuid_hi: 0u64, uuid_lo: 0u64)
+
+fn _server_data_empty_acquisition_v1() -> ServerDataBlockAcquisitionV1:
+    ServerDataBlockAcquisitionV1(
+        identity: _server_data_empty_identity_v1(),
+        transport: 0u32,
+        locator_hi: 0u64,
+        locator_lo: 0u64,
+        sector_size: 0u32,
+        writable: 0u32,
+        flush_supported: 0u32
+    )
+
+fn _server_data_probe_reject_v1(
+    error: ServerDataVirtioProbeErrorV1,
+    visited: u32
+) -> ServerDataVirtioProbeResultV1:
+    ServerDataVirtioProbeResultV1(
+        ok: false,
+        error: error,
+        acquisition: _server_data_empty_acquisition_v1(),
+        visited: visited
+    )
+
+pub fn server_data_media_identity_valid_v1(identity: ServerDataMediaIdentityV1) -> bool:
+    identity.serial_id != 0u64 and identity.role_id != 0u64 and
+        (identity.uuid_hi != 0u64 or identity.uuid_lo != 0u64)
+
+pub fn server_data_media_identity_equal_v1(
+    left: ServerDataMediaIdentityV1,
+    right: ServerDataMediaIdentityV1
+) -> bool:
+    left.serial_id == right.serial_id and left.role_id == right.role_id and
+        left.uuid_hi == right.uuid_hi and left.uuid_lo == right.uuid_lo
+
+fn _server_data_uuid_equal_v1(
+    left: ServerDataMediaIdentityV1,
+    right: ServerDataMediaIdentityV1
+) -> bool:
+    left.uuid_hi == right.uuid_hi and left.uuid_lo == right.uuid_lo
+
+fn _server_data_candidate_matches_v1(
+    candidate: ServerDataVirtioCandidateV1,
+    requested: ServerDataMediaIdentityV1
+) -> bool:
+    server_data_media_identity_equal_v1(candidate.identity, requested)
+
+fn _server_data_transport_supported_v1(transport: u32) -> bool:
+    transport == SERVER_DATA_TRANSPORT_X86_VIRTIO_PCI_V1 or
+        transport == SERVER_DATA_TRANSPORT_ARM_VIRTIO_MMIO_V1 or
+        transport == SERVER_DATA_TRANSPORT_RV_VIRTIO_MMIO_V1
+
+fn _server_data_candidate_locator_valid_v1(candidate: ServerDataVirtioCandidateV1) -> bool:
+    if candidate.transport == SERVER_DATA_TRANSPORT_X86_VIRTIO_PCI_V1:
+        # locator_hi is domain+1 (zero is invalid); locator_lo is canonical BDF.
+        return candidate.locator_hi != 0u64 and candidate.locator_lo <= 0xFFFFu64
+    if candidate.transport == SERVER_DATA_TRANSPORT_ARM_VIRTIO_MMIO_V1:
+        return candidate.locator_hi == 0u64 and candidate.locator_lo != 0u64 and
+            (candidate.locator_lo & 0x1FFu64) == 0u64
+    if candidate.transport == SERVER_DATA_TRANSPORT_RV_VIRTIO_MMIO_V1:
+        return candidate.locator_hi == 0u64 and candidate.locator_lo != 0u64 and
+            (candidate.locator_lo & 0x1FFu64) == 0u64
+    false
+
+pub fn server_data_x86_virtio_pci_candidate_v1(
+    identity: ServerDataMediaIdentityV1,
+    domain: u32,
+    bus: u8,
+    device: u8,
+    function: u8,
+    sector_size: u32,
+    writable: bool,
+    flush_supported: bool
+) -> ServerDataVirtioCandidateV1:
+    if device > 31u8 or function > 7u8:
+        return ServerDataVirtioCandidateV1(
+            identity: identity, transport: SERVER_DATA_TRANSPORT_X86_VIRTIO_PCI_V1, locator_hi: 0u64,
+            locator_lo: 0u64, sector_size: sector_size,
+            writable: 0u32, flush_supported: 0u32)
+    val packed_bdf = (bus.to_u64() << 8) | (device.to_u64() << 3) | function.to_u64()
+    ServerDataVirtioCandidateV1(
+        identity: identity,
+        transport: SERVER_DATA_TRANSPORT_X86_VIRTIO_PCI_V1,
+        locator_hi: domain.to_u64() + 1u64,
+        locator_lo: packed_bdf,
+        sector_size: sector_size,
+        writable: if writable: 1u32 else: 0u32,
+        flush_supported: if flush_supported: 1u32 else: 0u32
+    )
+
+pub fn server_data_virtio_mmio_candidate_v1(
+    identity: ServerDataMediaIdentityV1,
+    transport: u32,
+    mmio_base: u64,
+    sector_size: u32,
+    writable: bool,
+    flush_supported: bool
+) -> ServerDataVirtioCandidateV1:
+    ServerDataVirtioCandidateV1(
+        identity: identity,
+        transport: transport,
+        locator_hi: 0u64,
+        locator_lo: mmio_base,
+        sector_size: sector_size,
+        writable: if writable: 1u32 else: 0u32,
+        flush_supported: if flush_supported: 1u32 else: 0u32
+    )
+
+pub fn server_data_virtio_select_v1(
+    candidates: [ServerDataVirtioCandidateV1],
+    requested: ServerDataMediaIdentityV1,
+    root_identity: ServerDataMediaIdentityV1,
+    expected_transport: u32
+) -> ServerDataVirtioProbeResultV1:
+    if not server_data_media_identity_valid_v1(requested) or
+        not server_data_media_identity_valid_v1(root_identity):
+        return _server_data_probe_reject_v1(ServerDataVirtioProbeErrorV1.InvalidRequest, 0u32)
+    if not _server_data_transport_supported_v1(expected_transport):
+        return _server_data_probe_reject_v1(ServerDataVirtioProbeErrorV1.InvalidRequest, 0u32)
+    if candidates.len() > SERVER_DATA_VIRTIO_CANDIDATE_LIMIT_V1.to_i64():
+        return _server_data_probe_reject_v1(ServerDataVirtioProbeErrorV1.CandidateLimitExceeded, 0u32)
+
+    var selected = _server_data_empty_acquisition_v1()
+    var matches: u32 = 0u32
+    var visited: u32 = 0u32
+    var rejection = ServerDataVirtioProbeErrorV1.None
+    for candidate in candidates:
+        visited = visited + 1u32
+        if not _server_data_candidate_matches_v1(candidate, requested):
+            continue
+        matches = matches + 1u32
+        if _server_data_uuid_equal_v1(candidate.identity, root_identity):
+            rejection = ServerDataVirtioProbeErrorV1.RootDeviceRejected
+        elif not _server_data_transport_supported_v1(candidate.transport) or
+            candidate.transport != expected_transport:
+            rejection = ServerDataVirtioProbeErrorV1.TransportUnsupported
+        elif not _server_data_candidate_locator_valid_v1(candidate) or
+            candidate.writable > 1u32 or candidate.flush_supported > 1u32:
+            rejection = ServerDataVirtioProbeErrorV1.InvalidCandidate
+        elif candidate.writable != 1u32:
+            rejection = ServerDataVirtioProbeErrorV1.ReadOnlyRejected
+        elif candidate.flush_supported != 1u32:
+            rejection = ServerDataVirtioProbeErrorV1.FlushUnsupported
+        elif candidate.sector_size != SERVER_DATA_SECTOR_SIZE_V1:
+            rejection = ServerDataVirtioProbeErrorV1.SectorSizeUnsupported
+        else:
+            selected = ServerDataBlockAcquisitionV1(
+                identity: candidate.identity,
+                transport: candidate.transport,
+                locator_hi: candidate.locator_hi,
+                locator_lo: candidate.locator_lo,
+                sector_size: candidate.sector_size,
+                writable: candidate.writable,
+                flush_supported: candidate.flush_supported
+            )
+
+    # Cardinality has priority over per-candidate state: two records claiming
+    # the requested identity are ambiguous even if only one looks usable.
+    if matches > 1u32:
+        return _server_data_probe_reject_v1(ServerDataVirtioProbeErrorV1.DuplicateIdentity, visited)
+    if matches == 0u32:
+        return _server_data_probe_reject_v1(ServerDataVirtioProbeErrorV1.NoMatchingMedia, visited)
+    if rejection != ServerDataVirtioProbeErrorV1.None:
+        return _server_data_probe_reject_v1(rejection, visited)
+    ServerDataVirtioProbeResultV1(
+        ok: true,
+        error: ServerDataVirtioProbeErrorV1.None,
+        acquisition: selected,
+        visited: visited
+    )

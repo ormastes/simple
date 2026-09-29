@@ -593,71 +593,64 @@ kernel void kernel_draw_circle_filled(
 
 // ---- kernel_draw_rounded_rect ----
 
-// Per-pixel replica of ONE _emu_corner_arc(cx,cy,rad,dx_sign,dy_sign) call's
-// span coverage + blend, for absolute-local pixel (lx, ly). Replays the
-// exact midpoint-circle recurrence backend_emu.spl _emu_corner_arc uses
-// (decision boundary is `d < 0`, NOT `d <= 0` — that is a *different*
-// corner-arc algorithm used by sw_corner_arc/_rr_ring_hit for the OUTLINE
-// path) and blends `color` over `dst` once per iteration whose span-1 or
-// span-2 covers (lx, ly) — i.e. once per core.draw_rect_filled call CPU
-// would issue that touches this pixel, in the same order.
+// Per-pixel implementation of the SHARED ROUNDED-RECT CORNER COVERAGE
+// FORMULA v1 (2026-09-12). The single definition of the formula is the
+// comment block above emu_draw_rounded_rect in
+// src/lib/gc_async_mut/gpu/engine2d/backend_emu.spl — read it there; this is
+// a transliteration and must stay a bit-identical twin of it and of the
+// Vulkan lane (which reaches the same code, since backend_vulkan.spl's
+// draw_rounded_rect delegates to emu_draw_rounded_rect).
 //
-// NOT a plain membership test: CPU's emu_draw_rounded_rect issues SEVEN
-// core.draw_rect_filled calls (3 band rects + 4 corner arcs, each doing up
-// to r+1 midpoint iterations x 2 spans), and their pixel footprints OVERLAP
-// AT THE SEAMS — e.g. a corner arc's first iteration (py=0) draws its span
-// at the arc-center row, which is the adjoining side band's OWN first row,
-// so that row gets blended by BOTH the band rect and the corner arc. For an
-// opaque color that is a harmless redundant overwrite; for alpha<255 each
-// blend RE-COMPOSITES over the prior result — not idempotent. A
-// per-region-exclusive kernel (classify each pixel into exactly one of
-// middle-band/side-band/corner-arc, blend once) was tried first and
-// diverged from the CPU oracle on alpha<255 fills (confirmed via the
-// Simple-level replica in engine2d_shared_raster_parity_spec.spl before
-// this kernel was fixed) — bit-exactness requires literally replaying every
-// one of the seven primitives, in CPU's exact order, blending every hit.
-inline uint _rr_corner_arc_blend(int cx, int cy, int rad, int dx_sign, int dy_sign, int lx, int ly, uint color, uint dst) {
-    int px = rad;
-    int py = 0;
-    int d = 1 - rad;
-    while (px >= py) {
-        int row1 = cy + dy_sign * py;
-        int col_a = cx;
-        int col_b1 = cx + dx_sign * px;
-        int lo1 = (col_a < col_b1) ? col_a : col_b1;
-        int hi1 = (col_a < col_b1) ? col_b1 : col_a;
-        if (ly == row1 && lx >= lo1 && lx <= hi1) {
-            dst = blend_src_over(color, dst);
-        }
-        int row2 = cy + dy_sign * px;
-        int col_b2 = cx + dx_sign * py;
-        int lo2 = (col_a < col_b2) ? col_a : col_b2;
-        int hi2 = (col_a < col_b2) ? col_b2 : col_a;
-        if (ly == row2 && lx >= lo2 && lx <= hi2) {
-            dst = blend_src_over(color, dst);
-        }
-        py += 1;
-        if (d < 0) {
-            d += 2 * py + 1;
-        } else {
-            px -= 1;
-            d += 2 * (py - px) + 1;
-        }
+// Superseded the 2026-07-07 midpoint-circle replay. That version had to
+// replay CPU's seven primitives in order because their footprints OVERLAPPED
+// at the band/arc seams, so an alpha<255 fill was composited twice on the
+// seam rows and the result was order-dependent. The regions are now DISJOINT
+// on every lane — each pixel is blended exactly once — which is a
+// precondition of anti-aliasing, not a cosmetic change: a partial-coverage
+// pixel blended twice is simply wrong. The old rationale for replaying
+// overlaps therefore no longer applies and has been removed rather than left
+// standing next to code that contradicts it.
+//
+// isqrt is an integer Newton loop, NOT metal::sqrt: the shared formula is
+// defined on floor(sqrt(v)), which is algorithm-independent across lanes,
+// whereas a float sqrt can round differently and break bit-parity.
+inline long _rr_isqrt(long v) {
+    if (v <= 0) return 0;
+    long guess = v;
+    long next = (guess + 1) / 2;
+    while (next < guess) {
+        guess = next;
+        next = (guess + v / guess) / 2;
     }
-    return dst;
+    return guess;
 }
 
-// Rounded-rect FILL. Matches CPU emu_draw_rounded_rect (backend_emu.spl,
-// the canonical reference SoftwareBackend.draw_rounded_rect now delegates
-// to as of the 2026-07-06 outline-vs-fill fix): a full-height middle band
-// (cols [x+r, x+w-1-r]), two side bands (rows [y+r, y+h-1-r]), and four
-// FILLED corner arcs, replayed in the SAME order CPU issues them (see
-// _rr_corner_arc_blend's comment — this order/replay, not a per-region
-// membership test, is required for alpha<255 bit-exactness). 2D dispatch
-// over the [0,w) x [0,h) bounding box. Formerly this kernel drew the stale
-// pre-fix CPU OUTLINE behavior (edges + arc rings), which is why
-// CPU-vs-Metal parity diverged after the CPU fill fix landed — see
-// doc/08_tracking/bug/engine2d_metal_rounded_rect_kernel_stale_outline_2026-07-07.md
+// q = (2dx+1)^2 + (2dy+1)^2; cov256 = clamp(r*256 + 128 - isqrt(q*16384), 0, 256)
+// The 2d+1 terms measure from the pixel CENTRE to the continuous arc centre;
+// see the shared block in backend_emu.spl for why the half matters.
+inline int _rr_cov256(int dx, int dy, int r) {
+    long ex = (long)(2 * dx + 1);
+    long ey = (long)(2 * dy + 1);
+    long dist256 = _rr_isqrt((ex * ex + ey * ey) * 16384);
+    long cov = (long)r * 256 + 128 - dist256;
+    if (cov < 0) return 0;
+    if (cov > 256) return 256;
+    return (int)cov;
+}
+
+// a_eff = (alpha_byte(color) * cov) / 256, applied to the source alpha only;
+// the blend itself stays blend_src_over, unchanged and already parity-proven.
+inline uint _rr_modulate_alpha(uint color, int cov) {
+    int a = (int)((color >> 24) & 0xFFu);
+    int a_eff = (a * cov) / 256;
+    return (color & 0x00FFFFFFu) | ((uint)a_eff << 24);
+}
+
+// Rounded-rect FILL, anti-aliased corners. Seven DISJOINT regions: a
+// full-height middle band (cols [x+r, x+w-1-r]), two side bands (rows
+// [y+r, y+h-1-r]), and four r x r corner boxes. A pixel belongs to exactly
+// one, so it is blended exactly once and the result is order-independent.
+// 2D dispatch over the [0,w) x [0,h) bounding box.
 kernel void kernel_draw_rounded_rect(
     device uint* fb                  [[buffer(0)]],
     constant RoundedRectParams& p    [[buffer(1)]],
@@ -680,24 +673,27 @@ kernel void kernel_draw_rounded_rect(
     if (!inside_clip(px, py, clip)) return;
     int idx = py * p.fb_w + px;
 
-    uint dst = fb[idx];
-    // Middle band, left band, right band — same order as CPU emu_draw_rounded_rect.
-    if (lx >= r && lx < w - r) {
-        dst = blend_src_over(p.color, dst);
+    // Which of the seven regions is (lx, ly) in?
+    bool in_band = (lx >= r && lx < w - r) || (ly >= r && ly < h - r);
+    if (in_band) {
+        fb[idx] = blend_src_over(p.color, fb[idx]);
+        return;
     }
-    if (lx < r && ly >= r && ly < h - r) {
-        dst = blend_src_over(p.color, dst);
-    }
-    if (lx >= w - r && ly >= r && ly < h - r) {
-        dst = blend_src_over(p.color, dst);
-    }
-    // Four corner arcs — same (cx, cy, dx_sign, dy_sign) call order as CPU.
-    dst = _rr_corner_arc_blend(r, r, r, -1, -1, lx, ly, p.color, dst);
-    dst = _rr_corner_arc_blend(w - r - 1, r, r, 1, -1, lx, ly, p.color, dst);
-    dst = _rr_corner_arc_blend(r, h - r - 1, r, -1, 1, lx, ly, p.color, dst);
-    dst = _rr_corner_arc_blend(w - r - 1, h - r - 1, r, 1, 1, lx, ly, p.color, dst);
+    if (r <= 0) return;
 
-    fb[idx] = dst;
+    // A corner box. dx, dy are the shared formula's offsets, measured
+    // positive AWAY from the rect interior.
+    int dx = (lx < r) ? ((r - 1) - lx) : (lx - (w - r));
+    int dy = (ly < r) ? ((r - 1) - ly) : (ly - (h - r));
+    int cov = _rr_cov256(dx, dy, r);
+    if (cov >= 256) {
+        fb[idx] = blend_src_over(p.color, fb[idx]);
+    } else if (cov > 0) {
+        uint c = _rr_modulate_alpha(p.color, cov);
+        if (((c >> 24) & 0xFFu) != 0u) {
+            fb[idx] = blend_src_over(c, fb[idx]);
+        }
+    }
 }
 
 // ---- kernel_draw_rounded_rect_outline ----

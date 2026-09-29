@@ -3,12 +3,37 @@
 //! Consolidated logic for finding available C and C++ compilers,
 //! previously duplicated in `native_project.rs` and `native_binary.rs`.
 
+use crate::platform::path::to_native_owned;
 use crate::target::{LinkerFlavor, Target, TargetOS};
 
-const WINDOWS_GNU_C_COMPILERS: &[&str] = &["gcc", "clang"];
-const WINDOWS_GNU_CXX_COMPILERS: &[&str] = &["g++", "clang++"];
-const MSVC_C_COMPILERS: &[&str] = &["clang-cl", "clang", "cl.exe"];
+// Toolchain policy (2026-09-24): clang only -- never gcc/g++/cl.exe as a
+// host compiler. A missing clang is reported by `require_compiler` with the
+// install hint instead of silently switching to another toolchain.
+const WINDOWS_GNU_C_COMPILERS: &[&str] = &["clang"];
+const WINDOWS_GNU_CXX_COMPILERS: &[&str] = &["clang++"];
+const WINDOWS_GNU_CROSS_C_COMPILERS: &[&str] = &["x86_64-w64-mingw32-gcc"];
+const WINDOWS_GNU_CROSS_CXX_COMPILERS: &[&str] = &["x86_64-w64-mingw32-g++"];
+const MSVC_C_COMPILERS: &[&str] = &["clang-cl", "clang"];
 const MSVC_CXX_COMPILERS: &[&str] = &["clang-cl", "clang++", "clang"];
+
+/// True when `target` names the *same* Windows machine we are already
+/// running on with a GNU ABI, i.e. cross-prefixing the compiler would be
+/// wrong.
+///
+/// `Target::is_host()` only compares arch/os, not the explicit ABI a parsed
+/// triple carries in `linker_flavor_hint`. On a Windows host whose
+/// auto-detected flavor is MSVC (no `MSYSTEM`, no `target_env = "gnu"`
+/// toolchain), a target parsed from the literal string
+/// `"x86_64-pc-windows-gnu"` still satisfies `is_host()` on arch/os alone,
+/// even though the requested ABI (GNU) disagrees with the host's actual one
+/// (MSVC) — so a bare `gcc` picked up from PATH would silently be used
+/// instead of the `x86_64-w64-mingw32-*` cross toolchain. Compare against
+/// the host's *auto-detected* flavor (a fresh `Target` with no explicit
+/// hint) rather than `target.linker_flavor()`, which just echoes the hint
+/// back.
+fn is_native_gnu_windows_host(target: &Target) -> bool {
+    target.is_host() && Target::new(target.arch, target.os).linker_flavor() == LinkerFlavor::Gnu
+}
 
 fn compiler_matches_flavor(compiler: &str, flavor: LinkerFlavor) -> bool {
     match flavor {
@@ -22,7 +47,7 @@ fn cxx_candidates(target: &Target, flavor: LinkerFlavor) -> &'static [&'static s
     match (target.os, flavor) {
         (_, LinkerFlavor::Msvc) => MSVC_CXX_COMPILERS,
         (TargetOS::Windows, LinkerFlavor::Gnu) => WINDOWS_GNU_CXX_COMPILERS,
-        _ => &["clang++", "g++"],
+        _ => &["clang++"],
     }
 }
 
@@ -30,28 +55,43 @@ fn cxx_candidates(target: &Target, flavor: LinkerFlavor) -> &'static [&'static s
 ///
 /// Respects the `CC` environment variable. When `SIMPLE_LINKER_FLAVOR=msvc`,
 /// prefers MSVC-compatible compilers (`clang-cl`). On Windows, prefers `clang-cl`.
-/// On Unix, prefers `clang` over `gcc`.
+/// On Unix, uses `clang` (clang-only toolchain).
 pub fn find_c_compiler() -> String {
     detect_c_compiler_for_target(&Target::host())
+}
+
+fn nonblank_tool_override(value: String) -> Option<String> {
+    (!value.trim().is_empty()).then(|| to_native_owned(value))
 }
 
 /// Detect the C compiler for a specific target platform.
 ///
 /// The target's resolved linker flavor selects an ABI-compatible toolchain:
-/// Windows GNU prefers `gcc`; Windows MSVC prefers `clang-cl`.
-/// On Unix targets, defaults to `cc`.
+/// Windows GNU uses `clang`; Windows MSVC prefers `clang-cl`.
+/// On Unix targets, uses `clang`.
 pub fn detect_c_compiler_for_target(target: &Target) -> String {
     if let Ok(cc) = std::env::var("CC") {
-        return cc;
+        // MSYS does NOT path-convert env vars for native child processes, so a
+        // `CC=/d/llvm/bin/clang-cl` arrives here verbatim and is unusable as a
+        // program path. This value goes straight to `Command::new`, so it is a
+        // spawn boundary and must be converted here. Identity on Unix.
+        if let Some(selected) = nonblank_tool_override(cc) {
+            return selected;
+        }
     }
     let flavor = target.linker_flavor();
+    if target.os == TargetOS::Windows && flavor == LinkerFlavor::Gnu && !is_native_gnu_windows_host(target) {
+        return WINDOWS_GNU_CROSS_C_COMPILERS[0].to_string();
+    }
     if flavor == LinkerFlavor::Msvc {
         for cc in MSVC_C_COMPILERS {
-            if command_exists(cc) && compiler_matches_flavor(cc, flavor) {
-                return cc.to_string();
+            if let Some(resolved) = resolve_working_command(cc) {
+                if compiler_matches_flavor(&resolved, flavor) {
+                    return resolved;
+                }
             }
         }
-        return "cl.exe".to_string();
+        return "clang-cl".to_string();
     }
     match target.os {
         TargetOS::Windows => {
@@ -60,17 +100,33 @@ pub fn detect_c_compiler_for_target(target: &Target) -> String {
                     return cc.to_string();
                 }
             }
-            "gcc".to_string()
+            "clang".to_string()
         }
-        _ if command_exists("clang") => "clang".to_string(),
-        _ => "gcc".to_string(),
+        _ => "clang".to_string(),
+    }
+}
+
+/// Error for a required clang compiler that is not installed (clang-only
+/// toolchain; no gcc/g++/cl.exe fallback), naming the install command.
+pub fn missing_compiler_error(tool: &str) -> String {
+    format!(
+        "required compiler `{tool}` was not found on PATH (clang-only toolchain;          gcc, g++ and MSVC cl.exe are not used as a fallback).          Install it with: sh scripts/setup/bootstrap-prereqs.shs install"
+    )
+}
+
+/// Fail fast when the selected compiler cannot be run.
+pub fn require_compiler(tool: &str) -> Result<(), String> {
+    if command_exists(tool) {
+        Ok(())
+    } else {
+        Err(missing_compiler_error(tool))
     }
 }
 
 /// Find a C++ compiler.
 ///
-/// Uses the host target's resolved linker flavor. Windows GNU prefers `g++`;
-/// Windows MSVC prefers `clang-cl`. On Unix, tries clang++ then g++.
+/// Uses the host target's resolved linker flavor. Windows GNU uses `clang++`;
+/// Windows MSVC prefers `clang-cl`. On Unix, `clang++`.
 pub fn find_cxx_compiler() -> String {
     detect_cxx_compiler_for_target(&Target::host())
 }
@@ -81,18 +137,26 @@ pub fn find_cxx_compiler() -> String {
 /// linker flavor determines the ABI-compatible automatic candidates.
 pub fn detect_cxx_compiler_for_target(target: &Target) -> String {
     if let Ok(cxx) = std::env::var("CXX") {
-        return cxx;
+        // Same spawn-boundary reasoning as `CC` above. Identity on Unix.
+        if let Some(selected) = nonblank_tool_override(cxx) {
+            return selected;
+        }
     }
     let flavor = target.linker_flavor();
+    if target.os == TargetOS::Windows && flavor == LinkerFlavor::Gnu && !is_native_gnu_windows_host(target) {
+        return WINDOWS_GNU_CROSS_CXX_COMPILERS[0].to_string();
+    }
     for cxx in cxx_candidates(target, flavor) {
-        if command_exists(cxx) && compiler_matches_flavor(cxx, flavor) {
-            return cxx.to_string();
+        if let Some(resolved) = resolve_working_command(cxx) {
+            if compiler_matches_flavor(&resolved, flavor) {
+                return resolved;
+            }
         }
     }
     if flavor == LinkerFlavor::Msvc {
         "clang-cl".to_string()
     } else {
-        "g++".to_string()
+        "clang++".to_string()
     }
 }
 
@@ -196,7 +260,7 @@ pub fn is_msvc_linker_flavor() -> bool {
 /// Verifies both that the process can be spawned AND that it exits
 /// successfully (exit code 0). This catches cases like a clang++
 /// that exists on PATH but crashes due to missing shared libraries.
-pub fn command_exists(name: &str) -> bool {
+fn command_works(name: &str) -> bool {
     std::process::Command::new(name)
         .arg("--version")
         .stdout(std::process::Stdio::null())
@@ -206,27 +270,111 @@ pub fn command_exists(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn windows_where_candidates(output: &[u8]) -> Vec<String> {
+    String::from_utf8_lossy(output)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Resolve the first runnable installation of a command. Windows `where.exe`
+/// can report several PATH hits; invoking only the bare name retries the first
+/// broken installation forever and never reaches a later healthy compiler.
+fn resolve_working_command(name: &str) -> Option<String> {
+    #[cfg(target_os = "windows")]
+    if let Ok(output) = std::process::Command::new("where.exe").arg(name).output() {
+        if output.status.success() {
+            for candidate in windows_where_candidates(&output.stdout) {
+                if command_works(&candidate) {
+                    return Some(candidate);
+                }
+            }
+        }
+    }
+    command_works(name).then(|| name.to_string())
+}
+
+pub fn command_exists(name: &str) -> bool {
+    resolve_working_command(name).is_some()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::target::TargetArch;
 
     #[test]
-    fn windows_gnu_prefers_gnu_compilers() {
-        let target = Target::new(TargetArch::X86_64, TargetOS::Windows);
-        assert_eq!(WINDOWS_GNU_C_COMPILERS, &["gcc", "clang"]);
-        assert_eq!(cxx_candidates(&target, LinkerFlavor::Gnu), &["g++", "clang++"]);
+    fn blank_tool_overrides_use_target_detection() {
+        assert!(nonblank_tool_override(String::new()).is_none());
+        assert!(nonblank_tool_override(" \t ".to_string()).is_none());
+        assert!(nonblank_tool_override("clang++".to_string()).is_some());
+    }
+
+    #[test]
+    fn windows_gnu_uses_clang_candidates() {
+        let target = Target::parse("x86_64-pc-windows-gnu").unwrap();
+        assert_eq!(WINDOWS_GNU_C_COMPILERS, &["clang"]);
+        assert_eq!(cxx_candidates(&target, LinkerFlavor::Gnu), &["clang++"]);
         assert!(!compiler_matches_flavor("clang-cl", LinkerFlavor::Gnu));
+        assert_eq!(target.linker_flavor(), LinkerFlavor::Gnu);
+        assert_eq!(target.triple_str(), "x86_64-pc-windows-gnu");
+        assert_eq!(detect_c_compiler_for_target(&target), "x86_64-w64-mingw32-gcc");
+        assert_eq!(detect_cxx_compiler_for_target(&target), "x86_64-w64-mingw32-g++");
     }
 
     #[test]
     fn windows_msvc_keeps_msvc_compilers() {
-        let target = Target::new(TargetArch::X86_64, TargetOS::Windows);
-        assert_eq!(MSVC_C_COMPILERS, &["clang-cl", "clang", "cl.exe"]);
+        let target = Target::parse("x86_64-pc-windows-msvc").unwrap();
+        assert_eq!(MSVC_C_COMPILERS, &["clang-cl", "clang"]);
         assert_eq!(
             cxx_candidates(&target, LinkerFlavor::Msvc),
             &["clang-cl", "clang++", "clang"]
         );
         assert!(compiler_matches_flavor("clang-cl", LinkerFlavor::Msvc));
+        assert_eq!(target.linker_flavor(), LinkerFlavor::Msvc);
+        assert_eq!(target.triple_str(), "x86_64-pc-windows-msvc");
+        if cfg!(target_os = "windows") {
+            let resolved = detect_cxx_compiler_for_target(&target);
+            assert!(
+                command_works(&resolved),
+                "resolved compiler is not runnable: {resolved}"
+            );
+            assert!(
+                is_msvc_target(&resolved),
+                "resolved compiler has the wrong ABI: {resolved}"
+            );
+        }
+    }
+
+    #[test]
+    fn windows_where_candidates_preserve_all_installations_in_order() {
+        assert_eq!(
+            windows_where_candidates(b"C:\\broken\\clang-cl.exe\r\nC:\\healthy\\clang-cl.exe\r\n"),
+            vec![
+                "C:\\broken\\clang-cl.exe".to_string(),
+                "C:\\healthy\\clang-cl.exe".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn host_compiler_candidates_are_clang_only() {
+        for list in [WINDOWS_GNU_C_COMPILERS, WINDOWS_GNU_CXX_COMPILERS, MSVC_C_COMPILERS, MSVC_CXX_COMPILERS] {
+            for cc in list {
+                assert!(!matches!(*cc, "gcc" | "g++" | "cc" | "c++" | "cl" | "cl.exe"), "{cc}");
+            }
+        }
+        let linux = Target::new(TargetArch::X86_64, TargetOS::Linux);
+        assert_eq!(cxx_candidates(&linux, LinkerFlavor::Gnu), &["clang++"]);
+    }
+
+    #[test]
+    fn missing_compiler_error_names_tool_and_install_command() {
+        let message = missing_compiler_error("clang-cl");
+        assert!(message.contains("`clang-cl`"), "{message}");
+        assert!(message.contains("sh scripts/setup/bootstrap-prereqs.shs install"), "{message}");
+        assert!(require_compiler("definitely-not-a-compiler-xyz").is_err());
     }
 }

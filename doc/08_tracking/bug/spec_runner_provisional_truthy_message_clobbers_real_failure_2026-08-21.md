@@ -1,4 +1,9 @@
 # Spec runner: a falsy `expect(x)` subject overwrites an earlier real matcher failure message
+## Closed 2026-09-16 — ...ge - Date: 2026-08-21 - Status: RESOLVED 2026-08-21 - Where: `src/compiler_rust/compiler/s
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - Date: 2026-08-21
 - Status: RESOLVED 2026-08-21
@@ -66,3 +71,4 @@ Test: `cargo test --release --test bdd_provisional_message_test` -> 2 passed,
 0 failed. It is fixture-driven — each deliberately-failing spec is written to a
 temp dir and run in a child process, and the test asserts on the CAPTURED runner
 output, so no spec in the tree is left red.
+

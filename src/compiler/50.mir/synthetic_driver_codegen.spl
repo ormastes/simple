@@ -7,8 +7,8 @@
 use compiler.mir.mir_instructions.{MirFunction, MirBlock, MirInst, MirInstKind, MirOperand, MirOperandKind, mir_operand_const_int}
 use compiler.mir.mir_types.{MirConstValue, MirType, MirTypeKind, MirSignature}
 use compiler.mir.synthetic_driver_registration.{plan_synthetic_driver_registration, SyntheticDriverRegistrationPlan, SyntheticDriverRegistrationStatus}
-use compiler.hir.hir_definitions.{HirFunction}
-use compiler.hir.hir_types.{SymbolTable}
+use compiler.hir.hir_definitions.{HirFunction, HirModule}
+use compiler.hir.hir_types.{SymbolTable, SymbolId}
 use compiler.common.attributes.{DriverManifestAttr}
 
 fn apply_synthetic_driver_codegen(fn_: HirFunction, mir_fn: MirFunction, symbols: SymbolTable) -> MirFunction:
@@ -101,3 +101,47 @@ fn make_register_static_driver_call(manifest: DriverManifestAttr, ops_name: text
         kind: MirInstKind.Call(nil, func_operand, [manifest_operand, ops_operand]),
         span: nil
     )
+
+# ============================================================================
+# Module-level / impl-level @driver(...) sugar
+# doc/03_plan/os/driver/driver_framework_module_level_sugar.md Phase 2 step 1
+# ============================================================================
+
+# One auto-collected driver operation: the Driver-trait slot it fills and the
+# function that fills it.
+struct DriverOp:
+    name: text
+    symbol: SymbolId
+
+# The Driver trait surface a module-level @driver(...) auto-collects against.
+# Exactly the eight names the plan enumerates; a function whose name is not
+# in this list is never swept into a synthesized DriverOps record.
+fn driver_trait_op_names() -> [text]:
+    ["init", "probe", "attach", "detach", "read", "write", "ioctl", "irq"]
+
+# Auto-collect the Driver ops a module carries, by matching its EXPORTED
+# function names against the Driver trait surface.
+#
+# This is the entry point a module-level (or impl-level) `@driver(...)` with
+# no explicit `ops=` lowers through: the attribute names the manifest, and the
+# op record is derived from the functions the module actually exports. A
+# module that exports nothing collects nothing -- an empty list, never an
+# error sentinel.
+fn collect_module_driver_ops(module: HirModule) -> [DriverOp]:
+    val surface = driver_trait_op_names()
+    var ops: [DriverOp] = []
+    # A module with no function table at all (an empty HirModule, as a
+    # freshly-constructed one is) collects nothing. Reading `.keys()` off the
+    # absent map would raise instead, and the contract is an empty list.
+    if not module.functions.?:
+        return ops
+    for symbol in module.functions.keys():
+        if val fn_ = module.functions.get(symbol):
+            if not fn_.is_public:
+                continue
+            var i = 0
+            while i < surface.len():
+                if fn_.name == surface[i]:
+                    ops.push(DriverOp(name: fn_.name, symbol: symbol))
+                i = i + 1
+    ops

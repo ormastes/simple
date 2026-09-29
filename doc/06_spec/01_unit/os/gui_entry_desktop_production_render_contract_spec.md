@@ -17,13 +17,23 @@
 
 #### installs the exact generated WM snapshot once before every canonical desktop compositor and frame
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- installs the exact generated WM snapshot once before every canonical desktop compositor and frame
+   - Expected: _desktop_theme_installer_occurrences(src) equals `1`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("installs the exact generated WM snapshot once before every canonical desktop compositor and frame")
 val x86 = file_read("examples/09_embedded/simple_os/arch/x86_64/gui_entry_desktop.spl")
 val arm64 = file_read("examples/09_embedded/simple_os/arch/arm64/gui_entry_desktop.spl")
 val riscv64 = file_read("examples/09_embedded/simple_os/arch/riscv64/gui_entry_desktop.spl")
@@ -45,13 +55,18 @@ for src in [x86, arm64, riscv64]:
 
 #### should keep registered-only shaping independent of the stubbed host font ABI
 
+- should keep registered-only shaping independent of the stubbed host font ABI
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 28 lines folded for reproduction.
+Runnable source: 30 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("should keep registered-only shaping independent of the stubbed host font ABI")
 val renderer = file_read("src/lib/nogc_sync_mut/text_layout/font_renderer.spl")
 val shaper = file_read("src/lib/skia/feature/shaper/shaper.spl")
 val bootstrap = file_read("src/os/desktop/font_bootstrap.spl")
@@ -86,13 +101,18 @@ expect(direct_read).to_be_less_than(mounted_gate)
 
 #### boots validated dynamic scanout into persistent Engine2D shared shell rendering
 
+- boots validated dynamic scanout into persistent Engine2D shared shell rendering
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 41 lines folded for reproduction.
+Runnable source: 43 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("boots validated dynamic scanout into persistent Engine2D shared shell rendering")
 val src = file_read("examples/09_embedded/simple_os/arch/x86_64/gui_entry_desktop.spl")
 expect(src).to_contain("bga_init_scanout")
 expect(src).to_contain("mmio_disable_test_mode()")
@@ -140,13 +160,18 @@ expect(src.contains("shell.run()")).to_be(false)
 
 #### routes WM Simple Web evidence through the production desktop entry
 
+- routes WM Simple Web evidence through the production desktop entry
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 28 lines folded for reproduction.
+Runnable source: 30 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("routes WM Simple Web evidence through the production desktop entry")
 val targets = file_read("src/os/_QemuRunner/runner_targets.spl")
 val scenarios = file_read("src/os/_QemuRunner/scenario_catalog.spl")
 val builds = file_read("src/os/_QemuRunner/os_build_run.spl")
@@ -181,13 +206,18 @@ expect(x64_readiness.contains("arch/x86_64/wm_entry.spl")).to_be(false)
 
 #### routes the AArch64 boot desktop through canonical Engine2D owners and optional host GPU
 
+- routes the AArch64 boot desktop through canonical Engine2D owners and optional host GPU
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 40 lines folded for reproduction.
+Runnable source: 42 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("routes the AArch64 boot desktop through canonical Engine2D owners and optional host GPU")
 val src = file_read("examples/09_embedded/simple_os/arch/arm64/gui_entry_desktop.spl")
 val mount_font_media = src.index_of("    vfs_boot_init_virtio_fat32()")
 val register_font = src.index_of("val font_loaded = simpleos_desktop_register_selected_fonts_from_vfs()")
@@ -234,13 +264,18 @@ expect(src.contains(".host_gpu_base")).to_be(false)
 
 #### projects ARM64 window geometry and bounded scroll through DrawIR and requires Vulkan on Linux
 
+- projects ARM64 window geometry and bounded scroll through DrawIR and requires Vulkan on Linux
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 25 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("projects ARM64 window geometry and bounded scroll through DrawIR and requires Vulkan on Linux")
 val entry = file_read("examples/09_embedded/simple_os/arch/arm64/gui_entry_desktop.spl")
 val linux_entry = file_read("examples/09_embedded/simple_os/arch/arm64/gui_entry_desktop_linux_qemu.spl")
 val compositor = file_read("src/os/compositor/compositor.spl")
@@ -270,13 +305,18 @@ expect(entry.contains("engine.present()")).to_be(false)
 
 #### routes the RV64 dynamic scanout through canonical Engine2D owners and one runtime facade
 
+- routes the RV64 dynamic scanout through canonical Engine2D owners and one runtime facade
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 37 lines folded for reproduction.
+Runnable source: 39 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("routes the RV64 dynamic scanout through canonical Engine2D owners and one runtime facade")
 val src = file_read("examples/09_embedded/simple_os/arch/riscv64/gui_entry_desktop.spl")
 val display = file_read("src/os/kernel/arch/riscv64/display.spl")
 val resolver = file_read("src/os/_QemuRunner/scenario_disks.spl")
@@ -320,13 +360,20 @@ expect(builds).to_contain("[\"build/os/generated\", \"src/os\", \"src/lib\", \"e
 
 #### submits canonical WM Draw IR to validated host presentation before local fallback
 
+- submits canonical WM Draw IR to validated host presentation before local fallback
+   - Expected: unfiltered_composition equals `-1`
+   - Expected: composition_build equals `validated_composition`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 73 lines folded for reproduction.
+Runnable source: 75 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("submits canonical WM Draw IR to validated host presentation before local fallback")
 val src = file_read("src/os/compositor/engine2d_wm_frame_executor.spl")
 val mapper = file_read("src/os/kernel/arch/x86_64/host_gpu_ivshmem_vmm.spl")
 val bridge = file_read("src/os/lib/gpu_bridge/host_gpu_ivshmem.spl")
@@ -411,7 +458,7 @@ expect(src.contains("engine2d_draw_ir_adv_composition_with_images(self.engine"))
 | Category | Hardware & OS |
 | Status | Active |
 | Source | `test/01_unit/os/gui_entry_desktop_production_render_contract_spec.spl` |
-| Updated | 2026-08-09 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -432,63 +479,56 @@ Tests covering SimpleOS production desktop render entry.
 
 </details>
 
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-OS`
+<!-- sspec-maintain:traceability:end -->
+
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `82dc5e48e4ad696aa9110329c9888917fd7a49e6951ca91067fb6225346cf0ea`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `e20549317ba9be29fe421d5adae16415f87fcfe0af9f418a805b3713cb8c450a`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `82dc5e48e4ad696aa9110329c9888917fd7a49e6951ca91067fb6225346cf0ea`.
+Source SHA-256: `e20549317ba9be29fe421d5adae16415f87fcfe0af9f418a805b3713cb8c450a`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `82dc5e48e4ad696aa9110329c9888917fd7a49e6951ca91067fb6225346cf0ea`
-Analyzer: `1`; rules: `ssdoc-rules/1`
-Raw score: **77/100**; effective score: **77/100**; blockers: **0**.
+Source SHA-256: `e20549317ba9be29fe421d5adae16415f87fcfe0af9f418a805b3713cb8c450a`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **87/100**; effective score: **87/100**; blockers: **0**.
 
-SSpec documentization score: 77/100
+SSpec documentization score: 87/100
 source: test/01_unit/os/gui_entry_desktop_production_render_contract_spec.spl
 mirror: doc/06_spec/01_unit/os/gui_entry_desktop_production_render_contract_spec.md (current)
-findings: 12 blockers: 0
-  narrative=80 structure=55 oracle=80
-  traceability=80 evidence=100 coverage=100 maintainability=45
+findings: 7 blockers: 0
+  narrative=100 structure=95 oracle=80
+  traceability=100 evidence=70 coverage=100 maintainability=70
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
 doc/06_spec/01_unit/os/gui_entry_desktop_production_render_contract_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/os/gui_entry_desktop_production_render_contract_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, assumptions/preconditions, primary workflow, traceability, unsupported/limitations, recovery/troubleshooting
+doc/06_spec/01_unit/os/gui_entry_desktop_production_render_contract_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
   why: A test dump is not a complete professional specification manual.
   improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/os/gui_entry_desktop_production_render_contract_spec.spl:1:1: advice SSDOC-MNT-001 [maintainability] (-15): multiple scenarios form a flat, unfolded presentation
-  why: Long flat dumps obscure the primary workflow.
-  improve: Group secondary detail and keep the primary workflow visible.
-test/01_unit/os/gui_entry_desktop_production_render_contract_spec.spl:1:1: advice SSDOC-MNT-007 [maintainability] (-10): research, plan, architecture, or design metadata links are incomplete
-  why: Reviewers need selected lifecycle evidence, not inferred project state.
-  improve: Link the selected lifecycle artifacts or configure a reasoned scope suppression.
-test/01_unit/os/gui_entry_desktop_production_render_contract_spec.spl:1:1: warning SSDOC-NAR-001 [narrative] (-20): missing authored purpose and audience
-  why: Readers need scope, audience, and intent before executable detail.
-  improve: Add authored purpose, scope, and audience facts.
 test/01_unit/os/gui_entry_desktop_production_render_contract_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-20): 2 unexplained numeric expected value(s)
   why: Reviewers need to know why a magic expected value is authoritative.
   improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/01_unit/os/gui_entry_desktop_production_render_contract_spec.spl:1:1: warning SSDOC-TRC-001 [traceability] (-20): no implemented requirement identity
-  why: Stable requirement identity connects intent, implementation, and evidence.
-  improve: Bind scenarios to stable selected REQ identities.
-test/01_unit/os/gui_entry_desktop_production_render_contract_spec.spl:17:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'installs the exact generated WM snapshot once before every canonical desktop compositor and frame' has no visible step flow
-  why: Ordered visible actions make the manual operable.
-  improve: Add ordered step("...") calls for meaningful actions.
-test/01_unit/os/gui_entry_desktop_production_render_contract_spec.spl:34:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'should keep registered-only shaping independent of the stubbed host font ABI' has no visible step flow
-  why: Ordered visible actions make the manual operable.
-  improve: Add ordered step("...") calls for meaningful actions.
-test/01_unit/os/gui_entry_desktop_production_render_contract_spec.spl:34:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should keep registered-only shaping independent of the stubbed host font ABI' describes the test rather than its outcome
+test/01_unit/os/gui_entry_desktop_production_render_contract_spec.spl:28:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'installs the exact generated WM snapshot once before every canonical desktop compositor and frame' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/os/gui_entry_desktop_production_render_contract_spec.spl:47:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should keep registered-only shaping independent of the stubbed host font ABI' describes the test rather than its outcome
   why: Outcome names describe product behavior rather than test mechanics.
   improve: Rename it to the observable product outcome.
-test/01_unit/os/gui_entry_desktop_production_render_contract_spec.spl:64:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'boots validated dynamic scanout into persistent Engine2D shared shell rendering' has no visible step flow
-  why: Ordered visible actions make the manual operable.
-  improve: Add ordered step("...") calls for meaningful actions.
-test/01_unit/os/gui_entry_desktop_production_render_contract_spec.spl:107:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'routes WM Simple Web evidence through the production desktop entry' has no visible step flow
-  why: Ordered visible actions make the manual operable.
-  improve: Add ordered step("...") calls for meaningful actions.
+test/01_unit/os/gui_entry_desktop_production_render_contract_spec.spl:47:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should keep registered-only shaping independent of the stubbed host font ABI' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/os/gui_entry_desktop_production_render_contract_spec.spl:79:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'boots validated dynamic scanout into persistent Engine2D shared shell rendering' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
 <!-- sspec-maintain:scorecard:end -->

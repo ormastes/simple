@@ -39,6 +39,13 @@ pub struct LlvmBackend {
     pub(super) cpu: TargetCpu,
     /// Enable coverage instrumentation
     pub(super) coverage_enabled: bool,
+    /// Memory-order mode of the function currently being compiled, set from
+    /// its `@volatile` / `@no_reorder` attributes at the top of
+    /// `compile_function` (design A.2, `asm_embedded_hal_and_dual_run.md`):
+    /// bit 0 = every Load/Store is `volatile`; bit 1 = a
+    /// `fence syncscope("singlethread") seq_cst` follows every Load/Store and
+    /// inline-asm call (compiler barrier only — no hardware fence).
+    pub(super) mem_order_mode: std::cell::Cell<u8>,
     // --- borrowing fields first (dropped before context) ---
     #[cfg(feature = "llvm")]
     pub(super) module: RefCell<Option<Module<'static>>>,
@@ -102,6 +109,63 @@ pub(super) fn llvm_memprof_enabled() -> bool {
 }
 
 // Manual Debug implementation since Context/Module/Builder don't implement Debug
+
+/// Default x86-64 CPU profile for LLVM codegen.
+///
+/// This is the knob that decides whether LLVM's loop and SLP vectorizers --
+/// both enabled in `optimize_module_ir` -- are allowed to emit AVX-512. It was
+/// pinned to `x86-64-v3`, i.e. AVX2, so on a host with full AVX-512 support
+/// every natively built binary (the DB server, the HTTP server, the software
+/// renderer) was vectorized at 256 bits and never 512, with nothing in the
+/// build output saying so.
+///
+/// Widening follows the same discipline as the pure-Simple auto-vectorizer's
+/// planning level (`auto_vectorize_target.spl`), for the same reason: a CPU
+/// name is a REQUEST, not proof about the execution domain.
+///
+///   * the output must target the host -- a cross-compiled artifact must never
+///     be widened from the builder's CPUID, or it will fault on the machine it
+///     was built for;
+///   * AVX-512 F, VL and BW must all be present, VL because LLVM still emits
+///     128/256-bit forms for short trips and BW because byte/word lanes are
+///     otherwise unencodable;
+///   * anything short of that returns the previous `x86-64-v3` baseline, so
+///     this can only widen, never narrow.
+///
+/// `SIMPLE_X86_64_DEFAULT_CPU` overrides the choice outright, which is the
+/// escape hatch for reproducible builds that must not vary with the builder.
+fn default_x86_64_cpu_name(triple: &str) -> &'static str {
+    const BASELINE: &str = "x86-64-v3";
+    const WIDE: &str = "x86-64-v4";
+
+    if let Ok(forced) = std::env::var("SIMPLE_X86_64_DEFAULT_CPU") {
+        return match forced.trim() {
+            "x86-64-v4" => WIDE,
+            "x86-64-v3" => BASELINE,
+            "x86-64-v2" => "x86-64-v2",
+            "x86-64" => "x86-64",
+            _ => BASELINE,
+        };
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    {
+        // Host-targeting only. `triple` is the requested output triple; if it
+        // is not an x86_64 triple the caller is cross-compiling and the host
+        // receipt proves nothing about the target.
+        let targets_host = triple.starts_with("x86_64") || triple.starts_with("amd64");
+        if targets_host
+            && std::is_x86_feature_detected!("avx512f")
+            && std::is_x86_feature_detected!("avx512vl")
+            && std::is_x86_feature_detected!("avx512bw")
+        {
+            return WIDE;
+        }
+    }
+    let _ = triple;
+    BASELINE
+}
+
 impl std::fmt::Debug for LlvmBackend {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LlvmBackend")
@@ -137,6 +201,7 @@ impl LlvmBackend {
             let always_inline = self.context_ref().create_enum_attribute(kind, 0);
             func.add_attribute(AttributeLoc::Function, always_inline);
         }
+        self.apply_asm_placement_attrs(func, attrs);
         // M4: mark every defined function `sanitize_address` when the ASan
         // lane is on, mirroring what clang's `-fsanitize=address` does — the
         // `asan` module pass (run in `optimize_module_ir`) only instruments
@@ -145,6 +210,41 @@ impl LlvmBackend {
             let kind = Attribute::get_named_enum_kind_id("sanitize_address");
             let asan_attr = self.context_ref().create_enum_attribute(kind, 0);
             func.add_attribute(AttributeLoc::Function, asan_attr);
+        }
+    }
+
+    /// Asm-embedding contract (design A.2): `@naked` -> LLVM `naked` +
+    /// `noinline` + `nounwind`; `@section("name")` -> `section "name"`;
+    /// `@align(n)` -> `align n`; `@global` -> external linkage (the
+    /// unmangled name is kept by `mangle.rs`, which treats `global` like
+    /// `export`). Attribute arguments arrive encoded as `section=<name>` /
+    /// `align=<n>` (see `append_asm_placement_attribute_metadata`).
+    #[cfg(feature = "llvm")]
+    fn apply_asm_placement_attrs(&self, func: FunctionValue<'static>, attrs: &[String]) {
+        for attr in attrs {
+            match attr.as_str() {
+                "naked" => {
+                    for name in ["naked", "noinline", "nounwind"] {
+                        let kind = Attribute::get_named_enum_kind_id(name);
+                        func.add_attribute(
+                            AttributeLoc::Function,
+                            self.context_ref().create_enum_attribute(kind, 0),
+                        );
+                    }
+                }
+                "global" => func.set_linkage(inkwell::module::Linkage::External),
+                _ => {
+                    if let Some(section) = attr.strip_prefix("section=") {
+                        func.set_section(Some(section));
+                    } else if let Some(align) = attr.strip_prefix("align=") {
+                        if let Ok(n) = align.parse::<u32>() {
+                            if n.is_power_of_two() && n <= 4096 {
+                                func.as_global_value().set_alignment(n);
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -265,6 +365,7 @@ impl LlvmBackend {
                 opt_level,
                 cpu,
                 coverage_enabled: false,
+                mem_order_mode: std::cell::Cell::new(0),
                 module: RefCell::new(None),
                 builder: RefCell::new(None),
                 coverage_counter: RefCell::new(0),
@@ -323,6 +424,53 @@ impl LlvmBackend {
 
     pub fn cpu(&self) -> &TargetCpu {
         &self.cpu
+    }
+
+    /// Design A.5 data items: emit each `@section/@align/@global`
+    /// `const`/`static` as a placed LLVM constant array (raw byte image).
+    /// `zeroed()` items get `zeroinitializer` so a `.bss`-named section stays
+    /// NOBITS-eligible; `@global` gives external linkage under the unmangled
+    /// name; without it the symbol is internal.
+    #[cfg(feature = "llvm")]
+    fn declare_raw_data_items(&self, module_ir: &MirModule) {
+        use inkwell::values::BasicValue;
+        let m = self.module.borrow();
+        let Some(m) = m.as_ref() else {
+            return;
+        };
+        let ctx = self.context_ref();
+        for item in &module_ir.raw_data_items {
+            let elem_ty = match item.element_bits {
+                8 => ctx.i8_type(),
+                16 => ctx.i16_type(),
+                32 => ctx.i32_type(),
+                _ => ctx.i64_type(),
+            };
+            let array_ty = elem_ty.array_type(item.count as u32);
+            let global = m.add_global(array_ty, None, &item.name);
+            if item.zeroed {
+                global.set_initializer(&array_ty.const_zero());
+            } else {
+                let values: Vec<inkwell::values::IntValue> = item
+                    .values
+                    .iter()
+                    .map(|v| elem_ty.const_int(*v as u64, false))
+                    .collect();
+                global.set_initializer(&elem_ty.const_array(&values).as_basic_value_enum());
+            }
+            if let Some(section) = &item.section {
+                global.set_section(Some(section));
+            }
+            if item.align > 0 {
+                global.set_alignment(item.align);
+            }
+            global.set_constant(item.is_const && !item.zeroed);
+            global.set_linkage(if item.is_global {
+                inkwell::module::Linkage::External
+            } else {
+                inkwell::module::Linkage::Internal
+            });
+        }
     }
 
     #[cfg(feature = "llvm")]
@@ -601,7 +749,7 @@ impl LlvmBackend {
                 .map_err(|e| crate::error::factory::llvm_build_failed(tag, &e))?;
             Ok(cs
                 .try_as_basic_value()
-                .left()
+                .basic()
                 .map(|v| v.into_int_value())
                 .unwrap_or_else(|| i64_type.const_int(0, false)))
         };
@@ -616,8 +764,9 @@ impl LlvmBackend {
         let emit_zero_fill_loop = |push_fn: inkwell::values::FunctionValue<'static>,
                                    array: inkwell::values::IntValue<'static>,
                                    count: inkwell::values::IntValue<'static>,
-                                   tag: &str|
-         -> Result<(), CompileError> {
+                                   tag: &str,
+                                   thread_push_result: bool|
+         -> Result<inkwell::values::IntValue<'static>, CompileError> {
             let preheader = builder
                 .get_insert_block()
                 .ok_or_else(|| CompileError::Codegen("zero-fill loop: no insert block".to_string()))?;
@@ -631,6 +780,18 @@ impl LlvmBackend {
             let phi = builder
                 .build_phi(i64_type, &format!("{tag}_i"))
                 .map_err(|e| crate::error::factory::llvm_build_failed("zfill phi", &e))?;
+            // FAM freestanding push ABI: carry the possibly realloc-moved
+            // header around the loop as a second phi and return it as the
+            // final array handle.
+            let arr_phi = if thread_push_result {
+                let p = builder
+                    .build_phi(i64_type, &format!("{tag}_arr"))
+                    .map_err(|e| crate::error::factory::llvm_build_failed("zfill arr phi", &e))?;
+                p.add_incoming(&[(&array, preheader)]);
+                Some(p)
+            } else {
+                None
+            };
             let zero_idx = i64_type.const_int(0, false);
             phi.add_incoming(&[(&zero_idx, preheader)]);
             let idx = phi.as_basic_value().into_int_value();
@@ -642,7 +803,13 @@ impl LlvmBackend {
                 .map_err(|e| crate::error::factory::llvm_build_failed("zfill condbr", &e))?;
             builder.position_at_end(body_bb);
             let zero_elem = i64_type.const_int(0, false);
-            let _ = call_i64(push_fn, &[array, zero_elem], tag)?;
+            let push_target = arr_phi
+                .map(|p| p.as_basic_value().into_int_value())
+                .unwrap_or(array);
+            let pushed = call_i64(push_fn, &[push_target, zero_elem], tag)?;
+            if let Some(p) = arr_phi {
+                p.add_incoming(&[(&pushed, body_bb)]);
+            }
             let next = builder
                 .build_int_add(idx, i64_type.const_int(1, false), &format!("{tag}_next"))
                 .map_err(|e| crate::error::factory::llvm_build_failed("zfill add", &e))?;
@@ -651,7 +818,9 @@ impl LlvmBackend {
                 .build_unconditional_branch(cond_bb)
                 .map_err(|e| crate::error::factory::llvm_build_failed("zfill br back", &e))?;
             builder.position_at_end(exit_bb);
-            Ok(())
+            Ok(arr_phi
+                .map(|p| p.as_basic_value().into_int_value())
+                .unwrap_or(array))
         };
 
         // --- strings ---
@@ -682,29 +851,39 @@ impl LlvmBackend {
                 .map(|s| s.len())
                 .unwrap_or(init.values.len());
             let capacity = i64_type.const_int(element_count as u64, false);
+            // FAM freestanding push ABI: the push returns the possibly
+            // realloc-moved header — thread it through every fill so the
+            // global store publishes the post-grow handle.
+            let fam_push = self.target.array_push_returns_header();
             let array_rv = if let Some(strings) = &init.string_values {
                 let array_new = get_rt("rt_array_new", 1);
                 let array_push = get_rt("rt_array_push", 2);
                 let string_new = get_rt("rt_string_new", 2);
-                let array = call_i64(array_new, &[capacity], "init_arr")?;
+                let mut array = call_i64(array_new, &[capacity], "init_arr")?;
                 for string_val in strings {
                     let bytes = string_val.as_bytes();
                     let ptr = make_str_ptr(bytes, &mut str_const_counter)?;
                     let len = i64_type.const_int(bytes.len() as u64, false);
                     let s = call_i64(string_new, &[ptr, len], "init_arr_str")?;
-                    let _ = call_i64(array_push, &[array, s], "init_arr_push")?;
+                    let pushed = call_i64(array_push, &[array, s], "init_arr_push")?;
+                    if fam_push {
+                        array = pushed;
+                    }
                 }
                 array
             } else if init.element_type == crate::hir::TypeId::U8 {
                 let byte_array_new = get_rt("rt_byte_array_new", 1);
                 let byte_push = get_rt("rt_typed_bytes_u8_push", 2);
-                let array = call_i64(byte_array_new, &[capacity], "init_barr")?;
+                let mut array = call_i64(byte_array_new, &[capacity], "init_barr")?;
                 if all_zero {
-                    emit_zero_fill_loop(byte_push, array, capacity, "init_barr_zfill")?;
+                    array = emit_zero_fill_loop(byte_push, array, capacity, "init_barr_zfill", fam_push)?;
                 } else {
                     for value in &init.values {
                         let byte = i64_type.const_int((*value & 0xff) as u64, false);
-                        let _ = call_i64(byte_push, &[array, byte], "init_barr_push")?;
+                        let pushed = call_i64(byte_push, &[array, byte], "init_barr_push")?;
+                        if fam_push {
+                            array = pushed;
+                        }
                     }
                 }
                 array
@@ -712,20 +891,23 @@ impl LlvmBackend {
                 let array_new = get_rt("rt_array_new", 1);
                 let array_push = get_rt("rt_array_push", 2);
                 let value_bool = get_rt("rt_value_bool", 1);
-                let array = call_i64(array_new, &[capacity], "init_bool_arr")?;
+                let mut array = call_i64(array_new, &[capacity], "init_bool_arr")?;
                 for value in &init.values {
                     let raw = i64_type.const_int(u64::from(*value != 0), false);
                     let boxed = call_i64(value_bool, &[raw], "init_bool")?;
-                    let _ = call_i64(array_push, &[array, boxed], "init_bool_arr_push")?;
+                    let pushed = call_i64(array_push, &[array, boxed], "init_bool_arr_push")?;
+                    if fam_push {
+                        array = pushed;
+                    }
                 }
                 array
             } else {
                 let array_new = get_rt("rt_array_new", 1);
                 let array_push = get_rt("rt_array_push", 2);
-                let array = call_i64(array_new, &[capacity], "init_iarr")?;
+                let mut array = call_i64(array_new, &[capacity], "init_iarr")?;
                 if all_zero {
                     // Boxed zero is `0 << 3` == 0, so pushing raw 0 is identical.
-                    emit_zero_fill_loop(array_push, array, capacity, "init_iarr_zfill")?;
+                    array = emit_zero_fill_loop(array_push, array, capacity, "init_iarr_zfill", fam_push)?;
                 } else {
                     for value in &init.values {
                         // Box small ints: raw << 3 (matches cranelift compile path).
@@ -734,7 +916,10 @@ impl LlvmBackend {
                         let boxed = builder
                             .build_left_shift(raw, shift, "box")
                             .map_err(|e| crate::error::factory::llvm_build_failed("init box shl", &e))?;
-                        let _ = call_i64(array_push, &[array, boxed], "init_iarr_push")?;
+                        let pushed = call_i64(array_push, &[array, boxed], "init_iarr_push")?;
+                        if fam_push {
+                            array = pushed;
+                        }
                     }
                 }
                 array
@@ -914,7 +1099,7 @@ impl LlvmBackend {
             if alias.get_type().get_return_type().is_some() {
                 let ret = call
                     .try_as_basic_value()
-                    .left()
+                    .basic()
                     .ok_or_else(|| CompileError::semantic(format!("alias `{alias_name}` missing return value")))?;
                 builder
                     .build_return(Some(&ret))
@@ -1030,7 +1215,7 @@ impl LlvmBackend {
             self.cpu
                 .llvm_cpu_name(self.target.arch)
                 .unwrap_or(match self.target.arch {
-                    TargetArch::X86_64 => "x86-64-v3",
+                    TargetArch::X86_64 => default_x86_64_cpu_name(&triple),
                     TargetArch::Aarch64 => "generic",
                     TargetArch::X86 => "i686",
                     TargetArch::Arm => "generic",
@@ -1402,7 +1587,7 @@ impl LlvmBackend {
             .map_err(|e| crate::error::factory::llvm_build_failed("call malloc", &e))?;
         let ptr = call
             .try_as_basic_value()
-            .left()
+            .basic()
             .ok_or_else(|| crate::error::factory::llvm_build_failed("call malloc", "no return value"))?
             .into_pointer_value();
         let val = i32t.const_int(42, false);
@@ -1574,6 +1759,33 @@ impl NativeBackend for LlvmBackend {
         let module_name = module.name.as_deref().unwrap_or("module");
         self.create_module(module_name)?;
 
+        // Outline lambda/generator/future body blocks into standalone
+        // top-level MIR functions BEFORE anything else touches
+        // `module.functions`. Without this, a MIR function that assigns a
+        // lambda to a local (`val f: fn(i64) -> i64 = \x: x * 2`) keeps the
+        // lambda's body as an extra, disconnected basic block INSIDE its
+        // parent function (confirmed via `SIMPLE_DUMP_IR`: the dumped IR
+        // showed `bb1: ; No predecessors!` still inside `@spl_main`, and no
+        // `@main_outlined_1` function anywhere in the module) instead of
+        // becoming its own callable function. `compile_closure_create`
+        // (functions/objects.rs) then does `module.get_function(func_name)`
+        // for that never-emitted outlined name, finds nothing, and silently
+        // falls back to `i8_ptr_type.const_null()` as the closure's function
+        // pointer. Every later indirect call through that closure value then
+        // loads and calls a NULL function pointer — measured exit 133
+        // (SIGTRAP) for a plain local closure and exit 139 (SIGSEGV) for one
+        // read back out of a class field, both fixed by this outlining pass
+        // (see doc/08_tracking/bug/native_closure_value_indirect_call_segv_2026-09-07.md).
+        // `codegen::common_backend::compile_all_functions` (the Cranelift/JIT
+        // path) already calls `expand_with_outlined` for exactly this reason;
+        // the LLVM/native backend never did, so a call through a closure
+        // VALUE (as opposed to calling a function by its bare name, which
+        // never goes through ClosureCreate/IndirectCall) always crashed.
+        let outlined_functions = crate::codegen::shared::expand_with_outlined(module);
+        let mut owned_module = module.clone();
+        owned_module.functions = outlined_functions;
+        let module: &MirModule = &owned_module;
+
         // Pre-declare runtime functions with correct signatures.
         // This prevents compile_call from creating wrong declarations when
         // MIR calls a runtime function with a different number of arguments
@@ -1647,6 +1859,8 @@ impl NativeBackend for LlvmBackend {
 
         #[cfg(feature = "llvm")]
         self.declare_globals(module);
+        #[cfg(feature = "llvm")]
+        self.declare_raw_data_items(module);
 
         // First pass: forward-declare all function signatures
         // This is necessary so that functions can call each other regardless of compilation order
@@ -1739,7 +1953,11 @@ impl NativeBackend for LlvmBackend {
                         // ELF section GC works at section granularity. Keep every
                         // body in its own section so an unreachable generic/helper
                         // body cannot retain its unresolved imports at final link.
-                        if emit_elf_function_sections {
+                        // A `@section("...")` body already owns its section
+                        // (design A.2); the per-body GC section must not
+                        // overwrite it — that is exactly how `.text.boot`
+                        // was measured missing (survey §0 Q1 finding 5).
+                        if emit_elf_function_sections && f.get_section().is_none() {
                             f.set_section(Some(&format!(".text.simple.{body_section_index}")));
                             body_section_index += 1;
                         }
@@ -1776,5 +1994,96 @@ impl NativeBackend for LlvmBackend {
                 | TargetArch::Wasm32
                 | TargetArch::Wasm64
         )
+    }
+}
+
+#[cfg(test)]
+mod default_x86_64_cpu_tests {
+    use super::default_x86_64_cpu_name;
+
+    // Serialised because these mutate a process-global env var.
+    fn with_forced<T>(value: Option<&str>, f: impl FnOnce() -> T) -> T {
+        let key = "SIMPLE_X86_64_DEFAULT_CPU";
+        let prev = std::env::var(key).ok();
+        match value {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+        let out = f();
+        match prev {
+            Some(p) => std::env::set_var(key, p),
+            None => std::env::remove_var(key),
+        }
+        out
+    }
+
+    #[test]
+    fn cross_compiled_output_is_never_widened_from_the_host() {
+        // The builder's CPUID says nothing about the machine the artifact will
+        // run on. Widening here produces a binary that faults on its target.
+        with_forced(None, || {
+            assert_eq!(default_x86_64_cpu_name("aarch64-unknown-linux-gnu"), "x86-64-v3");
+            assert_eq!(default_x86_64_cpu_name("riscv64-unknown-elf"), "x86-64-v3");
+            assert_eq!(default_x86_64_cpu_name("wasm32-unknown-unknown"), "x86-64-v3");
+        });
+    }
+
+    #[test]
+    fn never_narrows_below_the_previous_baseline() {
+        // Whatever the host reports, the answer must be at least the v3 that
+        // was hardcoded before, or this is a regression rather than an upgrade.
+        with_forced(None, || {
+            for triple in ["x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu", "amd64-foo"] {
+                let got = default_x86_64_cpu_name(triple);
+                assert!(
+                    got == "x86-64-v3" || got == "x86-64-v4",
+                    "{triple} resolved to {got}, which is below the v3 baseline"
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn host_targeting_widens_exactly_when_the_host_admits_avx512() {
+        // The decision must track the real capability probe, not a guess.
+        with_forced(None, || {
+            // `cfg!` is a VALUE, not a compilation gate: on aarch64 the
+            // `is_x86_feature_detected!` arms still had to compile and the
+            // macro rejects the target outright ("This macro cannot be used
+            // on the current target"), so the whole `simple-compiler` lib
+            // TEST target failed to build on every non-x86 host -- no Rust
+            // unit test in this crate could run on an arm64 macOS box. A real
+            // `#[cfg]` on the binding keeps the x86_64 probe byte-identical
+            // and gives other architectures the only answer they can have.
+            #[cfg(target_arch = "x86_64")]
+            let expected_wide = std::is_x86_feature_detected!("avx512f")
+                && std::is_x86_feature_detected!("avx512vl")
+                && std::is_x86_feature_detected!("avx512bw");
+            #[cfg(not(target_arch = "x86_64"))]
+            let expected_wide = false;
+            let got = default_x86_64_cpu_name("x86_64-unknown-linux-gnu");
+            assert_eq!(got == "x86-64-v4", expected_wide, "got {got}");
+        });
+    }
+
+    #[test]
+    fn the_env_override_wins_over_host_detection() {
+        // Reproducible builds must not vary with whoever ran the compiler.
+        with_forced(Some("x86-64-v3"), || {
+            assert_eq!(default_x86_64_cpu_name("x86_64-unknown-linux-gnu"), "x86-64-v3");
+        });
+        with_forced(Some("x86-64"), || {
+            assert_eq!(default_x86_64_cpu_name("x86_64-unknown-linux-gnu"), "x86-64");
+        });
+        with_forced(Some("x86-64-v4"), || {
+            assert_eq!(default_x86_64_cpu_name("aarch64-unknown-linux-gnu"), "x86-64-v4");
+        });
+    }
+
+    #[test]
+    fn an_unrecognised_override_falls_back_to_the_baseline() {
+        with_forced(Some("znver9-turbo"), || {
+            assert_eq!(default_x86_64_cpu_name("x86_64-unknown-linux-gnu"), "x86-64-v3");
+        });
     }
 }

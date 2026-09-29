@@ -1,4 +1,9 @@
 # Whitespace glyphs return `None` on the routine rasterization path
+## Closed 2026-09-16 — Status fixed/landed (395a3f7b37d); whitespace yields valid 0x0 bitmaps
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-07-18
 **Status:** fixed / landed (`395a3f7b37d`)
@@ -39,3 +44,4 @@ return a valid empty bitmap so the routine path never sees a spurious `None`.
 - `baremetal_option_field_unwrap_faults_class_2026-07-18.md` — the `None` on the
   routine path was one of the inputs feeding the baremetal Option-unwrap fault
   storm; returning a valid empty bitmap removes that source.
+

@@ -163,29 +163,39 @@ emit_unavailable() {
         sed 's/^/- /' "$BUILD_DIR/evidence.env"
     } >"$REPORT_PATH"
     cat "$BUILD_DIR/evidence.env"
+    # Verdict line (2026-09-06): this function used to end at the `cat` above,
+    # so every caller died on a bare `exit 1` with an env dump as the last
+    # stdout line and no PASS/FAIL/ERROR verdict at all. Absence of a runtime
+    # or a binary is absence of evidence, so it is ERROR (exit 2), never a pass.
+    case "$reason" in
+        *-failed|*-not-allowed|invalid-*)
+            echo "FAIL — 0 of 1 bitmap comparison(s) completed ($reason)"
+            exit 1
+            ;;
+        *)
+            echo "ERROR — nothing was checked ($reason)"
+            exit 2
+            ;;
+    esac
 }
 
 for required in node npm; do
     if ! have "$required"; then
         emit_unavailable "missing-command:$required"
-        exit 1
     fi
 done
 
 if [ "$SIMPLE_BIN_STATUS" != "pass" ]; then
     emit_unavailable "simple-bin-$SIMPLE_BIN_STATUS"
-    exit 1
 fi
 
 if [ ! -f "$VALIDATOR" ]; then
     emit_unavailable "missing-electron-proof-validator"
-    exit 1
 fi
 
 ELECTRON_BIN="${ELECTRON_BIN:-${SIMPLE_ELECTRON_BIN:-}}"
 if [ -n "$ELECTRON_BIN" ] && [ ! -x "$ELECTRON_BIN" ]; then
     emit_unavailable "electron-bin-missing"
-    exit 1
 elif [ -x "tools/electron-shell/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron" ]; then
     ELECTRON_BIN="tools/electron-shell/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron"
 elif [ -x "tools/electron-shell/node_modules/.bin/electron" ]; then
@@ -196,7 +206,6 @@ fi
 
 if [ "$ELECTRON_BIN" = "" ]; then
     emit_unavailable "missing-electron-dependency"
-    exit 1
 fi
 
 set +e
@@ -207,7 +216,6 @@ set -e
 
 if [ "$simple_code" -ne 0 ]; then
     emit_unavailable "simple-render-failed"
-    exit 1
 fi
 
 simple_status="$(field_of simple_status "$SIMPLE_OUT")"
@@ -220,11 +228,9 @@ html_has_app_shell="$(field_of html_has_app_shell "$SIMPLE_OUT")"
 
 if [ "$simple_status" != "pass" ] || [ ! -s "$HTML_PATH" ] || [ ! -s "$EXPECTED_ARGB" ]; then
     emit_unavailable "missing-simple-generated-artifacts"
-    exit 1
 fi
 if [ "$simple_blur" != "false" ]; then
     emit_unavailable "simple-blur-or-tolerance-not-allowed"
-    exit 1
 fi
 
 set +e
@@ -573,4 +579,12 @@ fi
 } >"$REPORT_PATH"
 
 cat "$BUILD_DIR/evidence.env"
-[ "$status" = "pass" ]
+# Verdict line (2026-09-06): this script used to end on a bare
+# `[ "$status" = "pass" ]`, which under `set -e` exits 1 with an env dump as
+# the last stdout line and no PASS/FAIL/ERROR verdict.
+if [ "$status" = "pass" ]; then
+    echo "PASS — 1 evidence bundle checked (electron-generated-gui-web-parity-evidence), 0 mismatches"
+else
+    echo "FAIL — 1 evidence bundle checked (electron-generated-gui-web-parity-evidence), ${reason:-status=$status}"
+    exit 1
+fi

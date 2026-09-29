@@ -1,0 +1,47 @@
+#!/bin/sh
+# Exercise native time and the qualification gate with a controlled test runner.
+# This checks the harness; it does not qualify a compiler's RSS.
+set -eu
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+scratch=$(mktemp -d "${TMPDIR:-/tmp}/simple-rss-platform.XXXXXX")
+trap 'rm -rf "$scratch"' EXIT HUP INT TERM
+mkdir -p "$scratch/bin" "$scratch/test/fixtures/pure_simple_tooling"
+cp "$repo/test/fixtures/pure_simple_tooling/sibling_describe_green_spec.spl" \
+  "$scratch/test/fixtures/pure_simple_tooling/"
+cat >"$scratch/bin/simple" <<'RUNNER'
+#!/bin/sh
+[ "$1" = test ] && [ "$3" = --batch-size=2 ] || exit 9
+[ "$#" -eq 6 ] || exit 10
+files=$(find "$2" -name '*_spec.spl' | wc -l | tr -d ' ')
+[ "$files" = 3 ] || exit 11
+echo '1 maximum resident set size' >&2
+echo 'Batch worker: pid=100'
+echo 'Batch boundary: completed=2/3'
+echo 'Batch worker: pid=101'
+echo 'Batch boundary: completed=3/3'
+echo 'Passed: 6'
+exit "${RSS_FIXTURE_EXIT:-0}"
+RUNNER
+chmod +x "$scratch/bin/simple"
+cd "$scratch"
+export TEST_RUNNER_RSS_ROOT="$scratch/result"
+export TEST_RUNNER_RSS_FILE_COUNT=3 TEST_RUNNER_RSS_BATCH_SIZE=2
+export TEST_RUNNER_RSS_MAX_KIB=1048576
+sh "$repo/scripts/check/check-test-runner-rss-batch.shs" >pass.log
+grep -q '^test_runner_rss_batch_status=pass$' pass.log
+grep -q '^1 maximum resident set size$' result/error.log
+rss=$(cat result/parent-rss-kib)
+[ "$rss" -gt 0 ]
+if [ "$(uname -s)" = Darwin ]; then
+  bytes=$(awk '/maximum resident set size/ {print $1}' result/parent-rss-raw)
+  [ "$rss" -eq "$(( (bytes + 1023) / 1024 ))" ]
+fi
+if TEST_RUNNER_RSS_MAX_KIB=1 sh "$repo/scripts/check/check-test-runner-rss-batch.shs" >limit.log; then
+  echo 'FAIL: RSS limit accepted an over-budget process'; exit 1
+fi
+grep -q '^error=parent_rss_kib:' limit.log
+if RSS_FIXTURE_EXIT=7 sh "$repo/scripts/check/check-test-runner-rss-batch.shs" >failure.log; then
+  echo 'FAIL: failed runner was accepted'; exit 1
+fi
+grep -q '^error=runner_failed:7$' failure.log
+echo "PASS: native $(uname -s) RSS capture, KiB units, memory limit, and runner failure"

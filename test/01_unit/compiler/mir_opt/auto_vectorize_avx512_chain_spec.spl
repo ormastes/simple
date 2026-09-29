@@ -1,0 +1,269 @@
+# Purpose: the whole point of the auto-vectorization work is that a plain
+# scalar loop reaches REAL AVX-512 instructions with no source change. Every
+# other spec checks one link of that chain in isolation: the pass emits the
+# right MIR, or the AVX-512 selector admits hand-written MIR. Neither proves
+# the chain CLOSES.
+#
+# This spec joins them. It takes the function `rewrite_elementwise_add`
+# actually produces and feeds it to `x86_plan_avx512_fixed`, the real
+# admission the x86_64 instruction selector uses (isel_x86_64.spl:184). If the
+# pass emits something the selector rejects, the pass produces no AVX-512
+# however correct its MIR looks — and the rejection reason names why.
+#
+# `x86_plan_avx512_fixed` derives every vector shape from `func.locals`
+# declared types (x86_64_avx512_isel.spl:53-59), with inference only across
+# copies and mask ops. A vector temporary that is never declared as a local has
+# no shape, and `MirSimdLoad` is then rejected with
+# `avx512-load-splat-gather-shape-mismatch`. That is the failure this spec
+# exists to catch, and it is invisible to any test that stops at the MIR.
+# @req REQ-CMP-COMPILER_ANALYSIS-001
+
+use std.spec.step
+use std.spec.{describe, it, expect}
+
+use compiler.mir.mir_data.{MirFunction, MirBlock, MirInst, MirInstKind,
+    MirTerminator, MirOperand, MirOperandKind, MirBinOp, LocalId, BlockId, SymbolId}
+use compiler.mir.mir_types.{MirSignature, MirType, MirTypeKind, MirLocal, LocalKind, MirConstValue}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.attributes.{DriverManifestAttr, DriverManifestAttrKind,
+    VhdlHardwareMetadata, vhdl_hardware_metadata_default}
+use compiler.mir_opt.mir_opt.auto_vectorize.{VectorRecipeKind, VectorRecipe, rewrite_elementwise_add}
+use compiler.backend.native.x86_64_avx512_isel.{x86_plan_avx512_fixed}
+
+fn make_driver_manifest_attr_default() -> DriverManifestAttr:
+    DriverManifestAttr(
+        kind:         DriverManifestAttrKind.Driver,
+        driver_class: 0,
+        vendor:       0,
+        device_ids:   [],
+        version:      "",
+        abi:          ""
+    )
+
+fn lid(n: i64) -> LocalId:
+    LocalId(id: n)
+
+fn bid(n: i64) -> BlockId:
+    BlockId.new(n)
+
+fn copy_op(n: i64) -> MirOperand:
+    MirOperand(kind: MirOperandKind.Copy(lid(n)))
+
+fn int_op(v: i64) -> MirOperand:
+    MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(v), MirType(kind: MirTypeKind.I64)))
+
+fn local_of(n: i64, kind: MirTypeKind) -> MirLocal:
+    MirLocal(id: lid(n), name: nil, type_: MirType(kind: kind), kind: LocalKind.Temp, is_ghost: false)
+
+fn gep(dest: i64, base: i64, index: i64) -> MirInst:
+    MirInst(kind: MirInstKind.GetElementPtr(lid(dest), copy_op(base), [copy_op(index)]))
+
+# A scalar `out[i] = a[i] + b[i]` loop over f32, the shape the whole effort
+# targets. Block 0 enters, block 1 is the loop, block 9 returns.
+fn scalar_entry() -> MirBlock:
+    MirBlock(id: bid(0), label: nil,
+        instructions: [
+            MirInst(kind: MirInstKind.Const(lid(1), MirConstValue.Int(1000), MirType(kind: MirTypeKind.I64))),
+            MirInst(kind: MirInstKind.Const(lid(2), MirConstValue.Int(2000), MirType(kind: MirTypeKind.I64))),
+            MirInst(kind: MirInstKind.Const(lid(3), MirConstValue.Int(3000), MirType(kind: MirTypeKind.I64))),
+            MirInst(kind: MirInstKind.Const(lid(4), MirConstValue.Int(0), MirType(kind: MirTypeKind.I64)))
+        ],
+        terminator: MirTerminator.Goto(target: bid(1)))
+
+# The same loop, but the bound lives in a LOCAL — what server code looks like.
+fn dyn_scalar_loop() -> MirBlock:
+    MirBlock(id: bid(1), label: nil,
+        instructions: [
+            MirInst(kind: MirInstKind.BinOp(lid(20), MirBinOp.Lt, copy_op(4), copy_op(41))),
+            gep(30, 1, 4),
+            MirInst(kind: MirInstKind.Load(lid(10), copy_op(30))),
+            gep(31, 2, 4),
+            MirInst(kind: MirInstKind.Load(lid(11), copy_op(31))),
+            MirInst(kind: MirInstKind.BinOp(lid(12), MirBinOp.Add, copy_op(10), copy_op(11))),
+            gep(32, 3, 4),
+            MirInst(kind: MirInstKind.Store(copy_op(32), copy_op(12))),
+            MirInst(kind: MirInstKind.BinOp(lid(4), MirBinOp.Add, copy_op(4), int_op(1)))
+        ],
+        terminator: MirTerminator.If(cond: copy_op(20), then_: bid(1), else_: bid(9)))
+
+fn scalar_loop(trip: i64) -> MirBlock:
+    MirBlock(id: bid(1), label: nil,
+        instructions: [
+            MirInst(kind: MirInstKind.BinOp(lid(20), MirBinOp.Lt, copy_op(4), int_op(trip))),
+            gep(30, 1, 4),
+            MirInst(kind: MirInstKind.Load(lid(10), copy_op(30))),
+            gep(31, 2, 4),
+            MirInst(kind: MirInstKind.Load(lid(11), copy_op(31))),
+            MirInst(kind: MirInstKind.BinOp(lid(12), MirBinOp.Add, copy_op(10), copy_op(11))),
+            gep(32, 3, 4),
+            MirInst(kind: MirInstKind.Store(copy_op(32), copy_op(12))),
+            MirInst(kind: MirInstKind.BinOp(lid(4), MirBinOp.Add, copy_op(4), int_op(1)))
+        ],
+        terminator: MirTerminator.If(cond: copy_op(20), then_: bid(1), else_: bid(9)))
+
+fn scalar_exit() -> MirBlock:
+    MirBlock(id: bid(9), label: nil, instructions: [], terminator: MirTerminator.Ret(value: nil))
+
+fn scalar_function(trip: i64) -> MirFunction:
+    MirFunction(
+        symbol:                   SymbolId(id: 1),
+        name:                     "elementwise_add_f32",
+        signature:                MirSignature(params: [], return_type: MirType(kind: MirTypeKind.Unit), is_variadic: false),
+        locals:                   [local_of(1, MirTypeKind.I64), local_of(2, MirTypeKind.I64),
+                                   local_of(3, MirTypeKind.I64), local_of(4, MirTypeKind.I64)],
+        blocks:                   [scalar_entry(), scalar_loop(trip), scalar_exit()],
+        entry_block:              bid(0),
+        span:                     Span(start: 0, end: 0, line: 1, col: 1),
+        generic_params:           [],
+        is_generic_template:      false,
+        specialization_of:        nil,
+        type_bindings:            {},
+        layout_phase:             nil,
+        is_kernel:                false,
+        is_export_c:              false,
+        export_name:              "",
+        has_driver_manifest_attr: false,
+        driver_manifest_attr:     make_driver_manifest_attr_default(),
+        has_vhdl_metadata:        false,
+        vhdl_metadata:            vhdl_hardware_metadata_default(),
+        has_fast_math:            false
+    )
+
+fn dyn_function() -> MirFunction:
+    var f = scalar_function(16)
+    f.blocks = [scalar_entry(), dyn_scalar_loop(), scalar_exit()]
+    var ls = f.locals
+    ls.push(local_of(41, MirTypeKind.I64))
+    f.locals = ls
+    f
+
+# A lowered `while`: cond block holds the test, body holds the work. This is
+# what the compiler emits; every other fixture here is a single block.
+fn lowered_cond() -> MirBlock:
+    MirBlock(id: bid(1), label: Some("while_cond"),
+        instructions: [MirInst(kind: MirInstKind.BinOp(lid(20), MirBinOp.Lt, copy_op(4), copy_op(41)))],
+        terminator: MirTerminator.If(cond: copy_op(20), then_: bid(2), else_: bid(9)))
+
+fn lowered_body() -> MirBlock:
+    MirBlock(id: bid(2), label: Some("while_body"),
+        instructions: [
+            gep(30, 1, 4),
+            MirInst(kind: MirInstKind.Load(lid(10), copy_op(30))),
+            gep(31, 2, 4),
+            MirInst(kind: MirInstKind.Load(lid(11), copy_op(31))),
+            MirInst(kind: MirInstKind.BinOp(lid(12), MirBinOp.Add, copy_op(10), copy_op(11))),
+            gep(32, 3, 4),
+            MirInst(kind: MirInstKind.Store(copy_op(32), copy_op(12))),
+            MirInst(kind: MirInstKind.BinOp(lid(4), MirBinOp.Add, copy_op(4), int_op(1)))
+        ],
+        terminator: MirTerminator.Goto(target: bid(1)))
+
+fn lowered_while_function() -> MirFunction:
+    var f = scalar_function(16)
+    f.blocks = [scalar_entry(), lowered_cond(), lowered_body(), scalar_exit()]
+    var ls = f.locals
+    ls.push(local_of(41, MirTypeKind.I64))
+    f.locals = ls
+    f
+
+fn lowered_recipe(element: text, lanes: i64) -> VectorRecipe:
+    var r = recipe_for(element, lanes, -1)
+    r.header_block = bid(2)
+    r
+
+fn recipe_for(element: text, lanes: i64, trip: i64) -> VectorRecipe:
+    VectorRecipe(
+        kind:             VectorRecipeKind.Elementwise,
+        header_block:     bid(1),
+        induction_var:    lid(4),
+        trip_count:       trip,
+        element_type:     element,
+        vector_width:     lanes,
+        op_name:          "add_elementwise",
+        note:             "avx512 chain",
+        input_bases:      [lid(1), lid(2)],
+        output_base:      Some(lid(3)),
+        accumulator:      nil,
+        chunk_width:      lanes,
+        index_locals:     [lid(4)],
+        store_value:      nil,
+        induction_update: lid(4))
+
+fn plan_for(element: text, lanes: i64, trip: i64) -> [text]:
+    """Rewrite, then ask the real x86_64 AVX-512 admission about the result.
+
+    Returns [ok, reason] as text so a failing example names the rejection
+    instead of just reporting false.
+    """
+    val rewritten = rewrite_elementwise_add(recipe_for(element, lanes, trip), scalar_function(trip))
+    val plan = x86_plan_avx512_fixed(rewritten)
+    [if plan.ok: "true" else: "false", plan.reason]
+
+describe "the auto-vectorized function reaches real AVX-512 selection":
+    it "is actually rewritten before anything is claimed about the backend":
+        step("if the pass declined, an admission verdict would be meaningless")
+        val before = scalar_function(16).blocks.len()
+        val after = rewrite_elementwise_add(recipe_for("f32", 16, 16), scalar_function(16)).blocks.len()
+        expect(after > before).to_equal(true)
+
+    it "is admitted by x86_plan_avx512_fixed for a 16-lane f32 loop":
+        step("this is the width the whole AVX-512 planning effort produces")
+        step("a rejection here means the pass emits no zmm however good its MIR looks")
+        val got = plan_for("f32", 16, 16)
+        expect(got[1]).to_equal("avx512-frame-values-planned")
+        expect(got[0]).to_equal("true")
+
+    it "is admitted for a 16-lane i32 loop":
+        step("i32x16 is the other full-width zmm shape the selector models")
+        val got = plan_for("i32", 16, 16)
+        expect(got[1]).to_equal("avx512-frame-values-planned")
+        expect(got[0]).to_equal("true")
+
+    it "is admitted for an 8-lane f64 loop":
+        step("f64x8 is the third, and uses the same zmm registers")
+        val got = plan_for("f64", 8, 16)
+        expect(got[1]).to_equal("avx512-frame-values-planned")
+        expect(got[0]).to_equal("true")
+
+    it "declares every vector temporary it creates as a typed local":
+        step("x86_plan_avx512_fixed derives shapes from func.locals and nothing")
+        step("else, so an undeclared vector temp has no shape and its")
+        step("MirSimdLoad is rejected. This pins the cause, not just the symptom.")
+        val rewritten = rewrite_elementwise_add(recipe_for("f32", 16, 16), scalar_function(16))
+        var declared = 0
+        for local in rewritten.locals:
+            match local.type_.kind:
+                case Vec16f: declared = declared + 1
+                case _: ()
+        # load a, load b, result — three f32x16 values exist in the vector body.
+        expect(declared).to_equal(3)
+
+    it "does not claim AVX-512 for a width the selector does not model":
+        step("a 4-lane recipe is xmm work; if this were also admitted the")
+        step("positive examples above would prove nothing about width")
+        val got = plan_for("f32", 4, 16)
+        expect(got[0]).to_equal("false")
+
+    it "admits a loop whose length is only known at RUNTIME":
+        step("this is the shape server code actually has — a request body, a")
+        step("row set, a framebuffer sized at runtime. Until the bound became")
+        step("an operand the pass declined every one of them, so it could be")
+        step("Active and still never produce a single AVX-512 instruction for")
+        step("anything a server runs.")
+        val rewritten = rewrite_elementwise_add(recipe_for("f32", 16, -1), dyn_function())
+        expect(rewritten.blocks.len() > dyn_function().blocks.len()).to_equal(true)
+        val plan = x86_plan_avx512_fixed(rewritten)
+        expect(plan.reason).to_equal("avx512-frame-values-planned")
+        expect(plan.ok).to_equal(true)
+
+    it "admits a LOWERED WHILE with a runtime bound — the real shape":
+        step("cond block holds the test, body holds the work, bound is a local.")
+        step("This is what the compiler emits. Every other example here is a")
+        step("single block carrying its own test, which the compiler never")
+        step("produces — so this is the one that says the chain works on real")
+        step("code rather than on fixtures.")
+        val rewritten = rewrite_elementwise_add(lowered_recipe("f32", 16), lowered_while_function())
+        expect(rewritten.blocks.len() > lowered_while_function().blocks.len()).to_equal(true)
+        val plan = x86_plan_avx512_fixed(rewritten)
+        expect(plan.reason).to_equal("avx512-frame-values-planned")
+        expect(plan.ok).to_equal(true)

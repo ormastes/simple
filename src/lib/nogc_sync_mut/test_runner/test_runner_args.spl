@@ -26,6 +26,7 @@ use std.test_runner.test_runner_types.{TestExecutionMode, TestLevel, TestOptions
 use compiler.common.assurance.policy_names.{normalize_profile_name, valid_profile_names_help}
 
 use std.io_runtime.{file_exists}
+use std.nogc_sync_mut.test_runner.resource_policy.{test_default_max_procs, test_max_procs_value_valid}
 
 # =========================================================================
 # Mode String Parsing
@@ -75,7 +76,7 @@ fn parse_mode_str(m: text) -> TestExecutionMode:
 
 fn _test_arg_is_numeric_option(arg: text) -> bool:
     (
-        arg == "--max-mem" or arg == "--cpu-threshold" or arg == "--mem-threshold" or
+        arg == "--max-mem" or arg == "--max-procs" or arg == "--cpu-threshold" or arg == "--mem-threshold" or
         arg == "--resource-limit" or arg == "--max-workers" or
         arg == "--parallel-timeout" or arg == "--fuzz-time" or
         arg == "--chaos-trials" or arg == "--chaos-fault-rate" or
@@ -88,7 +89,7 @@ fn _test_arg_is_signed_number(value: text) -> bool:
 
 fn _test_arg_has_empty_equals_value(arg: text) -> bool:
     (
-        arg == "--max-mem=" or arg == "--execution-mode=" or
+        arg == "--max-mem=" or arg == "--max-procs=" or arg == "--execution-mode=" or
         arg == "--cpu-threshold=" or arg == "--mem-threshold=" or
         arg == "--resource-limit=" or arg == "--max-workers=" or
         arg == "--parallel-timeout=" or arg == "--fuzz-time=" or
@@ -106,7 +107,7 @@ fn test_args_validation_error(args: [text]) -> text:
     while i < args.len():
         val arg = args[i]
         val needs_value = (
-            arg == "--max-mem" or arg == "--execution-mode" or
+            arg == "--max-mem" or arg == "--max-procs" or arg == "--execution-mode" or
             arg == "--cpu-threshold" or arg == "--mem-threshold" or
             arg == "--resource-limit" or arg == "--max-workers" or
             arg == "--parallel-timeout" or arg == "--fuzz-time" or
@@ -127,9 +128,18 @@ fn test_args_validation_error(args: [text]) -> text:
                 return "missing value for {arg}"
             if arg == "--format" and value != "text" and value != "json" and value != "doc":
                 return "invalid value for --format: {value}"
+            if arg == "--max-procs" and not test_max_procs_value_valid(value):
+                return "invalid value for --max-procs: {value} (expected a nonnegative integer)"
             if arg == "--profile" and normalize_profile_name(value) == "":
                 return "invalid value for --profile: {value} (valid: {valid_profile_names_help()})"
             i = i + 2
+            continue
+
+        if arg.starts_with("--max-procs="):
+            val value = arg.substring(12)
+            if not test_max_procs_value_valid(value):
+                return "invalid value for --max-procs: {value} (expected a nonnegative integer)"
+            i = i + 1
             continue
 
         if arg.starts_with("--profile="):
@@ -263,12 +273,9 @@ fn parse_test_args(args: [text]) -> TestOptions:
     var security_supply_chain = false
     var spl_doctest = false
     var max_mem_gb = 16
-    # RLIMIT_NPROC (ulimit -u) is a per-UID cap counting ALL of the user's
-    # processes on macOS and Linux, not just this test's subtree — a low cap
-    # blocks every fork for the whole session once the user already runs more
-    # processes than the cap. 4096 keeps fork-bomb protection without tripping
-    # on normal desktop sessions (hundreds of pre-existing processes).
-    var max_procs = 4096
+    # A macOS workstation inherits its existing per-UID process limit.
+    # --max-procs is an explicit total UID cap, not a test-subtree budget.
+    var max_procs = test_default_max_procs(file_exists("/System/Library/CoreServices/SystemVersion.plist"))
     var mem_check = false
     var fork_mode = false
     var resource_limit_pct = 75
@@ -348,6 +355,12 @@ fn parse_test_args(args: [text]) -> TestOptions:
                 max_mem_gb = args[i].to_int() ?? 0
         elif arg.starts_with("--max-mem="):
             max_mem_gb = arg[10:].to_int() ?? 0
+        elif arg == "--max-procs":
+            i = i + 1
+            if i < args.len():
+                max_procs = args[i].to_i64() ?? 0
+        elif arg.starts_with("--max-procs="):
+            max_procs = arg[12:].to_i64() ?? 0
         elif arg == "--no-db":
             no_db = true
         elif arg == "--verbose" or arg == "-v":

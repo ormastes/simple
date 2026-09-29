@@ -1,0 +1,67 @@
+use common.plugin.aspect_params.{
+    AspectParamsV1,
+    ASPECT_PARAM_LOG_CALLS,
+    ASPECT_PARAM_LOG_ASSIGNMENTS,
+    ASPECT_PARAM_COMPILE_LOG_LEVEL,
+    ASPECT_PARAM_RUNTIME_LOG_LEVEL,
+    ASPECT_PARAM_MCDC_MODE,
+    ASPECT_PARAM_MCDC_MANIFEST_SHA256,
+    aspect_log_level_from_text,
+    ASPECT_CUTOVER_ATOMIC_EXT_V1,
+    ASPECT_CUTOVER_REJECTED_EXT_V1,
+    aspect_coverage_cutover_policy_v1,
+    aspect_mcdc_mode_from_text
+}
+use common.plugin.iface_id.{ParamExt, ParamHeader}
+use std.nogc_sync_mut.io_runtime.{env_get_opt}
+
+fn _aspect_env_bool(value: text) -> bool:
+    val lowered = value.to_lower()
+    lowered == "1" or lowered == "true" or lowered == "yes" or lowered == "on"
+
+fn _aspect_present(present: i64, ordinal: i64, value: text?) -> i64:
+    if value.?:
+        return present | (1 << ordinal)
+    present
+
+pub fn aspect_params_from_values(
+    log_calls: text?,
+    log_assignments: text?,
+    compile_log_level: text?,
+    runtime_log_level: text?,
+    mcdc_mode: text?,
+    mcdc_manifest_sha256: text?
+) -> AspectParamsV1:
+    var present = 0
+    present = _aspect_present(present, ASPECT_PARAM_LOG_CALLS, log_calls)
+    present = _aspect_present(present, ASPECT_PARAM_LOG_ASSIGNMENTS, log_assignments)
+    present = _aspect_present(present, ASPECT_PARAM_COMPILE_LOG_LEVEL, compile_log_level)
+    present = _aspect_present(present, ASPECT_PARAM_RUNTIME_LOG_LEVEL, runtime_log_level)
+    present = _aspect_present(present, ASPECT_PARAM_MCDC_MODE, mcdc_mode)
+    present = _aspect_present(present, ASPECT_PARAM_MCDC_MANIFEST_SHA256, mcdc_manifest_sha256)
+    AspectParamsV1(
+        hdr: ParamHeader("simple.aop.AspectParams", 1, 0, present),
+        log_calls: _aspect_env_bool(log_calls ?? ""),
+        log_assignments: _aspect_env_bool(log_assignments ?? ""),
+        compile_log_level: aspect_log_level_from_text(compile_log_level ?? "debug"),
+        runtime_log_level: aspect_log_level_from_text(runtime_log_level ?? "debug"),
+        mcdc_mode: aspect_mcdc_mode_from_text(mcdc_mode ?? ""),
+        mcdc_manifest_sha256: mcdc_manifest_sha256 ?? "",
+        ext: [ParamExt(ASPECT_CUTOVER_ATOMIC_EXT_V1, 1, [],
+            "sha256:simple.instrumentation.cutover.atomic.v1")])
+
+pub fn aspect_params_from_env() -> AspectParamsV1:
+    var params = aspect_params_from_values(
+        env_get_opt("SIMPLE_AOP_LOG_CALLS"),
+        env_get_opt("SIMPLE_AOP_LOG_ASSIGNMENTS"),
+        env_get_opt("SIMPLE_AOP_COMPILE_LOG_LEVEL"),
+        env_get_opt("SIMPLE_AOP_RUNTIME_LOG_LEVEL"),
+        env_get_opt("SIMPLE_MCDC_MODE"),
+        env_get_opt("SIMPLE_MCDC_MANIFEST_SHA256"))
+    val cutover = env_get_opt("SIMPLE_COVERAGE_CUTOVER_STATE") ?? ""
+    match aspect_coverage_cutover_policy_v1(cutover):
+        case Ok(_): pass
+        case Err(message):
+            params.ext.push(ParamExt(ASPECT_CUTOVER_REJECTED_EXT_V1, 1,
+                message.bytes(), "sha256:simple.instrumentation.cutover.rejected.v1"))
+    params

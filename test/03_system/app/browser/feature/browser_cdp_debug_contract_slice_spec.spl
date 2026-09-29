@@ -1,0 +1,23 @@
+# @cover src/app/browser/main.spl 0%
+# @req REQ-015
+use std.spec
+use std.common.debug.capability.{CapLevel}
+use std.common.debug.contracts_v1.{DebugVerificationV1, debug_policy_observe_only_v1}
+use std.common.debug.service_v1.{central_debug_service_v1_graph, central_debug_service_v1_receipts, central_debug_service_v1_close}
+use app.debug.browser.cdp_debug_service_adapter_v1.{browser_cdp_blocked_v1}
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+describe "REQ-015 browser JS Wasm debug contract slice":
+    it "reports this host truthfully when no reachable browser executable exists":
+        val (path, _stderr, _code) = rt_process_run("/bin/sh", ["-c", "command -v chromium || command -v chromium-browser || command -v google-chrome || command -v electron || true"])
+        expect(path.trim()).to_equal("")
+        val slice = browser_cdp_blocked_v1("build-browser-system-host", debug_policy_observe_only_v1(), "no Chromium, Chrome, or Electron executable found on this host").unwrap()
+        val graph = central_debug_service_v1_graph(slice.session_id).unwrap()
+        expect(graph.build_id).to_equal("build-browser-system-host")
+        expect(graph.capabilities.all(\cap: cap.support == CapLevel.Unavailable and cap.verification == DebugVerificationV1.Blocked)).to_equal(true)
+        expect(slice.worker_auto_attach_verified).to_equal(false)
+        expect(slice.boundary_frames.len()).to_equal(0)
+        expect(slice.source_mapping_reason).to_contain("blocked")
+        expect(central_debug_service_v1_receipts(slice.session_id).last().reason).to_contain("redacted")
+        central_debug_service_v1_close(slice.session_id).unwrap()

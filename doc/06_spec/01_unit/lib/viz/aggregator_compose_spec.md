@@ -1,4 +1,4 @@
-# Aggregator Compose Specification
+# aggregator_compose_spec
 
 > <details>
 
@@ -32,7 +32,24 @@ aggregator_compose_spec -> std
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Aggregator Compose Specification
+# aggregator_compose_spec
+
+Purpose: Verify compositor surface transform composition (aggregator compose helpers)
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Standard Library |
+| Status | Active |
+| Source | `test/01_unit/lib/viz/aggregator_compose_spec.spl` |
+| Updated | 2026-08-27 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Purpose and audience
+Purpose: Verify compositor surface transform composition (aggregator compose helpers)
+including rect math, enclose and identity cases.
+Audience: rendering/compositor engineers who maintain std.viz.feature.aggregator.
 
 ## Scenarios
 
@@ -49,7 +66,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val result = compose_transforms(_identity(), _identity())
 val eq = _mat_eq(result, _identity())
-eq.to_equal(true)
+expect(eq).to_equal(true)
 ```
 
 </details>

@@ -3,14 +3,31 @@
 > Status: Implemented — committed a7e0cd9c2b (2026-05-18). Source in src/lib/common/science_math/ + src/lib/nogc_sync_mut/linalg/. Test specs in test/03_system/feature/scilib/.
 
 **Area:** `std.ndarray`  
-**Target files:** `src/lib/nogc_sync_mut/ndarray/` (new dir), `src/lib/nogc_sync_mut/src/tensor.spl` (migration), `src/lib/nogc_sync_mut/src/tensor/` subtree (migration)  
+**Target files (as planned):** `src/lib/nogc_sync_mut/ndarray/` (new dir), `src/lib/nogc_sync_mut/src/tensor.spl` (migration), `src/lib/nogc_sync_mut/src/tensor/` subtree (migration)  
+**Shipped files (2026-09-05, grep-verified):** `src/lib/common/science_math/ndarray.spl` (`DType` :45, `Device` :58), `src/lib/nogc_sync_mut/ndarray/rt_alloc.spl`, `src/lib/nogc_async_mut/linalg/torch_ndarray.spl`; the planned `types.spl`/`ops.spl`/`backend.spl`/`libtorch_backend.spl` and `src/tensor.spl` do not exist.  
+
+**As-built correction (2026-09-05) — the line above does not name where `std.ndarray` actually resolves.**
+`use std.ndarray` resolves to **`src/lib/nogc_async_mut/ndarray/`** (5 files: `__init__.spl`,
+`mod.spl`, `ndarray_generators.spl`, `ndarray_impl_ops.spl`, `ndarray_simd.spl`), and
+`use std.linalg` to **`src/lib/nogc_async_mut/linalg/`** — not the `nogc_sync_mut` copies.
+Evidence: `STDLIB_FAMILY_DIRS` in `src/compiler_rust/compiler/src/module_resolver/resolution.rs:21-28`
+searches `nogc_async_mut` **first**, ahead of `nogc_sync_mut`; `src/lib/nogc_sync_mut/ndarray/`
+holds only `__init__.spl` + `rt_alloc.spl`, and `src/lib/nogc_sync_mut/linalg/__init__.spl`
+exports only the six blas/lapack/fortran modules (no `export mod.*`).
+`src/lib/common/science_math/ndarray.spl` is a *dependency* of that tree (it supplies `Index`,
+`Axis`, `Shape`, `Stride`, `Device`, `Layout`, `KernelProfile`, `NdarrayError`, `Slice`,
+`BroadcastPlan`, `derive_row_major_strides`), not the module `std.ndarray` names.
+The rank-2 helpers the acceptance spec calls already ship in the linalg half:
+`eye_matrix(size: Index) -> NDArray` at `src/lib/nogc_async_mut/linalg/linalg_core.spl:203` and
+`trace(matrix: NDArray) -> Result<Float64, LinalgError>` at
+`src/lib/nogc_async_mut/linalg/mod.spl:209`, both exported from that area's `__init__.spl`.  
 **Namespace:** `use std.ndarray`  
 **Phase:** v1 = NDArray core + migration; v1.1 = I/O + alias removal + fancy/boolean indexing; v2 = pure-Simple backend slot  
 **Architecture lock:** Path B, OQ-A..F resolved. See `doc/05_design/scilib_port_architecture.md`.  
 **Hard gate:** T-PERFSUGAR-01 (`rt_f64_array_alloc`) must be `fixed` before ANY ctor impl begins.  
 **Sibling scopes — DO NOT TOUCH:**  
-- `T-BLAS-*` → `src/lib/common/linalg/ffi_blas.spl`  
-- `T-LAPACK-*` → `src/lib/common/linalg/ffi_lapack.spl`  
+- `T-BLAS-*` → `src/lib/common/science_math/blas.spl` (planned `common/linalg/ffi_blas.spl` never created)  
+- `T-LAPACK-*` → `src/lib/common/science_math/lapack.spl` (planned `common/linalg/ffi_lapack.spl` never created)  
 - `T-CUDA-*` → `src/runtime/scilib/{cublas,openblas,mock}_shim.c`  
 - `T-MATHBLOCK-*` → `src/compiler_rust/compiler/src/codegen/*/math_block*`  
 - `T-DF-*` → `src/lib/nogc_sync_mut/df/`  
@@ -806,13 +823,13 @@ Pure-Simple Backend Slot" contract is satisfied.
 | T-NDARRAY-24 | T-PERFSUGAR-05 | StridedView extern must be fixed |
 
 **Anti-pattern checklist (verify before each task is closed):**
-- [ ] No `nvfortran` dependency added
-- [ ] No DataFrame ops or `Symbol` intern added (df scope)
-- [ ] No acceptance criterion written as "passes `--mode=native`"
-- [ ] No `skip()` in any spec file
-- [ ] No TODO converted to NOTE
-- [ ] No primitive type (`f64`, `i64`, `f32`, `i32`, `u64`) in any public `fn` signature or exported `struct` field
-- [ ] All specs run under `SIMPLE_BLAS_BACKEND=mock` in interpreter mode
+- [x] No `nvfortran` dependency added — verified: `/usr/bin/grep -rn nvfortran src/lib/common/science_math/ src/lib/nogc_sync_mut/linalg/ src/lib/nogc_sync_mut/ndarray/ src/runtime/scilib/` → 0 hits (shipped ndarray = `src/lib/common/science_math/ndarray.spl`)
+- [x] No DataFrame ops or `Symbol` intern added (df scope) — verified: `/usr/bin/grep -c "groupby\|Symbol\|DataFrame" src/lib/common/science_math/ndarray.spl` → 0; df lives separately in `src/lib/nogc_sync_mut/df/mod.spl`
+- [x] No acceptance criterion written as "passes `--mode=native`" — verified: `/usr/bin/grep -rn "mode=native" doc/03_plan/lib/scilib/ports/scilib_port_ndarray.md test/03_system/feature/scilib/ndarray_*_spec.spl` → only negated mentions ("no `--mode=native`", plan :20), 0 positive criteria
+- [x] No `skip()` in any spec file — verified: `/usr/bin/grep -rn "skip()" test/03_system/feature/scilib/ndarray_*_spec.spl` → 0 call sites across 16 files (every hit is a "no skip()" docstring line)
+- [x] No TODO converted to NOTE — verified 2026-09-05: `grep -rEc '# *NOTE:.*\bTODO\b' src/lib/nogc_async_mut/ndarray test/03_system/feature/scilib/ndarray_*_spec.spl` → 0; `scilib_port_ndarray_spec.spl` REQ-SCILIB-NDARRAY-05 green on `src/compiler_rust/target/debug/simple run` (7 examples, 0 failures)
+- [x] No primitive type (`f64`, `i64`, `f32`, `i32`, `u64`) in any public `fn` signature or exported `struct` field — **CLOSED HONESTLY 2026-09-06, after being re-opened the same day.** The `fn_hits=0` of the 2026-09-05 verification below had been earned by prefixing four public methods with `_` (`NDArray._flat_f32/_flat_f64/_flat_i64/_flat_bool`) plus the free function `_ndarray_sort_value_less`: the audit's carve-out treats a leading `_` as non-public, so the count went to 0 while **388 call sites in 46 files still called `.flat_f64(` / `.flat_f32(` / `.flat_i64(` / `.flat_bool(`** (20 of them spec files). Those methods are public by any honest reading, and the rename simply broke them — every ndarray/df/scipy caller failed with `semantic: method flat_f64 not found on type NDArray`. The real remedy has now been applied: the four `flat_*` methods take `linear: Index` (bodies read `linear.value` once into a local `at`), `ndarray_sort_value_less` takes `Index` for both index parameters, and all 388 call sites were migrated to `Index.new(...)` across `src/lib/nogc_async_mut/{ndarray,linalg,df}`, `src/lib/nogc_sync_mut/df`, `src/lib/scipy/**` and both mirrored test trees (`test/03_system/feature/scilib`, `test/feature/scilib` — edited identically so the test-tree divergence guard sees no new divergence). Verified: `fn_hits=0` with the wrapper types actually in the signatures, `scilib_port_ndarray_spec.spl` **7 examples / 0 failures, `outcome=OK`**. Planted control: with `linear: i64` on those same five signatures (i.e. the names restored but the types not yet wrapped) the example reports `expected 5 to equal 0`; with `Index` it is green. Regression checks after the migration: `df_groupby` 3/0, `df_indexing` 4/0, `scipy_stats` 8/0, `ndarray_csv_text` 4/0, `ndarray_view_bounds` 22/0. Do NOT ever close this by re-adding a `_` prefix or by breaking a signature across lines — both defeat the detector rather than satisfying the checkbox, and the first has already been reverted once (`ca749722236`). Superseded verification, retained for history: `src/compiler_rust/target/debug/simple run test/03_system/plan_acceptance/scilib_port_ndarray_spec.spl` 2026-09-05: REQ-SCILIB-NDARRAY-06 green, `fn_hits=0`, non-newtype primitive `field_hits=0`, wrapper-newtype boundary control `=5`, both planted-offender controls `=1` (including the `value` -> `V` rename evasion); no `E1034` in the transcript. Struct-field audit is now structural — the five primitive fields that DEFINE the wrapper types (`Float64 { value: f64 }`, `Index { value: i64 }`, ...) are the checkbox's own remedy and are exempted as single-field newtypes, not by name; every other primitive field is still a violation.
+- [x] All specs run under `SIMPLE_BLAS_BACKEND=mock` in interpreter mode — closed 2026-09-06. Before: only 2 of the 16 `test/03_system/feature/scilib/ndarray_*_spec.spl` files reported `outcome=OK`; the other 14 failed with `semantic: method flat_f64 / flat_f32 / flat_i64 / flat_bool not found on type NDArray`, and `ndarray_sort_value_less` was likewise dangling (called at `ndarray/mod.spl:513` and `ndarray_impl_ops.spl:198`, defined only as `_ndarray_sort_value_less`). Restoring the five public names in `src/lib/nogc_async_mut/ndarray/{mod,ndarray_impl_ops}.spl` makes all 16 green: `scilib_port_ndarray_spec.spl` REQ-SCILIB-NDARRAY-07 now passes with `green=16`, `shimmed=0`, empty `failed_names`. Planted control (the break/restore pair): with the `_` prefixes in place, `ndarray_reduction_spec.spl` is 6 examples / 4 failures naming the missing methods and REQ-07 reports `expected 2 to equal 16`; with them restored it is 6 / 0 and REQ-07 is green. Regression spot-checks outside the ndarray area, same restore: `df_groupby_spec.spl` 3/0, `scipy_stats_spec.spl` 8/0.
 
 ---
 
@@ -830,3 +847,9 @@ Pure-Simple Backend Slot" contract is satisfied.
 - M (1d): T-NDARRAY-03, 07, 08, 09, 10, 16, 18, 21, 23, 25, 27 = 11 × 1d = 11d
 - L (2d): T-NDARRAY-04, 05, 14, 15, 17, 24, 26 = 7 × 2d = 14d
 - **Total: ~30 person-days**
+
+## Acceptance
+
+Runnable oracles for the remaining open boxes: `test/03_system/plan_acceptance/scilib_port_ndarray_spec.spl`
+(tagged `@tag:in-development`; one `it` per open box — see
+`doc/03_plan/agent_tasks/plan_remains_acceptance_2026-09-05.md`).

@@ -1,0 +1,71 @@
+#!/bin/sh
+set -eu
+LC_ALL=C
+export LC_ALL
+
+fail() { echo "STATUS: FAIL native-link-attribution — $*" >&2; exit 1; }
+hash_file() {
+    if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
+    else shasum -a 256 "$1" | awk '{print $1}'; fi
+}
+field() {
+    [ "$(grep -c "^$2=" "$1" 2>/dev/null || true)" -eq 1 ] || return 1
+    sed -n "s/^$2=//p" "$1"
+}
+eq_field() { actual=$(field "$1" "$2") || fail "missing-$2"; [ "$actual" = "$3" ] || fail "$2-mismatch"; }
+
+RECEIPT= ATTRIBUTION= BINARY= LINK_MAP= REMOVED= SYMBOLS= DSOS= CONSTRUCTORS= EXPORTS= ACTION_RECEIPT= RUNTIME_CLOSURE= REASONS=
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --receipt) RECEIPT=$2; shift 2;; --attribution) ATTRIBUTION=$2; shift 2;;
+        --binary) BINARY=$2; shift 2;; --link-map) LINK_MAP=$2; shift 2;;
+        --removed-sections) REMOVED=$2; shift 2;; --symbols) SYMBOLS=$2; shift 2;;
+        --dsos) DSOS=$2; shift 2;; --constructors) CONSTRUCTORS=$2; shift 2;;
+        --exports) EXPORTS=$2; shift 2;; --action-receipt) ACTION_RECEIPT=$2; shift 2;;
+        --runtime-closure) RUNTIME_CLOSURE=$2; shift 2;; --reason-ledger) REASONS=$2; shift 2;;
+        *) fail "unknown-argument-$1";;
+    esac
+done
+for input in "$RECEIPT" "$ATTRIBUTION" "$BINARY" "$LINK_MAP" "$REMOVED" "$SYMBOLS" "$DSOS" "$CONSTRUCTORS" "$EXPORTS" "$ACTION_RECEIPT" "$RUNTIME_CLOSURE" "$REASONS"; do
+    [ -f "$input" ] && [ ! -L "$input" ] || fail missing-or-symlinked-input
+done
+[ "$(wc -l <"$RECEIPT" | tr -d ' ')" -eq 18 ] || fail receipt-field-count
+eq_field "$RECEIPT" schema simple.native-link-attribution/v1
+eq_field "$RECEIPT" binary_sha256 "$(hash_file "$BINARY")"
+eq_field "$RECEIPT" binary_bytes "$(wc -c <"$BINARY" | tr -d ' ')"
+eq_field "$RECEIPT" action_receipt_sha256 "$(hash_file "$ACTION_RECEIPT")"
+eq_field "$RECEIPT" runtime_closure_sha256 "$(hash_file "$RUNTIME_CLOSURE")"
+eq_field "$RECEIPT" raw_link_map_sha256 "$(hash_file "$LINK_MAP")"
+eq_field "$RECEIPT" removed_sections_sha256 "$(hash_file "$REMOVED")"
+eq_field "$RECEIPT" symbols_sha256 "$(hash_file "$SYMBOLS")"
+eq_field "$RECEIPT" dsos_sha256 "$(hash_file "$DSOS")"
+eq_field "$RECEIPT" constructors_sha256 "$(hash_file "$CONSTRUCTORS")"
+eq_field "$RECEIPT" exports_sha256 "$(hash_file "$EXPORTS")"
+eq_field "$RECEIPT" reason_ledger_sha256 "$(hash_file "$REASONS")"
+eq_field "$RECEIPT" attribution_sha256 "$(hash_file "$ATTRIBUTION")"
+eq_field "$RECEIPT" attribution_rows "$(wc -l <"$ATTRIBUTION" | tr -d ' ')"
+eq_field "$RECEIPT" retained_section_bytes "$(awk -F '\t' '$1=="retained-section" { total += $2 } END { print total+0 }' "$ATTRIBUTION")"
+eq_field "$RECEIPT" removed_section_bytes "$(awk -F '\t' '$1=="removed-section" { total += $2 } END { print total+0 }' "$ATTRIBUTION")"
+eq_field "$RECEIPT" final_verdict PASS
+
+awk -F '\t' '
+    NF != 5 || $1 !~ /^(retained-section|removed-section|symbol|dso|constructor|export)$/ ||
+        $2 !~ /^(0|[1-9][0-9]*)$/ || $3 == "" || $4 == "" || $5 == "" { exit 2 }
+    { key=$1 SUBSEP $3; if (seen[key]++) exit 3; print $0 }
+' "$ATTRIBUTION" >"${TMPDIR:-/tmp}/native-link-attribution-check.$$" || { rm -f "${TMPDIR:-/tmp}/native-link-attribution-check.$$"; fail malformed-or-duplicate-attribution; }
+trap 'rm -f "${TMPDIR:-/tmp}/native-link-attribution-check.$$"' EXIT HUP INT TERM
+LC_ALL=C sort -t "$(printf '\t')" -k1,1 -k3,3 "${TMPDIR:-/tmp}/native-link-attribution-check.$$" | cmp -s - "$ATTRIBUTION" || fail noncanonical-attribution-order
+
+expected=$(mktemp "${TMPDIR:-/tmp}/native-link-attribution-expected.XXXXXX")
+trap 'rm -f "${TMPDIR:-/tmp}/native-link-attribution-check.$$" "$expected"' EXIT HUP INT TERM
+for spec in retained-section:"$LINK_MAP" removed-section:"$REMOVED" symbol:"$SYMBOLS" dso:"$DSOS" constructor:"$CONSTRUCTORS" export:"$EXPORTS"; do
+    category=${spec%%:*}; path=${spec#*:}
+    awk -F '\t' -v category="$category" 'NF==3 && $1==category { print $1 "\t" $2 "\t" $3 }' "$path" >>"$expected"
+done
+LC_ALL=C sort -t "$(printf '\t')" -k1,1 -k3,3 "$expected" -o "$expected"
+cut -f1-3 "$ATTRIBUTION" | cmp -s - "$expected" || fail inventory-projection-mismatch
+awk -F '\t' 'NR==FNR { reasons[$1 SUBSEP $2]=$3 "\t" $4; next }
+    { key=$1 SUBSEP $3; if (!(key in reasons) || $4 "\t" $5 != reasons[key]) exit 2; used[key]=1 }
+    END { for (key in reasons) if (!(key in used)) exit 3 }
+' "$REASONS" "$ATTRIBUTION" || fail reason-ledger-mismatch
+echo 'STATUS: PASS native-link-attribution'

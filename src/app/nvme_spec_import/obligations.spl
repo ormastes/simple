@@ -1,0 +1,202 @@
+"""
+obligations — the five test obligations per capability (positive, negative,
+reset, fault, persistence) and the EVIDENCE BINDINGS that say, for one
+(feature, obligation) cell, which in-tree program produces the evidence and
+which verdict token proves it ran.
+
+A binding exists only where a named program prints a named token that this
+session actually observed. Every cell without a binding is PENDING, and the
+generator emits a blocked marker naming why. There is deliberately no default
+binding and no wildcard: an unbound cell must look unbound, because a generated
+scenario that asserts nothing while reporting green is the worst possible
+outcome of this tool.
+
+EVIDENCE GRADE of a binding:
+  `direct`    — the bound token is a specific assertion message about THIS
+                feature (e.g. the CQE phase bit on the first lap).
+  `aggregate` — the bound token is a whole-program verdict covering many
+                features at once (`ALL NVME CONTROLLER E2E CHECKS PASS`). It
+                proves the path ran and the program's own expectations held,
+                but it does not isolate this feature. Recorded as `aggregate`
+                so a reader is never misled into thinking it does.
+"""
+
+use feature_map.*
+
+val OB_POSITIVE: text = "positive"
+val OB_NEGATIVE: text = "negative"
+val OB_RESET: text = "reset"
+val OB_FAULT: text = "fault"
+val OB_PERSISTENCE: text = "persistence"
+
+val FW: text = "examples/09_embedded/simpleos_nvme_fw/fw/"
+
+# Evidence programs, all under fw/. Every one was RUN from the repo root on
+# 2026-09-01 and printed its verdict line; the tokens bound below were then
+# grepped out of those captured logs, so no binding names a line that does not
+# occur. Running from anywhere else silently zeroes the transport profile
+# (fw/nvme_transport_config.spl holds a cwd-relative SDN path).
+val REG: text = FW + "nvme_registers_check.spl"          # NVME REGISTERS OK
+val ADM: text = FW + "admin_transport_check.spl"         # ADMIN TRANSPORT OK
+val RDY: text = FW + "nvme_ready_gate_check.spl"         # NVME READY GATE OK
+val PRP: text = FW + "prp_wire_witness_check.spl"        # PRP WIRE WITNESS OK
+val MB:  text = FW + "nvme_multiblock_witness_check.spl" # NVME MULTIBLOCK WITNESS OK
+val HEQ: text = FW + "host_equiv_transport_check.spl"    # HOST EQUIV TRANSPORT OK
+val REC: text = FW + "nvme_emu_recovery_check.spl"       # NVME EMU RECOVERY OK
+val DUR: text = FW + "durability_check.spl"              # DURABILITY OK
+val QSD: text = FW + "qset_delete_check.spl"             # QSET DELETE OK
+val TPF: text = FW + "task_pool_fail_closed_check.spl"   # TASK POOL CLOSED OK
+val ARB: text = FW + "arbitration_check.spl"             # ARBITRATION OK
+
+struct Binding:
+    feature:    text
+    obligation: text
+    program:    text   # path, relative to repo root
+    token:      text   # verdict / assertion line the scenario asserts
+    grade:      text   # direct | aggregate
+
+"""Every (feature, obligation) cell for which in-tree evidence exists today.
+
+RE-SCORED 2026-09-01. The previous binding set predated the controller register
+file, the admin doorbell transport, real page payloads and PRP-over-the-wire.
+Cells that were pending only because those did not exist are now bound, and
+several aggregate bindings were upgraded to `direct` because a specific
+assertion about the feature now exists (Identify, for instance, moved from the
+whole-program `ALL NVME CONTROLLER E2E CHECKS PASS` verdict to
+`Identify produced a CONTROLLER structure`, asserted after the command
+travelled ASQ memory -> admin doorbell -> phase-tagged ACQ entry).
+
+WHAT IS DELIBERATELY STILL UNBOUND, so that the count is not inflated:
+
+  * every `persistence` cell outside Read/Write/Flush, INCLUDING arbitration's.
+    Persistence means power-cycle durability. `PRESERVED: AQA is not affected by
+    a Controller Reset` is reset-SURVIVAL evidence and binding it to
+    `persistence` would be the same category error this file already rejects for
+    backpressure-as-negative. No program power-cycles and re-reads the register
+    file, and none re-reads a queue registry across a power cycle either.
+    RE-CHECKED 2026-09-01 against `fw/arbitration_check.spl`: its section F
+    covers RESET, not persistence — a fresh post-reset queue registry is not a
+    durable one — so arbitration/persistence stays pending on purpose.
+  * `abort`, `async_event_request`, `get_log_fw_slot` beyond `positive`: the
+    opcode demonstrably travels the transport, but nothing asserts the
+    command's own semantics (what an Abort actually cancelled, which event was
+    reported, which slot is active).
+  * `prp_transfer` / `fault`: no failure is injected into a PRP transfer.
+"""
+fn bindings() -> [Binding]:
+    var b: [Binding] = []
+
+    # ── controller registers: the property window and its access rules ───────
+    b.push(Binding(feature: "controller_registers", obligation: OB_POSITIVE, program: REG, token: "bringup() drives the whole sequence through the registers", grade: "direct"))
+    b.push(Binding(feature: "controller_registers", obligation: OB_NEGATIVE, program: REG, token: "CAP is RO: an all-ones host write changes nothing", grade: "direct"))
+    b.push(Binding(feature: "controller_registers", obligation: OB_RESET, program: REG, token: "CSTS returns to its reset value", grade: "direct"))
+    b.push(Binding(feature: "controller_registers", obligation: OB_FAULT, program: REG, token: "NEGATIVE: CSTS.CFS is set for an over-large AQA", grade: "direct"))
+
+    # ── CC.EN / CSTS.RDY enable handshake ────────────────────────────────────
+    b.push(Binding(feature: "enable_handshake", obligation: OB_POSITIVE, program: REG, token: "CSTS.RDY is now 1 -- the controller is enabled", grade: "direct"))
+    b.push(Binding(feature: "enable_handshake", obligation: OB_NEGATIVE, program: REG, token: "NEGATIVE: CSTS.RDY stays 0 for an invalid AQA", grade: "direct"))
+    b.push(Binding(feature: "enable_handshake", obligation: OB_RESET, program: REG, token: "clearing CC.EN takes CSTS.RDY back to 0", grade: "direct"))
+    b.push(Binding(feature: "enable_handshake", obligation: OB_FAULT, program: RDY, token: "a fatal controller refuses submissions", grade: "direct"))
+
+    # ── Controller Reset ─────────────────────────────────────────────────────
+    b.push(Binding(feature: "controller_reset", obligation: OB_POSITIVE, program: REG, token: "CSTS.RDY is 0 after the Controller Reset", grade: "direct"))
+    b.push(Binding(feature: "controller_reset", obligation: OB_NEGATIVE, program: RDY, token: "WITNESS: submission is refused again after the Controller Reset", grade: "direct"))
+    b.push(Binding(feature: "controller_reset", obligation: OB_RESET, program: REG, token: "DISCARDED: SQ0TDBL is back to 0", grade: "direct"))
+    b.push(Binding(feature: "controller_reset", obligation: OB_FAULT, program: RDY, token: "the fixture really is in CSTS.CFS", grade: "direct"))
+
+    # ── Admin SQ/CQ pair, now over the real admin doorbell transport ─────────
+    b.push(Binding(feature: "admin_queue_pair", obligation: OB_POSITIVE, program: ADM, token: "ASQ memory CDW0[7:0] holds the Identify opcode", grade: "direct"))
+    b.push(Binding(feature: "admin_queue_pair", obligation: OB_NEGATIVE, program: ADM, token: "poll_acq refuses the wrong-phase entry", grade: "direct"))
+    b.push(Binding(feature: "admin_queue_pair", obligation: OB_RESET, program: REG, token: "PRESERVED: AQA is not affected by a Controller Reset", grade: "direct"))
+    b.push(Binding(feature: "admin_queue_pair", obligation: OB_FAULT, program: RDY, token: "WITNESS: a not-ready controller FETCHES NOTHING on a doorbell ring", grade: "direct"))
+
+    # ── host-equivalent transport: doorbell + phase tag ──────────────────────
+    b.push(Binding(feature: "doorbell_registers", obligation: OB_POSITIVE, program: HEQ, token: "SQ0TDBL now holds the shadow tail", grade: "direct"))
+    b.push(Binding(feature: "doorbell_registers", obligation: OB_NEGATIVE, program: HEQ, token: "unattached board transport refuses submission", grade: "direct"))
+    b.push(Binding(feature: "doorbell_registers", obligation: OB_RESET, program: REG, token: "DISCARDED: the shadow SQ tail is back to 0", grade: "direct"))
+    b.push(Binding(feature: "doorbell_registers", obligation: OB_FAULT, program: RDY, token: "WITNESS: submit_sqe REFUSES while CSTS.RDY is 0", grade: "direct"))
+    b.push(Binding(feature: "cqe_phase_tag", obligation: OB_POSITIVE, program: HEQ, token: "CQE phase bit 16 == 1 on the first lap", grade: "direct"))
+    b.push(Binding(feature: "cqe_phase_tag", obligation: OB_NEGATIVE, program: HEQ, token: "poll refuses the stale CQE", grade: "direct"))
+    b.push(Binding(feature: "cqe_phase_tag", obligation: OB_RESET, program: HEQ, token: "host expected phase toggled to 0 after one full lap", grade: "direct"))
+    b.push(Binding(feature: "cqe_phase_tag", obligation: OB_FAULT, program: ADM, token: "refused poll did NOT advance the admin CQ head", grade: "direct"))
+
+    # ── admin commands, now over the admin doorbell transport ────────────────
+    b.push(Binding(feature: "identify", obligation: OB_POSITIVE, program: ADM, token: "Identify produced a CONTROLLER structure", grade: "direct"))
+    b.push(Binding(feature: "identify", obligation: OB_NEGATIVE, program: ADM, token: "unsupported opcode -> SC_INVALID_OPCODE, never silent success", grade: "direct"))
+    b.push(Binding(feature: "get_log_error", obligation: OB_POSITIVE, program: ADM, token: "all 13 admin opcodes travelled exec_admin", grade: "aggregate"))
+    b.push(Binding(feature: "get_log_error", obligation: OB_FAULT, program: REC, token: "NVME EMU RECOVERY OK", grade: "aggregate"))
+    b.push(Binding(feature: "get_log_smart", obligation: OB_POSITIVE, program: ADM, token: "Get Log Page (SMART) travelled the admin path", grade: "direct"))
+    b.push(Binding(feature: "get_log_smart", obligation: OB_FAULT, program: REC, token: "NVME EMU RECOVERY OK", grade: "aggregate"))
+    b.push(Binding(feature: "get_log_fw_slot", obligation: OB_POSITIVE, program: ADM, token: "all 13 admin opcodes travelled exec_admin", grade: "aggregate"))
+    b.push(Binding(feature: "features_set_get", obligation: OB_POSITIVE, program: ADM, token: "Get Features read back the value Set Features stored", grade: "direct"))
+    b.push(Binding(feature: "io_queue_create_delete", obligation: OB_POSITIVE, program: ADM, token: "Create CQ + Create SQ for qid 1 succeeded over the doorbell path", grade: "direct"))
+    b.push(Binding(feature: "io_queue_create_delete", obligation: OB_NEGATIVE, program: QSD, token: "QSET DELETE OK", grade: "aggregate"))
+    b.push(Binding(feature: "abort", obligation: OB_POSITIVE, program: ADM, token: "all 13 admin opcodes travelled exec_admin", grade: "aggregate"))
+    b.push(Binding(feature: "async_event_request", obligation: OB_POSITIVE, program: ADM, token: "all 13 admin opcodes travelled exec_admin", grade: "aggregate"))
+
+    # ── command arbitration: round robin across competing I/O queues ─────────
+    # Round robin ONLY. Weighted round robin with urgent priority (CAP.AMS bit
+    # 0) is not implemented and not advertised, so no cell here claims it; the
+    # positive token below is the CAP.AMS=0 assertion precisely so the ledger
+    # records the NON-claim as tested fact rather than as silence.
+    b.push(Binding(feature: "arbitration", obligation: OB_POSITIVE, program: ARB, token: "P2 NO STARVATION: the arbiter never served one queue twice running while another had backlog", grade: "direct"))
+    b.push(Binding(feature: "arbitration", obligation: OB_NEGATIVE, program: ARB, token: "NEGATIVE: the empty qid 2 is never selected, and qid 1 is served exactly once", grade: "direct"))
+    b.push(Binding(feature: "arbitration", obligation: OB_RESET, program: ARB, token: "RESET: re-created queues are served equally -- no queue inherited a pre-reset advantage", grade: "direct"))
+    b.push(Binding(feature: "arbitration", obligation: OB_FAULT, program: ARB, token: "FAULT: the deleted queue is NEVER selected again -- no livelock on a dead qid", grade: "direct"))
+
+    # ── status-code reporting ────────────────────────────────────────────────
+    b.push(Binding(feature: "status_code_reporting", obligation: OB_POSITIVE, program: ADM, token: "unsupported opcode still completes with its own cid", grade: "direct"))
+    b.push(Binding(feature: "status_code_reporting", obligation: OB_NEGATIVE, program: MB, token: "an over-MDTS write is rejected with SC_INVALID_FIELD", grade: "direct"))
+    b.push(Binding(feature: "status_code_reporting", obligation: OB_FAULT, program: TPF, token: "TASK POOL CLOSED OK", grade: "aggregate"))
+
+    # ── NVM command set over the host transport, with REAL page payloads ─────
+    b.push(Binding(feature: "nvm_write", obligation: OB_POSITIVE, program: PRP, token: "WITNESS: the device stored the NEW word 0 (0xBB00), not the stale 0xAA00", grade: "direct"))
+    b.push(Binding(feature: "nvm_write", obligation: OB_NEGATIVE, program: MB, token: "an over-MDTS write is rejected with SC_INVALID_FIELD", grade: "direct"))
+    b.push(Binding(feature: "nvm_write", obligation: OB_RESET, program: RDY, token: "WITNESS: exec_io yields no completion after the reset", grade: "direct"))
+    b.push(Binding(feature: "nvm_write", obligation: OB_FAULT, program: REC, token: "NVME EMU RECOVERY OK", grade: "aggregate"))
+    b.push(Binding(feature: "nvm_write", obligation: OB_PERSISTENCE, program: DUR, token: "recover: post-checkpoint overwrite of 10 restored", grade: "direct"))
+    b.push(Binding(feature: "nvm_read", obligation: OB_POSITIVE, program: PRP, token: "the read-back completes", grade: "direct"))
+    b.push(Binding(feature: "nvm_read", obligation: OB_RESET, program: RDY, token: "WITNESS: exec_io still fetched nothing", grade: "direct"))
+    b.push(Binding(feature: "nvm_read", obligation: OB_FAULT, program: MB, token: "block index 2 is genuinely unreadable", grade: "direct"))
+    b.push(Binding(feature: "nvm_read", obligation: OB_PERSISTENCE, program: DUR, token: "journal overflow: all 600 writes survive power cycle (no silent drop)", grade: "direct"))
+    b.push(Binding(feature: "nvm_flush", obligation: OB_POSITIVE, program: HEQ, token: "every one of depth+3 commands completed across the wrap", grade: "direct"))
+    b.push(Binding(feature: "nvm_flush", obligation: OB_PERSISTENCE, program: DUR, token: "post-crash: only checkpointed 10 remains (overwrite was volatile)", grade: "direct"))
+
+    # ── PRP data transfer: PRP1/PRP2 are real addresses the device DMAs from ──
+    b.push(Binding(feature: "prp_transfer", obligation: OB_POSITIVE, program: PRP, token: "PRP1 holds the ADDRESS of the host page buffer", grade: "direct"))
+    b.push(Binding(feature: "prp_transfer", obligation: OB_NEGATIVE, program: PRP, token: "WITNESS: the device fetched NOTHING (no SQE was written)", grade: "direct"))
+
+    # DELIBERATELY NOT BOUND: status_code_reporting / reset.
+    # `hil_queue_backpressure_check.spl` was considered and rejected. Queue
+    # backpressure is a FAULT condition, not "a malformed command is rejected
+    # with the correct status code and changes no state", and the feature
+    # matrix itself files backpressure under the fault obligation. Binding it
+    # elsewhere would have inflated coverage with evidence about a different
+    # thing, which is the exact failure this file exists to prevent.
+    b
+
+fn obligation_list() -> [text]:
+    [OB_POSITIVE, OB_NEGATIVE, OB_RESET, OB_FAULT, OB_PERSISTENCE]
+
+"""The binding for one cell, or an empty binding when the cell is pending."""
+fn binding_for(feature: text, obligation: text) -> Binding:
+    val bs = bindings()
+    var i: i64 = 0
+    while i < bs.len():
+        if bs[i].feature == feature and bs[i].obligation == obligation:
+            return bs[i]
+        i = i + 1
+    Binding(feature: "", obligation: "", program: "", token: "", grade: "")
+
+fn is_bound(b: Binding) -> bool:
+    b.token.len() > 0
+
+"""Why a pending cell is pending: the feature's blocker, or the evidence gap."""
+fn pending_reason(f: NvmeFeature, obligation: text) -> text:
+    if f.status == FEATURE_STATUS_BLOCKED:
+        return f.blocker
+    "no in-tree program drives the " + obligation + " obligation for this feature to a named verdict token yet; the firmware path exists but nothing asserts it"
+
+export Binding, bindings, obligation_list, binding_for, is_bound, pending_reason
+export OB_POSITIVE, OB_NEGATIVE, OB_RESET, OB_FAULT, OB_PERSISTENCE, FW
+export REG, ADM, RDY, PRP, MB, HEQ, REC, DUR, QSD, TPF, ARB

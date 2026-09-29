@@ -1,0 +1,115 @@
+#!/bin/sh
+
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname "$0")/../../.." && pwd -P)
+. "$root/scripts/bootstrap/bootstrap-jobs.shs"
+
+fail() {
+  printf 'bootstrap_jobs_policy_test: %s\n' "$*" >&2
+  exit 1
+}
+
+assert_value() {
+  expected=$1
+  actual=$2
+  label=$3
+  [ "$actual" = "$expected" ] || fail "$label expected=$expected actual=$actual"
+}
+
+work=$(mktemp -d "${TMPDIR:-/tmp}/simple-bootstrap-jobs.XXXXXX")
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+
+review_only=0
+[ "${1:-}" != --review ] || review_only=1
+
+if [ "$review_only" -eq 0 ]; then
+bootstrap_detect_host_cpus() { printf '8\n'; }
+unset SIMPLE_NATIVE_BUILD_THREADS
+bootstrap_select_jobs "" "$work/missing.sdn"
+assert_value 8 "$host_cpus" default-host-cpus
+assert_value 8 "$jobs" default-jobs
+assert_value 8 "$selfhost_jobs" default-selfhost-jobs
+assert_value default "$job_source" default-source
+
+SIMPLE_NATIVE_BUILD_THREADS=5
+bootstrap_select_jobs "" "$work/missing.sdn"
+assert_value 5 "$jobs" env-jobs
+assert_value 5 "$selfhost_jobs" env-selfhost-jobs
+assert_value env "$job_source" env-source
+
+printf 'bootstrap:\n  jobs: 4\n' >"$work/bootstrap.sdn"
+unset SIMPLE_NATIVE_BUILD_THREADS
+bootstrap_select_jobs "" "$work/bootstrap.sdn"
+assert_value 4 "$jobs" config-jobs
+assert_value config "$job_source" config-source
+
+SIMPLE_NATIVE_BUILD_THREADS=6
+bootstrap_select_jobs 3 "$work/bootstrap.sdn"
+assert_value 3 "$jobs" priority-jobs
+assert_value 3 "$selfhost_jobs" priority-selfhost-jobs
+assert_value cli "$job_source" priority-source
+
+if bootstrap_select_jobs invalid "$work/bootstrap.sdn" 2>"$work/invalid-cli.log"; then
+  fail 'invalid explicit CLI value was accepted'
+fi
+grep -Fq -- '--jobs must be a positive integer, auto, full, half, or min' "$work/invalid-cli.log" ||
+  fail 'invalid explicit CLI diagnostic missing'
+
+SIMPLE_NATIVE_BUILD_THREADS=invalid
+bootstrap_select_jobs "" "$work/bootstrap.sdn" 2>"$work/invalid-env.log"
+assert_value 8 "$jobs" invalid-env-fallback-jobs
+assert_value fallback-env-invalid "$job_source" invalid-env-source
+grep -Fq 'using all 8 detected CPUs' "$work/invalid-env.log" ||
+  fail 'invalid environment fallback diagnostic missing'
+
+unset SIMPLE_NATIVE_BUILD_THREADS
+printf 'bootstrap:\n  jobs: zero\n' >"$work/invalid-config.sdn"
+bootstrap_select_jobs "" "$work/invalid-config.sdn" 2>"$work/invalid-config.log"
+assert_value 8 "$jobs" invalid-config-fallback-jobs
+assert_value fallback-config-invalid "$job_source" invalid-config-source
+grep -Fq 'using all 8 detected CPUs' "$work/invalid-config.log" ||
+  fail 'invalid config fallback diagnostic missing'
+
+bootstrap_detect_host_cpus() { printf '0\n'; }
+bootstrap_select_jobs "" "$work/missing.sdn" 2>"$work/zero-detection.log"
+assert_value 1 "$host_cpus" zero-detection-host-fallback
+assert_value 1 "$jobs" zero-detection-jobs-fallback
+assert_value fallback-host-detection "$job_source" zero-detection-source
+grep -Fq 'invalid or zero detected CPU count; using 1' "$work/zero-detection.log" ||
+  fail 'zero CPU detection diagnostic missing'
+fi
+
+# Review additions run independently so the already-green base cases need not
+# be repeated while a continuation is waiting.
+. "$root/scripts/bootstrap/bootstrap-jobs.shs"
+mkdir -p "$work/fake-bin"
+printf '#!/bin/sh\nprintf "7\\n"\n' >"$work/fake-bin/nproc"
+printf '#!/bin/sh\nprintf "11\\n"\n' >"$work/fake-bin/getconf"
+chmod +x "$work/fake-bin/nproc" "$work/fake-bin/getconf"
+detected=$(PATH="$work/fake-bin:$PATH" bootstrap_detect_host_cpus)
+assert_value 7 "$detected" affinity-aware-nproc-precedence
+
+bootstrap_detect_host_cpus() { printf '8\n'; }
+unset SIMPLE_NATIVE_BUILD_THREADS
+bootstrap_select_jobs 12 "$work/missing.sdn"
+assert_value 12 "$jobs" explicit-oversubscription-honored
+assert_value 12 "$selfhost_jobs" explicit-selfhost-oversubscription-honored
+assert_value cli "$job_source" explicit-oversubscription-source
+
+if bootstrap_select_jobs 999999 "$work/missing.sdn" 2>"$work/huge-cli.log"; then
+  fail 'unsafe huge explicit CLI value was accepted'
+fi
+grep -Fq -- '--jobs must be a positive integer' "$work/huge-cli.log" ||
+  fail 'unsafe huge explicit CLI diagnostic missing'
+
+SIMPLE_NATIVE_BUILD_THREADS=999999
+bootstrap_select_jobs "" "$work/missing.sdn" 2>"$work/huge-env.log"
+assert_value 8 "$jobs" unsafe-huge-env-fallback
+assert_value fallback-env-invalid "$job_source" unsafe-huge-env-source
+
+if [ "$review_only" -eq 1 ]; then
+  printf 'PASS: bootstrap job selection review contract\n'
+else
+  printf 'PASS: bootstrap job selection default/env/config/priority/fallback/review contract\n'
+fi
