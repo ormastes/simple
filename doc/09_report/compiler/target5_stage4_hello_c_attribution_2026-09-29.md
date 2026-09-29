@@ -29,6 +29,14 @@ input receipt for the saved Simple hello. The C binary names `libm.so.6` and
 `libc.so.6`; the Simple binary names `libc.so.6` and the ELF loader. They are
 therefore not a matched link pair.
 
+The compiler's `stage4-link-profiles/<hash>/profile.input` receipt applies
+when building the Stage4 compiler itself. The saved hello is an ordinary
+native output from that compiler. Searching retained build receipts for the
+hello's unstripped SHA-256
+`fcf5d4bb072c107f0e2603db7c5f864117c06cd9ba01b84e60b33cf8fda41e7a`
+found no matching link profile. The Stage4 compiler profile cannot stand in
+for the hello link's inputs.
+
 The unstripped Simple binary attributes 4,240 bytes to `.text` versus 1,528
 bytes in the closer C binary. It has 32 undefined dynamic function imports
 versus 18 in that C binary. Its retained code includes
@@ -37,7 +45,7 @@ SIMD text initialization, and profiler setup. `dlopen`/`dlsym` are dynamic
 imports even for this no-import hello. Those facts identify runtime and
 startup closure work; they do not prove that an optional provider loaded.
 
-Next: retain the exact Stage4 hello linker arguments, entry shim, runtime
+Next: retain the exact hello linker arguments, entry shim, runtime
 archive hashes, map, and provider/NoGC trace. Build the C comparator from
 those same inputs and check the 1.05 ratio. Then cut retained startup/runtime
 roots only under a verified feature-closure policy and run paired startup/RSS
