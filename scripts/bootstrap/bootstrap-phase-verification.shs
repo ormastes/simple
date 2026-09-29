@@ -343,6 +343,9 @@ if [ "$phase" = stage2 ]; then
       die "Phase2 runtime path differs from the admitted capsule"
   fi
   runtime_path=$bound_runtime
+  # Phase2 keeps its own admission; only reuse the canonical snapshot helpers.
+  . "$source_root/scripts/check/lib/bootstrap-stage3/authority.shs"
+  . "$source_root/scripts/check/lib/bootstrap-stage3/command-snapshot.shs"
 fi
 if [ -z "$runtime_path" ]; then
   compiler_dir=$(dirname "$compiler")
@@ -769,18 +772,24 @@ run_task() {
       if [ "$phase" = stage1 ]; then
         bootstrap_phase1_validate_invocation "${1:-}" "$task" "$log.phase1-before.env" || exit 89
       fi
-      if [ "$phase" = stage3 ] && [ "${1:-}" = "$compiler_snapshot" ] && \
+      if { [ "$phase" = stage2 ] || [ "$phase" = stage3 ]; } && \
+         [ "${1:-}" = "$compiler_snapshot" ] && \
          [ "${2:-}" = native-build ]; then
         case "$task" in compiler_cli_build|test_runner_build|mcp_build|lsp_build) ;; *) exit 89 ;; esac
         # Keep the actual compiler at argv[0] so the existing pinned-toolchain
         # boundary still recognizes and validates this native-build invocation.
         SIMPLE_NATIVE_RUNTIME_BUNDLE=core-c-bootstrap SIMPLE_RUNTIME_PATH="$runtime_path"
-        SIMPLE_NATIVE_BUILD_THREADS="$s3_threads" SIMPLE_NATIVE_BUILD_CACHE_DIR="$s3_cache"
-        SIMPLE_NATIVE_BUILD_TARGET="$stage3_platform" SIMPLE_BINARY="$compiler_snapshot"
+        SIMPLE_NATIVE_BUILD_THREADS="$pure_tool_threads" SIMPLE_NATIVE_BUILD_CACHE_DIR="$pure_tool_cache"
+        SIMPLE_RT_OBJ_CACHE_DIR="$pure_tool_cache/runtime-objects"
+        SIMPLE_NATIVE_BUILD_TARGET="$target_c_platform" SIMPLE_BINARY="$compiler_snapshot"
+        SIMPLE_PROJECT_ROOT="$source_root" SIMPLE_ABI_POLICY=v1
+        SIMPLE_RUNTIME_RISCV64_VECTOR=0
+        unset SIMPLE_BOOTSTRAP_STAGE3_REQUESTED_ROUTE SIMPLE_NATIVE_BUILD_WORKER
         SIMPLE_BOOTSTRAP_STAGE3=0 SIMPLE_BOOTSTRAP_STAGE4=0
         export SIMPLE_NATIVE_RUNTIME_BUNDLE SIMPLE_RUNTIME_PATH SIMPLE_NATIVE_BUILD_THREADS \
-          SIMPLE_NATIVE_BUILD_CACHE_DIR SIMPLE_NATIVE_BUILD_TARGET SIMPLE_BINARY \
-          SIMPLE_BOOTSTRAP_STAGE3 SIMPLE_BOOTSTRAP_STAGE4
+           SIMPLE_NATIVE_BUILD_CACHE_DIR SIMPLE_NATIVE_BUILD_TARGET SIMPLE_BINARY \
+           SIMPLE_BOOTSTRAP_STAGE3 SIMPLE_BOOTSTRAP_STAGE4 SIMPLE_RT_OBJ_CACHE_DIR \
+           SIMPLE_PROJECT_ROOT SIMPLE_ABI_POLICY SIMPLE_RUNTIME_RISCV64_VECTOR
         bootstrap_phase_run_command run_with_timeout "$@"
       elif [ "$phase" = stage1 ] && [ "${1:-}" = "$compiler_snapshot" ] && \
          [ "${2:-}" = native-build ]; then
@@ -968,6 +977,7 @@ write_command_owner_receipt() {
     [ "$(manifest_value phase "$receipt")" = "$phase" ] || return 1
     [ "$(manifest_value compiler_snapshot_sha256 "$receipt")" = "$snapshot_sha" ] || return 1
     [ "$(manifest_value runtime_identity_sha256 "$receipt")" = "$runtime_cache_identity" ] || return 1
+    validate_target_c_receipt "$receipt" || return 1
     [ "$(manifest_value compiler_cli_path "$receipt")" = "$cli" ] || return 1
     [ "$(manifest_value compiler_cli_sha256 "$receipt")" = "$cli_sha" ] || return 1
     [ "$(manifest_value test_runner_path "$receipt")" = "$runner" ] || return 1
@@ -985,6 +995,7 @@ write_command_owner_receipt() {
       echo "phase=$phase"
       echo "compiler_snapshot_sha256=$snapshot_sha"
       echo "runtime_identity_sha256=$runtime_cache_identity"
+      write_target_c_receipt_fields || exit 1
       echo "compiler_cli_path=$cli"
       echo "compiler_cli_sha256=$cli_sha"
       echo "test_runner_path=$runner"
@@ -1007,6 +1018,7 @@ validate_command_owner_receipt() {
   [ "$(manifest_value phase "$vcor_receipt")" = "$phase" ] || return 1
   [ "$(manifest_value compiler_snapshot_sha256 "$vcor_receipt")" = "$snapshot_sha" ] || return 1
   [ "$(manifest_value runtime_identity_sha256 "$vcor_receipt")" = "$runtime_cache_identity" ] || return 1
+  validate_target_c_receipt "$vcor_receipt" || return 1
   vcor_cli=$(manifest_value compiler_cli_path "$vcor_receipt")
   vcor_cli_sha=$(manifest_value compiler_cli_sha256 "$vcor_receipt")
   vcor_runner=$(manifest_value test_runner_path "$vcor_receipt")
@@ -1132,33 +1144,148 @@ validate_stage3_tool_binding() (
     [ "$(hash_file "$compiler_snapshot")" = "$expected_sha" ]
 )
 
-run_stage3_tool_build() {
-  s3_task=$1 s3_entry=$2 s3_output=$3 s3_cache=$4 s3_threads=$5
-  if ! validate_stage3_tool_binding; then
-    printf 'task=%s|result=FAIL|status=authority-mismatch|elapsed_seconds=0|log=-\n' "$s3_task" >>"$summary"
+# The generic source inventory covers the Simple selector, not src/runtime.
+# Stage3's full manifest additionally binds C/headers through its seed inputs
+# fingerprint. These target fields also identify tool caches and cover Phase2.
+snapshot_target_c_inputs() (
+  tci_record=$1
+  tci_cc_request=$(bootstrap_phase_c_compiler_path) || exit 1
+  tci_cc=$(bootstrap_stage3_canonical_native_command "$tci_cc_request") || exit 1
+  [ -f "$tci_cc" ] && [ -x "$tci_cc" ] || exit 1
+  if [ -n "${SIMPLE_CC:-}" ]; then
+    tci_override=$(command -v "$SIMPLE_CC") || exit 1
+    tci_override=$(bootstrap_stage3_canonical_native_command "$tci_override") || exit 1
+    [ "$tci_override" = "$tci_cc" ] || exit 1
+  fi
+  bootstrap_stage3_directory_snapshot "$tci_record.runtime" "$source_root/src/runtime" || exit 1
+  "$tci_cc_request" --version >"$tci_record.version" 2>&1 || exit 1
+  case "$target_c_platform" in
+    *-pc-windows-msvc) grep -Eq '^clang version 23\.1\.1([[:space:]]|$)' "$tci_record.version" || exit 1 ;;
+    *) grep -qi 'clang version' "$tci_record.version" || exit 1 ;;
+  esac
+  tci_profile_sha=$(printf '%s\n' core-c-bootstrap v1 llvm "$target_c_platform" \
+    opt=3 riscv-vector=0 stage4-legacy=0 "$target_c_source_sha" | hash_stream) || exit 1
+  tci_runtime_sha=$(hash_file "$tci_record.runtime") || exit 1
+  tci_sdk_header="$source_root/tools/counterpart/sdk/c/simple_counterpart_abi.h"
+  [ -f "$tci_sdk_header" ] && [ ! -L "$tci_sdk_header" ] || exit 1
+  tci_sdk_sha=$(hash_file "$tci_sdk_header") || exit 1
+  tci_tool_sha=$(hash_file "$tci_cc") || exit 1
+  tci_version_sha=$(hash_file "$tci_record.version") || exit 1
+  {
+    echo 'target_runtime_profile=core-c-bootstrap'
+    echo 'target_runtime_abi_policy=v1'
+    echo 'target_runtime_backend=llvm'
+    echo "target_runtime_platform=$target_c_platform"
+    echo "target_source_snapshot_sha256=$target_c_source_sha"
+    echo "target_runtime_source_path=$source_root/src/runtime"
+    echo "target_runtime_snapshot_sha256=$tci_runtime_sha"
+    echo "target_counterpart_sdk_header_path=$tci_sdk_header"
+    echo "target_counterpart_sdk_header_sha256=$tci_sdk_sha"
+    echo "target_c_tool_path=$tci_cc"
+    echo "target_c_tool_sha256=$tci_tool_sha"
+    echo "target_c_tool_version_sha256=$tci_version_sha"
+    echo "target_runtime_profile_sha256=$tci_profile_sha"
+  } >"$tci_record" || exit 1
+)
+
+prepare_phase_c_tool_binding() {
+  case "${SIMPLE_NATIVE_RUNTIME_BUNDLE:-core-c-bootstrap}" in
+    core-c-bootstrap|core_c_bootstrap|core-c|core_c) ;;
+    *) return 1 ;;
+  esac
+  [ "${SIMPLE_ABI_POLICY:-v1}" = v1 ] || return 1
+  [ "${SIMPLE_RUNTIME_RISCV64_VECTOR:-0}" = 0 ] || return 1
+  if [ -n "${SIMPLE_PROJECT_ROOT:-}" ]; then
+    [ "$(CDPATH= cd -- "$SIMPLE_PROJECT_ROOT" && pwd -P)" = "$source_root" ] || return 1
+  fi
+  if [ "$phase" = stage3 ]; then
+    [ "$stage3_backend" = llvm ] || return 1
+    target_c_platform=$stage3_platform
+    target_c_source_sha=$stage3_source_sha
+  else
+    target_c_platform=$(bootstrap_phase_c_target_platform) || return 1
+    target_c_source_sha=$(manifest_value source_snapshot_sha256 "$(dirname "$compiler")/admission.env")
+  fi
+  # The Windows executor pins clang-cl/MSVC even under Git Bash's GNU MSYSTEM.
+  case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*)
+    [ "$target_c_platform" = x86_64-pc-windows-msvc ] || return 1
+    [ "${SIMPLE_WINDOWS_ABI:-msvc}:${SIMPLE_LINKER_FLAVOR:-msvc}:${CL:-/TC}" = msvc:msvc:/TC ] || return 1 ;;
+  esac
+  [ "${#target_c_source_sha}" -eq 64 ] || return 1
+  target_c_binding="$work_root/target-c-inputs.env"
+  snapshot_target_c_inputs "$target_c_binding" || return 1
+  target_c_identity=$(hash_file "$target_c_binding") || return 1
+  chmod 400 "$target_c_binding" || return 1
+  tool_input_identity=$(printf '%s\n' "$runtime_cache_identity" "$target_c_identity" \
+    "$target_c_source_sha" | hash_stream) || return 1
+  write_target_c_receipt_fields >>"$summary"
+}
+
+write_target_c_receipt_fields() {
+  case "$phase" in stage2|stage3)
+    cat "$target_c_binding" || return 1
+    echo "target_runtime_identity_sha256=$target_c_identity"
+    echo "tool_input_identity_sha256=$tool_input_identity"
+    ;;
+  esac
+}
+
+validate_target_c_receipt() {
+  case "$phase" in stage2|stage3)
+    [ "$(hash_file "$target_c_binding")" = "$target_c_identity" ] || return 1
+    [ "$(manifest_key_count target_runtime_identity_sha256 "$1")" = 1 ] || return 1
+    [ "$(manifest_key_count tool_input_identity_sha256 "$1")" = 1 ] || return 1
+    [ "$(manifest_value target_runtime_identity_sha256 "$1")" = "$target_c_identity" ] || return 1
+    [ "$(manifest_value tool_input_identity_sha256 "$1")" = "$tool_input_identity" ] || return 1
+    while IFS='=' read -r tcr_key tcr_value; do
+      [ "$(manifest_key_count "$tcr_key" "$1")" = 1 ] &&
+        [ "$(manifest_value "$tcr_key" "$1")" = "$tcr_value" ] || return 1
+    done <"$target_c_binding"
+    ;;
+  esac
+}
+
+validate_phase_c_tool_binding() (
+  [ "$(hash_file "$compiler_snapshot")" = "$expected_sha" ] || exit 1
+  if [ "$phase" = stage3 ]; then
+    validate_stage3_tool_binding || exit 1
+  else
+    pcb_runtime=$(sh "$source_root/scripts/bootstrap/phase2-runtime-binding.shs" resolve \
+      "$compiler" "$source_root" "$tmp/phase2-tool-binding") || exit 1
+    [ "$pcb_runtime" = "$runtime_path" ] || exit 1
+  fi
+  snapshot_target_c_inputs "$tmp/target-c-current.env" || exit 1
+  [ "$(hash_file "$tmp/target-c-current.env")" = "$target_c_identity" ] &&
+    [ "$(hash_file "$target_c_binding")" = "$target_c_identity" ]
+)
+
+run_phase_c_tool_build() {
+  pure_tool_task=$1 pure_tool_entry=$2 pure_tool_output=$3 pure_tool_cache=$4 pure_tool_threads=$5
+  if ! validate_phase_c_tool_binding; then
+    printf 'task=%s|result=FAIL|status=authority-mismatch|elapsed_seconds=0|log=-\n' "$pure_tool_task" >>"$summary"
     matrix_failed=1 matrix_task_passed=0
     return
   fi
-  run_matrix_task "$s3_task" --verification-expect-executable="$s3_output" \
-    "$compiler_snapshot" native-build "$s3_entry" --backend="$stage3_backend" -o "$s3_output"
-  if ! validate_stage3_tool_binding; then
-    printf 'task=%s_authority|result=FAIL|status=authority-mismatch|elapsed_seconds=0|log=-\n' "$s3_task" >>"$summary"
+  run_matrix_task "$pure_tool_task" --verification-expect-executable="$pure_tool_output" \
+    "$compiler_snapshot" native-build "$pure_tool_entry" --backend=llvm -o "$pure_tool_output"
+  if ! validate_phase_c_tool_binding; then
+    printf 'task=%s_authority|result=FAIL|status=authority-mismatch|elapsed_seconds=0|log=-\n' "$pure_tool_task" >>"$summary"
     matrix_failed=1 matrix_task_passed=0
   fi
 }
 
 # Match inventory workers: each child owns HOME/TMP/cache and result files;
 # only the parent publishes rows and marks the command owner ready.
-run_stage3_tool_worker() (
+run_phase_c_tool_worker() (
   worker=$1
-  home="$work_root/stage3-tool-workers/$worker/home"
-  tmp="$work_root/stage3-tool-workers/$worker/tmp"
-  summary="$work_root/stage3-tool-workers/$worker/summary.env"
+  home="$work_root/$phase-tool-workers/$worker/home"
+  tmp="$work_root/$phase-tool-workers/$worker/tmp"
+  summary="$work_root/$phase-tool-workers/$worker/summary.env"
   mkdir -p "$home" "$tmp" || exit 1
   : >"$summary" || exit 1
   shift
-  run_stage3_tool_build "$@"
-  printf '%s\n' "$matrix_task_passed" >"$work_root/stage3-tool-workers/$worker/result" || exit 1
+  run_phase_c_tool_build "$@"
+  printf '%s\n' "$matrix_task_passed" >"$work_root/$phase-tool-workers/$worker/result" || exit 1
 )
 
 run_matrix_task() {
@@ -1631,10 +1758,9 @@ else
   # and tests through the artifact that actually owns each command surface.
   # This prevents an unsupported `check`/`test` dispatch from being expanded
   # into thousands of false source failures.
-  # Each producer uses its own authority: Phase2 Rust capsule, Phase3 admitted
-  # C-runtime provenance, or the existing higher-phase hosted lane.
+   # The producer keeps its own phase admission. Phase2/3 tools link the live,
+   # separately bound C owner through the pure-Simple positional route.
   tool_runtime_bundle=host-gpu
-  [ "$phase" != stage2 ] || tool_runtime_bundle=bootstrap-tools
   hosted_runtime_sha=""
   compiler_cli=""
   test_runner=""
@@ -1651,66 +1777,58 @@ else
   if [ "$tool_authority_ready" -ne 1 ]; then
     record_unsupported_task compiler_cli_build host-gpu-hosted-runtime-authority-unavailable
     record_unsupported_task test_runner_build host-gpu-hosted-runtime-authority-unavailable
-  else
+   else
     [ "$phase" = stage3 ] || echo "hosted_runtime_sha256=$hosted_runtime_sha" >>"$summary"
-    hosted_runtime_ready=1
-    tool_cache="$cache_root/compiler-tools/$phase/$snapshot_sha/$runtime_cache_identity"
+     hosted_runtime_ready=1
+     tool_input_identity=$runtime_cache_identity
+     if [ "$phase" = stage2 ] || [ "$phase" = stage3 ]; then
+       prepare_phase_c_tool_binding || die "cannot bind target C source/profile/tool inputs"
+     fi
+     tool_cache="$cache_root/compiler-tools/$phase/$snapshot_sha/$tool_input_identity"
     # 16-hex prefixes, not the full 64-hex pair: the full path to the built
     # simple_cli.exe was 288 chars on the Windows lane, past MAX_PATH, and
     # CreateProcess cannot launch an image there (ERROR_FILE_NOT_FOUND even
     # with LongPathsEnabled), so every spec child the runner spawned failed
     # "process spawn failed" (bootstrap36, 2026-09-25). Identity is still the
     # full hashes recorded in the command-owner receipt.
-    tool_outputs="$outputs/compiler-tools/$phase/$(printf %.16s "$snapshot_sha")/$(printf %.16s "$runtime_cache_identity")"
+     tool_outputs="$outputs/compiler-tools/$phase/$(printf %.16s "$snapshot_sha")/$(printf %.16s "$tool_input_identity")"
     compiler_cli="$tool_outputs/simple_cli"
     test_runner="$tool_outputs/simple_test_runner"
-    # Slim profile only: one shared object cache for both builds (same
-    # compiler, same --source closure of src/compiler + src/app + src/lib),
-    # so the CLI and test-runner entry points reuse each other's compiled
-    # objects instead of each paying for the whole closure independently
-    # (perf audit of PR #1458). Gated on stage2_slim_profile so every other
-    # caller (run-linux-phase2-tests.shs, run-freebsd-phase2-tests.shs,
-    # run-macos-phase23-evidence.shs, stage1/stage3/stage4) keeps its
-    # original two-separate-caches behaviour byte-identically under
-    # --profile=full (the default).
-    if [ "$stage2_slim_profile" -eq 1 ]; then
-      tool_cache_cli="$tool_cache/shared"
-      tool_cache_runner="$tool_cache/shared"
-    else
-      tool_cache_cli="$tool_cache/full-cli"
-      tool_cache_runner="$tool_cache/test-runner"
-    fi
+    # Concurrent producers own separate object/cache and temporary state,
+    # including the slim Phase2 profile.
+    tool_cache_cli="$tool_cache/full-cli"
+    tool_cache_runner="$tool_cache/test-runner"
     mkdir -p "$tool_cache_cli" "$tool_cache_runner"
     mkdir -p "$tool_outputs"
     rm -f "$compiler_cli" "$test_runner"
-    if [ "$phase" = stage3 ]; then
-      if [ "$build_threads" -gt 1 ]; then
-        stage3_worker_threads=$((build_threads / 2))
-        stage3_workers="$work_root/stage3-tool-workers"
-        mkdir -p "$stage3_workers/cli" "$stage3_workers/runner" || die "cannot isolate Stage3 builders"
-        rm -f "$stage3_workers/cli/result" "$stage3_workers/runner/result"
-        run_stage3_tool_worker cli compiler_cli_build src/app/cli/_CliMain/main_and_help.spl \
-          "$compiler_cli" "$tool_cache_cli" "$stage3_worker_threads" &
-        stage3_cli_pid=$!
-        run_stage3_tool_worker runner test_runner_build src/app/test_runner_new/main.spl \
-          "$test_runner" "$tool_cache_runner" "$stage3_worker_threads" &
-        stage3_runner_pid=$!
-        stage3_cli_wait=0 stage3_runner_wait=0
-        wait "$stage3_cli_pid" || stage3_cli_wait=$?
-        wait "$stage3_runner_pid" || stage3_runner_wait=$?
-        for stage3_worker in cli runner; do
-          [ -f "$stage3_workers/$stage3_worker/summary.env" ] && cat "$stage3_workers/$stage3_worker/summary.env" >>"$summary"
-        done
-        [ "$stage3_cli_wait" -ne 0 ] || compiler_cli_ready=$(cat "$stage3_workers/cli/result" 2>/dev/null || printf 0)
-        [ "$stage3_runner_wait" -ne 0 ] || test_runner_ready=$(cat "$stage3_workers/runner/result" 2>/dev/null || printf 0)
-        if [ "$compiler_cli_ready" != 1 ] || [ "$test_runner_ready" != 1 ]; then
-          matrix_failed=1
-          printf 'task=stage3_tool_workers|result=FAIL|status=worker-failed|elapsed_seconds=0|log=-\n' >>"$summary"
-        fi
-      else
-        run_stage3_tool_build compiler_cli_build src/app/cli/_CliMain/main_and_help.spl "$compiler_cli" "$tool_cache_cli" 1
+     if [ "$phase" = stage2 ] || [ "$phase" = stage3 ]; then
+       if [ "$build_threads" -gt 1 ]; then
+         phase_worker_threads=$((build_threads / 2))
+         phase_workers="$work_root/$phase-tool-workers"
+         mkdir -p "$phase_workers/cli" "$phase_workers/runner" || die "cannot isolate phase C builders"
+         rm -f "$phase_workers/cli/result" "$phase_workers/runner/result"
+         run_phase_c_tool_worker cli compiler_cli_build src/app/cli/_CliMain/main_and_help.spl \
+           "$compiler_cli" "$tool_cache_cli" "$phase_worker_threads" &
+         phase_cli_pid=$!
+         run_phase_c_tool_worker runner test_runner_build src/app/test_runner_new/main.spl \
+           "$test_runner" "$tool_cache_runner" "$phase_worker_threads" &
+         phase_runner_pid=$!
+         phase_cli_wait=0 phase_runner_wait=0
+         wait "$phase_cli_pid" || phase_cli_wait=$?
+         wait "$phase_runner_pid" || phase_runner_wait=$?
+         for phase_worker in cli runner; do
+           [ -f "$phase_workers/$phase_worker/summary.env" ] && cat "$phase_workers/$phase_worker/summary.env" >>"$summary"
+         done
+         [ "$phase_cli_wait" -ne 0 ] || compiler_cli_ready=$(cat "$phase_workers/cli/result" 2>/dev/null || printf 0)
+         [ "$phase_runner_wait" -ne 0 ] || test_runner_ready=$(cat "$phase_workers/runner/result" 2>/dev/null || printf 0)
+         if [ "$compiler_cli_ready" != 1 ] || [ "$test_runner_ready" != 1 ]; then
+           matrix_failed=1
+           printf 'task=%s_tool_workers|result=FAIL|status=worker-failed|elapsed_seconds=0|log=-\n' "$phase" >>"$summary"
+         fi
+       else
+         run_phase_c_tool_build compiler_cli_build src/app/cli/_CliMain/main_and_help.spl "$compiler_cli" "$tool_cache_cli" 1
         compiler_cli_ready=$matrix_task_passed
-        run_stage3_tool_build test_runner_build src/app/test_runner_new/main.spl "$test_runner" "$tool_cache_runner" 1
+         run_phase_c_tool_build test_runner_build src/app/test_runner_new/main.spl "$test_runner" "$tool_cache_runner" 1
         test_runner_ready=$matrix_task_passed
       fi
     else
@@ -1754,16 +1872,16 @@ else
       # "compiler test binary works" proof; skip entirely (no task row --
       # see the stage2_slim_profile note above for why no row is emitted).
   elif [ "$hosted_runtime_ready" -eq 1 ]; then
-    tool_build_cache="$cache/tool_builds/$phase/$snapshot_sha/$runtime_cache_identity"
+    tool_build_cache="$cache/tool_builds/$phase/$snapshot_sha/$tool_input_identity"
     # Short path for the same MAX_PATH reason as tool_outputs above.
-    server_outputs="$outputs/tool-builds/$phase/$(printf %.16s "$snapshot_sha")/$(printf %.16s "$runtime_cache_identity")"
+    server_outputs="$outputs/tool-builds/$phase/$(printf %.16s "$snapshot_sha")/$(printf %.16s "$tool_input_identity")"
     mcp_server="$server_outputs/simple_mcp_server"
     mkdir -p "$server_outputs"
     rm -f "$server_outputs/simple_mcp_server" "$server_outputs/simple_lsp_mcp_server"
-    if [ "$phase" = stage3 ]; then
-      run_stage3_tool_build mcp_build src/app/mcp/main.spl "$mcp_server" "$tool_build_cache/mcp" "$build_threads"
+    if [ "$phase" = stage2 ] || [ "$phase" = stage3 ]; then
+      run_phase_c_tool_build mcp_build src/app/mcp/main.spl "$mcp_server" "$tool_build_cache/mcp" "$build_threads"
       mcp_build_ready=$matrix_task_passed
-      run_stage3_tool_build lsp_build src/app/simple_lsp_mcp/main.spl "$server_outputs/simple_lsp_mcp_server" "$tool_build_cache/lsp" "$build_threads"
+      run_phase_c_tool_build lsp_build src/app/simple_lsp_mcp/main.spl "$server_outputs/simple_lsp_mcp_server" "$tool_build_cache/lsp" "$build_threads"
       lsp_build_ready=$matrix_task_passed
     else
     run_matrix_task mcp_build --verification-expect-executable="$mcp_server" \
@@ -1790,6 +1908,9 @@ else
   fi
 
   if [ -n "$compiler_cli_sha" ] && [ -n "$test_runner_sha" ]; then
+    if [ "$phase" = stage2 ] || [ "$phase" = stage3 ]; then
+      validate_phase_c_tool_binding || die "target C inputs changed before owner publication"
+    fi
     command_owner_lineage_sha=$(printf '%s\n' "$compiler_cli_sha" "$test_runner_sha" "$mcp_server_sha" |
       hash_stream)
     command_owner_receipt="$tool_outputs/command-owners.$command_owner_lineage_sha.env"
