@@ -1,6 +1,6 @@
 # Stage4 positional AOT repeats work after successful no-op publication
 
-- **Status:** Open
+- **Status:** Diagnosed — expected refusal for an unadmitted Stage4 compiler
 - **Found:** 2026-09-29, Linux ARM64 exact Stage4 standalone compiler
 - **Impact:** repeated identical AOT requests still parse, compile, and link
 
@@ -12,11 +12,20 @@ and environment also returned exit 0, but did not print the
 compile/link work and a 576 ms build, versus 635 ms for the first request.
 The second request is therefore not an admitted no-op cache hit.
 
-**Next:** expose the exact `native_noop_admit_v1` miss reason and compare the
-request identity, `CURRENT`, authenticated receipt, source fingerprint, and
-output fingerprint across the two invocations. Repair the mismatch without
-waiving source or output authentication. This is a compile-performance TODO
-for Target 6 as well as a Stage4 cache bug.
+The 2026-09-29 trace showed `current-missing` on both invocations. The first
+publication returned `ok`, and its 64-byte `CURRENT` file existed. The second
+invocation used a different request identity, so it looked under a different
+`CURRENT` path. `native_build_compiler_identity()` deliberately includes PID and
+time when `SIMPLE_ABI_POLICY` or `SIMPLE_ABI_ADMISSION_RECEIPT` is absent. Both
+were absent in this standalone Stage4 invocation. The differing keys are the
+intended fail-closed behavior for an unadmitted compiler, not a broken pointer
+write or a source/output fingerprint mismatch. Do not remove the ABI admission
+check to make this diagnostic build hit.
+
+**Next:** run the native no-op performance proof with a compiler that has a
+valid, matching Stage-2 ABI admission receipt. If that run misses, record its
+attributed reason and repair that specific mismatch. This standalone Stage4
+measurement cannot prove the Target 6 warm-admission goal.
 
 Evidence: `build/mini_builds/target5_stage4_owner_substr_hello.log` and
 `target5_stage4_owner_substr_noop_hit.log`.

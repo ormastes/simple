@@ -3,11 +3,12 @@
 **Status:** IN PROGRESS — CORE GROUNDWORK ONLY
 
 Adjacent compile-performance finding (2026-09-29): an exact Stage4 standalone
-hello build now succeeds, but an immediately repeated identical invocation
-still performs load/parse/MIR/native compile/link work instead of reporting a
-native no-op admission hit. This is tracked in
+hello build now succeeds. A repeated invocation still does compiler work
+because that diagnostic compiler has no ABI admission receipt; its producer
+identity intentionally changes between processes. This is diagnosed in
 `doc/08_tracking/bug/stage4_native_noop_admission_misses_after_publication_2026-09-29.md`.
-It does not substitute for the persistent-index Git/SCV events, full
+The admitted-compiler warm proof remains pending. It does not substitute for
+the persistent-index Git/SCV events, full
 entrypoint cutover, or native performance proof required by this plan.
 
 **Parent plans:**
