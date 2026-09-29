@@ -59,5 +59,7 @@ call. No Stage4 compiler or captured hello was produced. See
 Bootstrap-provider follow-up: an existing runtime archive directory no longer
 becomes a dynamic-library path in the bootstrap provider. The untyped SFFI
 refusal remains fail-closed and now identifies its function and argument
-index. Focused Rust tests pass (3 native-loader, 21 dynamic-SFFI). No fresh
-Stage4 compiler or hello capture has been produced from these edits.
+index. Focused Rust tests pass (3 native-loader, 21 dynamic-SFFI). The
+refreshed debug bootstrap executable then timed out after 300 seconds on a
+Stage4 attempt without a provider-directory warning or a named foreign call.
+No fresh Stage4 compiler or hello capture has been produced from these edits.
