@@ -4,9 +4,13 @@
 
 Preserve all Simple features and architectures while making optional libraries truly demand-loaded, preferring qualified pure-Simple implementations, matching Python's base interpreter loading footprint, and measuring release-small hello against C with the same required startup and link inputs.
 
-Current size status (2026-09-29): the exact Linux LLD hello replay yields
-13,544-byte Simple and 13,608-byte matched C stripped outputs (ratio 0.995297).
-BS7 now requires and independently replays that captured link on Linux;
+Current size status (2026-09-29): the current-source literal `hello` exact
+Linux LLD replay yields 13,544-byte Simple and 13,264-byte matched C `puts`
+stripped outputs (ratio 1.021110). Both NFR-002 numeric sublimits pass; the
+build used `--O1 --no-debug`, and an admitted `release-small` profile is still
+missing. The earlier 0.995297 ratio used the Simple runtime writer in both
+entries and is a diagnostic, not the selected denominator. BS7 now requires
+and independently replays the captured link on Linux;
 `matched-startup-v1` alone cannot pass. NoGC/provider traces, admitted
 startup/RSS cohorts, full optional-provider closure, and Phase 7 cutover
 remain open.
@@ -207,16 +211,20 @@ been run, so native development and release qualification remain pending.
 Exact hello-link follow-up (2026-09-29): a fresh selected-K1 pure-Simple
 Stage4 compiler built a one-source hello and captured LLD's opened inputs.
 Replaying that archive changed only the program object for the C comparator;
-both outputs run. After the same strip tool, Simple is 13,544 bytes and C is
-13,608 bytes (ratio 0.995297), so this matched Linux size comparison passes.
-The fail-closed replay checker and two rejection probes are recorded in
-`doc/09_report/compiler/target5_exact_hello_link_c_gate_2026-09-29.md`.
+both outputs run. The first same-writer diagnostic measured 13,544-byte
+Simple against 13,608-byte C (`rt_println_str`). The selected C `puts` entry
+for the literal `hello` fixture measures 13,264 bytes, yielding 1.021110.
+The latter result and its remaining release-small limits are in
+`doc/09_report/compiler/target5_literal_hello_puts_matched_2026-09-29.md`.
 The BS7 producer now binds the unstripped outputs, C source, archive,
 capture receipt, and tool hashes in its cohort receipt. Its Linux checker
 requires those inputs and replays both links; the old label-only path is
 rejected. A real-LLD synthetic fixture passes the clean path and rejects
-evidence mutations. The cohort receipt now also binds the Python executable,
-and every Simple/Python sample row must name its lane's exact binary digest.
+evidence mutations for the prior C source; the final C `puts` source still
+needs its next bounded fixture run. The cohort receipt binds the NoGC hello, a separate
+interpreter executable, Python, and expected stdout. Each startup sample row
+must name its interpreter or Python executable hash; the matched-link checker
+requires C `puts` and verifies both replayed programs' stdout bytes.
 Complete NoGC/provider traces, 30/100-sample production
 cohorts, and the feature closure before marking Target 5 complete.
 

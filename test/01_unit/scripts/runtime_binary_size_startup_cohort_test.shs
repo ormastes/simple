@@ -8,6 +8,7 @@ hash_file() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1"; else
 PYTHON=$(command -v python3) || fail missing-python3
 
 printf 'stage=4\ncompiler_kind=pure-simple-stage4\n' >"$scratch/stage4.env"
+printf 'Hello World\n' >"$scratch/expected-stdout.txt"
 : >"$scratch/nogc.tsv"; : >"$scratch/providers.tsv"; : >"$scratch/samples.tsv"
 
 if [ "$(uname -s)" = Linux ]; then
@@ -78,7 +79,9 @@ else
 fi
 
 cp "$scratch/simple" "$scratch/simple.good"
-sample_hash=$(hash_file "$scratch/simple")
+cp "$scratch/simple" "$scratch/interpreter"
+cp "$scratch/interpreter" "$scratch/interpreter.good"
+sample_hash=$(hash_file "$scratch/interpreter")
 python_hash=$(hash_file "$PYTHON")
 i=1; while [ "$i" -le 30 ]; do
   printf 'sample|simple|%s|100|100|0|%s\n' "$i" "$sample_hash" >>"$scratch/samples.tsv"
@@ -89,16 +92,17 @@ done
 produce() {
   if [ "$(uname -s)" = Linux ]; then
     (cd "$scratch" && "$ROOT/scripts/check/produce-runtime-binary-size-startup-cohort.shs" \
-      --mode development --output-dir out --samples samples.tsv --simple-binary simple --c-binary c --python-binary "$PYTHON" \
+      --mode development --output-dir out --samples samples.tsv --simple-binary simple --interpreter-binary interpreter --c-binary c --python-binary "$PYTHON" \
       --c-reference matched-startup-v1 --stage4-receipt stage4.env --nogc-inventory nogc.tsv \
       --provider-trace providers.tsv --format-allowance-bytes 0 \
       --matched-simple-unstripped simple-unstripped --matched-c-unstripped "$C_UNSTRIPPED" \
       --matched-c-source "$C_SOURCE" --matched-archive hello-link.tar \
+      --matched-expected-stdout expected-stdout.txt \
       --matched-archive-receipt hello-link.tar.receipt --matched-clang "$CLANG" \
       --matched-lld "$LLD" --matched-strip "$STRIP")
   else
     (cd "$scratch" && "$ROOT/scripts/check/produce-runtime-binary-size-startup-cohort.shs" \
-      --mode development --output-dir out --samples samples.tsv --simple-binary simple --c-binary c --python-binary "$PYTHON" \
+      --mode development --output-dir out --samples samples.tsv --simple-binary simple --interpreter-binary interpreter --c-binary c --python-binary "$PYTHON" \
       --c-reference matched-startup-v1 --stage4-receipt stage4.env --nogc-inventory nogc.tsv \
       --provider-trace providers.tsv --format-allowance-bytes 0)
   fi
@@ -107,17 +111,18 @@ check() {
   if [ "$(uname -s)" = Linux ]; then
     "$ROOT/scripts/check/check-runtime-binary-size-startup-cohort.shs" \
       --receipt "$scratch/out/receipt.env" --samples "$scratch/out/samples.tsv" \
-      --simple-binary "$scratch/simple" --c-binary "$scratch/c" --python-binary "$PYTHON" \
+      --simple-binary "$scratch/simple" --interpreter-binary "$scratch/interpreter" --c-binary "$scratch/c" --python-binary "$PYTHON" \
       --stage4-receipt "$scratch/stage4.env" --nogc-inventory "$scratch/out/nogc-inventory.tsv" \
       --provider-trace "$scratch/out/provider-trace.tsv" \
       --matched-simple-unstripped "$scratch/simple-unstripped" --matched-c-unstripped "$C_UNSTRIPPED" \
       --matched-c-source "$C_SOURCE" --matched-archive "$scratch/hello-link.tar" \
+      --matched-expected-stdout "$scratch/expected-stdout.txt" \
       --matched-archive-receipt "$scratch/hello-link.tar.receipt" --matched-clang "$CLANG" \
       --matched-lld "$LLD" --matched-strip "$STRIP"
   else
     "$ROOT/scripts/check/check-runtime-binary-size-startup-cohort.shs" \
       --receipt "$scratch/out/receipt.env" --samples "$scratch/out/samples.tsv" \
-      --simple-binary "$scratch/simple" --c-binary "$scratch/c" --python-binary "$PYTHON" \
+      --simple-binary "$scratch/simple" --interpreter-binary "$scratch/interpreter" --c-binary "$scratch/c" --python-binary "$PYTHON" \
       --stage4-receipt "$scratch/stage4.env" --nogc-inventory "$scratch/out/nogc-inventory.tsv" \
       --provider-trace "$scratch/out/provider-trace.tsv"
   fi
@@ -128,7 +133,7 @@ check >/dev/null || fail clean-checker
 if [ "$(uname -s)" = Linux ]; then
   reject "$ROOT/scripts/check/check-runtime-binary-size-startup-cohort.shs" \
     --receipt "$scratch/out/receipt.env" --samples "$scratch/out/samples.tsv" \
-    --simple-binary "$scratch/simple" --c-binary "$scratch/c" --python-binary "$PYTHON" \
+    --simple-binary "$scratch/simple" --interpreter-binary "$scratch/interpreter" --c-binary "$scratch/c" --python-binary "$PYTHON" \
     --stage4-receipt "$scratch/stage4.env" --nogc-inventory "$scratch/out/nogc-inventory.tsv" \
     --provider-trace "$scratch/out/provider-trace.tsv"
 fi
@@ -138,6 +143,7 @@ printf 'stage=3\ncompiler_kind=rust-seed\n' >"$scratch/stage4.env"; reject check
 printf 'stage=4\ncompiler_kind=pure-simple-stage4\n' >"$scratch/stage4.env"
 sed -i.bak 's/sample_count=30/sample_count=29/' "$scratch/out/receipt.env"; reject check; mv "$scratch/out/receipt.env.bak" "$scratch/out/receipt.env"
 printf x >>"$scratch/simple"; reject check; cp "$scratch/simple.good" "$scratch/simple"
+printf x >>"$scratch/interpreter"; reject check; cp "$scratch/interpreter.good" "$scratch/interpreter"
 sed -i.bak 's/c_reference_kind=matched-startup-v1/c_reference_kind=bare-c/' "$scratch/out/receipt.env"; reject check; mv "$scratch/out/receipt.env.bak" "$scratch/out/receipt.env"
 cp "$scratch/out/samples.tsv" "$scratch/out/samples.good"
 cp "$scratch/out/receipt.env" "$scratch/out/receipt.good"
@@ -150,5 +156,11 @@ if [ "$(uname -s)" = Linux ]; then
   sed -i.bak 's/^matched_archive_sha256=./matched_archive_sha256=0/' "$scratch/out/receipt.env"; reject check; mv "$scratch/out/receipt.env.bak" "$scratch/out/receipt.env"
   cp "$scratch/hello-link.tar.receipt" "$scratch/hello-link.tar.receipt.good"
   printf x >>"$scratch/hello-link.tar.receipt"; reject check; mv "$scratch/hello-link.tar.receipt.good" "$scratch/hello-link.tar.receipt"
+  cp "$scratch/expected-stdout.txt" "$scratch/expected-stdout.good"
+  printf 'other\n' >"$scratch/expected-stdout.txt"; reject check
+  sed -i.bak "s/^matched_expected_stdout_sha256=.*/matched_expected_stdout_sha256=$(hash_file "$scratch/expected-stdout.txt")/" "$scratch/out/receipt.env"
+  reject check
+  mv "$scratch/expected-stdout.good" "$scratch/expected-stdout.txt"
+  mv "$scratch/out/receipt.env.bak" "$scratch/out/receipt.env"
 fi
-echo 'BS7 cohort test: PASS — clean cohort, label-only refusal, and matched-link/sample evidence mutations'
+echo 'BS7 cohort test: PASS — clean cohort, label-only refusal, and matched-link/stdout/sample evidence mutations'

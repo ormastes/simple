@@ -6,13 +6,14 @@ fail() { echo "STATUS: FAIL runtime-binary-size-startup-cohort-producer — $*" 
 hash_file() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'; else shasum -a 256 "$1" | awk '{print $1}'; fi; }
 percentile() { LC_ALL=C sort -n "$1" | sed -n "$2"p; }
 
-MODE= OUTPUT= SAMPLES= SIMPLE= C_BINARY= PYTHON= C_REFERENCE= STAGE4= NOGC= PROVIDERS= ALLOWANCE=0
-MATCH_SIMPLE= MATCH_C= MATCH_SOURCE= MATCH_ARCHIVE= MATCH_RECEIPT=
+MODE= OUTPUT= SAMPLES= SIMPLE= INTERPRETER= C_BINARY= PYTHON= C_REFERENCE= STAGE4= NOGC= PROVIDERS= ALLOWANCE=0
+MATCH_SIMPLE= MATCH_C= MATCH_SOURCE= MATCH_STDOUT= MATCH_ARCHIVE= MATCH_RECEIPT=
 MATCH_CLANG= MATCH_LLD= MATCH_STRIP=
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --mode) MODE=$2; shift 2;; --output-dir) OUTPUT=$2; shift 2;; --samples) SAMPLES=$2; shift 2;;
         --simple-binary) SIMPLE=$2; shift 2;; --c-binary) C_BINARY=$2; shift 2;;
+        --interpreter-binary) INTERPRETER=$2; shift 2;;
         --python-binary) PYTHON=$2; shift 2;;
         --c-reference) C_REFERENCE=$2; shift 2;;
         --stage4-receipt) STAGE4=$2; shift 2;; --nogc-inventory) NOGC=$2; shift 2;;
@@ -20,6 +21,7 @@ while [ "$#" -gt 0 ]; do
         --matched-simple-unstripped) MATCH_SIMPLE=$2; shift 2;;
         --matched-c-unstripped) MATCH_C=$2; shift 2;;
         --matched-c-source) MATCH_SOURCE=$2; shift 2;;
+        --matched-expected-stdout) MATCH_STDOUT=$2; shift 2;;
         --matched-archive) MATCH_ARCHIVE=$2; shift 2;;
         --matched-archive-receipt) MATCH_RECEIPT=$2; shift 2;;
         --matched-clang) MATCH_CLANG=$2; shift 2;;
@@ -35,12 +37,12 @@ case "$(uname -s)" in
 esac
 case "$OUTPUT" in ''|/*|..|../*|*/../*|*/..) fail unsafe-output-dir;; esac
 case "$ALLOWANCE" in ''|*[!0-9]*) fail invalid-format-allowance;; esac
-for file in "$SAMPLES" "$SIMPLE" "$C_BINARY" "$STAGE4" "$NOGC" "$PROVIDERS"; do
+for file in "$SAMPLES" "$SIMPLE" "$INTERPRETER" "$C_BINARY" "$STAGE4" "$NOGC" "$PROVIDERS"; do
     [ -f "$file" ] && [ ! -L "$file" ] || fail missing-or-symlinked-input
 done
 [ -f "$PYTHON" ] || fail missing-python-binary
 if [ "$(uname -s)" = Linux ]; then
-    for file in "$MATCH_SIMPLE" "$MATCH_C" "$MATCH_SOURCE" "$MATCH_ARCHIVE" "$MATCH_RECEIPT"; do
+    for file in "$MATCH_SIMPLE" "$MATCH_C" "$MATCH_SOURCE" "$MATCH_STDOUT" "$MATCH_ARCHIVE" "$MATCH_RECEIPT"; do
         [ -f "$file" ] && [ ! -L "$file" ] || fail matched-link-input-missing-or-symlinked
     done
     for tool in "$MATCH_CLANG" "$MATCH_LLD" "$MATCH_STRIP"; do
@@ -72,6 +74,7 @@ host_arch=$(uname -m)
 sample_count=$sample_count
 simple_binary_sha256=$(hash_file "$SIMPLE")
 simple_binary_bytes=$(wc -c <"$SIMPLE" | tr -d ' ')
+interpreter_binary_sha256=$(hash_file "$INTERPRETER")
 c_binary_sha256=$(hash_file "$C_BINARY")
 c_binary_bytes=$(wc -c <"$C_BINARY" | tr -d ' ')
 python_binary_sha256=$(hash_file "$PYTHON")
@@ -95,6 +98,7 @@ if [ "$(uname -s)" = Linux ]; then
 matched_simple_unstripped_sha256=$(hash_file "$MATCH_SIMPLE")
 matched_c_unstripped_sha256=$(hash_file "$MATCH_C")
 matched_c_source_sha256=$(hash_file "$MATCH_SOURCE")
+matched_expected_stdout_sha256=$(hash_file "$MATCH_STDOUT")
 matched_archive_sha256=$(hash_file "$MATCH_ARCHIVE")
 matched_archive_receipt_sha256=$(hash_file "$MATCH_RECEIPT")
 matched_clang_sha256=$(hash_file "$MATCH_CLANG")
@@ -103,12 +107,14 @@ matched_strip_sha256=$(hash_file "$MATCH_STRIP")
 EOF
 fi
 set -- --receipt "$OUTPUT/receipt.env" --samples "$OUTPUT/samples.tsv" \
-    --simple-binary "$SIMPLE" --c-binary "$C_BINARY" --python-binary "$PYTHON" \
+    --simple-binary "$SIMPLE" --interpreter-binary "$INTERPRETER" \
+    --c-binary "$C_BINARY" --python-binary "$PYTHON" \
     --stage4-receipt "$STAGE4" --nogc-inventory "$OUTPUT/nogc-inventory.tsv" \
     --provider-trace "$OUTPUT/provider-trace.tsv"
 if [ "$(uname -s)" = Linux ]; then
     set -- "$@" --matched-simple-unstripped "$MATCH_SIMPLE" \
         --matched-c-unstripped "$MATCH_C" --matched-c-source "$MATCH_SOURCE" \
+        --matched-expected-stdout "$MATCH_STDOUT" \
         --matched-archive "$MATCH_ARCHIVE" --matched-archive-receipt "$MATCH_RECEIPT" \
         --matched-clang "$MATCH_CLANG" --matched-lld "$MATCH_LLD" \
         --matched-strip "$MATCH_STRIP"
