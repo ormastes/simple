@@ -82,3 +82,18 @@ a blocker; it does not transfer landing responsibility to the user. Missing
 checks require investigation and repair. The agent must confirm the actual
 merge before claiming completion, while preserving the integrity of policy
 and review evidence.
+
+## Additional MCP contract evidence
+
+The non-mutating `spipe_review_request_create` call was also investigated. Its
+implementation in SPipe `src/review/admission.js` only creates a hashed request
+with `external_authority_required: true`; its next action is submission to a
+configured broker. It does not resolve or admit a live PR itself.
+
+The request must select exactly one of PR, session, or feature; unused selector
+strings must be empty. Its `required_checks` validator accepts safe identifiers
+without spaces, not GitHub display names such as `SPipe Self Review Admission`.
+The attempted requests exposed both validation constraints. Do not invent a
+check-identity mapping or mistake a successfully constructed request for a
+broker-issued admission. Resolve the authoritative mapping and broker route
+before attempting an admission mutation.
