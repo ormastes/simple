@@ -1,0 +1,47 @@
+# Native component fixture: invalid invocations must fail before source
+# inventory access or any foreign compiler call.
+use app.cli.bootstrap_main.{run_native_build_bootstrap, bootstrap_native_build_worker_args}
+use app.io._CliCompile.compile_targets.{cli_native_build_option_error}
+use app.io.cli_ops.{cli_kernel_executable_path}
+use app.cli.native_build_producer_binding.{bootstrap_native_build_producer_binding}
+use app.io.env_ops.{env_set}
+
+fn main() -> i64:
+    # Native launch must also cover OS/OSTYPE absent; blank values exercise
+    # the same rejected env detector branch inside this isolated component.
+    env_set("OS", "")
+    env_set("OSTYPE", "")
+    val actual = cli_kernel_executable_path()
+    assert(actual != "")
+    val bound = match bootstrap_native_build_producer_binding(actual, actual, actual):
+        case Ok(binary): binary
+        case Err(reason):
+            print reason
+            ""
+    assert(bound != "")
+    val conflict_error = match bootstrap_native_build_producer_binding(actual, actual, "src/app/cli/bootstrap_main.spl"):
+        case Ok(_): ""
+        case Err(reason): reason
+    assert(conflict_error == "bootstrap native-build producer mismatch: SIMPLE_BIN")
+    val missing_self = match bootstrap_native_build_producer_binding("", actual, actual):
+        case Ok(_): ""
+        case Err(reason): reason
+    assert(missing_self == "bootstrap native-build cannot resolve the invoking executable")
+    val unsupported = ["simple", "native-build", "--source", "src", "--entry", "missing.spl",
+        "--unsupported-native-route-flag"]
+    assert(cli_native_build_option_error(bootstrap_native_build_worker_args(unsupported), true) ==
+        "unknown option: --unsupported-native-route-flag")
+    assert(run_native_build_bootstrap(unsupported) == 1)
+    val no_entry = ["simple", "native-build", "--source", "src", "--threads", "1"]
+    assert(cli_native_build_option_error(bootstrap_native_build_worker_args(no_entry), true) ==
+        "No entry point specified for native-build backend")
+    assert(run_native_build_bootstrap(no_entry) == 1)
+    val conflict = ["simple", "native-build", "--entry", "first.spl", "second.spl"]
+    assert(cli_native_build_option_error(bootstrap_native_build_worker_args(conflict), true).contains(
+        "multiple native-build entry points"))
+    assert(run_native_build_bootstrap(conflict) == 1)
+    assert(cli_native_build_option_error(["--source", "src", "entry.spl", "--emit-shared",
+        "--no-mangle", "--threads", "1", "--mode=one-binary"], true) == "")
+    assert(run_native_build_bootstrap(["simple", "native-build", "--list-optimizations"]) == 0)
+    print "pure-bootstrap-native-route-regression: PASS"
+    return 0

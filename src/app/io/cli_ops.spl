@@ -25,6 +25,7 @@ use std.io_runtime.{mkdir_p}
 use std.io_runtime.{file_delete}
 use std.nogc_sync_mut.io.file_ops.{file_write_text_at}
 use std.nogc_sync_mut.sffi.io.{path_absolute}
+use std.nogc_sync_mut.io_runtime.{host_os}
 extern fn print_raw(value: text) -> i64
 
 # --- Shell/file helpers (local copies to avoid circular imports) ---
@@ -185,8 +186,9 @@ fn _cli_resolve_symlink(path: text) -> text:
 # `ps -o comm= -p <our pid>` is safe here in a way `readlink -f /proc/self/exe`
 # is not: the trap those comments warn about is a spawned helper describing
 # ITSELF, and `ps` is asked about a PID we name, not about its own process.
-fn _cli_self_exe_via_pid_query() -> text:
-    if _cli_is_windows_platform():
+fn _cli_self_exe_via_pid_query(require_absolute: bool = false) -> text:
+    val windows = if require_absolute: host_os() == "windows" else: _cli_is_windows_platform()
+    if windows:
         # Windows has neither /proc nor `ps`. Returning "" here left argv[0]
         # (the `.spl` entry) as the "executable": `simple test` spawned the
         # source file (child died ~80ms, exit -1) and the single-file runner
@@ -197,7 +199,10 @@ fn _cli_self_exe_via_pid_query() -> text:
         if win_code != 0 or win_path == "" or win_path.ends_with(".spl") or not _cli_file_exists_impl(win_path):
             return ""
         return win_path
-    val (stdout, _stderr, code) = process_run_direct("ps", ["-o", "comm=", "-p", "{getpid()}"])
+    val (stdout, _stderr, code) = if require_absolute:
+        process_run_bounded("ps", ["-o", "comm=", "-p", "{getpid()}"], 2000, 65536)
+    else:
+        process_run_direct("ps", ["-o", "comm=", "-p", "{getpid()}"])
     if code != 0:
         return ""
     val lines = stdout.split("\n")
@@ -206,12 +211,25 @@ fn _cli_self_exe_via_pid_query() -> text:
     val reported = lines[0].trim()
     if reported == "" or reported.ends_with(".spl"):
         return ""
+    if require_absolute and not reported.starts_with("/"):
+        return ""
     var resolved = _cli_resolve_argv0(cwd(), reported)
     if resolved == "":
         resolved = _cli_find_on_path(reported)
     if resolved == "" or not _cli_file_exists_impl(resolved):
         return ""
     _cli_resolve_symlink(resolved)
+
+pub fn cli_kernel_executable_path() -> text:
+    # Strict bootstrap lineage: query our own process image, never argv or env.
+    if host_os() != "windows":
+        val proc_path = _cli_resolve_symlink("/proc/self/exe")
+        if proc_path != "" and proc_path != "/proc/self/exe" and _cli_file_exists_impl(proc_path):
+            return proc_path
+    val reported = _cli_self_exe_via_pid_query(true)
+    if reported == "" or not _cli_file_exists_impl(reported):
+        return ""
+    _cli_resolve_symlink(reported)
 
 fn _cli_current_exe_path() -> text:
     # Prefer the kernel's record of the real executable: argv0-based
