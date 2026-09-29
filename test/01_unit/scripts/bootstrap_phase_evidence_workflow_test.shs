@@ -171,7 +171,7 @@ EOF
 
 # Exercise the workflow-owned runner without compiling. The fake producer uses
 # the real centralized path shape, including the platform directory, and the
-# log proves both verifier calls receive distinct compiler/capsule authorities.
+# log proves the Stage 2 capsule and Stage 3 provenance handoffs.
 contract="$tmp/runner"
 storage="$contract/storage"
 mkdir -p "$contract/bin"
@@ -232,8 +232,18 @@ PHASE23_EVIDENCE_COMMAND="$contract/bin/evidence" \
 [ "$(wc -l <"$contract/calls.verifier" | tr -d ' ')" = 2 ] || fail 'runner did not reach both verifiers'
 grep -Fq -- '--phase=stage2' "$contract/calls.verifier" || fail 'Stage 2 verifier was not reached'
 grep -Fq -- '--phase=stage3' "$contract/calls.verifier" || fail 'Stage 3 verifier was not reached'
-grep -Fq 'phase-runtime-capsules/stage2/' "$contract/calls.verifier" || fail 'Stage 2 capsule handoff missing'
-grep -Fq 'phase-runtime-capsules/stage3/' "$contract/calls.verifier" || fail 'Stage 3 capsule handoff missing'
+stage2_call=$(grep -F -- '--phase=stage2 ' "$contract/calls.verifier")
+stage3_call=$(grep -F -- '--phase=stage3 ' "$contract/calls.verifier")
+printf '%s\n' "$stage2_call" | grep -Fq 'phase-runtime-capsules/stage2/' ||
+  fail 'Stage 2 capsule handoff missing'
+printf '%s\n' "$stage3_call" | grep -Fq -- \
+  "--stage3-provenance=$storage/build/bootstrap/stage3/aarch64-apple-darwin/provenance.env" ||
+  fail 'canonical Stage 3 provenance handoff missing'
+if printf '%s\n' "$stage3_call" | grep -Fq -- '--runtime-path='; then
+  fail 'Stage 3 runtime authority was overridden'
+fi
+[ "$(wc -l <"$contract/calls.capsule" | tr -d ' ')" = 1 ] ||
+  fail 'Stage 3 published a Phase 2 runtime capsule'
 
 # The bypass predicate is independently executable: only the explicit contract
 # mode with all four fake command owners may suppress real artifact guards.
