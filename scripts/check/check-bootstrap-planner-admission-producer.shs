@@ -16,6 +16,13 @@
 #   ERROR — nothing was checked     exit 2
 set -eu
 
+focused_configured_output=0
+case "${1:-}" in
+    --configured-output-only) focused_configured_output=1 ;;
+    "") ;;
+    *) echo "usage: $0 [--configured-output-only]" >&2; exit 2 ;;
+esac
+
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
 BOOTSTRAP_STAGE3_VERSION_ROOT=$root
 export BOOTSTRAP_STAGE3_VERSION_ROOT
@@ -54,6 +61,7 @@ checked=$((checked + 1))
 #      (strict = refuses an untyped reason; permissive = accepts anything)
 make_fixture() {
     mf_dst=$1 mf_prov=$2 mf_policy=$3
+    mf_exe=${4:-}
     mkdir -p "$mf_dst/src/app/cli" "$mf_dst/src/runtime" \
         "$mf_dst/build/bootstrap/stage2/fixture-triple"
     cp -- "$root/src/app/cli/bootstrap_reason_planner.spl" \
@@ -64,7 +72,7 @@ make_fixture() {
     # shim with the same argv contract and authorization text as the real
     # planner. This exercises the producer's measure/exec/smoke/emit path
     # without needing a real stage2 compiler in the tree.
-    cat >"$mf_dst/build/bootstrap/stage2/fixture-triple/simple" <<'FIXTURE_CC'
+    cat >"$mf_dst/build/bootstrap/stage2/fixture-triple/simple$mf_exe" <<'FIXTURE_CC'
 #!/bin/sh
 set -eu
 out=''
@@ -103,9 +111,9 @@ echo "bootstrap-plan: execution=not-attempted receipt=$receipt reason=$reason"
 PLANNER
 chmod +x "$out"
 FIXTURE_CC
-    replace_in_file "s/@POLICY@/$mf_policy/" "$mf_dst/build/bootstrap/stage2/fixture-triple/simple"
-    chmod +x "$mf_dst/build/bootstrap/stage2/fixture-triple/simple"
-    mf_parent="$mf_dst/build/bootstrap/stage2/fixture-triple/simple"
+    replace_in_file "s/@POLICY@/$mf_policy/" "$mf_dst/build/bootstrap/stage2/fixture-triple/simple$mf_exe"
+    chmod +x "$mf_dst/build/bootstrap/stage2/fixture-triple/simple$mf_exe"
+    mf_parent="$mf_dst/build/bootstrap/stage2/fixture-triple/simple$mf_exe"
     mf_parent_sha=$(bootstrap_planner_v2_hash_file "$mf_parent")
     mf_evidence_dir="$mf_dst/build/bootstrap/provenance/fixture"
     mkdir -p "$mf_evidence_dir"
@@ -186,6 +194,7 @@ run_custom_output_producer() {
         --out="$rp_root/custom-output-receipt.env"
 }
 
+if [ "$focused_configured_output" -eq 0 ]; then
 # --- fixture 1: the gate is satisfiable -------------------------------------
 ok_root="$scratch/ok"
 make_fixture "$ok_root" 'stage2-provenance: pure-simple' strict
@@ -197,6 +206,8 @@ grep -q '^bootstrap-admission: produced ' "$scratch/ok.log" ||
 bootstrap_planner_v2_verify "$ok_root/receipt.env" "$ok_root" >/dev/null 2>&1 ||
     fail "verifier rejected the canonical producer's own receipt (gate unsatisfiable)"
 checked=$((checked + 1))
+
+fi
 
 # --- configured output: admission follows the bootstrap output owner --------
 custom_root="$scratch/custom-output"
@@ -239,6 +250,42 @@ run_custom_output_producer "$custom_root" >"$scratch/custom-output.log" 2>&1 ||
 bootstrap_planner_v2_verify "$custom_root/custom-output-receipt.env" "$custom_root" >/dev/null 2>&1 ||
     fail "configured-output receipt failed canonical verification"
 checked=$((checked + 1))
+
+# A configured parent must not borrow admission authority from a sibling output.
+sibling="$custom_root/build/bootstrap-sibling"
+mkdir -p "$sibling"
+cp "$custom_admission" "$sibling/admission.env"
+sibling_receipt_esc=$(printf '%s' "$sibling/admission.env" | sed 's/[\/&]/\\&/g')
+for custom_receipt in "$custom_sanity" "$custom_provenance"; do
+    replace_in_file "s/^admission_receipt_path=.*/admission_receipt_path=$sibling_receipt_esc/" "$custom_receipt"
+done
+if run_custom_output_producer "$custom_root" >"$scratch/sibling-output.log" 2>&1; then
+    fail "configured output borrowed a sibling admission receipt"
+fi
+grep -q 'parent-stage2-admission-outside-bootstrap-output' "$scratch/sibling-output.log" ||
+    fail "sibling authority was not rejected at the output owner boundary"
+checked=$((checked + 1))
+
+# A Windows-suffixed parent emits and binds planner.exe through the actual producer.
+exe_root="$scratch/windows-suffix"
+make_fixture "$exe_root" 'stage2-provenance: pure-simple' strict .exe
+exe_root=$(CDPATH= cd -- "$exe_root" && pwd -P)
+sh "$producer" --root="$exe_root" \
+    --parent-compiler="$exe_root/build/bootstrap/stage2/fixture-triple/simple.exe" \
+    --runtime-dir="$exe_root/src/runtime" \
+    --target=//bootstrap:stage4 --reason=self-host-convergence-check \
+    --out="$exe_root/receipt.env" >"$scratch/windows-suffix.log" 2>&1 ||
+    fail "producer refused the Windows executable suffix fixture"
+bootstrap_planner_v2_verify "$exe_root/receipt.env" "$exe_root" >/dev/null 2>&1 ||
+    fail "Windows executable receipt failed canonical verification"
+exe_planner=$(bootstrap_planner_v2_field planner_path "$exe_root/receipt.env")
+case "$exe_planner" in */planner.exe) ;; *) fail "Windows planner lost executable suffix" ;; esac
+checked=$((checked + 1))
+
+if [ "$focused_configured_output" -eq 1 ]; then
+    echo "PASS — $checked configured-output/Windows fixture(s) checked"
+    exit 0
+fi
 
 # --- fixture 2: a forged argv digest is refused ------------------------------
 cp -- "$ok_root/receipt.env" "$scratch/argv.env"

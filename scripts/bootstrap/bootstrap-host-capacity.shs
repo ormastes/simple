@@ -1,0 +1,41 @@
+#!/bin/sh
+# Physical capacity shared by bootstrap schedulers. Unknown capacity fails;
+# callers must serialize rather than enforce a fabricated memory ceiling.
+# Sources follow upstream 0e49d8f8861 (PKG-F).
+bootstrap_host_memory_mib() (
+    bootstrap_capacity_os=${1:-$(uname -s 2>/dev/null || :)}
+    bootstrap_capacity_meminfo=${2:-/proc/meminfo}
+    bootstrap_capacity_value=
+    bootstrap_capacity_divisor=1
+    case "$bootstrap_capacity_os" in
+        Darwin|FreeBSD)
+            bootstrap_capacity_key=hw.memsize
+            [ "$bootstrap_capacity_os" != FreeBSD ] || bootstrap_capacity_key=hw.physmem
+            bootstrap_capacity_value=$(sysctl -n "$bootstrap_capacity_key" 2>/dev/null || :)
+            bootstrap_capacity_divisor=1048576
+            ;;
+        *)
+            if [ -r "$bootstrap_capacity_meminfo" ]; then
+                bootstrap_capacity_value=$(awk '/^MemTotal:/ {print $2; exit}' "$bootstrap_capacity_meminfo")
+                bootstrap_capacity_divisor=1024
+            fi
+            case "$bootstrap_capacity_value" in ''|*[!0-9]*|0)
+                case "$bootstrap_capacity_os" in
+                    MINGW*|MSYS*|CYGWIN*)
+                        # Bound CIM startup; an unavailable bounded probe is unknown.
+                        command -v timeout >/dev/null 2>&1 || exit 1
+                        bootstrap_capacity_value=$(timeout 30 powershell.exe -NoProfile -NonInteractive -Command \
+                            '(Get-CimInstance Win32_OperatingSystem).TotalVisibleMemorySize' \
+                            </dev/null 2>/dev/null | tr -d '\r\n ') || exit 1
+                        bootstrap_capacity_divisor=1024
+                        ;;
+                esac
+                ;;
+            esac
+            ;;
+    esac
+    case "$bootstrap_capacity_value" in ''|*[!0-9]*|0) exit 1 ;; esac
+    bootstrap_capacity_mib=$(awk -v n="$bootstrap_capacity_value" -v d="$bootstrap_capacity_divisor" 'BEGIN {printf "%.0f", int(n/d)}')
+    [ "$bootstrap_capacity_mib" -gt 0 ] || exit 1
+    printf '%s\n' "$bootstrap_capacity_mib"
+)

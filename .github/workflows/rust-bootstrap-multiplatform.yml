@@ -20,6 +20,8 @@ on:
       - 'scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs'
       - 'scripts/check/cert/redeploy_gate/fixtures/p2_add.spl'
       - 'scripts/check/check-bootstrap-portability.shs'
+      - 'scripts/check/check-bootstrap-host-capacity.shs'
+      - 'scripts/check/check-bootstrap-windows-authority-paths.shs'
       - 'scripts/check/check-seed-parse-superset.shs'
       - 'scripts/check/check-bootstrap-essential-tools-smoke.shs'
       - 'scripts/check/validate-json.spl'
@@ -89,6 +91,8 @@ on:
       - 'scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs'
       - 'scripts/check/cert/redeploy_gate/fixtures/p2_add.spl'
       - 'scripts/check/check-bootstrap-portability.shs'
+      - 'scripts/check/check-bootstrap-host-capacity.shs'
+      - 'scripts/check/check-bootstrap-windows-authority-paths.shs'
       - 'scripts/check/check-seed-parse-superset.shs'
       - 'scripts/check/check-bootstrap-essential-tools-smoke.shs'
       - 'scripts/check/validate-json.spl'
@@ -192,7 +196,10 @@ jobs:
 
       - name: Validate bootstrap portability contracts
         if: runner.os == 'Linux' && matrix.backend == 'llvm'
-        run: sh scripts/check/check-bootstrap-portability.shs
+        run: |
+          sh scripts/check/check-bootstrap-portability.shs
+          sh scripts/check/check-bootstrap-host-capacity.shs
+          sh scripts/check/check-bootstrap-windows-authority-paths.shs
 
       - name: Setup MSVC
         if: runner.os == 'Windows'
@@ -251,9 +258,6 @@ jobs:
         shell: bash
         working-directory: src/compiler_rust
         run: |
-          if [ "$RUNNER_OS" = "Windows" ] || [ "$RUNNER_OS" = "Linux" ]; then
-            export CARGO_BUILD_JOBS=10
-          fi
           if [ "${{ matrix.backend }}" = "llvm" ]; then
             cargo build --profile bootstrap -p simple-driver --features llvm
             cargo build --profile bootstrap -p simple-native-all --features driver-compat,llvm
@@ -282,35 +286,39 @@ jobs:
           if [ "$RUNNER_OS" = "Windows" ]; then
             export SIMPLE_LINKER_FLAVOR=msvc SIMPLE_WINDOWS_ABI=msvc
           fi
-          if [ "$RUNNER_OS" = "Windows" ] || { [ "$RUNNER_OS" = "Linux" ] && [ "${{ matrix.backend }}" = "cranelift" ]; }; then
-            # Stage 2 is the receipt-free trust root. Stage 3 must consume
-            # the measured planner receipt for this exact admitted parent.
-            sh scripts/bootstrap/bootstrap-from-scratch.sh \
-              --backend=${{ matrix.backend }} --mode=dynload --full-bootstrap \
-              --stop-after-stage2 --no-mcp --incremental-unlimited --jobs=10
-            stage2="$(find build/bootstrap/stage2 -type f \( -name simple -o -name simple.exe \) -print -quit)"
-            test -n "$stage2"
-            bootstrap_receipt="$PWD/build/bootstrap/native-stage3-planner-admission-v2.env"
-            sh scripts/bootstrap/produce-bootstrap-planner-admission-v2.shs \
-              --target=//bootstrap:stage3 \
-              --reason=verify-landed-compiler-fix \
-              --parent-compiler="$stage2" \
-              --out="$bootstrap_receipt"
-            # The admitted resume currently requires its single-thread path.
-            sh scripts/bootstrap/bootstrap-from-scratch.sh \
-              --bootstrap-receipt="$bootstrap_receipt" \
-              --resume-stage3-from-admitted=build/bootstrap
-            exit 0
-          fi
           if [ "$RUNNER_OS" = "Linux" ] && [ "${{ matrix.backend }}" = "llvm" ]; then
             mcp_flag=--full-cli
           else
             mcp_flag=--no-mcp
           fi
+          # Admit a pure-Simple planner parent before the coordinated build.
+          # Keep it in its own output tree so the later build cannot replace
+          # the compiler whose digest authorizes the planner receipt.
+          planner_output=build/bootstrap/ci-planner-parent
+          sh scripts/bootstrap/bootstrap-from-scratch.sh \
+            --backend=${{ matrix.backend }} \
+            --mode=dynload --full-bootstrap --stop-after-stage2 \
+            --output="$planner_output" --jobs=2
+          planner_parent=
+          for candidate in "$planner_output"/stage2/*/simple "$planner_output"/stage2/*/simple.exe; do
+            [ -f "$candidate" ] || continue
+            if [ -n "$planner_parent" ]; then
+              echo "error: multiple planner parents found" >&2
+              exit 1
+            fi
+            planner_parent=$candidate
+          done
+          test -n "$planner_parent"
+          planner_receipt="$planner_output/ci-stage4-planner-admission.env"
+          sh scripts/bootstrap/produce-bootstrap-planner-admission-v2.shs \
+            --target=//bootstrap:stage4 --reason=self-host-convergence-check \
+            --parent-compiler="$planner_parent" \
+            --bootstrap-output="$planner_output" --out="$planner_receipt"
           sh scripts/bootstrap/bootstrap-from-scratch.sh \
             --backend=${{ matrix.backend }} \
             --mode=dynload \
             --full-bootstrap \
+            --bootstrap-receipt="$planner_receipt" \
             "$mcp_flag" \
             --jobs=2
 
@@ -319,7 +327,11 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: bootstrap-failure-logs-${{ matrix.name }}-${{ matrix.backend }}-${{ github.sha }}
-          path: build/bootstrap/logs/**
+          path: |
+            build/bootstrap/logs/**
+            build/bootstrap/ci-planner-parent/logs/**
+            build/bootstrap/admission/**
+            build/bootstrap/scheduler/**
           if-no-files-found: error
           retention-days: 7
 
