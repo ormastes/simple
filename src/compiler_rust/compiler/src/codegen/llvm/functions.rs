@@ -856,7 +856,8 @@ impl LlvmBackend {
                         let Some(&alloca) = local_allocas.get(local_index) else {
                             continue;
                         };
-                        let offset = 8 + (capture_index as u64 * 8);
+                        // Match the reserved kind word in compile_closure_create.
+                        let offset = 16 + (capture_index as u64 * 8);
                         let offset_val = self.context_ref().i32_type().const_int(offset, false);
                         let field_ptr = unsafe {
                             builder

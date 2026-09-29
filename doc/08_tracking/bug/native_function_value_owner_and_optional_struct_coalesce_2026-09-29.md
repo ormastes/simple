@@ -1,6 +1,6 @@
 # Native function owners and optional struct coalescing
 
-**Status: draft, blocked by actual native callback execution failure.** The final fixture compiles and links, then exits with code 1 at its first `port.supports_fn("emit-gpu")` call. No Stage2 or Stage4 success is established. Verification stopped at the three-production-cycle cap; explicit user direction is required before another compiler fix/test cycle.
+**Status: native callback regression repaired in the authorized 2026-09-29 follow-up below.** The earlier three-cycle investigation and its failures remain recorded here. The focused callback fixture now executes successfully; this does not establish full Stage2/Stage4 bootstrap qualification.
 
 ## Production evidence
 
@@ -58,3 +58,47 @@ Local evidence is retained on D-backed storage:
 - `D:/dev/simple-bootstrap-bootstrap-tools-fix-20260929/build/mini_builds/symbol-owner-review/final-cycle3-owned-inputs/`: immutable snapshot of eight tested owned files, scoped patch and hash manifest. This results update is a documentation-only addition after that snapshot.
 
 Three production verification cycles were used: cycle 1 stopped at a peer test import compile error; cycle 2 passed the controls/type check then failed native linking; cycle 3 passed the actual callback ownership regression and native link, then failed execution. Earlier test-compilation repairs were recorded separately. No further compiler edits or test retries were made after the final failure. The combined patch may be pushed as a draft for review; it is not ready for merge or bootstrap admission.
+
+
+## 2026-09-29: direct-function ABI and collision-free closure header
+
+The user authorized continued repair after the earlier stopped investigation.
+LLVM GlobalLoad and function-global initialization emit direct callable records
+`[entry, 0x5344495245435446]`. The old indirect-call emitter always supplied a
+hidden closure context, shifting `_gpu`'s text argument and explaining exit 1.
+The call now selects the direct signature without that context, or the closure
+signature with it, and joins the result with an LLVM PHI.
+
+Review caught a discriminator collision: old LLVM closures placed capture zero
+at byte 8, the same slot as the direct marker. LLVM closures now reserve a zero
+kind word there and store captures starting at byte 16. Allocation, capture
+stores and outlined-body loads agree. The secondary emitter delegates closure
+creation and indirect calls to these same helpers. Direct records retain their
+existing layout, including the scalar pool runtime's marker requirement.
+MIR and Cranelift capture layouts are unchanged.
+
+Existing LLVM closure objects must be regenerated together; mixing old capture
+objects with the new layout is unsupported. Native object keys already include
+the running compiler's full-byte fingerprint (`native_project/mod.rs`). The
+native regression creates a fresh build/cache directory each time.
+
+Verification used official LLVM 23.1.2 Linux ARM64, with release asset SHA-256
+`143308c82f8e21707be7fdc135d5e0ddd9a46a377ca9f38befc716fd842cb59b`.
+The initial installed LLVM 23.1.0 was rejected by the existing version pin;
+no pin was weakened. A command launched outside the Rust workspace also
+stopped at dependency selection before compilation and was corrected to the
+workspace directory.
+
+- Imported HIR/MIR owner regression and initial native execution: 2 passed,
+  0 failed (`/tmp/pr2044-native-callback-fixed.log`).
+- After the review correction, the affected native execution test: 1 passed,
+  0 failed, 1 filtered out (`/tmp/pr2044-native-callback-marker-fixed.log`).
+  It checks direct text/bool and integer calls, optional struct callbacks,
+  single receiver evaluation, a captured closure, a capture-free closure,
+  floating-point arguments/results, and a capture equal to the direct marker.
+- Independent read-only Linux-lane review checked all LLVM closure producers,
+  the outlined capture consumer, secondary-emitter delegation, and runtime
+  thread/pool discriminator contracts; no remaining concrete blocker found.
+
+This is focused compiler/bootstrap evidence. Full bootstrap and the previously
+pending Trace32/hardware/MCP qualification remain separate requirements.
