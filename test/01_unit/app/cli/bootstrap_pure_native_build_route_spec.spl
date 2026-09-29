@@ -1,0 +1,51 @@
+"""Bootstrap native dispatch must retain the pure compiler boundary."""
+
+use std.spec.{describe, it, expect}
+use std.io_runtime.{file_read}
+use app.cli.bootstrap_main.{run_native_build_bootstrap, bootstrap_native_build_worker_args}
+use app.io._CliCompile.compile_targets.{cli_native_build_option_error}
+
+describe "pure bootstrap native CLI ownership":
+    it "rejects unsupported options before compiler admission":
+        val args = ["simple", "native-build", "--source", "src",
+            "--entry", "test/fixtures/nonexistent-route-entry.spl", "--unsupported-native-route-flag"]
+        val worker_args = bootstrap_native_build_worker_args(args)
+        expect(cli_native_build_option_error(worker_args, true)).to_equal(
+            "unknown option: --unsupported-native-route-flag")
+        expect(run_native_build_bootstrap(args)).to_equal(1)
+
+    it "rejects entryless source scans through the native argument owner":
+        val args = ["simple", "native-build", "--source", "src", "--threads", "1"]
+        expect(cli_native_build_option_error(bootstrap_native_build_worker_args(args), true)).to_equal(
+            "No entry point specified for native-build backend")
+        expect(run_native_build_bootstrap(args)).to_equal(1)
+
+    it "rejects conflicting explicit and positional entries":
+        val args = ["simple", "native-build", "--entry", "first.spl", "second.spl"]
+        expect(cli_native_build_option_error(bootstrap_native_build_worker_args(args), true)).to_contain(
+            "multiple native-build entry points")
+        expect(run_native_build_bootstrap(args)).to_equal(1)
+        expect(cli_native_build_option_error(["--entry", "first.spl", "--entry=second.spl"], true)).to_contain(
+            "multiple native-build entry points")
+
+    it "preserves supported project roots and shared output options":
+        val args = ["simple", "native-build", "--source", "src/app", "--source=src/lib",
+            "--entry", "src/app/provider_cli/native_provider_v1.spl", "--entry-closure",
+            "--backend=llvm", "--mode", "one-binary", "--emit-shared", "--no-mangle",
+            "--threads", "1", "--cache-dir", "private/cache", "--runtime-bundle", "core-c-bootstrap",
+            "--output", "private/provider.so"]
+        val forwarded = bootstrap_native_build_worker_args(args)
+        expect(forwarded[0]).to_equal("--source")
+        expect(forwarded[1]).to_equal("src/app")
+        expect(forwarded[2]).to_equal("--source=src/lib")
+        expect(cli_native_build_option_error(forwarded, true)).to_equal("")
+
+    it "keeps optimization listing valid without a compilation entry":
+        expect(cli_native_build_option_error(["--list-optimizations"], true)).to_equal("")
+        expect(run_native_build_bootstrap(["simple", "native-build", "--list-optimizations"])).to_equal(0)
+
+    it "removes the embedded Rust compiler ABI from bootstrap native dispatch":
+        val source = file_read("src/app/cli/bootstrap_main.spl")
+        expect(source.contains("extern fn rt_native_build")).to_equal(false)
+        expect(source.contains("run_rt_native_build(")).to_equal(false)
+        expect(source.contains("unsafe(capabilities: [ffi]): rt_native_build")).to_equal(false)
