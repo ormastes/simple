@@ -158,6 +158,7 @@ validate_hosted_runtime_authority() {
 }
 
 phase=""
+stage3_provenance=""
 compiler=""
 expected_sha=""
 strategy=normal
@@ -177,6 +178,7 @@ test_workers=${BOOTSTRAP_VERIFY_TEST_WORKERS:-1}
 for arg in "$@"; do
   case "$arg" in
     --phase=*) phase=${arg#*=} ;;
+    --stage3-provenance=*) stage3_provenance=${arg#*=} ;;
     --compiler=*) compiler=${arg#*=} ;;
     --compiler-sha256=*) expected_sha=${arg#*=} ;;
     --strategy=*) strategy=${arg#*=} ;;
@@ -201,6 +203,11 @@ for arg in "$@"; do
 done
 
 case "$phase" in stage1|stage2|stage3|stage4) ;; *) die "invalid phase" ;; esac
+[ -z "$stage3_provenance" ] || [ "$phase" = stage3 ] || die "--stage3-provenance is stage3-only"
+if [ "$phase" = stage3 ]; then
+  [ -n "$stage3_provenance" ] || die "Stage3 requires admitted provenance"
+  [ "$hash_policy" = canonical ] || die "Stage3 requires canonical provenance"
+fi
 case "$strategy" in normal|full) ;; *) die "verification requires normal or full" ;; esac
 case "$profile" in full|slim) ;; *) die "--profile requires full or slim" ;; esac
 [ "$profile" != slim ] || [ "$phase" = stage2 ] || die "--profile=slim is stage2-only"
@@ -211,6 +218,7 @@ case "$spec_timeout_seconds" in ''|*[!0-9]*|0) die "spec timeout must be a posit
 case "$native_internal_timeout" in ''|*[!0-9]*) die "native internal timeout must be an integer" ;; esac
 [ "$native_internal_timeout" -gt 60 ] || die "native internal timeout must exceed 60 seconds"
 case "$build_threads" in ''|*[!0-9]*|0) die "build threads must be a positive integer" ;; esac
+[ "$phase" != stage3 ] || [ "$build_threads" -le 12 ] || die "Stage3 build threads must be from 1 to 12"
 case "$test_workers" in
   [1-9]|1[0-2]) ;;
   *) die "test workers must be an integer from 1 to 12" ;;
@@ -296,6 +304,33 @@ if [ "$source_before" != "$source_after" ] || [ "$snapshot_sha" != "$expected_sh
   hash_status=WARN
 fi
 compiler_snapshot="$work_root/compiler.snapshot"
+if [ "$phase" = stage3 ]; then
+  [ -f "$stage3_provenance" ] && [ ! -L "$stage3_provenance" ] || die "invalid Stage3 provenance file"
+  stage3_provenance=$(cd "$(dirname "$stage3_provenance")" && printf '%s/%s\n' "$(pwd -P)" "$(basename "$stage3_provenance")") || die "cannot resolve Stage3 provenance"
+  compiler=$(cd "$(dirname "$compiler")" && printf '%s/%s\n' "$(pwd -P)" "$(basename "$compiler")") || die "cannot resolve Stage3 compiler"
+  BOOTSTRAP_STAGE3_FACADE_PATH="$source_root/scripts/check/lib/bootstrap-stage3-provenance.shs"
+  . "$BOOTSTRAP_STAGE3_FACADE_PATH" || die "cannot load Stage3 provenance authority"
+  stage3_manifest_sha=$(hash_file "$stage3_provenance") || die "cannot hash Stage3 provenance"
+  TMPDIR="$tmp" bootstrap_stage3_verify_manifest "$stage3_provenance" "$stage3_provenance" \
+    "$source_root" "$compiler" "$compiler" "$stage3_provenance.authority-map.env" || die "Stage3 provenance is not current"
+  [ "$(hash_file "$stage3_provenance")" = "$stage3_manifest_sha" ] || die "Stage3 provenance changed during verification"
+  [ "$(manifest_value stage3_sha256 "$stage3_provenance")" = "$snapshot_sha" ] &&
+    [ "$(manifest_value output_sha256 "$stage3_provenance")" = "$snapshot_sha" ] || die "Stage3 producer differs from compiler snapshot"
+  stage3_source_sha=$(manifest_value source_fingerprint "$stage3_provenance")
+  stage3_runtime_snapshot=$(manifest_value runtime_admitted_snapshot_path "$stage3_provenance")
+  stage3_runtime_sha=$(manifest_value runtime_admitted_snapshot_sha256 "$stage3_provenance")
+  stage3_backend=$(manifest_value backend "$stage3_provenance")
+  stage3_platform=$(manifest_value platform "$stage3_provenance")
+  bound_runtime=$(manifest_value runtime_path "$stage3_provenance")
+  [ "$(hash_file "$stage3_provenance")" = "$stage3_manifest_sha" ] || die "Stage3 provenance changed during field extraction"
+  [ -d "$bound_runtime" ] || die "Stage3 runtime is not a directory"
+  bound_runtime=$(cd "$bound_runtime" && pwd -P) || die "cannot resolve Stage3 runtime"
+  if [ "$runtime_path_explicit" = 1 ]; then
+    [ -d "$runtime_path" ] && [ "$(cd "$runtime_path" && pwd -P)" = "$bound_runtime" ] || die "Stage3 runtime differs from provenance"
+  fi
+  runtime_path=$bound_runtime
+  runtime_cache_identity=$(printf '%s\n' stage3 "$snapshot_sha" "$stage3_manifest_sha" "$stage3_runtime_sha" "$stage3_source_sha" | hash_stream) || die "cannot bind Stage3 runtime identity"
+fi
 if [ "$phase" = stage1 ]; then
   bootstrap_phase1_register_tool "$compiler_snapshot" "$snapshot_sha" || die "cannot bind Phase1 compiler snapshot"
 fi
@@ -448,6 +483,11 @@ stage2_row_delegation_env() {
   echo "actual_compiler_sha256=$snapshot_sha"
   echo "compiler_hash_status=$hash_status"
   echo "runtime_path=${runtime_path:--}"
+  if [ "$phase" = stage3 ]; then
+    echo "stage3_provenance_sha256=$stage3_manifest_sha"
+    echo "stage3_source_fingerprint=$stage3_source_sha"
+    echo "stage3_runtime_snapshot_sha256=$stage3_runtime_sha"
+  fi
   echo "native_internal_timeout_seconds=$native_internal_timeout"
   echo "timing_scope=post-admission-excludes-git-lfs-checkout"
   if [ "$stage2_test_delegate" -eq 1 ]; then
@@ -729,7 +769,20 @@ run_task() {
       if [ "$phase" = stage1 ]; then
         bootstrap_phase1_validate_invocation "${1:-}" "$task" "$log.phase1-before.env" || exit 89
       fi
-      if [ "$phase" = stage1 ] && [ "${1:-}" = "$compiler_snapshot" ] && \
+      if [ "$phase" = stage3 ] && [ "${1:-}" = "$compiler_snapshot" ] && \
+         [ "${2:-}" = native-build ]; then
+        case "$task" in compiler_cli_build|test_runner_build|mcp_build|lsp_build) ;; *) exit 89 ;; esac
+        # Keep the actual compiler at argv[0] so the existing pinned-toolchain
+        # boundary still recognizes and validates this native-build invocation.
+        SIMPLE_NATIVE_RUNTIME_BUNDLE=core-c-bootstrap SIMPLE_RUNTIME_PATH="$runtime_path"
+        SIMPLE_NATIVE_BUILD_THREADS="$s3_threads" SIMPLE_NATIVE_BUILD_CACHE_DIR="$s3_cache"
+        SIMPLE_NATIVE_BUILD_TARGET="$stage3_platform" SIMPLE_BINARY="$compiler_snapshot"
+        SIMPLE_BOOTSTRAP_STAGE3=0 SIMPLE_BOOTSTRAP_STAGE4=0
+        export SIMPLE_NATIVE_RUNTIME_BUNDLE SIMPLE_RUNTIME_PATH SIMPLE_NATIVE_BUILD_THREADS \
+          SIMPLE_NATIVE_BUILD_CACHE_DIR SIMPLE_NATIVE_BUILD_TARGET SIMPLE_BINARY \
+          SIMPLE_BOOTSTRAP_STAGE3 SIMPLE_BOOTSTRAP_STAGE4
+        bootstrap_phase_run_command run_with_timeout "$@"
+      elif [ "$phase" = stage1 ] && [ "${1:-}" = "$compiler_snapshot" ] && \
          [ "${2:-}" = native-build ]; then
         # A Phase-1 seed normally dispatches native-build to the deployed
         # pure-Simple CLI.  That ambient CLI can predate the admitted seed and
@@ -1066,6 +1119,48 @@ validate_stage4_tooling_receipt() {
 
 matrix_failed=0
 matrix_unsupported=0
+
+# This checks the admitted C owner, never an inherited Phase2 Rust capsule.
+validate_stage3_tool_binding() (
+  [ "$(hash_file "$stage3_provenance")" = "$stage3_manifest_sha" ] &&
+    [ "$(hash_file "$compiler_snapshot")" = "$expected_sha" ] || exit 1
+  # Revalidate live source, tool and runtime inputs, not just their archived
+  # snapshot files. Each producer's private TMPDIR owns the verifier scratch.
+  TMPDIR="$tmp" bootstrap_stage3_verify_manifest "$stage3_provenance" "$stage3_provenance" \
+    "$source_root" "$compiler" "$compiler" "$stage3_provenance.authority-map.env" || exit 1
+  [ "$(hash_file "$stage3_provenance")" = "$stage3_manifest_sha" ] &&
+    [ "$(hash_file "$compiler_snapshot")" = "$expected_sha" ]
+)
+
+run_stage3_tool_build() {
+  s3_task=$1 s3_entry=$2 s3_output=$3 s3_cache=$4 s3_threads=$5
+  if ! validate_stage3_tool_binding; then
+    printf 'task=%s|result=FAIL|status=authority-mismatch|elapsed_seconds=0|log=-\n' "$s3_task" >>"$summary"
+    matrix_failed=1 matrix_task_passed=0
+    return
+  fi
+  run_matrix_task "$s3_task" --verification-expect-executable="$s3_output" \
+    "$compiler_snapshot" native-build "$s3_entry" --backend="$stage3_backend" -o "$s3_output"
+  if ! validate_stage3_tool_binding; then
+    printf 'task=%s_authority|result=FAIL|status=authority-mismatch|elapsed_seconds=0|log=-\n' "$s3_task" >>"$summary"
+    matrix_failed=1 matrix_task_passed=0
+  fi
+}
+
+# Match inventory workers: each child owns HOME/TMP/cache and result files;
+# only the parent publishes rows and marks the command owner ready.
+run_stage3_tool_worker() (
+  worker=$1
+  home="$work_root/stage3-tool-workers/$worker/home"
+  tmp="$work_root/stage3-tool-workers/$worker/tmp"
+  summary="$work_root/stage3-tool-workers/$worker/summary.env"
+  mkdir -p "$home" "$tmp" || exit 1
+  : >"$summary" || exit 1
+  shift
+  run_stage3_tool_build "$@"
+  printf '%s\n' "$matrix_task_passed" >"$work_root/stage3-tool-workers/$worker/result" || exit 1
+)
+
 run_matrix_task() {
   task=$1
   shift
@@ -1536,9 +1631,8 @@ else
   # and tests through the artifact that actually owns each command surface.
   # This prevents an unsupported `check`/`test` dispatch from being expanded
   # into thousands of false source failures.
-  # Phase2 has a canonical SHA-bound capsule for this exact compiler. Later
-  # producers must retain their existing lane until their own authority binding
-  # is published; an inherited Phase2 capsule cannot authorize another compiler.
+  # Each producer uses its own authority: Phase2 Rust capsule, Phase3 admitted
+  # C-runtime provenance, or the existing higher-phase hosted lane.
   tool_runtime_bundle=host-gpu
   [ "$phase" != stage2 ] || tool_runtime_bundle=bootstrap-tools
   hosted_runtime_sha=""
@@ -1548,11 +1642,17 @@ else
   command_owner_receipt_sha=""
   compiler_cli_ready=0
   test_runner_ready=0
-  if ! validate_hosted_runtime_authority "$runtime_path"; then
+  tool_authority_ready=0
+  if [ "$phase" = stage3 ]; then
+    validate_stage3_tool_binding && tool_authority_ready=1
+  elif validate_hosted_runtime_authority "$runtime_path"; then
+    tool_authority_ready=1
+  fi
+  if [ "$tool_authority_ready" -ne 1 ]; then
     record_unsupported_task compiler_cli_build host-gpu-hosted-runtime-authority-unavailable
     record_unsupported_task test_runner_build host-gpu-hosted-runtime-authority-unavailable
   else
-    echo "hosted_runtime_sha256=$hosted_runtime_sha" >>"$summary"
+    [ "$phase" = stage3 ] || echo "hosted_runtime_sha256=$hosted_runtime_sha" >>"$summary"
     hosted_runtime_ready=1
     tool_cache="$cache_root/compiler-tools/$phase/$snapshot_sha/$runtime_cache_identity"
     # 16-hex prefixes, not the full 64-hex pair: the full path to the built
@@ -1583,6 +1683,37 @@ else
     mkdir -p "$tool_cache_cli" "$tool_cache_runner"
     mkdir -p "$tool_outputs"
     rm -f "$compiler_cli" "$test_runner"
+    if [ "$phase" = stage3 ]; then
+      if [ "$build_threads" -gt 1 ]; then
+        stage3_worker_threads=$((build_threads / 2))
+        stage3_workers="$work_root/stage3-tool-workers"
+        mkdir -p "$stage3_workers/cli" "$stage3_workers/runner" || die "cannot isolate Stage3 builders"
+        rm -f "$stage3_workers/cli/result" "$stage3_workers/runner/result"
+        run_stage3_tool_worker cli compiler_cli_build src/app/cli/_CliMain/main_and_help.spl \
+          "$compiler_cli" "$tool_cache_cli" "$stage3_worker_threads" &
+        stage3_cli_pid=$!
+        run_stage3_tool_worker runner test_runner_build src/app/test_runner_new/main.spl \
+          "$test_runner" "$tool_cache_runner" "$stage3_worker_threads" &
+        stage3_runner_pid=$!
+        stage3_cli_wait=0 stage3_runner_wait=0
+        wait "$stage3_cli_pid" || stage3_cli_wait=$?
+        wait "$stage3_runner_pid" || stage3_runner_wait=$?
+        for stage3_worker in cli runner; do
+          [ -f "$stage3_workers/$stage3_worker/summary.env" ] && cat "$stage3_workers/$stage3_worker/summary.env" >>"$summary"
+        done
+        [ "$stage3_cli_wait" -ne 0 ] || compiler_cli_ready=$(cat "$stage3_workers/cli/result" 2>/dev/null || printf 0)
+        [ "$stage3_runner_wait" -ne 0 ] || test_runner_ready=$(cat "$stage3_workers/runner/result" 2>/dev/null || printf 0)
+        if [ "$compiler_cli_ready" != 1 ] || [ "$test_runner_ready" != 1 ]; then
+          matrix_failed=1
+          printf 'task=stage3_tool_workers|result=FAIL|status=worker-failed|elapsed_seconds=0|log=-\n' >>"$summary"
+        fi
+      else
+        run_stage3_tool_build compiler_cli_build src/app/cli/_CliMain/main_and_help.spl "$compiler_cli" "$tool_cache_cli" 1
+        compiler_cli_ready=$matrix_task_passed
+        run_stage3_tool_build test_runner_build src/app/test_runner_new/main.spl "$test_runner" "$tool_cache_runner" 1
+        test_runner_ready=$matrix_task_passed
+      fi
+    else
     run_matrix_task compiler_cli_build --verification-expect-executable="$compiler_cli" \
       "$compiler_snapshot" native-build \
       --timeout "$native_internal_timeout" --runtime-bundle "$tool_runtime_bundle" --runtime-path "$runtime_path" \
@@ -1599,6 +1730,7 @@ else
       --entry src/app/test_runner_new/main.spl --threads "$build_threads" \
       --cache-dir "$tool_cache_runner" --output "$test_runner"
     test_runner_ready=$matrix_task_passed
+    fi
   fi
 
   if [ "$compiler_cli_ready" -eq 1 ] && [ -x "$compiler_cli" ]; then
@@ -1628,6 +1760,12 @@ else
     mcp_server="$server_outputs/simple_mcp_server"
     mkdir -p "$server_outputs"
     rm -f "$server_outputs/simple_mcp_server" "$server_outputs/simple_lsp_mcp_server"
+    if [ "$phase" = stage3 ]; then
+      run_stage3_tool_build mcp_build src/app/mcp/main.spl "$mcp_server" "$tool_build_cache/mcp" "$build_threads"
+      mcp_build_ready=$matrix_task_passed
+      run_stage3_tool_build lsp_build src/app/simple_lsp_mcp/main.spl "$server_outputs/simple_lsp_mcp_server" "$tool_build_cache/lsp" "$build_threads"
+      lsp_build_ready=$matrix_task_passed
+    else
     run_matrix_task mcp_build --verification-expect-executable="$mcp_server" \
       "$compiler_snapshot" native-build \
       --timeout "$native_internal_timeout" --runtime-bundle "$tool_runtime_bundle" --runtime-path "$runtime_path" \
@@ -1642,6 +1780,7 @@ else
       --entry src/app/simple_lsp_mcp/main.spl --threads "$build_threads" --cache-dir "$tool_build_cache" \
       --output "$server_outputs/simple_lsp_mcp_server"
     lsp_build_ready=$matrix_task_passed
+    fi
     if [ "$mcp_build_ready" -eq 1 ] && [ -x "$mcp_server" ]; then
       mcp_server_sha=$(hash_file "$mcp_server")
     fi
