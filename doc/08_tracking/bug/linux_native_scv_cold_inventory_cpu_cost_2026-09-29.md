@@ -82,3 +82,26 @@ inventory for warm requests. Any optimized cold path must preserve all five
 digests, src+test membership, no-follow reads, event ordering and publication
 binding. Existing Windows untracked-walk evidence is related history, not
 proof of the dominant Linux cost.
+
+## Prepared Simple owner optimization (not yet executed)
+
+The event owner now constructs canonical and three facet row lists in one
+pass over the original source. It preserves the existing whitespace helper,
+prefix predicates, row ordering, joins and public single-facet functions.
+It reuses a digest only when another view of that same event has byte-equal
+text. Empty/whole-source facets thus avoid redundant hashing and digest-hex
+allocation; distinct views still use the existing SHA authority. No source
+family, event, validation, cache binding or persistent schema is removed.
+
+The parity unit spec compares every event field and five digests with the
+unchanged public facet authority over whitespace, CRLF, Unicode, empty,
+single-facet, mixed-facet, prefix-near-miss and deletion cases. A native
+component checks 512 events with fixed independent expected facet texts;
+its process can be timed externally on the refreshed producer.
+
+Optimizer-app execution and the SSpec runner are currently blocked: this
+retained bootstrap compiler has no `run` or `test` command, and its native
+admission cold prime timed out. No seed fallback or optimizer PASS is
+claimed. The unchanged actual 600-second timeout is the baseline. Source
+review and focused execution are required before performance or correctness
+qualification of the prepared change.
