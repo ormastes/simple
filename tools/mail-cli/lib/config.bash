@@ -493,11 +493,12 @@ mail_config_set_account() (
   fi
   _mail_config_without_account "$name" > "$tmp"
   printf '\n  %s:\n' "$name" >> "$tmp"
-  local field value
+  local field value encoded
   for field in provider protocol email username display_name imap_server imap_port pop3_server pop3_port smtp_server smtp_port tls password_cmd password tenant_id client_id client_secret_env shared_mailbox; do
     value=$(jq -r --arg k "$field" '.[$k] // empty' <<< "$account_json")
     if [ -n "$value" ]; then
-      printf '    %s: %s\n' "$field" "$(jq -n --arg v "$value" '$v')" >> "$tmp"
+      encoded=$(builtin printf '%s' "$value" | jq -Rs '.') || return 1
+      printf '    %s: %s\n' "$field" "$encoded" >> "$tmp"
     fi
   done
   mv "$tmp" "$MAIL_CONFIG_FILE"
