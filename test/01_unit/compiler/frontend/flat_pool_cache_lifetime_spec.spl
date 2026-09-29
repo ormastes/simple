@@ -1,0 +1,66 @@
+# Cache serialization must retain its blob and parsed module, while leaving
+# flat pool owners usable by the bridge and the next source parse.
+use std.spec
+use compiler.frontend.flat_ast_bridge.{
+    parse_and_build_module_scoped, flat_pool_capture_arm, flat_pool_capture_take,
+    flat_pools_dump_all, flat_pools_dump_for_cache, build_module_from_flat_pool_blob}
+use compiler.frontend.parser_types.{ParserModule}
+use compiler.frontend.parser_types_expr.{StmtKind, ExprKind, BinOp}
+
+fn assert_alpha_body(module: ParserModule):
+    val function = module.functions["alpha"]
+    expect(function.body.stmts.len()).to_equal(1)
+    match function.body.stmts[0].kind:
+        case StmtKind.Expr(expression):
+            match expression.kind:
+                case ExprKind.MatchCase(subject, arms):
+                    match subject.kind:
+                        case ExprKind.Ident(name): expect(name).to_equal("x")
+                        case _: panic("expected retained match subject x")
+                    expect(arms.len()).to_equal(2)
+                    expect(arms[0].body.stmts.len()).to_equal(1)
+                    match arms[0].body.stmts[0].kind:
+                        case StmtKind.Expr(first):
+                            match first.kind:
+                                case ExprKind.IntLit(value): expect(value).to_equal(11)
+                                case _: panic("expected retained first arm literal 11")
+                        case _: panic("expected first arm expression statement")
+                    expect(arms[1].body.stmts.len()).to_equal(1)
+                    match arms[1].body.stmts[0].kind:
+                        case StmtKind.Expr(second):
+                            match second.kind:
+                                case ExprKind.Binary(operator, left, right):
+                                    expect(operator).to_equal(BinOp.Add)
+                                    match left.kind:
+                                        case ExprKind.Ident(name): expect(name).to_equal("x")
+                                        case _: panic("expected retained second arm x")
+                                    match right.kind:
+                                        case ExprKind.IntLit(value): expect(value).to_equal(7)
+                                        case _: panic("expected retained second arm literal 7")
+                                case _: panic("expected retained second arm addition")
+                        case _: panic("expected second arm expression statement")
+                case _: panic("expected retained match expression")
+        case _: panic("expected function match expression statement")
+
+describe "flat pool cache serialization lifetime":
+    it "preserves exact cache bytes and retained function data across the next parse":
+        val source = "fn alpha(x: i64) -> i64:\n    match x:\n        case 0: 11\n        case _: x + 7\n"
+        flat_pool_capture_arm()
+        val original = parse_and_build_module_scoped(source, "cache_alpha.spl", false)
+        val captured = flat_pool_capture_take()
+        expect(original.functions.len()).to_equal(1)
+        expect(original.functions["alpha"].name).to_equal("alpha")
+        assert_alpha_body(original)
+        expect(captured).to_equal(flat_pools_dump_all())
+        expect(flat_pools_dump_for_cache()).to_equal(captured)
+
+        val next = parse_and_build_module_scoped(
+            "fn beta() -> text:\n    return \"héllo\"\n", "cache_beta.spl", false)
+        expect(next.functions.len()).to_equal(1)
+        expect(next.functions["beta"].name).to_equal("beta")
+        assert_alpha_body(original)
+        val restored = build_module_from_flat_pool_blob(captured, source, "cache_alpha.spl")
+        expect(restored.is_some()).to_equal(true)
+        expect(restored.unwrap().functions.len()).to_equal(1)
+        expect(restored.unwrap().functions["alpha"].name).to_equal("alpha")
+        assert_alpha_body(restored.unwrap())
