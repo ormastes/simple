@@ -91,6 +91,30 @@ pub fn rt_string_len_fn(args: &[Value]) -> Result<Value, CompileError> {
     }
 }
 
+/// Keep interpreted `extern fn rt_string_substr_from(text, i64) -> text`
+/// aligned with the C and Rust native runtimes: the offset counts characters,
+/// clamps at zero, and the result owns its bytes even for a zero offset.
+pub fn rt_string_substr_from_fn(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 2 {
+        return Err(CompileError::semantic_with_context(
+            "rt_string_substr_from expects 2 arguments".to_string(),
+            ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+        ));
+    }
+    let Value::Str(text) = &args[0] else {
+        return Err(CompileError::semantic_with_context(
+            "rt_string_substr_from expects text argument".to_string(),
+            ErrorContext::new().with_code(codes::TYPE_MISMATCH),
+        ));
+    };
+    let start = usize::try_from(args[1].as_int()?.max(0)).unwrap_or(usize::MAX);
+    let byte_offset = text
+        .char_indices()
+        .nth(start)
+        .map_or(text.len(), |(offset, _)| offset);
+    Ok(Value::text_owned(text[byte_offset..].to_owned()))
+}
+
 /// Parse a `text` receiver to `i64`, mirroring `simple_runtime`'s
 /// `rt_string_to_int` (trim, whole-string parse, 0 on failure).
 ///
@@ -490,6 +514,31 @@ pub fn rt_string_builder_free_fn(args: &[Value]) -> Result<Value, CompileError> 
 mod tests {
     use super::*;
     use simple_runtime::value::heap::rt_heap_registry_count;
+
+    #[test]
+    fn substr_from_counts_characters_and_owns_zero_offset_copy() {
+        assert!(super::super::EXTERN_DISPATCH.contains_key("rt_string_substr_from"));
+        let source = Value::text("aé🙂z");
+        let zero = rt_string_substr_from_fn(&[source.clone(), Value::Int(0)]).unwrap();
+        assert_eq!(zero, source);
+        if let (Value::Str(original), Value::Str(copied)) = (&source, &zero) {
+            assert!(!std::sync::Arc::ptr_eq(original, copied));
+        }
+        assert_eq!(
+            rt_string_substr_from_fn(&[source.clone(), Value::Int(2)]).unwrap(),
+            Value::text("🙂z")
+        );
+        assert_eq!(
+            rt_string_substr_from_fn(&[source.clone(), Value::Int(-4)]).unwrap(),
+            source
+        );
+        assert_eq!(
+            rt_string_substr_from_fn(&[Value::text("aé🙂z"), Value::Int(99)]).unwrap(),
+            Value::text("")
+        );
+        assert!(rt_string_substr_from_fn(&[Value::Int(0), Value::Int(0)]).is_err());
+        assert!(rt_string_substr_from_fn(&[Value::text("x")]).is_err());
+    }
 
     #[test]
     fn builder_push_reclaims_its_temporary_runtime_string() {

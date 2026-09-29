@@ -714,11 +714,11 @@ fn dlsym_lookup(handle: usize, name: &str) -> Option<usize> {
 /// the narrow integer ABI supported by this legacy path. Other values must use
 /// a typed interpreter adapter.
 /// - Int -> direct i64
-fn value_to_i64(val: &Value) -> Result<i64, CompileError> {
+fn value_to_i64(val: &Value, name: &str, argument_index: usize) -> Result<i64, CompileError> {
     match val {
         Value::Int(n) => Ok(*n),
         other => Err(unsupported_conversion(format!(
-            "dynamic SFFI dispatch does not admit argument type '{}' without a typed ABI contract",
+            "dynamic SFFI dispatch for function '{name}' argument {argument_index} does not admit argument type '{}' without a typed ABI contract",
             other.type_name()
         ))),
     }
@@ -1029,8 +1029,8 @@ fn call_fptr(fptr: usize, name: &str, evaluated_args: &[Value]) -> Result<Value,
     if nargs > MAX_DYNAMIC_SFFI_ARGS {
         // Preserve the pre-existing error precedence: an inadmissible argument
         // type was reported before the arity error, so keep marshalling first.
-        for value in evaluated_args {
-            value_to_i64(value)?;
+        for (index, value) in evaluated_args.iter().enumerate() {
+            value_to_i64(value, name, index)?;
         }
         return Err(CompileError::runtime(format!(
             "dynamic SFFI dispatch: function '{}' has {} arguments (max {} supported)",
@@ -1038,8 +1038,8 @@ fn call_fptr(fptr: usize, name: &str, evaluated_args: &[Value]) -> Result<Value,
         )));
     }
     let mut args = [0i64; MAX_DYNAMIC_SFFI_ARGS];
-    for (slot, value) in args.iter_mut().zip(evaluated_args.iter()) {
-        *slot = value_to_i64(value)?;
+    for (index, (slot, value)) in args.iter_mut().zip(evaluated_args.iter()).enumerate() {
+        *slot = value_to_i64(value, name, index)?;
     }
 
     // Call the function pointer with the appropriate number of arguments.
@@ -1286,6 +1286,7 @@ mod tests {
             error.to_string().contains("does not admit argument type"),
             "expected the conversion error to take precedence, got: {error}"
         );
+        assert!(error.to_string().contains("function 'sum13' argument 13"));
     }
 
     unsafe extern "C" fn inspect_bytes(tag: i64, ptr: i64, len: i64, suffix: i64) -> i64 {
@@ -1460,6 +1461,7 @@ mod tests {
             let error = call_fptr(echo_i64 as usize, "echo_i64", &[unsupported])
                 .expect_err("untyped dynamic values must fail closed");
             assert!(error.to_string().contains("does not admit argument type"));
+            assert!(error.to_string().contains("function 'echo_i64' argument 0"));
             assert_eq!(
                 error.context().and_then(|context| context.code.as_deref()),
                 Some(codes::SFFI_UNSUPPORTED_CONVERSION)

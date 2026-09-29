@@ -4,12 +4,50 @@
 
 Preserve all Simple features and architectures while making optional libraries truly demand-loaded, preferring qualified pure-Simple implementations, matching Python's base interpreter loading footprint, and measuring release-small hello against C with the same required startup and link inputs.
 
-Current-source diagnostic (2026-09-29): exact Stage4 hello AOT now exits 0
+Current size status (2026-09-29): the current-source literal `hello` exact
+Linux LLD replay yields 13,544-byte Simple and 13,264-byte matched C `puts`
+stripped outputs (ratio 1.021110). Both NFR-002 numeric sublimits pass; the
+build used `--O1 --no-debug`, and an admitted `release-small` profile is still
+missing. The earlier 0.995297 ratio used the Simple runtime writer in both
+entries and is a diagnostic, not the selected denominator. BS7 now requires
+and independently replays the captured link on Linux;
+`matched-startup-v1` alone cannot pass. NoGC/provider traces, admitted
+startup/RSS cohorts, full optional-provider closure, and Phase 7 cutover
+remain open.
+
+Earlier current-source diagnostic (2026-09-29): exact Stage4 hello AOT now exits 0
 and runs. Its stripped ARM64 binary is 13,544 bytes, below the 15,360-byte
 absolute limit; a 30-pair Simple/Python startup and RSS cohort has normalized
-p95 ratio sum 0.174. This does not close the matched C 1.05x size gate,
+p95 ratio sum 0.174. At that point it did not close the matched C 1.05x size gate,
 optional-provider closure, or BS7 production receipts. Evidence is in
 `doc/09_report/compiler/target5_stage4_hello_entry_diagnostic_2026-09-29.md`.
+The earlier attribution follow-up built a 7,744-byte C hello using the Simple entry
+calls and an available core-C runtime archive, versus the saved 13,544-byte
+Simple hello (1.75x). That archive and the saved Simple link are not proven to
+share exact input identities, so it was not the matched-size gate. The next
+build at that point needed exact linker inputs, archive hashes, and a map alongside
+the Stage4 hello before producing the required same-input C comparator; see
+`doc/09_report/compiler/target5_stage4_hello_c_attribution_2026-09-29.md`.
+The Linux direct LLD linker now supports opt-in exact input reproduction with
+an output/archive/linker hash receipt. Its focused no-stub native probe passes;
+the saved hello still needed rebuilding with capture and BS7 still needed a
+checked C-comparator input binding. Those follow-ups are now done; see
+`doc/09_report/compiler/target5_native_link_reproduction_capture_2026-09-29.md`.
+The first fresh Stage4 compiler attempt compiled 866 source units but hit an
+outdated SQLite contract in the available pure-Simple Stage2 tool; a refreshed
+bootstrap-only tool then hit the shared runtime-path/interpreter-provider
+conflict before codegen. The exact blocker and acceptance are in
+`doc/08_tracking/bug/target5_stage4_bootstrap_runtime_path_dual_use_2026-09-29.md`.
+The bootstrap provider now distinguishes an archive directory from a dynamic
+library path, and the generic SFFI error names its function and argument.
+Those focused Rust tests pass. A refreshed debug bootstrap executable was
+built and attempted, but reached a 300-second timeout before a Stage4 result.
+An optimized bootstrap then exposed a missing interpreter dispatch for
+`rt_string_substr_from` after 821/821 source-closure files. The dispatch is
+fixed and its focused test passes. A rebuilt optimized bootstrap entered
+parse but reached the 300-second limit at 43/821 parsed files. The
+current-source Stage4 compiler and hello capture remain open; the bootstrap
+parse path or pure-Simple Stage2 SQLite archive contract needs repair.
 
 ## Phase 0 — Baselines and Attribution
 
@@ -169,6 +207,26 @@ requires empty NoGC-forbidden and optional-provider traces, requires 30
 development or 100 release samples per lane, and rejects Rust seed or
 pre-Stage4 evidence. The focused mutation suite passes. No heavy cohort has
 been run, so native development and release qualification remain pending.
+
+Exact hello-link follow-up (2026-09-29): a fresh selected-K1 pure-Simple
+Stage4 compiler built a one-source hello and captured LLD's opened inputs.
+Replaying that archive changed only the program object for the C comparator;
+both outputs run. The first same-writer diagnostic measured 13,544-byte
+Simple against 13,608-byte C (`rt_println_str`). The selected C `puts` entry
+for the literal `hello` fixture measures 13,264 bytes, yielding 1.021110.
+The latter result and its remaining release-small limits are in
+`doc/09_report/compiler/target5_literal_hello_puts_matched_2026-09-29.md`.
+The BS7 producer now binds the unstripped outputs, C source, archive,
+capture receipt, and tool hashes in its cohort receipt. Its Linux checker
+requires those inputs and replays both links; the old label-only path is
+rejected. A real-LLD synthetic fixture passes the clean path and rejects
+evidence mutations for the prior C source; the final C `puts` source still
+needs its next bounded fixture run. The cohort receipt binds the NoGC hello, a separate
+interpreter executable, Python, and expected stdout. Each startup sample row
+must name its interpreter or Python executable hash; the matched-link checker
+requires C `puts` and verifies both replayed programs' stdout bytes.
+Complete NoGC/provider traces, 30/100-sample production
+cohorts, and the feature closure before marking Target 5 complete.
 
 ## Phase 6 — Feature and Architecture Qualification
 
