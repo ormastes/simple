@@ -1,0 +1,63 @@
+# Native regression: contract misses preserve token state; report real heap counts.
+# Compile this fixture against the patched parser. Interpreter allocator traffic
+# is outside this counter contract; do not substitute an interpreted run.
+use compiler.core.parser.{parser_init, par_kind_get, par_text_get, par_line_get, par_col_get, parser_advance, parser_has_errors}
+use compiler.frontend.core.parser_stmts.{try_parse_contract_stmt}
+use compiler.frontend.core.lexer.{lex_token_start_get, lex_token_end_get}
+use compiler.core.ast_stmt.{stmt_get_tag, stmt_get_name, STMT_CONTRACT_PROOF_USES}
+use compiler.core.tokens.{TOK_LPAREN}
+
+extern fn rt_heap_registry_count() -> i64
+
+fn main() -> i64:
+    parser_init("val stable = 7\n")
+    val expected_kind = par_kind_get()
+    val expected_text = par_text_get()
+    val expected_line = par_line_get()
+    val expected_col = par_col_get()
+    val expected_start = lex_token_start_get()
+    val expected_end = lex_token_end_get()
+    # Warm literal/owner initialization before observing repeated misses. This
+    # real C-runtime counter includes all registered objects, not just arrays;
+    # report it without asserting an unmeasured allocation budget.
+    if try_parse_contract_stmt() != -1:
+        print "FAIL: warm ordinary val recognized as contract"
+        return 1
+    val before = rt_heap_registry_count()
+    var iteration = 0
+    while iteration < 64:
+        if try_parse_contract_stmt() != -1:
+            print "FAIL: ordinary val recognized as contract"
+            return 1
+        iteration = iteration + 1
+    val after = rt_heap_registry_count()
+    print "MEASURE: contract_miss registered_objects_before={before} registered_objects_after={after} iterations=64"
+    if (par_kind_get() != expected_kind or par_text_get() != expected_text or
+        par_line_get() != expected_line or par_col_get() != expected_col or
+        lex_token_start_get() != expected_start or lex_token_end_get() != expected_end):
+        print "FAIL: ordinary contract miss changed token state"
+        return 1
+    parser_advance()
+    if par_text_get() != "stable":
+        print "FAIL: ordinary statement no longer resumes at its binding"
+        return 1
+
+    # A recognized prefix that is an ordinary call still needs real rollback.
+    parser_init("out(stable)\n")
+    if try_parse_contract_stmt() != -1 or par_text_get() != "out":
+        print "FAIL: non-contract out call lost its first token"
+        return 1
+    parser_advance()
+    if par_kind_get() != TOK_LPAREN:
+        print "FAIL: non-contract out call lost its delimiter"
+        return 1
+
+    # An actual contract retains the same node kind and binding.
+    parser_init("proof uses: stable_refinement\n")
+    val clause = try_parse_contract_stmt()
+    if (clause < 0 or stmt_get_tag(clause) != STMT_CONTRACT_PROOF_USES or
+        stmt_get_name(clause) != "stable_refinement" or parser_has_errors()):
+        print "FAIL: actual proof contract changed"
+        return 1
+    print "PASS: ordinary tokens, call rollback and proof contract preserved"
+    0
