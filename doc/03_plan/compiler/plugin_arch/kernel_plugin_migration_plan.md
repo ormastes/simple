@@ -107,6 +107,10 @@ The receipt blocker is now localized to the source-owner text copy: the
 loaded 51-character hello path becomes empty before it is placed in the
 owner vector. Fix that copy and prove a successful receipt before treating
 the runnable hello as an admitted size/startup/RSS candidate.
+The source-owner copy is now repaired for the tested Stage4 hello. Hello AOT
+returns exit 0 and the stripped executable is 13,544 bytes; a diagnostic
+30-pair startup/RSS cohort has normalized sum 0.174. The matched C ratio,
+optional-provider gates, no-op cache hit, and BS7 receipts remain open.
 Structural/checker results below are therefore kept distinct from runtime and
 native qualification. The selected policy must be receipt-bound. Performance
 qualification remains blocked until an admitted architecture-matched baseline
