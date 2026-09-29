@@ -1,0 +1,82 @@
+# Production watcher/SHB filesystem regressions. No simulated cache or reader.
+# Run with compiler/app/lib module roots on an admitted self-hosted producer.
+
+use std.spec.{describe, it, expect, step}
+use std.nogc_sync_mut.io_runtime.{file_write, file_delete, file_exists, mkdir_p, hash_text, getpid}
+use compiler.driver.watcher.watcher_client.{get_or_generate_shb, check_shb_freshness}
+use compiler.driver.watcher.watcher_types.{WatcherConfig, watcher_config_default}
+use compiler.driver.cache.cache_validator.{source_to_cache_path}
+use compiler.driver.cache.cache_types.{CACHE_FRESH, CACHE_MISSING}
+use compiler.core.ast.{ast_reset}
+use compiler.core.parser.{parse_module}
+use compiler.core.types.{reset_all_pools}
+use compiler.shb.shb_types.{ShbFnEntry, ShbDependencyEntry, shb_module_interface_new}
+use compiler.shb.shb_writer.{shb_write}
+
+fn probe_config(case_name: text) -> WatcherConfig:
+    var config = watcher_config_default()
+    config.shb_dir = "build/watcher-shb-client-{getpid()}/{case_name}"
+    config.lock_path = "{config.shb_dir}/absent-watcher.lock"
+    mkdir_p(config.shb_dir)
+    config
+
+describe "Watcher SHB client uses the complete reader API":
+    it "reads all interface sections from a fresh physical cache":
+        step("Write a real SHB with sentinel sections, then take the fresh-cache path")
+        val config = probe_config("fresh")
+        val source_path = "build/watcher-shb-client-fresh-{getpid()}.spl"
+        val source = "pub fn source_function() -> i64: 17\n"
+        expect(file_write(source_path, source)).to_equal(true)
+        val cache_path = source_to_cache_path(source_path, config.shb_dir, ".shb")
+        var cached = shb_module_interface_new(hash_text(source), 4242)
+        cached.functions = [ShbFnEntry(name: "cached_interface_function", params: [], return_type: "i64", flags: 1)]
+        cached.dependencies = [ShbDependencyEntry(module_path: "probe.dependency", interface_hash: 919)]
+        expect(shb_write(cached, cache_path)).to_equal(true)
+        expect(check_shb_freshness(source_path, config.shb_dir).status).to_equal(CACHE_FRESH)
+        val actual = get_or_generate_shb(source_path, config)
+        expect(actual.header.interface_hash).to_equal(4242)
+        expect(actual.functions.len()).to_equal(1)
+        expect(actual.functions[0].name).to_equal("cached_interface_function")
+        expect(actual.dependencies.len()).to_equal(1)
+        expect(actual.dependencies[0].module_path).to_equal("probe.dependency")
+        expect(actual.dependencies[0].interface_hash).to_equal(919)
+        expect(file_delete(cache_path)).to_equal(true)
+        expect(file_delete(source_path)).to_equal(true)
+
+    it "generates and rereads a physical cache when the cache is missing":
+        step("Exercise inline SHB extraction, persistence, and subsequent cache reading")
+        val config = probe_config("missing-cache")
+        val source_path = "build/watcher-shb-client-generate-{getpid()}.spl"
+        val source = "pub fn generated_function() -> i64: 23\n"
+        expect(file_write(source_path, source)).to_equal(true)
+        val cache_path = source_to_cache_path(source_path, config.shb_dir, ".shb")
+        if file_exists(cache_path):
+            expect(file_delete(cache_path)).to_equal(true)
+        expect(check_shb_freshness(source_path, config.shb_dir).status).to_equal(CACHE_MISSING)
+        # The existing SHB extractor consumes the current parsed AST arena.
+        reset_all_pools()
+        ast_reset()
+        parse_module(source, source_path)
+        val generated = get_or_generate_shb(source_path, config)
+        expect(generated.functions.len()).to_equal(1)
+        expect(generated.functions[0].name).to_equal("generated_function")
+        expect(file_exists(cache_path)).to_equal(true)
+        expect(check_shb_freshness(source_path, config.shb_dir).status).to_equal(CACHE_FRESH)
+        val reread = get_or_generate_shb(source_path, config)
+        expect(reread.header.interface_hash).to_equal(generated.header.interface_hash)
+        expect(reread.functions[0].name).to_equal(generated.functions[0].name)
+        expect(file_delete(cache_path)).to_equal(true)
+        expect(file_delete(source_path)).to_equal(true)
+
+    it "preserves the empty interface contract for an unreadable missing source":
+        step("Leave source and cache absent and exercise the production fallback")
+        val config = probe_config("missing-source")
+        val source_path = "build/watcher-shb-client-absent-{getpid()}.spl"
+        expect(file_exists(source_path)).to_equal(false)
+        val cache_path = source_to_cache_path(source_path, config.shb_dir, ".shb")
+        expect(file_exists(cache_path)).to_equal(false)
+        val actual = get_or_generate_shb(source_path, config)
+        expect(actual.header.source_hash).to_equal(0)
+        expect(actual.functions.len()).to_equal(0)
+        expect(actual.dependencies.len()).to_equal(0)
+        expect(file_exists(cache_path)).to_equal(false)
