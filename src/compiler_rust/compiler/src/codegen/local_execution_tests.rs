@@ -14,6 +14,17 @@ fn source_to_mir(source: &str) -> crate::mir::MirModule {
     lower_to_mir(&hir_module).expect("mir lower failed")
 }
 
+#[test]
+fn test_cranelift_jit_typed_dict_membership_present_and_missing_scalar_keys() {
+    let mir = source_to_mir(
+        "fn integer_keys() -> i64:\n    val map: Dict<i64, i64> = {1: 7}\n    if map.has(1) and map.contains_key(1) and not map.has_key(2) and not map.contains(2):\n        return 1\n    return 0\n\nfn boolean_keys() -> i64:\n    val map: Dict<bool, i64> = {true: 7}\n    if map.contains_key(true) and not map.contains_key(false):\n        return 1\n    return 0\n",
+    );
+    let mut em = LocalExecutionManager::cranelift().expect("initialize membership JIT");
+    em.compile_module(&mir).expect("compile runtime membership predicates");
+    assert_eq!(em.execute("integer_keys", &[]).expect("integer membership"), 1);
+    assert_eq!(em.execute("boolean_keys", &[]).expect("boolean membership"), 1);
+}
+
 // =============================================================================
 // Cranelift JIT Tests
 // =============================================================================

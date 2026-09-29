@@ -40,6 +40,76 @@ fn has_exact_declared_call(func: &MirFunction, name: &str) -> bool {
 }
 
 #[test]
+fn typed_dict_alias_field_membership_keeps_runtime_owner() {
+    for method in ["has", "has_key", "contains", "contains_key"] {
+        let source = format!(
+            "type Registry = {{text: i64}}\ntype RegistryAlias = Registry\n\nclass Importer:\n    entries: Registry\n    alias_entries: RegistryAlias\n    fn probe(key: text) -> bool:\n        self.entries.{method}(key)\n    fn chain_probe(key: text) -> bool:\n        self.alias_entries.{method}(key)\n\nclass AdaptiveMap:\n    marker: i64\n    fn {method}(key: text) -> bool:\n        self.marker == 1\n\nfn custom(map: AdaptiveMap, key: text) -> bool:\n    map.{method}(key)\n"
+        );
+        let mut parser = simple_parser::Parser::new(&source);
+        let ast = parser.parse().unwrap();
+        let hir = crate::hir::lower(&ast).expect("lower alias declarations");
+        let registry = hir.types.lookup("Registry").unwrap();
+        assert_eq!(hir.types.lookup("RegistryAlias"), Some(registry));
+        assert!(
+            matches!(hir.types.get(registry), Some(crate::hir::HirType::Dict { key, value }) if *key == TypeId::STRING && *value == TypeId::I64)
+        );
+        let importer = hir.types.get(hir.types.lookup("Importer").unwrap()).unwrap();
+        assert!(
+            matches!(importer, crate::hir::HirType::Struct { fields, .. } if fields.iter().all(|(_, ty)| *ty == registry)),
+            "alias fields must retain complete Dict key/value types: {importer:?}"
+        );
+        let mir = crate::mir::lower_to_mir(&hir).expect("typed Dict alias field must lower");
+        for probe in mir.functions.iter().filter(|f| f.name.ends_with("probe")) {
+            assert!(
+                has_call(probe, "rt_contains"),
+                "{method}: Dict membership must use runtime ABI"
+            );
+            assert!(
+                probe
+                    .blocks
+                    .iter()
+                    .flat_map(|b| &b.instructions)
+                    .all(|inst| !matches!(inst, MirInst::MethodCallStatic { .. })),
+                "{method}: Dict membership must not enter nominal method binding"
+            );
+        }
+        assert_eq!(mir.functions.iter().filter(|f| f.name.ends_with("probe")).count(), 2);
+        let custom = mir.functions.iter().find(|f| f.name == "custom").unwrap();
+        assert!(
+            !has_call(custom, "rt_contains"),
+            "{method}: nominal receiver must retain its authored method"
+        );
+        assert!(has_exact_declared_call(custom, &format!("AdaptiveMap.{method}")));
+    }
+}
+
+#[test]
+fn typed_dict_membership_boxes_scalar_keys_once() {
+    for (key_type, expected) in [("i64", "int"), ("f64", "float"), ("bool", "bool")] {
+        let source =
+            format!("fn probe(map: Dict<{key_type}, i64>, key: {key_type}) -> bool:\n    map.contains_key(key)\n");
+        let mir = compile_to_mir(&source).expect("typed scalar Dict membership must lower");
+        let probe = mir.functions.iter().find(|f| f.name == "probe").unwrap();
+        let mut boxes = 0;
+        let mut contains = 0;
+        for inst in probe.blocks.iter().flat_map(|b| &b.instructions) {
+            match inst {
+                MirInst::BoxInt { .. } if expected == "int" => boxes += 1,
+                MirInst::BoxFloat { .. } if expected == "float" => boxes += 1,
+                MirInst::Call { target, .. } if expected == "bool" && target.name() == "rt_value_bool" => boxes += 1,
+                MirInst::Call { target, args, .. } if target.name() == "rt_contains" => {
+                    assert_eq!(args.len(), 2);
+                    contains += 1;
+                }
+                _ => (),
+            }
+        }
+        assert_eq!(boxes, 1, "{key_type}: box key once using its runtime tag");
+        assert_eq!(contains, 1, "{key_type}: test membership once");
+    }
+}
+
+#[test]
 fn trait_typed_parameter_preserves_owner_for_virtual_dispatch() {
     let mir = compile_to_mir(
         "trait Gateway:\n    fn store() -> i64\n\nstruct Adapter:\n    value: i64\n\nimpl Gateway for Adapter:\n    fn store(self) -> i64: self.value\n\nfn consume(gateway: Gateway) -> i64:\n    gateway.store()\n",

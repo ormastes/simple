@@ -248,6 +248,14 @@ impl Lowerer {
     pub(super) fn resolve_type(&mut self, ty: &Type) -> LowerResult<TypeId> {
         match ty {
             Type::Simple(name) => {
+                // A registered alias carries the complete target TypeId. Its
+                // textual family mapping (e.g. Alias -> Dict) omits generic
+                // arguments and must not replace that structural binding.
+                if self.type_aliases.contains_key(name) {
+                    if let Some(id) = self.module.types.lookup(name) {
+                        return Ok(id);
+                    }
+                }
                 let name = self.resolve_type_alias(name).unwrap_or(name);
                 // Handle "name?" pattern — some code paths produce Type::Simple("text?")
                 // instead of Type::Optional(Type::Simple("text")). Normalize here.
