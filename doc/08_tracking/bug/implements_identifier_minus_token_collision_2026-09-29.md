@@ -24,7 +24,7 @@ Twelve authored unit cases cover lexical references, contextual mock word versus
 
 High review precedes tests. A private one-thread bootstrap-only component can exercise these actual pure functions with the already reviewed b2d Rust seed. Preserve all assertions, suppress intentional negative diagnostics through parse_module_silent_checked, demand exact case/PASS markers, use no RSS cap and bounded time/disk/owned cleanup. A refreshed pure producer must later execute the native fixture; Rust-native execution alone is downstream evidence.
 
-No tests/builds ran in this new lane. Its feature cycle budget is zero of three. Old unsigned semantic greens and exhausted memory feature cycles will not be rerun.
+At initial plan review, no tests/builds had run in this feature lane. The subsequent three-cycle execution is recorded below. Old unsigned semantic greens and exhausted memory feature cycles were not rerun.
 
 ## Focused component finding: symbolic const initializer
 
@@ -35,3 +35,11 @@ Cycle 2 built with 2 modules compiled and 117 reused. Its actual run exited 1 at
 This is a concrete separate bootstrap-component symbolic-const initializer defect. Broader constant-alias behavior, other producers, and its internal compiler cause remain unverified; this token correction does not fix or claim to fix that general defect. Retained receipts are in D:/dev/simple-wsl-recovery-20260928/implements-focused-558976-20260929 and the actual artifact is /mnt/simple-bootstrap-6b2/implements-focused-8329-cycle2-20260929/parser-probe.
 
 The compatibility name now uses explicit wire literal 6, matching the token table's existing numeric alias convention. Its intended value, identifier category and public name are unchanged from the reviewed design. Root approved this one-line correction using the actual ELF evidence. The final component cycle must skip the already-passed first MINUS=61 assertion and execute only the failed alias check onward plus unrun cases. All remaining assertions stay intact. Native fixture remains pending a corrected pure producer. The feature has used two of three cycles; no final execution PASS is asserted here.
+
+## Final focused verification (cycle 3)
+
+Immutable tested source `73eb394ce633f45215df9f74f331f4bac2e4d1f3` passed the actual bootstrap-only lexer/parser component: build 0 (3 compiled, 116 cached, 0 failed), run 0, exact stdout 0, input pins after 0. Twelve CASE markers and final PASS were emitted. The remaining 44 authored assertions passed; the first MINUS61 equality was preserved from its cycle-2 PASS and omitted only from this final component adaptation. The original unit spec retains all 45 authored expectations. Feature budget is exhausted at three cycles; no green checks were repeated.
+
+Evidence: `D:/dev/simple-wsl-recovery-20260928/implements-focused-558976-20260929/FOCUSED_VERIFICATION.md`, raw receipts under `cycle3-monitor`, output `/mnt/simple-bootstrap-6b2/implements-focused-73eb-cycle3-20260929`. Binary SHA256 `6d4bbd04e31193a89c8568171c5fd5052fcc505d793c74e72b5e4831d1c66f87`; harness SHA256 `42a7f86fadc113f6926d428a1616ed2f2f8a7b9165d084b6cab8dc25c6fb5e65`. Supervisor elapsed 85.79 seconds, remaining owned processes 0, no termination signals. Build/run observed peak RSS 407484/7668 KiB; both receipts record no enforced RSS cap, no hard memory limit, and quiescent cleanup.
+
+These actual pure lexer/parser functions were compiled and executed as a bootstrap-only component using immutable b2d Rust seed SHA256 `82ee7562b287b0fbe22256847a8916de7a88bc6f1a43a28275c12afedab167e1`; this does not qualify a refreshed self-hosted producer. The native fixture remains deferred until a corrected pure producer exists. Broad compiler/core/lib checks, MCP native smoke, full bootstrap, merge and release are not claimed. This documentation update is production-equivalent to the tested source.
