@@ -3,6 +3,11 @@
 Date: 2026-09-29
 Status: execution plan; implementation completion is not certified.
 
+Execution update (2026-09-29): the user selected Windows first, then macOS,
+and requested branch publication and PRs. This ordering supersedes the initial
+Windows/Linux ordering below for this execution lane; it does not remove any
+supported-host requirement. See the [Windows bootstrap investigation](evidence/seven_plans/windows/bootstrap_readiness_2026-09-29.md).
+
 ## Scope and ownership
 
 Complete the seven items listed below on each supported host. This means seven
