@@ -46,3 +46,12 @@ capture, reproduce a C entry using the archived startup/runtime/link inputs,
 then run the 30/100-sample startup/RSS and 1.05 size gates. Also add a
 fail-closed BS7 checker binding the C comparator to these captured inputs;
 the present checker trusts a `matched-startup-v1` label without such proof.
+
+Fresh Stage4 follow-up: this branch's pure-Simple Stage2 bootstrap tool
+compiled all 866 selected-K1 source units with zero failures, then its older
+SQLite provider contract rejected the current ABI symbol. A refreshed
+bootstrap-only tool required explicit SCV cold initialization; with it, source
+closure reached 821 files but the runtime directory was interpreted as a
+dynamic provider path and the static fallback rejected an untyped `str` SFFI
+call. No Stage4 compiler or captured hello was produced. See
+`doc/08_tracking/bug/target5_stage4_bootstrap_runtime_path_dual_use_2026-09-29.md`.
