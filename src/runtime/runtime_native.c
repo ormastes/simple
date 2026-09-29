@@ -10665,6 +10665,10 @@ SPL_CORE_C_WEAK int rt_file_fsync(const uint8_t* path_ptr, uint64_t path_len) {
 
 /* ---- mirrors runtime_timestamp.c (rt_progress_* thread-local clock ABI) --- */
 
+/* A profile that includes runtime_timestamp.c selects its complete clock/TLS
+ * provider explicitly. Keep these fallbacks for compositions without it;
+ * MSVC has no weak-function definition to deduplicate both providers. */
+#if !defined(SIMPLE_RUNTIME_TIMESTAMP_OWNER)
 #if defined(_MSC_VER)
 #define RT_BUCKET2_TLS __declspec(thread)
 #else
@@ -10688,6 +10692,7 @@ SPL_CORE_C_WEAK void rt_progress_tls_clear(void) {
     rt_bucket2_progress_start_nanos = 0;
     rt_bucket2_progress_initialized = false;
 }
+#endif /* !SIMPLE_RUNTIME_TIMESTAMP_OWNER */
 
 #undef SPL_CORE_C_WEAK
 
