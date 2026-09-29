@@ -87,6 +87,7 @@ bootstrap_stage3_memory_append_processes "$out"
 # editing the production checkout or claiming a bootstrap admission receipt.
 fixture="$TMPDIR/authority-fixture"
 mkdir -p "$fixture/scripts/check/lib/bootstrap-stage3"
+fixture=$(CDPATH= cd -- "$fixture" && pwd -P)
 cp "$original_facade" "$fixture/scripts/check/lib/bootstrap-stage3-provenance.shs"
 for helper in authority command-snapshot sanity manifest-write manifest-verify self-test; do
     cp "$original_root/scripts/check/lib/bootstrap-stage3/$helper.shs" \
