@@ -16,6 +16,59 @@ fn compile_to_object(source: &str) -> CodegenResult<Vec<u8>> {
 }
 
 #[test]
+fn test_typed_dict_alias_field_membership_object_references_runtime_not_custom_method() {
+    use object::{Object, ObjectSection, ObjectSymbol, RelocationTarget};
+
+    for method in ["has", "has_key", "contains", "contains_key"] {
+        let source = format!(
+            "type Registry = {{text: i64}}\n\nclass Importer:\n    entries: Registry\n    fn probe(key: text) -> bool:\n        self.entries.{method}(key)\n\nclass AdaptiveMap:\n    marker: i64\n    fn {method}(key: text) -> bool:\n        self.marker == 1\n"
+        );
+        let bytes = compile_to_object(&source).expect("compile alias-field membership object");
+        let file = object::File::parse(bytes.as_slice()).expect("parse emitted object");
+        let probe = file
+            .symbols()
+            .find(|s| {
+                s.name()
+                    .is_ok_and(|name| name.contains("Importer") && name.ends_with("probe"))
+            })
+            .expect("probe symbol");
+        let section_index = probe.section_index().expect("probe code section");
+        let section = file.section_by_index(section_index).unwrap();
+        let start = probe.address() - section.address();
+        // COFF symbols can have zero size. Bound the function by the next
+        // defined symbol in its section, or the section end.
+        let end = if probe.size() != 0 {
+            start + probe.size()
+        } else {
+            file.symbols()
+                .filter(|s| s.section_index() == Some(section_index) && s.address() > probe.address())
+                .map(|s| s.address() - section.address())
+                .min()
+                .unwrap_or(section.size())
+        };
+        let targets: Vec<String> = section
+            .relocations()
+            .filter(|(offset, _)| *offset >= start && *offset < end)
+            .filter_map(|(_, reloc)| {
+                if let RelocationTarget::Symbol(index) = reloc.target() {
+                    Some(file.symbol_by_index(index).unwrap().name().unwrap().to_string())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert!(
+            targets.iter().any(|name| name.ends_with("rt_contains")),
+            "{method}: object must call runtime membership: {targets:?}"
+        );
+        assert!(
+            !targets.iter().any(|name| name.contains("AdaptiveMap")),
+            "{method}: Dict receiver must never call custom method: {targets:?}"
+        );
+    }
+}
+
+#[test]
 fn test_compile_simple_function() {
     let obj = compile_to_object("fn answer() -> i64:\n    return 42\n").unwrap();
     assert!(!obj.is_empty());

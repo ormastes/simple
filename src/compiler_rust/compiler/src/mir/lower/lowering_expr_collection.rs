@@ -478,10 +478,16 @@ impl<'a> MirLowerer<'a> {
         // accidentally-correct `1` into wrongly-boxed `8`. Both sides now land
         // together: this box here, plus the `.get()` route through
         // `lower_index_expr` in `lowering_expr_method.rs` (search
-        // `receiver_is_dict`). Floats/bools/strings remain untouched (follow-up).
+        // `receiver_is_dict`). Float/bool VALUE boxing remains a follow-up.
         for (key_expr, value_expr) in pairs {
             let key_reg = self.lower_expr(key_expr)?;
-            let key_reg = self.box_int_operand(key_reg, key_expr.ty)?;
+            // Boolean keys must match tagged membership/index reads. Preserve
+            // the existing write ABI for every other key type, including floats.
+            let key_reg = if key_expr.ty == TypeId::BOOL {
+                self.box_arg_for_any_param(key_reg, key_expr)?
+            } else {
+                self.box_int_operand(key_reg, key_expr.ty)?
+            };
             let value_reg = self.lower_expr(value_expr)?;
             let value_reg = self.box_int_operand(value_reg, value_expr.ty)?;
             let insert_target = CallTarget::from_name("rt_dict_set");
