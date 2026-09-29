@@ -6,6 +6,37 @@ bootstrap_phase_toolchain_error() {
     return 1
 }
 
+# The receipt writer and executor resolve the same C driver. Keep the spelling
+# native on Windows; the canonical authority helper hashes its physical file.
+bootstrap_phase_c_compiler_path() (
+    case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*)
+        case "${LLVM_SYS_231_PREFIX:-}" in
+            /*|[A-Za-z]:[\\/]*) ;;
+            *) bootstrap_phase_toolchain_error 'Windows requires an absolute LLVM_SYS_231_PREFIX'; exit 1 ;;
+        esac
+        phase_resolved_cc="$LLVM_SYS_231_PREFIX/bin/clang-cl.exe"
+        [ -f "$phase_resolved_cc" ] && [ -x "$phase_resolved_cc" ] || exit 1
+        cygpath -am "$phase_resolved_cc"
+        ;;
+    *)
+        phase_resolved_cc=${CC:-clang}
+        case "${phase_resolved_cc##*/}" in
+            clang|clang-[0-9]*) ;;
+            *) bootstrap_phase_toolchain_error 'Unix phase C compiler must be clang'; exit 1 ;;
+        esac
+        command -v "$phase_resolved_cc"
+        ;;
+    esac
+)
+
+bootstrap_phase_c_target_platform() {
+    case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) printf '%s\n' x86_64-pc-windows-msvc ;;
+    *) bootstrap_stage3_host_platform ;;
+    esac
+}
+
 bootstrap_phase_run_command() (
     phase_executor=$1
     shift
@@ -19,11 +50,7 @@ bootstrap_phase_run_command() (
             /*|[A-Za-z]:[\\/]*) ;;
             *) bootstrap_phase_toolchain_error 'Windows requires an absolute LLVM_SYS_231_PREFIX'; exit 1 ;;
         esac
-        phase_cc="$LLVM_SYS_231_PREFIX/bin/clang-cl.exe"
-        [ -f "$phase_cc" ] && [ -x "$phase_cc" ] || {
-            bootstrap_phase_toolchain_error 'LLVM prefix has no executable clang-cl.exe'; exit 1;
-        }
-        phase_cc=$(cygpath -am "$phase_cc") || exit 1
+        phase_cc=$(bootstrap_phase_c_compiler_path) || exit 1
         if [ -n "${CC:-}" ]; then
             phase_requested_cc=$(cygpath -am "$CC") || exit 1
             [ "$phase_requested_cc" = "$phase_cc" ] || {
@@ -71,12 +98,7 @@ bootstrap_phase_run_command() (
         [ "$phase_target_seen" = 1 ] || set -- "$@" --target x86_64-pc-windows-msvc
         ;;
     *)
-        phase_cc=${CC:-clang}
-        case "${phase_cc##*/}" in
-            clang|clang-[0-9]*) ;;
-            *) bootstrap_phase_toolchain_error 'Unix phase C compiler must be clang'; exit 1 ;;
-        esac
-        CC=$(command -v "$phase_cc") || {
+        CC=$(bootstrap_phase_c_compiler_path) || {
             bootstrap_phase_toolchain_error 'Unix phase requires executable clang'; exit 1;
         }
         # Some admitted compilers still route generated source through CXX.
@@ -92,5 +114,43 @@ bootstrap_phase_run_command() (
         export CC CXX
         ;;
     esac
+    # Pure-Simple runtime compilation reads SIMPLE_CC rather than CC. Reject an
+    # ambient override so the target receipt cannot describe a different tool.
+    if [ -n "${SIMPLE_CC:-}" ]; then
+        case "$(uname -s)" in
+        MINGW*|MSYS*|CYGWIN*)
+            phase_simple_cc=$(command -v "$SIMPLE_CC") || exit 1
+            phase_simple_cc=$(cygpath -am "$phase_simple_cc") || exit 1
+            ;;
+        *) phase_simple_cc=$(command -v "$SIMPLE_CC") || exit 1 ;;
+        esac
+        [ "$phase_simple_cc" = "$CC" ] || {
+            bootstrap_phase_toolchain_error 'SIMPLE_CC must match the pinned C compiler'; exit 1;
+        }
+    fi
+    SIMPLE_CC=$CC
+    export SIMPLE_CC
+    if [ -n "${source_root:-}" ]; then
+        if [ -n "${SIMPLE_PROJECT_ROOT:-}" ]; then
+            phase_project_root=$(CDPATH= cd -- "$SIMPLE_PROJECT_ROOT" && pwd -P) || exit 1
+            [ "$phase_project_root" = "$source_root" ] || {
+                bootstrap_phase_toolchain_error 'SIMPLE_PROJECT_ROOT must match the matrix source root'; exit 1;
+            }
+        fi
+        case "$(uname -s)" in
+        MINGW*|MSYS*|CYGWIN*) SIMPLE_PROJECT_ROOT=$(cygpath -am "$source_root") || exit 1 ;;
+        *) SIMPLE_PROJECT_ROOT=$source_root ;;
+        esac
+        export SIMPLE_PROJECT_ROOT
+    fi
+    if [ -n "${tmp:-}" ]; then
+        case "$(uname -s)" in
+        MINGW*|MSYS*|CYGWIN*)
+            TMP=$(cygpath -am "$tmp") || exit 1
+            TEMP=$TMP
+            export TMP TEMP
+            ;;
+        esac
+    fi
     "$phase_executor" "$@"
 )
