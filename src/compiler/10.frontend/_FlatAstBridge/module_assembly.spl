@@ -1224,6 +1224,23 @@ fn flat_ast_to_module(path: text) -> ParserModule:
 # scripts/check/check-flat-ast-roundtrip.shs, which drives the self-check
 # below over the whole src/app bootstrap closure.
 
+pub fn flat_pools_dump_for_cache() -> text:
+    # The input pools and retained ParserModule were born before this scope.
+    # Only encoder temporary arrays/text belong to it. Retain the final blob
+    # before ending the scope; cache bytes and pool owners remain unchanged.
+    if not _sffi_transient_array_scope_begin():
+        panic("transient cache serialization scope unavailable")
+    val blob = flat_pools_dump_all()
+    if not _sffi_transient_array_scope_pause():
+        val _ended = _sffi_transient_array_scope_end()
+        panic("transient cache serialization pause failed")
+    if not _sffi_transient_heap_promote(blob):
+        val _ended = _sffi_transient_array_scope_end()
+        panic("transient cache blob promotion failed")
+    if not _sffi_transient_array_scope_end():
+        panic("transient cache serialization scope end failed")
+    blob
+
 pub fn flat_pools_dump_all() -> text:
     var out = FLAT_POOL_CODEC_VERSION + "\n"
     out = out + flat_decl_pools_dump()
@@ -1437,7 +1454,13 @@ pub fn parse_and_build_module_scoped(source: text, path: text, streaming_scope: 
     # diagnostics re-emitted -- a build that fails with no message.
     if _fab_capture_pools == 1 and not parser_has_errors():
         val dump_t0 = if fab_cache_boundary_prof_enabled(): _sffi_time_now_unix_micros() else: 0
-        _fab_captured_blob = flat_pools_dump_all()
+        # A streaming caller already owns a paused parser scope and cannot
+        # nest another. Preserve that path; ordinary cold cache stores get a
+        # short serialization-only scope with just the final blob promoted.
+        _fab_captured_blob = if transient_scope:
+            flat_pools_dump_all()
+        else:
+            flat_pools_dump_for_cache()
         if fab_cache_boundary_prof_enabled():
             val dump_t1 = _sffi_time_now_unix_micros()
             print("PARSECACHE\tdump_ms={(dump_t1 - dump_t0) / 1000}\tbytes={_fab_captured_blob.len()}\tpath={path}")
