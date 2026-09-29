@@ -43,3 +43,12 @@ Template: [layer_skill.md](../../template/layer_skill.md)
   `doc/08_tracking/bug/unwrap_still_rebinds_to_poll_unwrap_at_closure_scale_2026-09-13.md`).
   Also avoid `use <module> as <alias>` + `alias.fn()` in the Stage 2 closure:
   `doc/08_tracking/bug/stage2_build_module_alias_call_undeclared_global_2026-09-20.md`.
+
+- 2026-09-29 seven-plan pure-Simple TDD: provider admission uses internal
+  state 3 to reserve terminal metadata publication; expose it as admitting,
+  publish with release ordering, and read metadata only after acquiring the
+  terminal state. Interrupted-publisher/native concurrency qualification is
+  still open. Rejected index generations clear stale compatibility markers;
+  process-global environment publication is not a concurrent transaction.
+  See [the bounded implementation report](../../../03_plan/evidence/seven_plans/parallel_pure_simple_tdd_2026-09-29.md)
+  for source owners, diagnostic counts, remaining host gates, and retry limits.
