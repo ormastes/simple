@@ -80,10 +80,34 @@ fn compile_source_inventory_apply_and_publish_v1(
     if digest == "":
         return CompileSourceInventoryReadV1(
             false, "inventory-publication-failed:" + publish_reason, "", nil)
-    val admitted = compile_source_inventory_read_current_v1(cache_root)
-    if not admitted.valid or admitted.digest != digest:
-        return CompileSourceInventoryReadV1(
-            false, "inventory-publication-raced", "", nil)
+    compile_source_inventory_publication_readback_v1(
+        cache_root, digest, expected_pointer_digest)
+
+fn compile_source_inventory_publication_readback_v1(
+    cache_root: text, published_digest: text, expected_pointer_digest: text
+) -> CompileSourceInventoryReadV1:
+    """Read one captured publication pointer, retaining the first rejection reason.
+
+    Invalid readback and a different admitted generation remain failures.
+    The expected pre-publication pointer hash and captured post-publication
+    pointer hash identify the observed state without claiming a race.
+    """
+    val pointer_content = compile_source_inventory_read_pointer_content_v1(cache_root) ?? ""
+    val admitted = compile_source_inventory_read_at_pointer_v1(cache_root, pointer_content)
+    if not admitted.valid:
+        return CompileSourceInventoryReadV1(false,
+            "inventory-publication-readback-invalid:{admitted.reason}" +
+            ";published_inventory_sha256={published_digest}" +
+            ";expected_pointer_sha256={expected_pointer_digest}" +
+            ";readback_pointer_sha256={sha256_text(pointer_content)}" +
+            ";readback_inventory_sha256={admitted.digest}", "", nil)
+    if admitted.digest != published_digest:
+        return CompileSourceInventoryReadV1(false,
+            "inventory-publication-digest-mismatch" +
+            ";published_inventory_sha256={published_digest}" +
+            ";expected_pointer_sha256={expected_pointer_digest}" +
+            ";readback_pointer_sha256={sha256_text(pointer_content)}" +
+            ";readback_inventory_sha256={admitted.digest}", "", nil)
     admitted
 
 fn compile_source_inventory_apply_git_changes_v1(
@@ -572,5 +596,6 @@ export compile_source_inventory_encode_v1, compile_source_inventory_decode_v1
 export compile_source_inventory_digest_v1
 export compile_source_inventory_publish_v1, compile_source_inventory_publish_reasoned_v1, compile_source_inventory_read_current_v1
 export compile_source_inventory_read_pointer_content_v1, compile_source_inventory_read_at_pointer_v1
+export compile_source_inventory_publication_readback_v1
 export compile_source_inventory_recover_v1
 export compile_source_inventory_snapshot_rows_v1
