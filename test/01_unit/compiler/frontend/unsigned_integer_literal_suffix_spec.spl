@@ -1,0 +1,99 @@
+# @cover src/compiler/10.frontend/core/_ParserPrimary/unsigned_integer_literals.spl
+use std.spec
+use compiler.core.parser.{parser_init, parser_get_errors, parser_guarded_int_text, parser_diagnostics_suppressed_set}
+use compiler.frontend.core._ParserPrimary.unsigned_integer_literals.{parse_unsigned_int_literal_text}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module_scoped}
+use compiler.frontend.parser_types_expr.{StmtKind, ExprKind, TypeKind}
+
+fn unsigned_word(token_text: text, suffix: text) -> i64:
+    parser_init("")
+    parser_diagnostics_suppressed_set(true)
+    parse_unsigned_int_literal_text(token_text, suffix)
+
+fn unsigned_error(token_text: text, suffix: text) -> text:
+    unsigned_word(token_text, suffix)
+    parser_get_errors().join("\n")
+
+describe "fixed-width unsigned integer literal suffixes":
+    it "retains the complete u64 word at both signed and unsigned boundaries":
+        expect(unsigned_word("9223372036854775807", "u64")).to_equal(9223372036854775807)
+        expect(parser_get_errors().len()).to_equal(0)
+        expect(unsigned_word("9223372036854775808", "u64")).to_equal(-9223372036854775808)
+        expect(parser_get_errors().len()).to_equal(0)
+        expect(unsigned_word("18446744073709551615", "u64")).to_equal(-1)
+        expect(parser_get_errors().len()).to_equal(0)
+
+    it "rejects u64 max plus one before its payload can wrap":
+        expect(unsigned_word("18446744073709551616", "u64")).to_equal(0)
+        expect(parser_get_errors().join("\n")).to_contain("integer literal out of range for u64")
+
+    it "checks the declared unsigned width rather than truncating a cast":
+        expect(unsigned_word("255", "u8")).to_equal(255)
+        expect(parser_get_errors().len()).to_equal(0)
+        expect(unsigned_error("256", "u8")).to_contain("out of range for u8")
+        expect(unsigned_word("65535", "u16")).to_equal(65535)
+        expect(parser_get_errors().len()).to_equal(0)
+        expect(unsigned_error("65536", "u16")).to_contain("out of range for u16")
+        expect(unsigned_word("4294967295", "u32")).to_equal(4294967295)
+        expect(parser_get_errors().len()).to_equal(0)
+        expect(unsigned_error("4294967296", "u32")).to_contain("out of range for u32")
+
+    it "accepts hexadecimal u64 max and rejects hexadecimal overflow":
+        expect(unsigned_word("0xffff_ffff_ffff_ffff", "u64")).to_equal(-1)
+        expect(parser_get_errors().len()).to_equal(0)
+        expect(unsigned_error("0x10000000000000000", "u64")).to_contain("out of range for u64")
+        expect(unsigned_word("0xff", "u8")).to_equal(255)
+        expect(parser_get_errors().len()).to_equal(0)
+        expect(unsigned_error("0x100", "u8")).to_contain("out of range for u8")
+
+    it "retains supported binary and octal suffix values":
+        expect(unsigned_word("0b11111111", "u8")).to_equal(255)
+        expect(parser_get_errors().len()).to_equal(0)
+        expect(unsigned_error("0b100000000", "u8")).to_contain("out of range for u8")
+        expect(unsigned_word("0o1777777777777777777777", "u64")).to_equal(-1)
+        expect(parser_get_errors().len()).to_equal(0)
+        expect(unsigned_error("0o2000000000000000000000", "u64")).to_contain("out of range for u64")
+
+    it "accepts leading zeroes and separators without growing the magnitude":
+        expect(unsigned_word("00000000000000000000000042", "u64")).to_equal(42)
+        expect(parser_get_errors().len()).to_equal(0)
+        expect(unsigned_word("18_446_744_073_709_551_615", "u64")).to_equal(-1)
+        expect(parser_get_errors().len()).to_equal(0)
+
+    it "keeps malformed-token errors ahead of overflow":
+        expect(unsigned_error("", "u64")).to_contain("malformed integer literal token text")
+        expect(unsigned_error("0x", "u64")).to_contain("malformed integer literal token text")
+        expect(unsigned_error("0b2", "u64")).to_contain("malformed integer literal token text")
+        expect(unsigned_error("18446744073709551616x", "u64")).to_contain("malformed integer literal token text")
+
+    it "preserves the existing signed maximum and minimum-magnitude path":
+        parser_init("")
+        parser_diagnostics_suppressed_set(true)
+        expect(parser_guarded_int_text("9223372036854775807")).to_equal(9223372036854775807)
+        expect(parser_guarded_int_text("9223372036854775808")).to_equal(-9223372036854775808)
+        expect(parser_get_errors().len()).to_equal(0)
+        expect(parser_guarded_int_text("9223372036854775809")).to_equal(0)
+        expect(parser_get_errors().join("\n")).to_contain("integer literal out of range for i64")
+
+    it "preserves the u64 suffix and word through the real primary-parser bridge":
+        val module = parse_and_build_module_scoped("fn maximum() -> u64:\n    18446744073709551615u64\n", "unsigned_boundary.spl", false)
+        expect(parser_get_errors().len()).to_equal(0)
+        val function = module.functions["maximum"]
+        var correct = false
+        match function.body.stmts[0].kind:
+            case StmtKind.Expr(expression):
+                match expression.kind:
+                    case ExprKind.Cast(value, target):
+                        match value.kind:
+                            case ExprKind.IntLit(word):
+                                match target.kind:
+                                    case TypeKind.Named(name, arguments): correct = word == -1 and name == "u64" and arguments.len() == 0
+                                    case _: ()
+                            case _: ()
+                    case _: ()
+            case _: ()
+        expect(correct).to_equal(true)
+
+    it "reports suffixed overflow through the real primary parser":
+        parse_and_build_module_scoped("fn overflow() -> u64:\n    18446744073709551616u64\n", "unsigned_overflow.spl", false)
+        expect(parser_get_errors().join("\n")).to_contain("integer literal out of range for u64")
