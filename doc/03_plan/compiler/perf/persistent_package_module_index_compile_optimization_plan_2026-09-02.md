@@ -24,6 +24,9 @@ generation readback, load, and pin for zero and one dependencies with
 `SIMPLE_NO_STUB_FALLBACK=1`. See
 `doc/08_tracking/bug/target6_native_cas_batch_generation_corruption_2026-09-28.md`.
 The production full CLI and typed graph cutover are still unqualified.
+The post-merge strict full CLI build reached link after 2,485 source units
+compiled or reused, but 163 unresolved runtime symbols blocked the binary.
+See `doc/08_tracking/bug/target56_strict_full_cli_optional_symbol_link_2026-09-29.md`.
 
 **Parent plans:**
 
