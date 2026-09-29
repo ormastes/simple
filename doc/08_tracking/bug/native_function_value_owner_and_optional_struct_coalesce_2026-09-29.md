@@ -127,3 +127,34 @@ callbacks. Existing landed callback and floating-point controls remain.
 
 Linux execution of this expanded fixture remains pending. This result makes
 no claim of bootstrap Phase 4 qualification.
+
+
+## PR #2046 integration review
+
+The independently prepared adapter proposal in commit `6b70440940e` passed its
+reported Linux/Windows direct-callback fixtures and LLVM adapter signature
+checks. Its new named-function records used a zero kind word and a thunk with
+an implicit context. That representation is rejected by the scalar pool APIs
+in `runtime_pool.c` and `runtime_thread.c`, which require the direct marker and
+call the entry without a context. Those pool paths were outside its fixture.
+
+Integration therefore retains the landed #2047 direct-record contract and
+reserved closure kind slot. The proposed adapter helper is superseded; its
+platform evidence does not attest this integrated source. The global named
+callback regression from #2046 is retained alongside the existing closure and
+marker-valued capture controls. The hardware probe's portable I/O facade
+changes are independent of the callable representation.
+
+The integrated global-callback native fixture passed with LLVM 23.1.2 ARM64:
+1 passed, 0 failed, 1 filtered out. Log: `/tmp/pr2046-global-callback-test.log`.
+This additionally exercises the function-global initializer's direct record,
+without replacing the scalar pool ABI with the alternative adapter.
+
+## PR #2049 Linux conflict-resolution evidence
+
+The merged fixture retains the landed global callback check and adds the
+scalar pool, VOID, and captured bool/text controls. On Linux ARM64 with
+LLVM 23.1.2, the expanded native test passed: 1 passed, 0 failed, 1 filtered
+out. Cargo used `CARGO_BUILD_JOBS=10`; the focused fixture itself retains its
+serial native compilation configuration. Log: `/tmp/pr2049-expanded-native-test.log`.
+This result does not qualify a full Linux or FreeBSD bootstrap.
