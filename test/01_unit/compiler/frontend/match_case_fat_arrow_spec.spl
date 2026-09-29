@@ -1,0 +1,86 @@
+# @cover src/compiler/10.frontend/core/parser_stmts.spl
+# Regression: case-prefixed fat arrows must preserve statements and lint metadata.
+use std.spec
+use compiler.core.parser.{parse_module_silent_checked}
+use compiler.core.ast.{module_get_decls, decl_get_body, arm_get_body, arm_get_guard, arm_get_rationale}
+use compiler.core.ast_stmt.{stmt_get_body, stmt_get_tag, stmt_get_expr, STMT_RETURN, STMT_EXPR, STMT_MATCH}
+use compiler.core.ast_expr.{expr_get_int, expr_get_str}
+use compiler.semantics.lint.required_comment.{check_required_comment}
+
+fn fat_arrow_arms(source: text) -> [i64]:
+    expect(parse_module_silent_checked(source, "fat_arrow.spl")).to_equal(false)
+    val decls = module_get_decls()
+    expect(decls.len()).to_equal(1)
+    val body = decl_get_body(decls[0])
+    expect(stmt_get_tag(body[0])).to_equal(STMT_MATCH)
+    stmt_get_body(body[0])
+
+describe "case-prefixed fat-arrow match arms":
+    it "preserves inline return statements in both case-prefixed arms":
+        val arms = fat_arrow_arms("fn f(n: text) -> text:\n    match n:\n        case \"known\" => return \"first\"\n        case \"other\" => return \"second\"\n")
+        expect(arms.len()).to_equal(2)
+        val first = arm_get_body(arms[0])
+        val second = arm_get_body(arms[1])
+        expect(first.len()).to_equal(1)
+        expect(stmt_get_tag(first[0])).to_equal(STMT_RETURN)
+        expect(expr_get_str(stmt_get_expr(first[0]))).to_equal("first")
+        expect(stmt_get_tag(second[0])).to_equal(STMT_RETURN)
+        expect(expr_get_str(stmt_get_expr(second[0]))).to_equal("second")
+
+    it "preserves expression bodies rather than introducing a return":
+        val arms = fat_arrow_arms("fn f(n: i64) -> i64:\n    match n:\n        case 0 => 10\n        case 1 => 20\n")
+        expect(arms.len()).to_equal(2)
+        val first = arm_get_body(arms[0])
+        expect(stmt_get_tag(first[0])).to_equal(STMT_EXPR)
+        expect(expr_get_int(stmt_get_expr(first[0]))).to_equal(10)
+
+    it "preserves every statement in indented case and caseless bodies":
+        val arms = fat_arrow_arms("fn f(n: i64) -> i64:\n    match n:\n        case 0 =>\n            val answer = 10\n            return answer\n        1 =>\n            val answer = 20\n            return answer\n")
+        expect(arms.len()).to_equal(2)
+        val first = arm_get_body(arms[0])
+        val second = arm_get_body(arms[1])
+        expect(first.len()).to_equal(2)
+        expect(second.len()).to_equal(2)
+        expect(stmt_get_tag(first[1])).to_equal(STMT_RETURN)
+        expect(stmt_get_tag(second[1])).to_equal(STMT_RETURN)
+
+    it "keeps inline caseless return statements as statements":
+        val arms = fat_arrow_arms("fn f(n: text) -> i64:\n    match n:\n        \"first\" => return 10\n        \"second\" => return 20\n")
+        expect(arms.len()).to_equal(2)
+        val first = arm_get_body(arms[0])
+        expect(stmt_get_tag(first[0])).to_equal(STMT_RETURN)
+        expect(expr_get_int(stmt_get_expr(first[0]))).to_equal(10)
+
+    it "retains the guard on each expanded alternative":
+        val arms = fat_arrow_arms("fn f(n: i64) -> i64:\n    match n:\n        case 0 | 1 if n >= 0 => return 10\n        case 2 => return 20\n")
+        expect(arms.len()).to_equal(3)
+        expect(arm_get_guard(arms[0])).to_be_greater_than(-1)
+        expect(arm_get_guard(arms[1])).to_equal(arm_get_guard(arms[0]))
+        val first = arm_get_body(arms[0])
+        expect(stmt_get_tag(first[0])).to_equal(STMT_RETURN)
+
+    it "retains the existing REQC004 warning for a bare text wildcard":
+        # Deliberately prohibited source: the test asserts the diagnostic.
+        val arms = fat_arrow_arms("fn f(n: text) -> text:\n    match n:\n        \"known\" => return \"known\"\n        case _ => return \"unsupported\"\n")
+        expect(arms.len()).to_equal(2)
+        val warnings = check_required_comment(module_get_decls())
+        expect(warnings.len()).to_equal(1)
+        expect(warnings[0].code).to_equal("REQC004")
+        expect(warnings[0].severity).to_equal("warn")
+
+    it "preserves wildcard rationale metadata without hiding the arm":
+        val arms = fat_arrow_arms("fn f(n: text) -> text:\n    match n:\n        case _(\"unknown protocol values return an explicit error label\") => return \"unsupported\"\n")
+        expect(arms.len()).to_equal(1)
+        expect(arm_get_rationale(arms[0])).to_equal("unknown protocol values return an explicit error label")
+        expect(check_required_comment(module_get_decls()).len()).to_equal(0)
+
+    it "keeps colon and thin-arrow statement bodies working":
+        val arms = fat_arrow_arms("fn f(n: i64) -> i64:\n    match n:\n        case 0: return 10\n        1 -> return 20\n")
+        expect(arms.len()).to_equal(2)
+        val first = arm_get_body(arms[0])
+        val second = arm_get_body(arms[1])
+        expect(stmt_get_tag(first[0])).to_equal(STMT_RETURN)
+        expect(stmt_get_tag(second[0])).to_equal(STMT_RETURN)
+
+    it "rejects a case-prefixed arrow with no body":
+        expect(parse_module_silent_checked("fn f(n: i64) -> i64:\n    match n:\n        case 0 =>\n", "missing_arrow_body.spl")).to_equal(true)
