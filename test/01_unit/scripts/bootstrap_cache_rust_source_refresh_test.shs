@@ -1,0 +1,56 @@
+#!/bin/sh
+# Bootstrap-only actual Rust dependency-cache criterion, isolated small archive.
+set -eu
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+. "$repo/scripts/bootstrap/bootstrap-cache-lineage.shs"
+producer=${BOOTSTRAP_CACHE_TEST_RUST_PRODUCER:?actual admitted Rust executable required}
+expected=${BOOTSTRAP_CACHE_TEST_RUST_SHA256:?exact producer pin required}
+[ "$(bootstrap_cache_hash_file "$producer")" = "$expected" ] || exit 64
+parent=${BOOTSTRAP_CACHE_TEST_ROOT:?absolute private Linux fixture root required}
+bootstrap_cache_new_path_validate "$parent" || exit 64
+mkdir -p "$parent"
+work=$(mktemp -d "$parent/rust-source-refresh.XXXXXX")
+trap 'status=$?; bootstrap_cache_release_all; printf "Retained real Rust source-refresh fixture: %s\n" "$work"; exit "$status"' EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+mkdir "$work/src" "$work/records" "$work/cold" "$work/body" "$work/layout"
+printf 'struct SharedLayout:\n    pad: i64\n    tag: i64\nfn shared_layout_origin() -> i64:\n    return 111\n' > "$work/src/layout_a.spl"
+printf 'fn shared_layout_reader(p: SharedLayout) -> i64:\n    return p.tag\n' > "$work/src/reader_b.spl"
+snapshot() {
+  sha256sum "$work/src/layout_a.spl" "$work/src/reader_b.spl" > "$1/source-inputs-before.txt"
+  printf 'archive: no runtime link; fixed actual Rust producer\n' > "$1/runtime-admitted.txt"
+  printf 'fixed inherited LLVM tool configuration\n' > "$1/tool-authority-before.txt"
+}
+context() {
+  bootstrap_cache_phase_inputs "$work" x86_64-unknown-linux-gnu llvm archive "$1/source-inputs-before.txt" "$1/runtime-admitted.txt" "$1/tool-authority-before.txt" 'no-entry-closure;threads=1;lane=default;emit-archive' | sha256sum | awk '{print $1}'
+}
+build() {
+  (cd "$work" && SIMPLE_NATIVE_BUILD_RUST=1 SIMPLE_NATIVE_INCREMENTAL=1 SIMPLE_CACHE_SCOPE=default "$producer" native-build --backend llvm --target x86_64-unknown-linux-gnu --source src --no-entry-closure --threads 1 --emit-archive --cache-dir "$work/cache/entry" -o "$work/result.a") > "$work/$1.log" 2>&1
+}
+snapshot "$work/cold"
+cold=$(context "$work/cold")
+bootstrap_cache_prepare "$work/cache" "$work/cache/entry" stage2 "$expected" "$cold" bootstrap-main reuse
+build cold
+grep -q 'Build complete: 2 compiled, 0 cached, 0 failed' "$work/cold.log"
+bootstrap_cache_writer_release "$work/cache/entry"
+BOOTSTRAP_CACHE_WRITERS=
+printf 'struct SharedLayout:\n    pad: i64\n    tag: i64\nfn shared_layout_origin() -> i64:\n    return 222\n' > "$work/src/layout_a.spl"
+snapshot "$work/body"
+body=$(context "$work/body")
+archive=$(bootstrap_cache_hash_file "$work/result.a")
+if bootstrap_cache_prepare "$work/cache" "$work/cache/entry" stage2 "$expected" "$body" bootstrap-main reuse > "$work/default-reject.log" 2>&1; then exit 1; fi
+[ "$(bootstrap_cache_hash_file "$work/result.a")" = "$archive" ]
+bootstrap_cache_refresh_source "$work/cache" "$work/cache/entry" stage2 "$expected" "$cold" "$body" bootstrap-main "$work/cold" "$work/body" "$work/records/body"
+build body
+grep -q 'Build complete: 1 compiled, 1 cached, 0 failed' "$work/body.log"
+[ "$(bootstrap_cache_hash_file "$work/result.a")" != "$archive" ]
+bootstrap_cache_writer_release "$work/cache/entry"
+BOOTSTRAP_CACHE_WRITERS=
+printf 'struct SharedLayout:\n    pad: i64\n    extra: i64\n    tag: i64\nfn shared_layout_origin() -> i64:\n    return 222\n' > "$work/src/layout_a.spl"
+snapshot "$work/layout"
+layout=$(context "$work/layout")
+bootstrap_cache_refresh_source "$work/cache" "$work/cache/entry" stage2 "$expected" "$body" "$layout" bootstrap-main "$work/body" "$work/layout" "$work/records/layout"
+build layout
+grep -q 'Build complete: 2 compiled, 0 cached, 0 failed' "$work/layout.log"
+printf 'PASS actual Rust source refresh: default changed-source rejection; body edit compiled1 cached1; cross-module layout edit compiled2 cached0; actual archive changed; no full bootstrap or runtime-admission qualification\n'

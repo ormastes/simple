@@ -31,7 +31,7 @@ while [ "${bootstrap_argc}" -gt 0 ]; do
     --backend|--output|--bootstrap-receipt|--produce-stage3-receipt|\
     --strategy|--resume-stage3-from-admitted|--resume-stage4-from-admitted|\
     --mode|--diagnostic-root|--diagnostic-child-compiler|--target|--jobs|\
-    --progress-interval|--invalidate-cache)
+    --progress-interval|--invalidate-cache|--refresh-stage2-source-cache)
       bootstrap_value_missing=1
       if [ "${bootstrap_argc}" -gt 0 ]; then
         case "$1" in -*) ;; *) bootstrap_value_missing=0 ;; esac
@@ -263,6 +263,10 @@ Options:
                      Explicitly invalidate only PHASE's selected entry cache
                      (stage2, stage3, stage4, stage4b-ui-backend, stage5N).
   --fresh-cache      Compatibility alias for --clean-rebuild
+  --refresh-stage2-source-cache=DIR
+                     Explicit source-only refresh from retained predecessor
+                     source/runtime/tool snapshots; verified Rust producer only.
+                     Retain objects for real dependency-key validation.
   --incremental-unlimited
                      Reuse incremental caches, including one-binary Stage 4,
                      and use every detected host CPU; retain Stage 4
@@ -326,6 +330,7 @@ resume_stage4_output=""
 full_cli=0
 fresh_cache=0
 invalidate_cache_scope=""
+refresh_stage2_source_cache=""
 release_tests=0
 diagnostic_sweep=0
 stop_after_stage2=0
@@ -416,6 +421,11 @@ while [ "$#" -gt 0 ]; do
       case "${selected_invalidation_scope}" in stage2|stage3|stage4|stage4b-ui-backend|stage5[0-9]*) ;; *) echo 'error: --invalidate-cache requires a build phase scope' >&2; exit 64 ;; esac
       invalidate_cache_scope="${invalidate_cache_scope:+${invalidate_cache_scope},}${selected_invalidation_scope}"
       ;;
+    --refresh-stage2-source-cache=*)
+      [ -z "${refresh_stage2_source_cache}" ] || { echo 'error: duplicate source refresh selection' >&2; exit 64; }
+      refresh_stage2_source_cache=${1#*=}
+      [ -n "${refresh_stage2_source_cache}" ] || exit 64
+      ;;
     --incremental-unlimited)
       execution_profile=incremental-unlimited
       ;;
@@ -497,6 +507,13 @@ while [ "$#" -gt 0 ]; do
   shift
 done
 # -- argv-parse end
+if [ -n "${refresh_stage2_source_cache}" ]; then
+  [ "${stop_after_stage2}" -eq 1 ] && [ "${full_bootstrap}" -eq 1 ] &&
+    [ "${fresh_cache}" -eq 0 ] && [ -z "${invalidate_cache_scope}" ] &&
+    [ "${execution_profile}" != clean-release ] || {
+    echo 'error: source refresh is a separate Rust Stage2-only operation; clean/invalidate/resume unsupported' >&2; exit 64;
+  }
+fi
 
 if [ "${stop_after_stage2}" -eq 1 ]; then
   [ "${stop_after_stage3}" -eq 0 ] &&
@@ -1561,7 +1578,7 @@ bootstrap_cache_action() {
   [ "${execution_profile}" != clean-release ] || bootstrap_selected_action=clean
   case ",${invalidate_cache_scope}," in *",$1,"*) bootstrap_selected_action=invalidate ;; esac
 }
-bootstrap_cache_context_hash() {
+bootstrap_cache_context_payload() {
   cache_options_payload=$(bootstrap_cache_explicit_options "${simple_abi_policy}" \
     "${SIMPLE_PLUGIN_MANIFEST_POLICY}" "${SIMPLE_KERNEL_K1_POLICY}" \
     "${SIMPLE_COVERAGE_CUTOVER_STATE}" "${k1_composition_sha256_before}" \
@@ -1611,16 +1628,52 @@ SIMPLE_STUB_MISSING_RT=1"
 ${cache_environment_payload}"
       ;;
   esac
+  cache_context_base=${2:-}
+  cache_source_snapshot=${stage3_source_before}
+  cache_runtime_snapshot=${runtime_admitted_snapshot}
+  cache_tool_snapshot=${tool_authority_before}
+  if [ -n "${cache_context_base}" ]; then
+    cache_source_snapshot=${cache_context_base}/source-inputs-before.txt
+    cache_runtime_snapshot=${cache_context_base}/runtime-admitted.txt
+    cache_tool_snapshot=${cache_context_base}/tool-authority-before.txt
+  fi
   cache_input_payload=$(bootstrap_cache_phase_inputs "${repo_root}" "${PLATFORM}" "${backend}" \
-    "${cache_build_mode:-${bootstrap_mode}}" "${stage3_source_before}" \
-    "${runtime_admitted_snapshot}" "${tool_authority_before}" "${cache_options_payload}") || return 1
-  printf '%s\n' "${cache_input_payload}" | hash_stream
+    "${cache_build_mode:-${bootstrap_mode}}" "${cache_source_snapshot}" \
+    "${cache_runtime_snapshot}" "${cache_tool_snapshot}" "${cache_options_payload}") || return 1
+  printf '%s\n' "${cache_input_payload}"
+}
+bootstrap_cache_context_hash() {
+  cache_hash_payload=$(bootstrap_cache_context_payload "$@") || return 1
+  printf '%s\n' "${cache_hash_payload}" | hash_stream
 }
 bootstrap_prepare_phase_cache() {
   bootstrap_cache_action "$2"
-  bootstrap_cache_prepare "$(absolute_path "$1")" "$(absolute_path "$3")" \
-    "$2" "$(hash_file "$4")" "$(bootstrap_cache_context_hash "$2")" "$5" \
-    "${bootstrap_selected_action}" || exit 1
+  if [ "$2" = stage2 ] && [ -n "${refresh_stage2_source_cache}" ]; then
+    [ "${bootstrap_selected_action}" = reuse ] && [ -z "${bootstrap_stage2_parent_override}" ] &&
+      [ "${stop_after_stage2}" -eq 1 ] && [ "${full_bootstrap}" -eq 1 ] || {
+      echo 'error: source refresh requires Rust full-bootstrap Stage2-only, without clean/invalidate' >&2; exit 64;
+    }
+    # This reviewed owner folds full module source with unconditional global
+    # structural dependencies. Unknown implementations fail closed.
+    [ "$(hash_file "${repo_root}/src/compiler_rust/compiler/src/pipeline/native_project/mod.rs")" = \
+      67ffbc45c28f92d2e7112840c07f3c2b63095ceaf1c51b0b627d1523682d40f0 ] &&
+      [ "$(hash_file "$4")" = "$(hash_file "${seed_bin}")" ] || {
+      echo 'error: source refresh rejected: unsupported Rust dependency-key owner/producer' >&2; exit 64;
+    }
+    bootstrap_cache_new_path_validate "${refresh_stage2_source_cache}" || exit 64
+    cache_refresh_records="${log_dir}/cache-source-transitions"
+    bootstrap_cache_new_path_validate "$(absolute_path "${cache_refresh_records}")" || exit 64
+    mkdir -p "${cache_refresh_records}" || exit 1
+    cache_refresh_record="$(absolute_path "${cache_refresh_records}")/stage2-$(date -u '+%Y%m%dT%H%M%S')-$$"
+    bootstrap_cache_refresh_source "$(absolute_path "$1")" "$(absolute_path "$3")" \
+      "$2" "$(hash_file "$4")" "$(bootstrap_cache_context_hash "$2" "${refresh_stage2_source_cache}")" \
+      "$(bootstrap_cache_context_hash "$2")" "$5" "${refresh_stage2_source_cache}" \
+      "${stage3_provenance_dir}" "${cache_refresh_record}" || exit 1
+  else
+    bootstrap_cache_prepare "$(absolute_path "$1")" "$(absolute_path "$3")" \
+      "$2" "$(hash_file "$4")" "$(bootstrap_cache_context_hash "$2")" "$5" \
+      "${bootstrap_selected_action}" || exit 1
+  fi
   SIMPLE_CACHE_SCOPE=$2
   export SIMPLE_CACHE_SCOPE
   bootstrap_cache_enable_persistence "$(absolute_path "$3")" || exit 1

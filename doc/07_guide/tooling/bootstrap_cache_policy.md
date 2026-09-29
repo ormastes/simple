@@ -17,6 +17,26 @@ frontend records, runtime objects and logs.
 | `--invalidate-cache=stage5N` | The selected MCP entry cache |
 | `--clean-rebuild` | Each build entry cache requested by this invocation |
 | `--fresh-cache`, `--no-cache` | Compatibility aliases for explicit clean rebuild |
+| `--refresh-stage2-source-cache=DIR` | Opt-in source-only Rust Stage 2 transition from retained predecessor snapshots; preserve dependency-keyed objects |
+
+The source-refresh route is restricted to `--full-bootstrap --stop-after-stage2`
+with the reviewed Rust dependency-key implementation and the same actual
+producer. `DIR` must hold the predecessor's `source-inputs-before.txt`,
+`runtime-admitted.txt` and `tool-authority-before.txt`, preserved before updating
+source or starting another attempt. The caller rederives the predecessor's
+aggregate binding using the current canonical source root and semantic options.
+Different producer, runtime, tools, options, source root, schema or phase/entry
+refuses this route. Clean/invalidate cannot be combined with source refresh.
+
+Under the exclusive writer, the transition records both bindings and snapshots
+in a unique immutable log record before publishing the new current binding.
+Existing inner objects and manifests remain intact. The actual Rust compiler's
+full module-content and global structural keys decide reuse: body edits miss
+their modules; changed imports, signatures or layouts can miss the whole
+closure. No exact reuse count is promised before the real compiler reports it.
+Source refresh does not import an unbound donor cache or authorize relocation.
+This amendment is undergoing focused source/behavior review; it is not yet a
+qualified operational launch instruction.
 
 After a source or compiler fix, explicitly invalidate its affected phase. A
 changed binding refuses default reuse with an actionable diagnostic and keeps
