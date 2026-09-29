@@ -25,6 +25,40 @@ fn empty_inventory() -> CompileSourceInventoryV1:
     CompileSourceInventoryV1(1, 0, [])
 
 describe "event-maintained compile source inventory":
+    it "retains the first invalid publication readback reason and pointer hashes":
+        val cache_root = "build/test-artifacts/scv-readback-invalid-{rt_getpid()}/build/scv"
+        dir_remove(cache_root, true)
+        val published = inventory_digest("published")
+        val expected_pointer = inventory_digest("previous-pointer")
+        val empty_pointer = inventory_digest("")
+        val rejected = compile_source_inventory_publication_readback_v1(
+            cache_root, published, expected_pointer)
+        expect(rejected.valid).to_equal(false)
+        expect(rejected.reason).to_contain(
+            "inventory-publication-readback-invalid:inventory-pointer-invalid")
+        expect(rejected.reason).to_contain("published_inventory_sha256={published}")
+        expect(rejected.reason).to_contain("expected_pointer_sha256={expected_pointer}")
+        expect(rejected.reason).to_contain("readback_pointer_sha256={empty_pointer}")
+
+    it "accepts its published digest and rejects a different admitted digest":
+        val cache_root = "build/test-artifacts/scv-readback-digest-{rt_getpid()}/build/scv"
+        dir_remove(cache_root, true)
+        val published = compile_source_inventory_publish_v1(cache_root, empty_inventory())
+        expect(published.len()).to_equal(64)
+        val expected_pointer = inventory_digest("")
+        val accepted = compile_source_inventory_publication_readback_v1(
+            cache_root, published, expected_pointer)
+        expect(accepted.valid).to_equal(true)
+        expect(accepted.digest).to_equal(published)
+        val different = inventory_digest("different-publication")
+        val rejected = compile_source_inventory_publication_readback_v1(
+            cache_root, different, expected_pointer)
+        expect(rejected.valid).to_equal(false)
+        expect(rejected.reason).to_contain("inventory-publication-digest-mismatch;")
+        expect(rejected.reason).to_contain("published_inventory_sha256={different}")
+        expect(rejected.reason).to_contain("readback_inventory_sha256={published}")
+        dir_remove(cache_root, true)
+
     it "does not publish Git changes when the filesystem journal overflows":
         val cache_root = "build/test-artifacts/scv-observed-{rt_getpid()}/build/scv"
         dir_remove(cache_root, true)
