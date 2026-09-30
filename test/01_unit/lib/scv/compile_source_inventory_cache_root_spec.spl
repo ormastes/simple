@@ -1,0 +1,64 @@
+"""SCV inventory readers follow checkout-owned snapshot authority."""
+use std.spec.{describe, it, expect}
+use std.scv.compile_source_inventory_core.{
+    compile_source_inventory_checkout_cache_root_v1,
+    compile_source_inventory_snapshot_cache_root_v1,
+    compile_source_inventory_cache_root_valid_v1
+}
+use std.scv.compile_source_inventory_core.{CompileSourceInventoryBindingV1,
+    compile_source_inventory_binding_reason_v1}
+use std.io_runtime.{file_read}
+
+val ROOT_TEST_REVISION = "scv-revision-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+describe "SCV inventory root agreement":
+    it "resolves the published checkout inventory instead of a host machine cache":
+        val root = compile_source_inventory_checkout_cache_root_v1("/work/project")
+        expect(root).to_equal("/work/project/build/scv")
+        expect(compile_source_inventory_cache_root_valid_v1("/home/user/.cache/simple/v1/projects/project")).to_equal(false)
+        expect(compile_source_inventory_snapshot_cache_root_v1("/work/project",
+            root + "/snapshots/" + ROOT_TEST_REVISION, ROOT_TEST_REVISION)).to_equal(root)
+
+    it "accepts both admitted checkout storage layouts and Windows canonical paths":
+        for root in ["/work/project/build/scv", "/work/project/.simple/scv"]:
+            expect(compile_source_inventory_snapshot_cache_root_v1("/work/project",
+                root + "/snapshots/" + ROOT_TEST_REVISION, ROOT_TEST_REVISION)).to_equal(root)
+        expect(compile_source_inventory_snapshot_cache_root_v1("C:\\work\\project",
+            "C:/work/project/build/scv/snapshots/" + ROOT_TEST_REVISION, ROOT_TEST_REVISION)).to_equal("C:/work/project/build/scv")
+        expect(compile_source_inventory_snapshot_cache_root_v1("\\\\?\\UNC\\server\\share\\project",
+            "//server/share/project/build/scv/snapshots/" + ROOT_TEST_REVISION, ROOT_TEST_REVISION)).to_equal("//server/share/project/build/scv")
+        expect(compile_source_inventory_snapshot_cache_root_v1("/work/a\\b",
+            "/work/a\\b/build/scv/snapshots/" + ROOT_TEST_REVISION, ROOT_TEST_REVISION)).to_equal("/work/a\\b/build/scv")
+
+    it "fails closed for foreign roots, traversal and mismatched or malformed revisions":
+        val good = "/work/project/build/scv/snapshots/" + ROOT_TEST_REVISION
+        for bad in ["/other/build/scv/snapshots/" + ROOT_TEST_REVISION,
+                    "/work/project/../other/build/scv/snapshots/" + ROOT_TEST_REVISION,
+                    "/work/project/build/scv/snapshots/other",
+                    good + "/extra", "relative/build/scv/snapshots/" + ROOT_TEST_REVISION]:
+            expect(compile_source_inventory_snapshot_cache_root_v1("/work/project", bad, ROOT_TEST_REVISION)).to_equal("")
+        expect(compile_source_inventory_snapshot_cache_root_v1("/work/project", good, "")).to_equal("")
+        expect(compile_source_inventory_snapshot_cache_root_v1("/work/project", good, ROOT_TEST_REVISION + "f")).to_equal("")
+        expect(compile_source_inventory_snapshot_cache_root_v1("/work/project/child", good, ROOT_TEST_REVISION)).to_equal("")
+
+    it "keeps publication, snapshot open and cold HIR on the shared resolver":
+        val publisher = file_read("src/app/compiler_entrypoint/admission.spl")
+        val reader = file_read("src/compiler/80.driver/driver_hir_pipeline_lowering.spl")
+        val opener = file_read("src/lib/scv/compile_snapshot.spl")
+        expect(publisher).to_contain("val cache_root = compile_source_inventory_checkout_cache_root_v1(root)")
+        expect(reader).to_contain("compile_source_inventory_read_current_v1(inventory_cache_root)")
+        expect(reader.contains("compile_source_inventory_read_current_v1(machine_cache_root())")).to_equal(false)
+        expect(reader).to_contain("inventory_binding, admitted.digest")
+        expect(reader).to_contain("source_root, inventory_binding.source_inventory_digest, inventory")
+        expect(opener).to_contain("compile_source_inventory_snapshot_cache_root_v1(")
+
+    it "compares canonical inventory digests within their domain":
+        val canonical = "a".repeat(64)
+        val manifest = "b".repeat(64)
+        val binding = CompileSourceInventoryBindingV1(manifest, canonical)
+        expect(compile_source_inventory_binding_reason_v1(binding, canonical)).to_equal("ok")
+        expect(compile_source_inventory_binding_reason_v1(binding, manifest)).to_equal("source-inventory-digest-mismatch")
+        expect(compile_source_inventory_binding_reason_v1(
+            CompileSourceInventoryBindingV1(canonical, manifest), canonical)).to_equal("source-inventory-digest-mismatch")
+        expect(compile_source_inventory_binding_reason_v1(
+            CompileSourceInventoryBindingV1(manifest, ""), canonical)).to_equal("source-inventory-digest-invalid")

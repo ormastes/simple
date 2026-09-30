@@ -10,6 +10,10 @@ use compiler.driver.cache.package_module_index.{
 use std.common.crypto.sha256.{sha256_text}
 use std.scv.compile_snapshot.{ScvCompileSnapshotV1, scv_compile_snapshot_acquire_v1}
 use app.compiler_entrypoint.inventory_events.{compiler_inventory_refresh_v1}
+use std.scv.compile_source_inventory.{compile_source_inventory_checkout_cache_root_v1,
+    compile_source_inventory_plain_checkout_v1,
+    CompileSourceInventoryBindingV1, compile_source_inventory_binding_reason_v1,
+    compile_source_inventory_read_current_v1}
 use app.compiler_entrypoint.index_compatibility.{
     compiler_entrypoint_publish_index_compatibility_v1}
 
@@ -75,15 +79,10 @@ fn compiler_entrypoint_admit_v1(source_roots: [text]) -> CompilerEntrypointAdmis
     if not env_set("SIMPLE_PACKAGE_INDEX_REBUILD_PENDING", "0"):
         return compiler_entrypoint_invalid_v1(
             "package-index-rebuild-env-clear-failed")
-    var root = path_absolute(".").replace("\\", "/")
-    # Windows returns the verbatim `\\?\C:\...` form for an existing path;
-    # `git -C` rejects it ("cannot change to '\?\C:\...'") and every refresh
-    # failed with git-event-source-unavailable. Same strip as compile_snapshot.
-    if root.starts_with("//?/"):
-        root = root.substring(4)
+    val root = compile_source_inventory_plain_checkout_v1(path_absolute("."))
     if root == "":
         return compiler_entrypoint_invalid_v1("repository-root-unavailable")
-    val cache_root = root + "/build/scv"
+    val cache_root = compile_source_inventory_checkout_cache_root_v1(root)
     val cold_init = (env_get("SIMPLE_SCV_INVENTORY_COLD_INIT") ?? "") == "1"
     # Cold publication replaces the complete inventory. Include both CLI
     # source families even when this request will snapshot only one of them;
@@ -102,6 +101,19 @@ fn compiler_entrypoint_admit_v1(source_roots: [text]) -> CompilerEntrypointAdmis
         root, cache_root, source_roots)
     if not snapshot.valid:
         return compiler_entrypoint_invalid_v1(snapshot.reason)
+    # Snapshot acquisition reads the inventory independently. Reject a moved
+    # CURRENT before publishing the pair; do not bind a new snapshot to an
+    # older refresh generation. This reads bounded metadata, not the tree.
+    val source_inventory = compile_source_inventory_read_current_v1(cache_root)
+    if not source_inventory.valid:
+        return compiler_entrypoint_invalid_v1(source_inventory.reason)
+    val inventory_binding = CompileSourceInventoryBindingV1(
+        snapshot_manifest_digest: snapshot.inventory_digest,
+        source_inventory_digest: refresh.inventory_digest)
+    val binding_reason = compile_source_inventory_binding_reason_v1(
+        inventory_binding, source_inventory.digest)
+    if binding_reason != "ok":
+        return compiler_entrypoint_invalid_v1(binding_reason)
     var index = package_module_index_read_current_v1(machine_cache_root())
     val transition = compiler_entrypoint_index_transition_v1(
         index, snapshot,
@@ -144,8 +156,12 @@ fn compiler_entrypoint_admit_v1(source_roots: [text]) -> CompilerEntrypointAdmis
         return compiler_entrypoint_invalid_v1("snapshot-commit-env-publish-failed")
     if not env_set("SIMPLE_SCV_TREE_ID", snapshot.tree_id):
         return compiler_entrypoint_invalid_v1("snapshot-tree-env-publish-failed")
-    if not env_set("SIMPLE_SCV_INVENTORY_DIGEST", snapshot.inventory_digest):
+    # Compatibility name retains the snapshot-manifest domain for package
+    # indices. Typed HIR receipts consume the separate canonical digest.
+    if not env_set("SIMPLE_SCV_INVENTORY_DIGEST", inventory_binding.snapshot_manifest_digest):
         return compiler_entrypoint_invalid_v1("snapshot-inventory-env-publish-failed")
+    if not env_set("SIMPLE_SCV_SOURCE_INVENTORY_DIGEST", inventory_binding.source_inventory_digest):
+        return compiler_entrypoint_invalid_v1("source-inventory-env-publish-failed")
     if not env_set("SIMPLE_SCV_INVENTORY_GENERATION", str(refresh.inventory_generation)):
         return compiler_entrypoint_invalid_v1("snapshot-generation-env-publish-failed")
     val active_index_digest = if cold_rebuild_pending: "" else: index.digest

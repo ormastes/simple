@@ -203,6 +203,70 @@ fn compile_source_inventory_cache_root_valid_v1(cache_root: text) -> bool:
         cache_root.ends_with("/build/scv") or
         cache_root.ends_with("/.simple/scv")
 
+# Pure routing for checkout-owned inventory. Machine cache configuration is a
+# separate contract: SIMPLE_CACHE never relocates an admitted SCV snapshot.
+fn compile_source_inventory_plain_checkout_v1(path: text) -> text:
+    var plain = path
+    # A backslash remains a legal POSIX filename byte. Convert only paths
+    # that explicitly carry Windows drive/UNC syntax.
+    if path.starts_with("\\\\") or (path.len() >= 2 and path.substring(1, 2) == ":"):
+        plain = path.replace("\\", "/")
+    if plain.starts_with("//?/UNC/"):
+        plain = "//" + plain.substring(8)
+    elif plain.starts_with("//?/"):
+        plain = plain.substring(4)
+    if plain == "": return ""
+    if not plain.starts_with("/") and not (plain.len() >= 3 and plain.substring(1, 3) == ":/"):
+        return ""
+    for component in plain.split("/"):
+        if component == "." or component == "..": return ""
+    while plain.len() > 1 and plain.ends_with("/"):
+        plain = plain.substring(0, plain.len() - 1)
+    plain
+
+fn compile_source_inventory_checkout_cache_root_v1(checkout_root: text) -> text:
+    val root = compile_source_inventory_plain_checkout_v1(checkout_root)
+    if root == "": return ""
+    if root == "/": return "/build/scv"
+    root + "/build/scv"
+
+fn compile_source_inventory_snapshot_cache_root_v1(
+    checkout_root: text, snapshot_root: text, revision_id: text
+) -> text:
+    val root = compile_source_inventory_plain_checkout_v1(checkout_root)
+    val snapshot = compile_source_inventory_plain_checkout_v1(snapshot_root)
+    if root == "" or snapshot == "" or not revision_id.starts_with("scv-revision-v1-"):
+        return ""
+    if not compile_source_inventory_digest_valid_v1(revision_id.substring(16)):
+        return ""
+    val prefix = if root == "/": "" else: root
+    val normal = prefix + "/build/scv"
+    val legacy = prefix + "/.simple/scv"
+    if snapshot == normal + "/snapshots/" + revision_id: return normal
+    if snapshot == legacy + "/snapshots/" + revision_id: return legacy
+    ""
+
+# These digests have different encodings. The snapshot hashes selected
+# path/content/size rows; the source inventory hashes its canonical schema,
+# generation and semantic fields. Never compare one domain with the other.
+struct CompileSourceInventoryBindingV1:
+    snapshot_manifest_digest: text
+    source_inventory_digest: text
+
+fn compile_source_inventory_binding_reason_v1(
+    binding: CompileSourceInventoryBindingV1, actual_source_inventory_digest: text
+) -> text:
+    if not compile_source_inventory_digest_valid_v1(binding.snapshot_manifest_digest):
+        return "snapshot-manifest-digest-invalid"
+    if not compile_source_inventory_digest_valid_v1(binding.source_inventory_digest):
+        return "source-inventory-digest-invalid"
+    if binding.source_inventory_digest != actual_source_inventory_digest:
+        return "source-inventory-digest-mismatch"
+    "ok"
+
+export CompileSourceInventoryBindingV1, compile_source_inventory_binding_reason_v1
+export compile_source_inventory_plain_checkout_v1
+
 # Byte-wise identity order (-1/0/1). Not text `<`/`>=`: native bootstrap text
 # relational operators compare tagged addresses, so the heap sort produced an
 # allocation-order inventory that failed its own canonical re-encode check
@@ -400,6 +464,8 @@ export compile_source_inventory_text_valid_v1
 export compile_source_inventory_digest_valid_v1
 export compile_source_inventory_path_valid_v1
 export compile_source_inventory_cache_root_valid_v1
+export compile_source_inventory_checkout_cache_root_v1
+export compile_source_inventory_snapshot_cache_root_v1
 export compile_source_inventory_sort_v1
 export compile_source_inventory_initial_events_v1
 export compile_source_inventory_entry_valid_v1
