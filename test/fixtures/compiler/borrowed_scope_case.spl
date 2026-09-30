@@ -1,0 +1,98 @@
+# Native lifetime probe shared by SSpec and the standalone regression entry.
+# No host filesystem/process access; these ABI calls control memory ownership.
+use compiler.frontend.flat_ast_bridge.{
+    parse_and_build_module_scoped, parse_and_build_module_in_borrowed_scope,
+    flat_pool_capture_arm, flat_pool_capture_take, flat_pools_dump_all,
+    flat_pools_dump_for_cache, build_module_from_flat_pool_blob
+}
+use compiler.core.parser.{parser_has_errors}
+use compiler.driver.driver_source_pipeline_parsing.{
+    driver_end_transient_parse_scope, driver_promote_frontend_registry_owners
+}
+
+@unsafe(reason: "exercise memory scope ownership invariant", capabilities: [ffi])
+extern fn rt_transient_array_scope_begin() -> bool
+@unsafe(reason: "owner pauses its memory scope before promotion", capabilities: [ffi])
+extern fn rt_transient_array_scope_pause() -> bool
+@unsafe(reason: "owner ends its empty memory scope", capabilities: [ffi])
+extern fn rt_transient_array_scope_end() -> bool
+@unsafe(reason: "retain cache blob past owner scope teardown", capabilities: [ffi])
+extern fn rt_transient_heap_promote(value: Any) -> bool
+
+pub fn borrowed_cache_scope_case(invalid_source: bool) -> i64:
+    val source = if invalid_source:
+        "fn scope_bad() -> i64:\n    return )\n"
+    else:
+        "fn scope_alpha() -> i64:\n    return 17\n"
+    var status: i64 = 0
+    var began = false
+    unsafe(capabilities: [ffi]):
+        began = rt_transient_array_scope_begin()
+    if not began:
+        return 1
+    flat_pool_capture_arm()
+    val parsed = parse_and_build_module_in_borrowed_scope(source, "scope_case.spl")
+    val blob = flat_pool_capture_take()
+    if invalid_source:
+        if not parser_has_errors() or blob != "":
+            status = 2
+    else:
+        if parser_has_errors() or not parsed.functions.contains_key("scope_alpha"):
+            status = 3
+        if blob == "" or blob != flat_pools_dump_all():
+            status = 4
+        # A warm restore also borrows the same driver lifetime.
+        val restored = build_module_from_flat_pool_blob(blob, source, "scope_case.spl")
+        if restored.is_none():
+            status = 5
+        elif not restored.unwrap().functions.contains_key("scope_alpha"):
+            status = 6
+    var nested = false
+    unsafe(capabilities: [ffi]):
+        nested = rt_transient_array_scope_begin()
+    if nested:
+        # The borrowed call must not have ended the parent's scope.
+        status = 7
+    var paused = false
+    var promoted = false
+    unsafe(capabilities: [ffi]):
+        paused = rt_transient_array_scope_pause()
+        promoted = rt_transient_heap_promote(blob)
+    if not paused or not promoted or not driver_promote_frontend_registry_owners():
+        status = 8
+    if not driver_end_transient_parse_scope():
+        status = 9
+    # Both successful and erroneous parses must leave a fresh owner possible.
+    var fresh = false
+    var ended = false
+    unsafe(capabilities: [ffi]):
+        fresh = rt_transient_array_scope_begin()
+        if fresh:
+            ended = rt_transient_array_scope_end()
+    if not fresh or not ended:
+        return 10
+    if status != 0:
+        return status
+    if not invalid_source:
+        val after_end = build_module_from_flat_pool_blob(blob, source, "scope_case.spl")
+        if after_end.is_none():
+            return 11
+        if not after_end.unwrap().functions.contains_key("scope_alpha"):
+            return 12
+    0
+
+pub fn owned_cache_scope_case() -> i64:
+    val source = "fn owned_alpha() -> i64:\n    return 23\n"
+    flat_pool_capture_arm()
+    val parsed = parse_and_build_module_scoped(source, "owned_case.spl", false)
+    val blob = flat_pool_capture_take()
+    if parser_has_errors() or not parsed.functions.contains_key("owned_alpha"):
+        return 21
+    if blob == "" or flat_pools_dump_for_cache() != blob:
+        return 22
+    val restored = build_module_from_flat_pool_blob(blob, source, "owned_case.spl")
+    if restored.is_none():
+        return 23
+    if not restored.unwrap().functions.contains_key("owned_alpha"):
+        return 24
+    0

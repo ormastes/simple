@@ -1261,7 +1261,7 @@ pub fn flat_pools_dump_all() -> text:
 # short-circuited: a restore that stops halfway leaves the pools in a torn
 # state that a later `and` would hide.
 pub fn flat_pools_restore_all(blob: text) -> bool:
-    val r = FlatPoolReader.new(blob)
+    val r = FlatPoolReader.new_canonical(blob)
     val version = r.next()
     if version != FLAT_POOL_CODEC_VERSION:
         return false
@@ -1272,7 +1272,8 @@ pub fn flat_pools_restore_all(blob: text) -> bool:
     val ok_par = flat_parser_state_restore(r)
     val ok_ext = flat_extend_pools_restore(r)
     val ok_pend = flat_pending_pools_restore(r)
-    ok_decl and ok_expr and ok_stmt and ok_type and ok_par and ok_ext and ok_pend and r.ok
+    (ok_decl and ok_expr and ok_stmt and ok_type and ok_par and ok_ext and ok_pend and
+        r.finish_canonical_frame() and flat_decl_pools_consistent())
 
 var _fab_roundtrip_cached: i64 = -1
 fn flat_roundtrip_enabled() -> bool:
@@ -1389,6 +1390,16 @@ pub fn build_module_from_flat_pool_blob(blob: text, source: text, path: text) ->
     Some(built)
 
 pub fn parse_and_build_module_scoped(source: text, path: text, streaming_scope: bool) -> ParserModule:
+    parse_and_build_module_with_scope_owner(source, path, streaming_scope, false)
+
+# The caller must keep its transient scope alive until the returned module and
+# any captured blob have been consumed or promoted. This entry never opens,
+# pauses, promotes out of, or ends that borrowed scope.
+pub fn parse_and_build_module_in_borrowed_scope(source: text, path: text) -> ParserModule:
+    parse_and_build_module_with_scope_owner(source, path, false, true)
+
+fn parse_and_build_module_with_scope_owner(source: text, path: text,
+    streaming_scope: bool, borrowed_scope: bool) -> ParserModule:
     val admission: ParserProviderAdmissionV1 = match parser_provider_v1_admit(parser_provider_v1_default()):
         case Err(reason): panic("flat AST parser provider admission failed: {reason}")
         case Ok(receipt): receipt
@@ -1454,10 +1465,10 @@ pub fn parse_and_build_module_scoped(source: text, path: text, streaming_scope: 
     # diagnostics re-emitted -- a build that fails with no message.
     if _fab_capture_pools == 1 and not parser_has_errors():
         val dump_t0 = if fab_cache_boundary_prof_enabled(): _sffi_time_now_unix_micros() else: 0
-        # A streaming caller already owns a paused parser scope and cannot
-        # nest another. Preserve that path; ordinary cold cache stores get a
-        # short serialization-only scope with just the final blob promoted.
-        _fab_captured_blob = if transient_scope:
+        # A parser-owned or caller-owned scope already contains the temporary
+        # encoder objects. Its owner controls promotion and reclamation. Only
+        # an unscoped caller opens a serialization-only scope here.
+        _fab_captured_blob = if transient_scope or borrowed_scope:
             flat_pools_dump_all()
         else:
             flat_pools_dump_for_cache()

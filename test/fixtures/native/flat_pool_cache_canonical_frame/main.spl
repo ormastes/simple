@@ -1,0 +1,41 @@
+# Native regression for the actual flat-pool cursor used by frontend caches.
+use compiler.frontend.core.flat_pool_codec.{FlatPoolReader, flat_pool_dec_i64, flat_pool_enc_i64}
+
+fn main() -> i64:
+    val good = FlatPoolReader.new_canonical(flat_pool_enc_i64([0, -7, 42]))
+    val values = flat_pool_dec_i64(good)
+    if values.len() != 3 or values[0] != 0 or values[1] != -7 or values[2] != 42:
+        return 1
+    if not good.finish_canonical_frame():
+        return 2
+    for malformed in ["", "0,0", "00", "-0", "+1", " 1", "1x", "9223372036854775808"]:
+        val bad_count = FlatPoolReader.new_canonical(malformed + "\n0\n")
+        val _count = bad_count.next_len()
+        if bad_count.ok:
+            return 3
+        val bad_scalar = FlatPoolReader.new_canonical("1\n" + malformed + "\n")
+        val _values = flat_pool_dec_i64(bad_scalar)
+        if bad_scalar.ok:
+            return 4
+    val extra = FlatPoolReader.new_canonical("1\n7\nextra\n")
+    val _extra_values = flat_pool_dec_i64(extra)
+    if extra.finish_canonical_frame():
+        return 5
+    val short = FlatPoolReader.new_canonical("2\n7\n")
+    val _short_values = flat_pool_dec_i64(short)
+    if short.finish_canonical_frame():
+        return 6
+    val unterminated = FlatPoolReader.new_canonical("1\n7")
+    if unterminated.ok:
+        return 9
+    # A rejected cursor cannot poison the next independent valid frame.
+    val fresh = FlatPoolReader.new_canonical("1\n31\n")
+    val fresh_values = flat_pool_dec_i64(fresh)
+    if not fresh.finish_canonical_frame() or fresh_values.len() != 1 or fresh_values[0] != 31:
+        return 7
+    # Legacy callers retain their historical permissive scalar behavior.
+    val legacy = FlatPoolReader.new("\n")
+    val legacy_value = legacy.next_i64()
+    if not legacy.ok or legacy_value != 0:
+        return 8
+    0
