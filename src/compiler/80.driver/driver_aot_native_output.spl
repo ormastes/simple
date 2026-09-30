@@ -38,6 +38,7 @@ use compiler.driver.driver_build.build_outcome.{BuildOutcomeKind, BuildUnitOutco
     build_outcome_retained_diagnostic_count}
 use compiler.driver.driver_log_helpers.{log_build_progress}
 use std.common.crypto.sha256.{sha256_text}
+use compiler.driver.cache.native_build_environment_identity.{native_build_environment_fingerprint_v1}
 use std.nogc_sync_mut.io_runtime.{env_get_nullable, env_set, process_run}
 
 @unsafe(reason: "raw filesystem text-write ABI", capabilities: [ffi])
@@ -209,11 +210,13 @@ fn _sffi_simd_has_avx2() -> bool:
 
 fn driver_native_build_cache_scope(backend: text, cache_dir: text, target: text,
                                    target_cpu: text, opt_level: i64,
-                                   symbol_mode: text, storage_identity: text) -> (text, text):
+                                   symbol_mode: text, storage_identity: text,
+                                 environment_identity: text) -> (text, text):
     val raw_target = if target == "": nil else: Some(target)
     val compiler_id = native_build_compiler_identity()
         + if symbol_mode == "": "" else: "-" + symbol_mode
         + "-storage-" + sha256_text(storage_identity)
+        + "-environment-" + environment_identity
     val host_avx2 = target == "" and _sffi_simd_has_avx2()
     val capability_key = "native-avx2-policy-v1:cpu={target_cpu};host={host_avx2}"
     val scope_raw = native_build_cache_scope_key(
@@ -754,9 +757,15 @@ impl CompilerDriver:
         if storage_identity == "invalid":
             return CompileResult.CodegenError(
                 "typed storage registry is malformed before cache setup")
+        # Retained objects are private to the actual effective environment.
+        # A missing/invalid snapshot must not reuse an old environment namespace.
+        val environment_identity = native_build_environment_fingerprint_v1()
+        if not environment_identity.valid:
+            return CompileResult.CodegenError(
+                "native cache environment identity refused: {environment_identity.reason}")
         val (base_cache_scope_root, _) = driver_native_build_cache_scope(
             effective_backend, cache_dir, native_target, native_cpu,
-            driver_opt_level, symbol_mode, storage_identity)
+            driver_opt_level, symbol_mode, storage_identity, environment_identity.digest)
         if ctx.native_sources_fingerprint == "":
             return CompileResult.CodegenError(
                 "native build source fingerprint missing before cache setup")
@@ -1020,8 +1029,8 @@ impl CompilerDriver:
 
         log_build_progress("native_compile", "modules", total_modules,
             total_modules, "complete", 5, 6, 0, cache_hit_count, "running")
-        if trace and (cache_hit_count > 0 or cache_miss_count > 0):
-            print "[NATIVE] cache: {cache_hit_count} hits, {cache_miss_count} misses"
+        if cache_hit_count > 0 or cache_miss_count > 0:
+            print "Cache: reused {cache_hit_count} modules; rebuilt {cache_miss_count}."
             _sffi_stdout_flush()
 
         # Link object files into final executable

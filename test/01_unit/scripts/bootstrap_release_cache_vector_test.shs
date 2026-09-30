@@ -1,0 +1,91 @@
+#!/bin/sh
+# Execute release's real inline producer/hash/replay expressions at a captured
+# process boundary. No compiler runs and no admitted evidence is manufactured.
+set -eu
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+BOOTSTRAP_STAGE3_FACADE_PATH="$repo/scripts/check/lib/bootstrap-stage3-provenance.shs"
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+. "$repo/scripts/bootstrap/bootstrap-cache-release-vector.shs"
+bootstrap_stage3_hash_stream() { sha256sum | awk '{print $1}'; }
+bootstrap_stage3_error() { echo "$*" >&2; exit 1; }
+absolute_path() { printf '%s\n' "$1"; }
+work=$(mktemp -d "${TMPDIR:-/tmp}/release-cache-vector.XXXXXX")
+trap 'test "$?" -ne 0 || rm -rf -- "$work"' EXIT
+fail() { echo "FAIL release vector: $* ($work)" >&2; exit 1; }
+awk '/^  stage2_build_args_sha256=/{on=1} on{print} on && /^  \)$/{exit}' \
+  "$repo/scripts/bootstrap/bootstrap-from-scratch.sh" > "$work/hash.shs"
+awk '/^  bootstrap_stage3_run_transcribed \\/{on=1} on{print} on && /-o "\$\{stage2_bin\}"$/{exit}' \
+  "$repo/scripts/bootstrap/bootstrap-from-scratch.sh" > "$work/run.shs"
+awk '/^# Preserve the legacy environment/{on=1} on{print} on && /^stage2_args=/{exit}' \
+  "$repo/scripts/bootstrap/resume-stage3-from-admitted.sh" > "$work/replay.shs"
+for f in hash run replay; do [ -s "$work/$f.shs" ] || fail "missing actual $f expression"; done
+bootstrap_stage3_run_transcribed() {
+  transcript=$1; shift 6
+  : > "$transcript"
+  : > "$work/actual.args"
+  while [ "$1" != -- ]; do
+    printf 'explicit-env:%s:%s\n' "${#1}" "$1" >> "$transcript"
+    printf '%s\n' "$1" >> "$work/actual.args"
+    shift
+  done
+  shift 2
+  for argument do
+    printf 'argv:%s:%s\n' "${#argument}" "$argument" >> "$transcript"
+    printf '%s\n' "$argument" >> "$work/actual.args"
+  done
+  set --
+  while IFS= read -r argument; do set -- "$@" "$argument"; done < "$work/actual.args"
+  actual_hash=$(bootstrap_stage3_args_sha256 "$@")
+}
+repo_root=$repo log_dir=$work output=$work
+stage2_home_absolute=$work stage2_tmp_absolute=$work stage_build_path=$PATH
+stage2_seed_absolute="$work/compiler with spaces" stage2_cache_absolute="$work/cache with spaces"
+stage_runtime_absolute="$work/runtime with spaces" stage2_bin="$work/result"
+stage2_command_transcript="$work/transcript" build_progress_events="$work/progress"
+stage_build_rust_log=error jobs=2 backend=cranelift bootstrap_mode=dynload
+stage2_transcript=$stage2_command_transcript stage2_progress=$build_progress_events
+seed=$stage2_seed_absolute stage2_cache=$stage2_cache_absolute runtime=$stage_runtime_absolute stage2=$stage2_bin
+stage2_backend=$backend stage2_threads=$jobs stage2_compile_stack_mib=
+for PLATFORM in x86_64-unknown-linux-gnu x86_64-pc-windows-msvc; do
+  platform=$PLATFORM
+  for native_verbose_arg in '' --verbose; do
+    bootstrap_link_library_path='fixture with spaces' bootstrap_link_compat_sha256=fixture-sha
+    . "$work/hash.shs"
+    . "$work/run.shs"
+    [ "$actual_hash" = "$stage2_build_args_sha256" ] || fail "$PLATFORM actual vector != producer hash"
+    stage2_rust_log=$stage_build_rust_log stage2_library_path=$bootstrap_link_library_path stage2_link_compat=$bootstrap_link_compat_sha256
+    . "$work/replay.shs"
+    [ "$actual_hash" = "$stage2_args" ] || fail "$PLATFORM receipt replay != actual vector"
+    # The exact historical producer had none of the four cache assignments.
+    awk '!/^SIMPLE_(FRONTEND|HIR)_CACHE(_DIR)?=/' "$work/actual.args" > "$work/legacy.args"
+    set --
+    while IFS= read -r argument; do set -- "$@" "$argument"; done < "$work/legacy.args"
+    legacy_hash=$(bootstrap_stage3_args_sha256 "$@")
+    sed '/^explicit-env:[0-9]*:SIMPLE_FRONTEND_CACHE/d; /^explicit-env:[0-9]*:SIMPLE_HIR_CACHE/d' "$stage2_transcript" > "$work/legacy.transcript"
+    stage2_transcript="$work/legacy.transcript"
+    . "$work/replay.shs"
+    [ "$legacy_hash" = "$stage2_args" ] || fail 'historical absent vector changed'
+    stage2_transcript=$stage2_command_transcript
+  done
+done
+cp "$stage2_transcript" "$work/valid"
+for mutation in missing duplicate empty malformed; do
+  case "$mutation" in
+    missing) sed '/SIMPLE_HIR_CACHE_DIR=/d' "$work/valid" > "$work/bad" ;;
+    duplicate) cat "$work/valid" > "$work/bad"; grep '^explicit-env:.*:SIMPLE_HIR_CACHE=' "$work/valid" >> "$work/bad" ;;
+    empty) sed 's/^explicit-env:.*:SIMPLE_HIR_CACHE_DIR=.*/explicit-env:21:SIMPLE_HIR_CACHE_DIR=/' "$work/valid" > "$work/bad" ;;
+    malformed) sed 's/^explicit-env:.*:SIMPLE_HIR_CACHE_DIR=/explicit-env:999:SIMPLE_HIR_CACHE_DIR=/' "$work/valid" > "$work/bad" ;;
+  esac
+  if bootstrap_cache_release_stage2_cache_assignments_v1 "$work/bad" > "$work/bad.args"; then fail "$mutation accepted"; fi
+done
+unset SIMPLE_ABI_POLICY
+bootstrap_cache_release_options_v1 inherited '' absent > "$work/absent"
+SIMPLE_ABI_POLICY=; export SIMPLE_ABI_POLICY
+bootstrap_cache_release_options_v1 inherited '' absent > "$work/empty"
+! cmp -s "$work/absent" "$work/empty" || fail 'absent and empty options collapsed'
+bootstrap_cache_release_options_v1 stripped '' absent > "$work/stripped"
+cmp -s "$work/absent" "$work/stripped" || fail 'stripped child inherited policy'
+SIMPLE_ABI_POLICY='bad
+value'; export SIMPLE_ABI_POLICY
+if bootstrap_cache_release_options_v1 inherited '' absent > "$work/invalid"; then fail 'multiline policy accepted'; fi
+echo 'PASS release inline Stage2 actual/hash/replay Linux+Windows, verbose, spaces, legacy absent, malformed/cache options'

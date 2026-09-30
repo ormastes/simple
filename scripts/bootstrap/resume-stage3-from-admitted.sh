@@ -20,6 +20,9 @@ BOOTSTRAP_STAGE3_FACADE_PATH="$root/scripts/check/lib/bootstrap-stage3-provenanc
 BOOTSTRAP_STAGE3_VERSION_ROOT=$root
 export BOOTSTRAP_STAGE3_FACADE_PATH BOOTSTRAP_STAGE3_VERSION_ROOT
 . "$BOOTSTRAP_STAGE3_FACADE_PATH"
+. "$root/scripts/bootstrap/bootstrap-cache-release-vector.shs"
+. "$root/scripts/bootstrap/bootstrap-cache-lineage.shs"
+BOOTSTRAP_CACHE_PROCESS_HELPER_PATH="$root/scripts/check/lib/portable-hardlink-lock.pl"
 . "$root/scripts/check/lib/bootstrap-planner-admission-bound.shs"
 planner_admission=${SIMPLE_BOOTSTRAP_REASON_RECEIPT:-}
 [ -n "$planner_admission" ] || {
@@ -70,7 +73,7 @@ runtime_origin_before="$stage3/runtime-origin-before.txt"
 runtime_origin_after="$stage3/runtime-origin-after.txt"
 runtime_admitted="$stage3/runtime-admitted.txt"
 lock="$output.lock"
-archive="$stage3/recovery-threads1"
+archive="$stage3/attempts/recovery-threads1-$(date -u '+%Y%m%dT%H%M%S')-$$"
 
 for required in "$stage2" "$admitted" "$stage2_admission" "$seed" "$stamp" "$native_all" \
   "$stage2_sanity" "$stage2_receiver" "$stage2_receiver_log" \
@@ -103,33 +106,38 @@ stage2_compile_stack_mib=$(bootstrap_stage3_transcript_argv_value_after \
   "$stage2_transcript" --compile-stack-mib 2>/dev/null || true)
 stage2_progress=$(bootstrap_stage3_transcript_explicit_env_value \
   "$stage2_transcript" SIMPLE_BUILD_PROGRESS_EVENTS) || exit 1
+stage2_rust_log=$(bootstrap_stage3_transcript_explicit_env_value "$stage2_transcript" RUST_LOG) || exit 1
+stage2_library_path=$(bootstrap_stage3_transcript_explicit_env_value "$stage2_transcript" LIBRARY_PATH) || exit 1
+stage2_link_compat=$(bootstrap_stage3_transcript_explicit_env_value "$stage2_transcript" SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256) || exit 1
 case "$stage2_backend" in llvm|llvm-lib|cranelift) ;; *) exit 1 ;; esac
 case "$stage2_threads" in ''|*[!0-9]*|0) exit 1 ;; esac
 case "$stage2_compile_stack_mib" in ''|*[!0-9]*|0) stage2_compile_stack_mib='' ;; esac
+# Preserve the legacy environment order and add cache pairs only if their
+# complete, unambiguous values were actually recorded by the new producer.
+set -- "RUST_LOG=$stage2_rust_log" "LIBRARY_PATH=$stage2_library_path" "SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256=$stage2_link_compat" \
+  "SIMPLE_BOOTSTRAP=1" "SIMPLE_NO_DEPRECATED_WARNINGS=1" \
+  "SIMPLE_NATIVE_BUILD_RUST=1" "SIMPLE_NO_STUB_FALLBACK=1" \
+  "SIMPLE_BUILD_PROGRESS_EVENTS=$stage2_progress"
+stage2_cache_replay_file="$output/stage2-cache-replay.$$.args"
+bootstrap_cache_release_stage2_cache_assignments_v1 "$stage2_transcript" > "$stage2_cache_replay_file" || {
+  rm -f "$stage2_cache_replay_file"
+  bootstrap_stage3_error 'Stage2 cache fields incomplete, duplicated or malformed'
+}
+while IFS= read -r stage2_cache_assignment; do
+  set -- "$@" "$stage2_cache_assignment"
+done < "$stage2_cache_replay_file"
+rm -f "$stage2_cache_replay_file"
+set -- "$@" "SIMPLE_BINARY=$seed" native-build --target "$platform" --backend "$stage2_backend" \
+  --runtime-bundle core-c-bootstrap --source src/compiler --source src/app \
+  --source src/lib --entry-closure --threads "$stage2_threads"
 if [ -n "$stage2_compile_stack_mib" ]; then
-  stage2_args=$(bootstrap_stage3_args_sha256 \
-  "RUST_LOG=error" "LIBRARY_PATH=" "SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256=absent" \
-  "SIMPLE_BOOTSTRAP=1" "SIMPLE_NO_DEPRECATED_WARNINGS=1" \
-  "SIMPLE_NATIVE_BUILD_RUST=1" "SIMPLE_NO_STUB_FALLBACK=1" \
-  "SIMPLE_BUILD_PROGRESS_EVENTS=$stage2_progress" "SIMPLE_BINARY=$seed" \
-  native-build --target "$platform" --backend "$stage2_backend" \
-  --runtime-bundle core-c-bootstrap --source src/compiler --source src/app \
-  --source src/lib --entry-closure --threads "$stage2_threads" \
-  --compile-stack-mib "$stage2_compile_stack_mib" \
-  --cache-dir "$stage2_cache" --mode dynload --entry src/app/cli/bootstrap_main.spl \
-  --runtime-path "$runtime" -o "$stage2")
-else
-  stage2_args=$(bootstrap_stage3_args_sha256 \
-  "RUST_LOG=error" "LIBRARY_PATH=" "SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256=absent" \
-  "SIMPLE_BOOTSTRAP=1" "SIMPLE_NO_DEPRECATED_WARNINGS=1" \
-  "SIMPLE_NATIVE_BUILD_RUST=1" "SIMPLE_NO_STUB_FALLBACK=1" \
-  "SIMPLE_BUILD_PROGRESS_EVENTS=$stage2_progress" "SIMPLE_BINARY=$seed" \
-  native-build --target "$platform" --backend "$stage2_backend" \
-  --runtime-bundle core-c-bootstrap --source src/compiler --source src/app \
-  --source src/lib --entry-closure --threads "$stage2_threads" \
-  --cache-dir "$stage2_cache" --mode dynload --entry src/app/cli/bootstrap_main.spl \
-  --runtime-path "$runtime" -o "$stage2")
+  set -- "$@" --compile-stack-mib "$stage2_compile_stack_mib"
 fi
+stage2_verbose_count=$(grep -c '^argv:9:--verbose$' "$stage2_transcript" || true)
+case "$stage2_verbose_count" in 0) ;; 1) set -- "$@" --verbose ;; *) exit 1 ;; esac
+set -- "$@" --cache-dir "$stage2_cache" --mode dynload --entry src/app/cli/bootstrap_main.spl \
+  --runtime-path "$runtime" -o "$stage2"
+stage2_args=$(bootstrap_stage3_args_sha256 "$@") || exit 1
 bootstrap_stage3_verify_sanity_evidence_receipt \
   "$stage2_sanity" "$stage2" "$root"
 bootstrap_stage3_verify_receiver_evidence_receipt \
@@ -167,61 +175,27 @@ if [ -f "$manifest" ] && bootstrap_stage3_verify_manifest "$manifest" "$root" "$
 fi
 mkdir "$lock" || { echo "error: bootstrap output is locked: $lock" >&2; exit 1; }
 printf '%s\n' "$$" >"$lock/pid"
-trap 'rm -rf "$lock"' EXIT HUP INT TERM
-
-# Prune native-build cache scope directories older than a TTL.
-#
-# Scope dirs are named
-# `backend=...;cpu=...;opt=...;compiler=<sha>+src<fingerprint>n<count>` and are
-# mint-once: as soon as any input in the closure changes, the source
-# fingerprint changes and a NEW scope dir is minted. The old one is never
-# consulted again, and nothing else ever collects it. That was harmless only
-# while the wrappers wiped the entire cache dir on every run; now that these
-# caches persist across runs (so an unchanged tree gets a real cache hit) the
-# wipe is gone and scope dirs would otherwise accumulate without bound.
-#
-# Age-based rather than LRU on purpose: it needs no bookkeeping sidecar and no
-# lock protocol. Several bootstrap lanes build concurrently on this host, and a
-# scope dir whose mtime is older than the TTL cannot belong to a live build, so
-# this can never pull artifacts out from under a running lane. Only entries
-# matching the `backend=*` scope-dir shape are ever removed, so sibling files
-# (build_cache.sdn, *.smf) are untouched. Override the window with
-# BOOTSTRAP_NATIVE_CACHE_TTL_DAYS; 0 or a non-numeric value disables pruning.
-bootstrap_native_cache_prune() {
-  bnc_dir=$1
-  bnc_ttl=${BOOTSTRAP_NATIVE_CACHE_TTL_DAYS:-7}
-  [ -d "${bnc_dir}" ] || return 0
-  case "${bnc_ttl}" in
-    ''|*[!0-9]*) return 0 ;;
-  esac
-  [ "${bnc_ttl}" -gt 0 ] || return 0
-  bnc_n=$(find "${bnc_dir}" -maxdepth 1 -type d -name 'backend=*' \
-    -mtime +"${bnc_ttl}" -print 2>/dev/null | wc -l)
-  [ "${bnc_n}" -gt 0 ] || return 0
-  find "${bnc_dir}" -maxdepth 1 -type d -name 'backend=*' \
-    -mtime +"${bnc_ttl}" -exec rm -rf {} + 2>/dev/null || true
-  echo "  native cache: pruned ${bnc_n} scope dir(s) older than ${bnc_ttl}d in ${bnc_dir}"
+bootstrap_release_resume_cleanup() {
+  resume_status=$?
+  bootstrap_cache_release_all
+  for terminal in "$stage3_log" "$stage3_transcript" "$stage3_sanity" "$manifest"; do
+    [ ! -f "$terminal" ] || cp -p "$terminal" "$archive/terminal.${terminal##*/}"
+  done
+  bootstrap_cache_freeze_attempt "$archive" || resume_status=1
+  rm -rf -- "$lock"
+  exit "$resume_status"
 }
+trap bootstrap_release_resume_cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 for old in "$candidate" "$stage3_transcript" "$stage3_log" "$stage3_sanity" "$manifest"; do
   if [ -e "$old" ]; then cp -p "$old" "$archive/$(basename "$old").before-resume"; fi
 done
 rm -f "$candidate" "$stage3_transcript" "$stage3_log" "$stage3_sanity" "$manifest"
-# stage3-native-cache is content-hash scoped by the pure-Simple driver itself
-# (driver_native_sources_fingerprint in
-# src/compiler/80.driver/driver_aot_native_output.spl), so a resumed run with
-# an unchanged source tree can reuse it. Wiping it unconditionally on every
-# resume defeated cross-run incrementality. Preserve by default;
-# RESUME_STAGE3_FRESH_CACHE=1 forces a clean rebuild.
-if [ "${RESUME_STAGE3_FRESH_CACHE:-0}" = 1 ]; then
-  rm -rf "$stage3_cache"
-else
-  # Preserved cache still needs a reaper: scope dirs are mint-once and nothing
-  # else collects them now that the unconditional wipe is gone.
-  bootstrap_native_cache_prune "$stage3_cache"
-  bootstrap_native_cache_prune "$stage2_cache"
-fi
-mkdir -p "$stage3_cache" "$home" "$tmp" "$(dirname "$stage3_log")"
+bootstrap_cache_new_path_validate "$stage3_cache" || bootstrap_stage3_error 'noncanonical stage3 cache selection'
+mkdir -p "$home" "$tmp" "$(dirname "$stage3_log")"
 
 # Stage-2 authority files remain the immutable pre-build bindings. Fresh
 # post-build evidence is written only to the distinct `*_after` paths below.
@@ -230,16 +204,27 @@ mkdir -p "$stage3_cache" "$home" "$tmp" "$(dirname "$stage3_log")"
 # foreign lane's dir is refused. Additive: old checkouts without the guard skip it.
 # doc/05_design/compiler/incremental_build/per_lane_private_caches.md
 cache_scope_guard="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)/scripts/check/check-cache-scope-ownership.shs"
-if [ -f "$cache_scope_guard" ]; then
-  mkdir -p "$stage2_cache"
-  sh "$cache_scope_guard" "$stage2_cache" stage2 || exit 1
-  sh "$cache_scope_guard" "$stage3_cache" stage3 || exit 1
+if [ -f "$stage2_cache/.cache_scope" ]; then
+  [ "$(cat "$stage2_cache/.cache_scope")" = lane=stage2 ] || bootstrap_stage3_error 'foreign admitted Phase 2 cache scope'
 fi
 
 # Recovery starts a fresh evidence interval after the immutable Stage-2 checks.
 bootstrap_stage3_source_snapshot "$source_before" "$root"
 bootstrap_stage3_git_state "$root" "$git_before"
 bootstrap_stage3_tool_authority_snapshot "$tool_before" "$path" "$root"
+resume_cache_action=${RESUME_STAGE3_CACHE_ACTION:-reuse}
+[ "${RESUME_STAGE3_FRESH_CACHE:-0}" != 1 ] || resume_cache_action=clean
+resume_cache_options=$(bootstrap_cache_release_options_v1 stripped '' absent) || exit 1
+resume_cache_persistence=$(bootstrap_cache_persistence_policy) || exit 1
+resume_cache_options="$resume_cache_options
+$resume_cache_persistence"
+resume_cache_payload=$(bootstrap_cache_phase_inputs "$root" "$platform" "$stage2_backend" \
+  dynload "$source_before" "$runtime_admitted" "$tool_before" "$resume_cache_options") ||
+  bootstrap_stage3_error 'cannot bind current cache inputs'
+resume_cache_inputs=$(printf '%s\n' "$resume_cache_payload" | bootstrap_stage3_hash_stream) || exit 1
+bootstrap_cache_prepare "$stage3" "$stage3_cache" stage3 \
+  "$(bootstrap_stage3_hash_file "$admitted")" "$resume_cache_inputs" bootstrap-main \
+  "$resume_cache_action" || bootstrap_stage3_error 'cache mismatch or active writer; specify explicit stage3 invalidation'
 script="$root/scripts/bootstrap/bootstrap-from-scratch.sh"
 helper="$BOOTSTRAP_STAGE3_FACADE_PATH"
 script_sha_before=$(bootstrap_stage3_hash_file "$script")
@@ -262,7 +247,8 @@ stage3_args=$(bootstrap_stage3_args_sha256 \
   "RUST_LOG=error" "LIBRARY_PATH=" "SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256=absent" \
   "SIMPLE_BOOTSTRAP=1" "SIMPLE_NO_DEPRECATED_WARNINGS=1" \
   "SIMPLE_STAGE3_STREAMING_SURFACES=1" \
-  "SIMPLE_FRONTEND_CACHE=0" \
+  "SIMPLE_FRONTEND_CACHE=1" "SIMPLE_FRONTEND_CACHE_DIR=$stage3_cache/frontend" \
+  "SIMPLE_HIR_CACHE=1" "SIMPLE_HIR_CACHE_DIR=$stage3_cache/hir" \
   "MALLOC_ARENA_MAX=2" "MALLOC_TRIM_THRESHOLD_=0" \
   "SIMPLE_NATIVE_ARENA_DECLS=1" "SIMPLE_NO_STUB_FALLBACK=1" \
   "SIMPLE_BUILD_PROGRESS_EVENTS=$progress" \
@@ -288,7 +274,8 @@ bootstrap_stage3_run_transcribed "$stage3_transcript" "$root" "$stage3_log" \
   "$home" "$tmp" "$path" RUST_LOG=error LIBRARY_PATH= \
   SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256=absent SIMPLE_BOOTSTRAP=1 \
   SIMPLE_NO_DEPRECATED_WARNINGS=1 SIMPLE_STAGE3_STREAMING_SURFACES=1 \
-  SIMPLE_FRONTEND_CACHE=0 \
+  SIMPLE_FRONTEND_CACHE=1 "SIMPLE_FRONTEND_CACHE_DIR=$stage3_cache/frontend" \
+  SIMPLE_HIR_CACHE=1 "SIMPLE_HIR_CACHE_DIR=$stage3_cache/hir" \
   MALLOC_ARENA_MAX=2 MALLOC_TRIM_THRESHOLD_=0 SIMPLE_NATIVE_ARENA_DECLS=1 \
   SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_BUILD_PROGRESS_EVENTS="$progress" \
   SIMPLE_COMPILER_PHASE_PROFILE=1 \
@@ -306,6 +293,7 @@ bootstrap_stage3_run_transcribed "$stage3_transcript" "$root" "$stage3_log" \
   src/app/cli/bootstrap_main.spl
 status=$?
 set -e
+bootstrap_cache_report_log "$stage3_log"
 if [ "$status" -ne 0 ]; then
   exit "$status"
 fi
