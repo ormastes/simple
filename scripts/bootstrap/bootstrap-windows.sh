@@ -53,35 +53,7 @@ git -C "${repo_root}" submodule update --init -- .spipe/spipe || {
 sleep 2
 git -C "${repo_root}/.spipe/spipe" status --porcelain >/dev/null 2>&1 || true
 
-# Materialize git symlinks as NTFS junctions/hardlinks before anything else
-# reads the tree. A checkout done by a Windows session that lacks a
-# fresh-logon SeCreateSymbolicLinkPrivilege token (see
-# doc/08_tracking/bug/windows_build_subcommand_silent_noop_stale_binary_2026-08-05.md)
-# degrades every git symlink to a plain text placeholder file containing the
-# literal target string — `src/compiler/backend` (an alias for the numbered
-# `70.backend` layer dir) and dozens like it would silently resolve to
-# nothing, breaking the loader in confusing ways far from this root cause.
-# No-op, fast, and idempotent on a checkout where symlinks already resolved
-# correctly (e.g. an elevated or Developer-Mode-since-logon session).
-materialized_receipt_dir="${repo_root}/build/bootstrap/materialized-links"
-materialized_receipt="${materialized_receipt_dir}/windows-materialized-links.$$.env"
-umask 077
-bash "${script_dir}/../setup/materialize-symlinks-windows.shs" \
-  --strict-missing --receipt "${materialized_receipt}" "${repo_root}" || {
-  echo "error: required Windows symlink materialization failed; see ${materialized_receipt}" >&2
-  exit 1
-}
-# Export the receipt ONLY when materialization actually produced one. On a
-# non-Windows host materialize-symlinks-windows.shs is a deliberate no-op that
-# exits 0 before writing any receipt, but this variable used to be exported
-# unconditionally beforehand. bootstrap_stage3_git_state treats a non-empty
-# value as "a materialized-links receipt exists" and routes to
-# bootstrap_stage3_materialized_git_state, which then failed on the absent file
-# -- surfacing only as "could not bind preflight source and git state before
-# checks" after every Rust stage had already built green, i.e. phase 1 could
-# never complete on Linux through this entrypoint.
-if [ -f "${materialized_receipt}" ]; then
-  export SIMPLE_WINDOWS_MATERIALIZED_LINKS_RECEIPT="${materialized_receipt}"
-fi
+# Preparation and receipt validation belong to the canonical startup owner.
+# Preserve any caller-supplied receipt so stale authority fails closed there.
 
 exec sh "${script_dir}/bootstrap-from-scratch.sh" "${forward[@]}"

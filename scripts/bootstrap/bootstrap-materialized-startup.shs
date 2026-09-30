@@ -1,0 +1,26 @@
+#!/bin/sh
+
+# Must run before source snapshots or compiler work. The native consumer is
+# the sole validator; never replace it with receipt existence/string checks.
+bootstrap_materialized_startup() {
+  bms_root=$1 bms_output=$2
+  bms_receipt=${SIMPLE_WINDOWS_MATERIALIZED_LINKS_RECEIPT:-}
+  mkdir -p "$bms_output/materialized-links" || return 1
+  bms_state="$bms_output/materialized-links/startup-git-state.$$.env"
+  if [ -z "$bms_receipt" ]; then
+    # Revision changes without supplied authority retain the safe repair path.
+    bash "$bms_root/scripts/setup/materialize-symlinks-windows.shs" --undo "$bms_root" || return 1
+    bms_receipt="$bms_output/materialized-links/windows-materialized-links.$$.env"
+    bms_receipt=$(cygpath -au "$bms_receipt") || return 1
+    bash "$bms_root/scripts/setup/materialize-symlinks-windows.shs" \
+      --strict-missing --receipt "$bms_receipt" "$bms_root" || return 1
+  fi
+  if ! bootstrap_stage3_materialized_git_state "$bms_root" "$bms_state" "$bms_receipt"; then
+    echo "error: Windows materialization receipt is invalid: $bms_receipt" >&2
+    echo 'Reprepare with materialize-symlinks-windows.shs --undo, then --strict-missing --receipt with a new receipt path; supply that receipt before retrying.' >&2
+    return 1
+  fi
+  SIMPLE_WINDOWS_MATERIALIZED_LINKS_RECEIPT=$bms_receipt
+  export SIMPLE_WINDOWS_MATERIALIZED_LINKS_RECEIPT
+  echo "Windows materialization receipt verified: $bms_receipt"
+}
