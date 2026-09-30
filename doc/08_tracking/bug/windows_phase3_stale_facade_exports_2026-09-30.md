@@ -56,3 +56,34 @@ The earlier generic-field and static-owner changes do not directly repair the
 the `std.io` missing exports, unresolved `HwFrontendRowFragment`, or the three
 unresolved `_` binders. Those need separate reproduction after refreshing the
 producer; this patch does not claim to clear all Phase 3 failures.
+
+## Corrected-producer component attempt
+
+On 2026-09-30, the immutable Windows producer with SHA-256
+`cbe4a8df41e14287005e258cf57f8e16bd096dee0c09954b39495446e5ab19cc`
+compiled the new `test/fixtures/native_io_facade_exports/main.spl` entry against
+this PR's real source modules. The fixture checks every byte value 0..255,
+missing-file behavior, and existing/missing directories through `app.io.mod`.
+
+Qualification status: **BLOCKED, no fixture execution and no runtime PASS**.
+The pure-Simple positional route processed 75 HIR modules, then exited 1 after
+40.10 seconds with four `unresolved type: SdnSpan` diagnostics in
+`src/lib/common/sdn/value.spl`. That module declares `pub class SdnSpan` itself;
+the failure is not evidence that the new I/O facade imports are missing.
+The HIR cache recorded 0 hits, 75 misses and 74 stores.
+
+Evidence root (local, retained):
+`D:/dev/simple-windows-stale-facades-20260930/build/native_probe/phase2/cbe4a8df41e14287005e258cf57f8e16bd096dee0c09954b39495446e5ab19cc/facade-entry/`.
+`build3.started.json` records the pure positional arguments; `build3.result.json`
+records terminal exit; `build3.stdout.log` and `build3.stderr.log` retain the
+diagnostics. The runtime authority is the reviewed retained
+`stage2-runtime-authority` under `simple-windows-hir-shared-fixes-20260930`.
+
+The preceding `build` and `build2` attempts used explicit `--entry` and `--source`.
+Route review established that those arguments select the embedded Rust
+coordinator when `SIMPLE_BOOTSTRAP_STAGE3` is unset, despite
+`SIMPLE_NO_BOOTSTRAP_DELEGATE=1`. Their compile/link diagnostics are unqualified
+Rust-backed observations and **must not be counted as self-hosted evidence**.
+The positional attempt used a separate `cache-pure` directory and no explicit
+entry/source flags. No Rust seed binary was invoked. Work stopped at the
+three-attempt limit without further fixture builds.
