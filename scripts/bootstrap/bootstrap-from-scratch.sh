@@ -2432,7 +2432,7 @@ if [ -z "${resume_stage4_output}" ] && [ -x "${seed_bin}" ] && [ -f "${native_al
     "${compiler_backfill_lib}"; then
     seed_stale=1
     if [ "${full_bootstrap}" -eq 1 ]; then
-      echo "Seed/runtime stale (Rust source content changed since last build). Full bootstrap will rebuild Rust."
+      echo "Seed/runtime stale (recorded seed input fingerprint changed). Full bootstrap will rebuild Rust."
     else
       echo "WARNING: Seed/runtime stale, but this is not --full-bootstrap; reusing the existing Rust seed."
     fi
