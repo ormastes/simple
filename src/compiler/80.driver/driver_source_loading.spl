@@ -915,8 +915,22 @@ fn _driver_try_numbered_entry_import_rel(root: text, rel: text) -> text:
         return init_path
     ""
 
+fn _driver_entry_import_checkout_prefix(entry_dir: text) -> text:
+    # Admission owns snapshot validation. An importer within that frozen tree
+    # must resolve qualified imports in the same tree, including failed probes.
+    # Keep ordinary checkout resolution unchanged outside the path boundary.
+    # This is a bounded environment/path check, with no directory walk.
+    val snapshot = _driver_canonical_source_path(sosix_env_get_nullable("SIMPLE_SCV_SNAPSHOT_ROOT") ?? "")
+    if snapshot == "":
+        return ""
+    val importer = _driver_canonical_source_path(entry_dir)
+    if importer == snapshot or importer.starts_with(snapshot + "/"):
+        return snapshot + "/"
+    ""
+
 fn _driver_try_entry_import_rel(rel: text, entry_dir: text) -> text:
-    var roots: [text] = ["", "src/"]
+    val checkout_prefix = _driver_entry_import_checkout_prefix(entry_dir)
+    var roots: [text] = [checkout_prefix, checkout_prefix + "src/"]
     if entry_dir != "":
         roots = roots.push(entry_dir + "/")
     for root in roots:
@@ -1093,8 +1107,9 @@ fn _driver_resolve_entry_import_exact(module_path: text, entry_dir: text) -> tex
     if numbered_compiler != "":
         return numbered_compiler
 
+    val library_root = _driver_entry_import_checkout_prefix(entry_dir) + "src/lib/"
     if not module_path.starts_with("std."):
-        val lib_base = "src/lib/" + rel
+        val lib_base = library_root + rel
         val lib_spl_path = lib_base + ".spl"
         var lib_spl_exists = false
         unsafe(capabilities: [ffi]):
@@ -1114,7 +1129,7 @@ fn _driver_resolve_entry_import_exact(module_path: text, entry_dir: text) -> tex
         if lib_init_exists:
             return lib_init_path
         for family in ["nogc_async_mut", "nogc_async_immut", "nogc_sync_immut", "nogc_sync_mut", "common", "gc_async_mut", "gc_async_immut", "gc_sync_mut", "gc_sync_immut", "nogc_async_mut_noalloc"]:
-            val family_base = "src/lib/" + family + "/" + rel
+            val family_base = library_root + family + "/" + rel
             val family_spl_path = family_base + ".spl"
             var family_spl_exists = false
             unsafe(capabilities: [ffi]):
@@ -1134,7 +1149,7 @@ fn _driver_resolve_entry_import_exact(module_path: text, entry_dir: text) -> tex
             if family_init_exists:
                 return family_init_path
     if module_path.starts_with("std."):
-        val lib_base = "src/lib/" + rel.substring(4)
+        val lib_base = library_root + rel.substring(4)
         val lib_spl_path = lib_base + ".spl"
         var lib_spl_exists = false
         unsafe(capabilities: [ffi]):
@@ -1155,7 +1170,7 @@ fn _driver_resolve_entry_import_exact(module_path: text, entry_dir: text) -> tex
             return lib_init_path
         val lib_subpath = rel.substring(4)
         for family in ["nogc_async_mut", "nogc_async_immut", "nogc_sync_immut", "nogc_sync_mut", "common", "gc_async_mut", "gc_async_immut", "gc_sync_mut", "gc_sync_immut", "nogc_async_mut_noalloc"]:
-            val family_base = "src/lib/" + family + "/" + lib_subpath
+            val family_base = library_root + family + "/" + lib_subpath
             val family_spl_path = family_base + ".spl"
             var family_spl_exists = false
             unsafe(capabilities: [ffi]):
