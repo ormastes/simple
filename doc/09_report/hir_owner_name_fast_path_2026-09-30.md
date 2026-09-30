@@ -46,8 +46,47 @@ by `src/runtime/counterpart_abi_runtime.c`. Compile exit: 1; elapsed: 32.148 s.
 do not exist, so the differential assertions and allocation counter have not
 executed. The three-attempt limit was reached; no further build was launched.
 
-STATUS: WARN — implementation and native object compilation complete; runtime
-regression/allocation evidence and full SymbolTable tests pending.
+## Link-only setup completion and first execution
+
+The parent subsequently authorized hydration of the exact tracked counterpart
+ABI header and completion of link setup using existing objects. The header was
+read from retained revision `0dedfd36ee57ecb6f53b1df163268e82219ff172`; its hash is
+in `header-hydration.json`. No compiler frontend was invoked. Five user and 36
+runtime cache objects retained their exact hashes and timestamps. Four missing
+runtime support objects and the canonical Linux entry shim completed setup.
+
+Linking exposed an independent producer alias-emission defect: the same oracle
+function appeared in both logical and physical module objects. `nm` output and
+`objdump -dr` instruction/relocation streams were identical. The diagnostic link
+omitted only the redundant logical alias; both cache files remain intact.
+No multiple-definition suppression flag was used. The full link input manifest
+and equivalence evidence are under `link-resume/`; this does not qualify the
+producer's normal linker route.
+
+The first executable reached allocation measurement without a mismatch in the
+32 differential cases. It then exited **5**, failing the zero-allocation budget:
+
+| 256 canonical calls | Registered object growth | Objects/call |
+|---|---:|---:|
+| Fast path | 1,536 | 6 |
+| Previous algorithm | 20,224 | 79 |
+
+This is 92.4% less registered-object growth in this fixture, but the requested
+allocation-free behavior is **not achieved**. No CPU-time speedup was measured.
+The first runtime failure ended validation; no further semantic fix/retry was
+performed. `run.log` and `link-resume/final-result.json` are authoritative for
+the actual execution; the earlier `result.json` remains the failed full build.
+
+STATUS: FAIL — zero-allocation acceptance unmet. Differential fixture reached
+the measurement successfully; full SymbolTable tests remain unexecuted.
+
+## Separate memory event
+
+The parent reported a WSL global OOM at 10:24:04 killing `simple.rejected` with
+17,355,696 KiB anonymous RSS, and CLI host PID 690815 exiting 137 in that
+interval. Exact namespace mapping was pending. This is separate from the
+earlier Phase 3 PID 656341 samples (4.37/6.08 GiB RSS); neither event proves a
+leak or attributes that OOM to the sampled Phase 3 process. No RSS cap was added.
 
 No full-build speedup or memory-leak claim is made. Paired full-closure CPU,
 boundary-memory and semantic-output comparison remains required for those
