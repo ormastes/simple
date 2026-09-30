@@ -51,3 +51,42 @@ the implementation and test hashes matched their captured pre-execution inputs.
 Logs, raw statuses and immutable input capture:
 `D:/dev/simple-wsl-recovery-20260928/rust-policy-relocation-contract-cycle1-20260929`.
 No compiler/bootstrap execution or live cache/stamp modification was performed.
+
+## Windows recurrence on the older frozen producer, 2026-09-30
+
+The isolated Windows `4a5a4ca15761` producer retained the older `f9bdea7b3238`
+bootstrap scripts, before the correction in `ff04909dfac0`. Its copied seed,
+Cargo cache and native objects matched their donor bytes and modification times.
+Nevertheless, the recorded aggregate changed from `fbd46ef1726e` to
+`cd6cdfba059c`: only the toolchain category changed. Compiler sources (42,875
+records), Cargo path dependencies (2), runtime sources (256), policy (525),
+native tools (22), recipes and unclassified records remained identical.
+
+A bounded resolver-only replay reproduced both complete 16-record toolchain
+category hashes exactly. The sole differing record was `rust-policy-path`, from
+`/d/dev/simple-windows-positional-snapshot-producer-20260930/src/compiler_rust/rust-toolchain.toml`
+to `/d/dev/simple-windows-hir-shared-fixes-20260930/src/compiler_rust/rust-toolchain.toml`.
+The policy hash, selected binaries and versions were unchanged. The live build
+was preserved. Its first Rust invocation subsequently passed in 9m22s and
+reported 253 `Compiling` records; no cache-hit count was reported.
+
+Windows/MSYS execution of the production Rust fingerprint block reproduced the
+relocation failure against the frozen implementation. The same block from
+current main passed relocation equality and policy-content, tool-path,
+tool-bytes, tool-version, foreign-policy, duplicate-policy and missing-policy
+controls. This supplements the existing full fingerprint regression; it does
+not create another permanent duplicate suite. Evidence and the finite diagnostic
+harness are retained in
+`D:/dev/simple-windows-hir-shared-recovery-20260930/`:
+`toolchain-differential.log`, `old-toolchain.records`, `new-toolchain.records`,
+`policy-relocation-f9b-negative.log`, `policy-relocation-baseline.log`, and
+`bootstrap_seed_policy_relocation_test.shs`. The historically named
+`policy-relocation-baseline.log` is the current-main **PASS**, not the negative.
+
+The bootstrap status text now reports a changed seed input fingerprint instead
+of asserting that Rust source content changed. Future frozen source generations
+must include the existing correction. Old stamps remain untouched. Reusing the
+same canonical source root also avoids relocation costs in Cargo's separate
+freshness checks: for example, the copied cache predates the new checkout's
+`vendor/regex-syntax/src/lib.rs` timestamp (09:00:51 versus 10:52:06). Fixing this
+fingerprint record alone does not prove that Cargo will reuse every artifact.
