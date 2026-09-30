@@ -1,0 +1,61 @@
+"""
+Imported generic method signatures retain their declaring-owner dependencies.
+
+Regression for the Linux TCP import-only failure: Result<TcpStream, IoError>
+projected to the scalar name Result, skipping both generic argument owners.
+Run with the rebuilt self-hosted test runner. Native reproduction evidence is
+in the accompanying 2026-09-30 bug report; no native PASS is implied here.
+"""
+# @req REQ-SSPEC-COMPILER
+use std.spec.*
+use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.common.config.{Logger}
+
+fn generic_signature_lower(method: text) -> HirLowering:
+    val logger = Logger(level: 0)
+    val errors_source = "struct Fault:\n    code: i64"
+    val owner_source = "use generic.errors.\{Fault\}\n\nstruct Token:\n    value: i64\n\nclass Bridge:\n    handle: i64\n" + method
+    val consumer_source = "use generic.owner.\{Bridge\}\n\nfn main() -> i64:\n    0"
+    var modules: Dict<text, Module> = {}
+    modules["generic.errors"] = parse_full_frontend(errors_source, "generic.errors", "generic.errors", logger)
+    modules["generic.owner"] = parse_full_frontend(owner_source, "generic.owner", "generic.owner", logger)
+    val consumer = parse_full_frontend(consumer_source, "generic.consumer", "generic.consumer", logger)
+    val sources = [
+        SourceFile(path: "generic/errors.spl", content: errors_source, module_name: "generic.errors"),
+        SourceFile(path: "generic/owner.spl", content: owner_source, module_name: "generic.owner")
+    ]
+    val surfaces = module_surfaces_from_modules(modules, sources)
+    expect(surfaces.is_ok()).to_equal(true)
+    var lowering = hirlowering_for_module("generic.consumer", surfaces.unwrap())
+    val hir = lowering.lower_module(consumer)
+    expect(hir.functions.len()).to_be_greater_than(0)
+    expect(lowering.errors.len()).to_equal(0)
+    expect(lowering.symbols.lookup_qualified_type_raw("generic.owner", "Token") >= 0).to_equal(true)
+    expect(lowering.symbols.lookup_qualified_type_raw("generic.owner", "Fault") >= 0).to_equal(true)
+    lowering
+
+describe "generic imported method dependencies":
+    it "registers sibling and explicitly imported return arguments":
+        step("import only a class whose Result return names two unimported argument types")
+        val lowering = generic_signature_lower("    fn receive() -> Result<Token, Fault>:\n        Ok(Token(value: 1))")
+        expect(lowering.symbols.lookup_qualified_type_raw("generic.errors", "Fault") >= 0).to_equal(true)
+
+    it "registers named generic parameter arguments":
+        step("import a class whose method accepts Result<Token, Fault>")
+        val lowering = generic_signature_lower("    fn send(value: Result<Token, Fault>) -> i64:\n        1")
+        expect(lowering.symbols.lookup_qualified_type_raw("generic.owner", "Bridge") >= 0).to_equal(true)
+
+    it "registers nested arguments inside an array element projection":
+        step("import a class whose parameter contains an array of generic results")
+        val lowering = generic_signature_lower("    fn send(values: [Result<Token, Fault>]) -> i64:\n        1")
+        expect(lowering.symbols.lookup_qualified_type_raw("generic.errors", "Fault") >= 0).to_equal(true)
+
+    it "registers named generic arguments inside array returns":
+        step("import a class whose method returns an array of generic results")
+        val lowering = generic_signature_lower("    fn receive() -> [Result<Token, Fault>]:\n        []")
+        expect(lowering.symbols.lookup_qualified_type_raw("generic.owner", "Bridge") >= 0).to_equal(true)
