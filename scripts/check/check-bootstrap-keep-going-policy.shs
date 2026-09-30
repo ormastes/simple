@@ -1,0 +1,181 @@
+#!/bin/sh
+# Exercise production scheduling with fake commands; no compiler/bootstrap build.
+set -eu
+root=${1:-$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)}
+. "$root/scripts/bootstrap/bootstrap-cache-policy.shs"
+policy_temp_base=$(CDPATH= cd -- "${TMPDIR:-/tmp}" && pwd -P)
+work=$(mktemp -d "$policy_temp_base/bootstrap-keep-going.XXXXXX")
+case "$work" in "$policy_temp_base"/bootstrap-keep-going.??????) ;;
+  *) echo 'FAIL: temporary path escaped expected base' >&2; exit 1 ;;
+esac
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+fail() { echo "FAIL: $*" >&2; exit 1; }
+phase_script="$root/scripts/bootstrap/bootstrap-phase-verification.shs"
+# Load the actual orchestration functions without starting admission/builds.
+for name in matrix_should_skip record_skipped_task record_unsupported_task run_matrix_task run_inventory_rows; do
+  awk -v signature="$name() {" '$0 == signature { copy=1 } copy { print } copy && /^}/ { exit }' \
+    "$phase_script" >>"$work/functions.sh"
+done
+sed -n '/^summary_read_status=0$/,$p' "$phase_script" >"$work/verdict.sh"
+[ -s "$work/verdict.sh" ] || fail 'production terminal verdict not found'
+. "$work/functions.sh"
+die() { fail "$@"; }
+mkdir -p "$work/cache" "$work/logs"
+printf 'compatible-object\n' >"$work/cache/object"
+cat >"$work/command.sh" <<'EOF'
+#!/bin/sh
+printf '%s:%s\n' "$1" "$SIMPLE_COMPILE_FAIL_FAST" >>"$POLICY_EXECUTION_LOG"
+[ "$1" != fail ]
+EOF
+export POLICY_EXECUTION_LOG="$work/executed"
+run_task() {
+  rt_name=$1
+  shift
+  rt_status=0
+  "$@" || rt_status=$?
+  rt_result=PASS
+  [ "$rt_status" -eq 0 ] || rt_result=FAIL
+  printf 'task=%s|result=%s|status=%s\n' "$rt_name" "$rt_result" "$rt_status" >>"$summary"
+  return "$rt_status"
+}
+check_matrix() {
+  expected_policy=$1
+  shift
+  bootstrap_compile_failure_policy "$@"
+  [ "$SIMPLE_COMPILE_FAIL_FAST" = "$expected_policy" ] || fail 'flag/env precedence'
+  matrix_failed=0
+  matrix_unsupported=0
+  summary="$work/summary"
+  : >"$summary"
+  : >"$POLICY_EXECUTION_LOG"
+  run_matrix_task first sh "$work/command.sh" fail
+  run_matrix_task later sh "$work/command.sh" later
+  [ "$matrix_failed" -eq 1 ] || fail 'failure latch was cleared'
+  if [ "$expected_policy" = 1 ]; then
+    [ "$(wc -l <"$POLICY_EXECUTION_LOG" | tr -d ' ')" = 1 ] || fail 'fail-fast launched later task'
+    grep -q 'task=later|result=SKIPPED|status=fail-fast' "$summary" || fail 'missing skipped row'
+    [ "$matrix_task_passed" -eq 0 ] || fail 'skipped task admitted as ready'
+  else
+    grep -q '^later:0$' "$POLICY_EXECUTION_LOG" || fail 'collect-all suppressed later task or child policy'
+    grep -q 'task=later|result=PASS' "$summary" || fail 'later passing receipt missing'
+  fi
+  [ "$(cat "$work/cache/object")" = compatible-object ] || fail 'compatible cache changed'
+  # Execute the production verdict: later success must not hide earlier failure.
+  verdict_status=0
+  ( . "$work/verdict.sh" ) || verdict_status=$?
+  [ "$verdict_status" -eq 1 ] || fail 'failed run became success'
+  grep -q '^overall=FAIL$' "$summary" || fail 'missing aggregate FAIL receipt'
+}
+unset SIMPLE_COMPILE_FAIL_FAST CI
+check_matrix 0
+unset SIMPLE_COMPILE_FAIL_FAST
+CI=true
+export CI
+check_matrix 1
+check_matrix 0 --fail-fast --keep-going
+check_matrix 1 --keep-going --fail-fast
+SIMPLE_COMPILE_FAIL_FAST=0
+check_matrix 0
+SIMPLE_COMPILE_FAIL_FAST=invalid
+check_matrix 1
+CI=false
+SIMPLE_COMPILE_FAIL_FAST=invalid
+check_matrix 0
+CI=1
+unset SIMPLE_COMPILE_FAIL_FAST
+check_matrix 1
+CI=0
+unset SIMPLE_COMPILE_FAIL_FAST
+check_matrix 0
+SIMPLE_COMPILE_FAIL_FAST=1
+check_matrix 1
+[ "$(bootstrap_strategy_failure_policy normal)" = fail-fast ] || fail 'strategy policy differs'
+bootstrap_compile_failure_policy --keep-going
+[ "$(bootstrap_strategy_failure_policy normal)" = inventory-to-end ] || fail 'host strategy stops early'
+
+# Execute the supervisor's actual cancellation branch with a recording kill
+# function. Admission/failure-manifest handling remains outside this branch.
+sed -n '/    if \[ "$qualifier_rc" -ne 0 \] &&/,/    fi/p' \
+  "$root/scripts/bootstrap/bootstrap-strategy.shs" >"$work/cancel.sh"
+[ -s "$work/cancel.sh" ] || fail 'supervisor cancellation branch missing'
+kill() { printf '%s\n' "$*" >>"$work/cancelled"; }
+engine_pid=12345
+for policy in 0 1; do
+  SIMPLE_COMPILE_FAIL_FAST=$policy
+  qualifier_rc=1
+  : >"$work/cancelled"
+  . "$work/cancel.sh"
+  if [ "$policy" = 1 ]; then
+    [ -s "$work/cancelled" ] || fail 'CI supervisor did not cancel after failure'
+  else
+    [ ! -s "$work/cancelled" ] || fail 'host supervisor cancelled independent work'
+  fi
+done
+unset -f kill
+
+# Unsupported prerequisites also latch policy, without suppressing independent
+# work on a host or admitting unrun work as successful on CI.
+for policy in 0 1; do
+  SIMPLE_COMPILE_FAIL_FAST=$policy
+  matrix_failed=0 matrix_unsupported=0
+  : >"$summary"
+  : >"$POLICY_EXECUTION_LOG"
+  record_unsupported_task unavailable missing-artifact
+  run_matrix_task independent sh "$work/command.sh" later
+  [ "$matrix_failed" -eq 1 ] || fail 'unsupported did not latch failure'
+  if [ "$policy" = 0 ]; then
+    grep -q '^later:0$' "$POLICY_EXECUTION_LOG" || fail 'host suppressed independent work after unsupported'
+  else
+    [ ! -s "$POLICY_EXECUTION_LOG" ] || fail 'CI executed work after unsupported'
+    grep -q 'task=independent|result=SKIPPED' "$summary" || fail 'unsupported followup not skipped'
+  fi
+  verdict_status=0
+  ( . "$work/verdict.sh" ) || verdict_status=$?
+  [ "$verdict_status" -eq 1 ] || fail 'unsupported aggregate passed'
+done
+
+# Exercise actual bounded row orchestration and receipts. A failed row is followed
+# by a useful passing row locally; CI leaves the later row explicitly unexecuted.
+source_root="$work"
+logs="$work/logs"
+summary="$work/summary"
+test_workers=1
+printf '%s\n' "$source_root/fail_spec.spl" "$source_root/later_spec.spl" >"$work/manifest"
+run_inventory_row() {
+  printf '%s\n' "$3" >>"$POLICY_EXECUTION_LOG"
+  if [ "$2" = 1 ]; then
+    printf 'FAIL 1 1 0 1 0 10\n' >"$logs/$1.rows/$2.result"
+  else
+    printf 'PASS 0 1 1 0 0 10\n' >"$logs/$1.rows/$2.result"
+  fi
+}
+for policy in 0 1; do
+  SIMPLE_COMPILE_FAIL_FAST=$policy
+  matrix_failed=0
+  : >"$POLICY_EXECUTION_LOG"
+  if run_inventory_rows rows fake-runner fake-owner '' "$work/manifest"; then
+    fail 'failed inventory returned success'
+  fi
+  if [ "$policy" = 0 ]; then
+    grep -q '^later_spec.spl$' "$POLICY_EXECUTION_LOG" || fail 'later inventory row suppressed'
+    grep -q 'later_spec.spl.*PASS' "$logs/rows.inventory.tsv" || fail 'later inventory receipt absent'
+  else
+    [ "$(wc -l <"$POLICY_EXECUTION_LOG" | tr -d ' ')" = 1 ] || fail 'fail-fast inventory launched later row'
+    grep -q 'later_spec.spl.*SKIPPED' "$logs/rows.inventory.tsv" || fail 'unrun inventory row not terminalized'
+  fi
+done
+
+# Admission is a fatal prerequisite even under --keep-going. The fake compiler
+# must never execute when the supplied immutable snapshot digest is invalid.
+printf '#!/bin/sh\necho invalid-admission-executed >>"$POLICY_EXECUTION_LOG"\n' >"$work/compiler"
+chmod +x "$work/compiler"
+: >"$POLICY_EXECUTION_LOG"
+invalid_status=0
+sh "$phase_script" --phase=stage2 --compiler="$work/compiler" \
+  --compiler-sha256=0000000000000000000000000000000000000000000000000000000000000000 \
+  --work-root="$work/invalid" --source-root="$root" --keep-going \
+  >"$work/invalid.log" 2>&1 || invalid_status=$?
+[ "$invalid_status" -eq 2 ] || fail 'invalid admission was not fatal'
+grep -q 'canonical compiler hash mismatch' "$work/invalid.log" || fail 'invalid snapshot reached wrong gate'
+[ ! -s "$POLICY_EXECUTION_LOG" ] || fail 'invalid compiler executed'
+printf '%s\n' 'PASS: collect-all default, CI fail-fast, ordered overrides, child policy, cache retention, inventory receipts, fatal admission'

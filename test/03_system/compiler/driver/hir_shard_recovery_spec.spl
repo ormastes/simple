@@ -1,0 +1,254 @@
+# Purpose: specify bounded HIR crash replacement and aggregate failure.
+# Requirements: doc/02_requirements/feature/bootstrap_keep_going.md
+# Architecture: doc/04_architecture/bootstrap_keep_going.md
+# Plan: doc/03_plan/sys_test/bootstrap_keep_going.md
+
+use std.spec
+use compiler.driver.driver_hir_recovery.{hir_shard_recovery_can_replace, hir_shard_aggregate_exit}
+use compiler.driver.driver_hir_recovery.{hir_shard_recovery_claim, hir_shard_recovery_terminal, hir_shard_recovery_seal, hir_shard_recovery_progress, hir_shard_recovery_failure_count, hir_shard_recovery_complete, hir_shard_recovery_finished}
+use compiler.driver.driver_hir_recovery.{hir_shard_recovery_inventory, hir_shard_recovery_close_inventory}
+use std.io_runtime.{dir_create_all, dir_exists, dir_list, file_read, file_write, getpid}
+
+# Each scenario owns a new queue. Keep receipts for inspection after the run.
+fn recovery_fixture(label: text) -> text:
+    val queue = "build/test_output/hir_recovery/{getpid()}-{label}"
+    expect(dir_exists(queue)).to_equal(false)
+    expect(dir_create_all(queue)).to_equal(true)
+    queue
+
+fn corrupt_recovery_record(queue: text, suffix: text, content: text):
+    var changed = 0
+    for name in dir_list(queue):
+        if name.ends_with(suffix):
+            expect(file_write("{queue}/{name}", content)).to_equal(true)
+            changed = changed + 1
+    expect(changed).to_equal(1)
+
+fn only_recovery_terminal(queue: text) -> text:
+    var record = ""
+    var found = 0
+    for name in dir_list(queue):
+        if name.ends_with(".terminal"):
+            record = file_read("{queue}/{name}")
+            found = found + 1
+    expect(found).to_equal(1)
+    record
+
+describe "HIR shard bounded recovery decisions":
+    describe "REQ-KG-005: replacement consumes newly attributed work":
+        it "should replace a crashed worker after one newly sealed module":
+            step("Record a module crash during a local collect-all build")
+            expect(hir_shard_recovery_can_replace(false, 139, 1)).to_equal(true)
+
+        it "should replace a timed-out worker only after attributed work":
+            step("Attribute a timed-out worker to its active module")
+            expect(hir_shard_recovery_can_replace(false, 124, 1)).to_equal(true)
+
+        it "should accept a reaped signal status after progress":
+            step("Observe a confirmed signal death after a module claim")
+            expect(hir_shard_recovery_can_replace(false, -139, 1)).to_equal(true)
+
+        it "should stop when a worker fails before claiming a module":
+            step("Observe a preflight failure without module progress")
+            expect(hir_shard_recovery_can_replace(false, 1, 0)).to_equal(false)
+
+        it "should stop when a crash cannot be attributed to new work":
+            step("Observe an unattributed crash without opening another retry")
+            expect(hir_shard_recovery_can_replace(false, 139, 0)).to_equal(false)
+
+        it "should reject a negative progress count":
+            step("Reject invalid progress as evidence for a replacement")
+            expect(hir_shard_recovery_can_replace(false, 139, -1)).to_equal(false)
+
+        it "should not replace a worker that completed successfully":
+            step("Finish a successful worker without scheduling crash recovery")
+            expect(hir_shard_recovery_can_replace(false, 0, 3)).to_equal(false)
+
+        it "should stop after a module crash under explicit fail-fast policy":
+            step("Apply the CI fail-fast policy to an attributed crash")
+            expect(hir_shard_recovery_can_replace(true, 139, 1)).to_equal(false)
+
+        it "should stop after multiple claims under explicit fail-fast policy":
+            step("Keep fail-fast authoritative even when the worker made progress")
+            expect(hir_shard_recovery_can_replace(true, 1, 5)).to_equal(false)
+
+    describe "REQ-KG-004: failures prohibit successful aggregate admission":
+        it "should allow a failure-free aggregate":
+            step("Complete all worker and module outcomes successfully")
+            expect(hir_shard_aggregate_exit(0, 0)).to_equal(0)
+
+        it "should reject one failed worker without a module diagnostic":
+            step("Retain a worker crash even when no diagnostic was emitted")
+            expect(hir_shard_aggregate_exit(1, 0)).to_equal(1)
+
+        it "should reject a diagnosed module when every worker exits cleanly":
+            step("Retain module failure independently of worker exit statuses")
+            expect(hir_shard_aggregate_exit(0, 1)).to_equal(1)
+
+        it "should reject combined worker and module failures":
+            step("Aggregate separate failures without allowing success")
+            expect(hir_shard_aggregate_exit(2, 3)).to_equal(1)
+
+        it "should reject unavailable worker accounting":
+            step("Treat a failed accounting read as a build failure")
+            expect(hir_shard_aggregate_exit(-1, 0)).to_equal(1)
+
+        it "should reject an unavailable module ledger":
+            step("Prevent missing ledger evidence from becoming a successful aggregate")
+            expect(hir_shard_aggregate_exit(0, -1)).to_equal(1)
+
+        it "should not cancel positive failures against an accounting error":
+            step("Preserve failure when counters contain both errors and failed work")
+            expect(hir_shard_aggregate_exit(-1, 1)).to_equal(1)
+
+    describe "REQ-KG-002: durable claims remain terminal across worker replacement":
+        it "should let a replacement claim the unfinished independent module":
+            step("Complete module A and leave module B active when its worker dies")
+            val queue = recovery_fixture("independent-after-crash")
+            expect(hir_shard_recovery_claim(queue, "worker-0", "a.spl", "key-a")).to_equal(1)
+            expect(hir_shard_recovery_terminal(queue, "worker-0", "a.spl", "PASS", true)).to_equal(true)
+            expect(hir_shard_recovery_claim(queue, "worker-0", "b.spl", "key-b")).to_equal(1)
+            expect(hir_shard_recovery_seal(queue, "worker-0", "CRASH")).to_equal(1)
+            step("Start a replacement that skips terminal modules and claims module C")
+            expect(hir_shard_recovery_claim(queue, "worker-1", "a.spl", "key-a")).to_equal(0)
+            expect(hir_shard_recovery_claim(queue, "worker-1", "b.spl", "key-b")).to_equal(0)
+            expect(hir_shard_recovery_claim(queue, "worker-1", "c.spl", "key-c")).to_equal(1)
+            expect(hir_shard_recovery_terminal(queue, "worker-1", "c.spl", "PASS", true)).to_equal(true)
+            expect(hir_shard_recovery_failure_count(queue)).to_equal(1)
+            expect(hir_shard_recovery_progress(queue, "worker-1")).to_equal(1)
+
+        it "should not seal another live worker's active module":
+            step("Assign different modules to two worker owners")
+            val queue = recovery_fixture("owner-isolation")
+            expect(hir_shard_recovery_claim(queue, "dead", "a.spl", "key-a")).to_equal(1)
+            expect(hir_shard_recovery_claim(queue, "live", "b.spl", "key-b")).to_equal(1)
+            step("Seal only the dead worker and let the live worker finish")
+            expect(hir_shard_recovery_seal(queue, "dead", "CRASH")).to_equal(1)
+            expect(hir_shard_recovery_terminal(queue, "dead", "b.spl", "FAILED", false)).to_equal(false)
+            expect(hir_shard_recovery_terminal(queue, "live", "b.spl", "PASS", true)).to_equal(true)
+            expect(hir_shard_recovery_failure_count(queue)).to_equal(1)
+
+        it "should never reopen or overwrite a terminal failure":
+            step("Record a lowering diagnostic as terminal")
+            val queue = recovery_fixture("immutable-terminal")
+            expect(hir_shard_recovery_claim(queue, "worker", "a.spl", "key-a")).to_equal(1)
+            expect(hir_shard_recovery_terminal(queue, "worker", "a.spl", "FAILED", false)).to_equal(true)
+            step("Reject attempts to overwrite or reclaim the diagnosed module")
+            expect(hir_shard_recovery_terminal(queue, "worker", "a.spl", "PASS", true)).to_equal(false)
+            expect(hir_shard_recovery_seal(queue, "worker", "CRASH")).to_equal(0)
+            expect(hir_shard_recovery_claim(queue, "replacement", "a.spl", "key-a")).to_equal(0)
+            expect(hir_shard_recovery_failure_count(queue)).to_equal(1)
+
+    describe "REQ-KG-003: successful lowering and reusable cache are distinct":
+        it "should retain successful uncached lowering without inventing a failure":
+            step("Complete a valid module that the optional cache codec cannot store")
+            val queue = recovery_fixture("uncached-completion")
+            expect(hir_shard_recovery_claim(queue, "worker", "a.spl", "key-a")).to_equal(1)
+            expect(hir_shard_recovery_terminal(queue, "worker", "a.spl", "PASS", false)).to_equal(true)
+            expect(hir_shard_recovery_failure_count(queue)).to_equal(0)
+            expect(hir_shard_recovery_seal(queue, "worker", "CRASH")).to_equal(0)
+
+    describe "REQ-KG-005: traversal completion differs from partial progress":
+        it "should require an explicit completion receipt for the exact owner":
+            step("Observe a new worker without a completed traversal")
+            val queue = recovery_fixture("traversal-receipt")
+            expect(hir_shard_recovery_finished(queue, "worker-0")).to_equal(false)
+            step("Publish one owner's completed traversal")
+            expect(hir_shard_recovery_complete(queue, "worker-0")).to_equal(true)
+            expect(hir_shard_recovery_finished(queue, "worker-0")).to_equal(true)
+            expect(hir_shard_recovery_finished(queue, "worker-1")).to_equal(false)
+
+        it "should fail closed when the invocation ledger is unavailable":
+            step("Use a missing queue to exercise unavailable durable accounting")
+            val queue = "build/test_output/hir_recovery/{getpid()}-missing-queue"
+            expect(dir_exists(queue)).to_equal(false)
+            expect(hir_shard_recovery_claim(queue, "worker", "a.spl", "key-a")).to_equal(-1)
+            expect(hir_shard_recovery_terminal(queue, "worker", "a.spl", "PASS", true)).to_equal(false)
+            expect(hir_shard_recovery_seal(queue, "worker", "CRASH")).to_equal(-1)
+            expect(hir_shard_recovery_progress(queue, "worker")).to_equal(-1)
+            expect(hir_shard_recovery_failure_count(queue)).to_equal(-1)
+            expect(hir_shard_recovery_complete(queue, "worker")).to_equal(false)
+            expect(hir_shard_recovery_finished(queue, "worker")).to_equal(false)
+
+        it "should reject a truncated claim instead of treating it as absent work":
+            step("Create a real claim and truncate its durable record")
+            val queue = recovery_fixture("truncated-claim")
+            expect(hir_shard_recovery_claim(queue, "worker", "a.spl", "key-a")).to_equal(1)
+            corrupt_recovery_record(queue, ".claim", "")
+            step("Reject unavailable ownership evidence during accounting and recovery")
+            expect(hir_shard_recovery_progress(queue, "worker")).to_equal(-1)
+            expect(hir_shard_recovery_seal(queue, "worker", "CRASH")).to_equal(-1)
+
+        it "should reject a truncated success receipt instead of admitting success":
+            step("Create a successful terminal record and remove its ownership fields")
+            val queue = recovery_fixture("truncated-pass")
+            expect(hir_shard_recovery_claim(queue, "worker", "a.spl", "key-a")).to_equal(1)
+            expect(hir_shard_recovery_terminal(queue, "worker", "a.spl", "PASS", true)).to_equal(true)
+            corrupt_recovery_record(queue, ".terminal", "PASS\n")
+            step("Reject an apparent success without valid durable evidence")
+            expect(hir_shard_recovery_failure_count(queue)).to_equal(-1)
+
+    describe "REQ-KG-006: every frozen inventory module has a terminal outcome":
+        it "should close an entirely successful inventory without adding failures":
+            step("Publish a frozen module inventory and complete its work")
+            val queue = recovery_fixture("inventory-pass")
+            expect(hir_shard_recovery_inventory(queue, "closure-a", ["a.spl"])).to_equal(true)
+            expect(hir_shard_recovery_claim(queue, "worker", "a.spl", "key-a")).to_equal(1)
+            expect(hir_shard_recovery_terminal(queue, "worker", "a.spl", "PASS", true)).to_equal(true)
+            expect(hir_shard_recovery_close_inventory(queue, false)).to_equal(0)
+            expect(hir_shard_recovery_failure_count(queue)).to_equal(0)
+
+        it "should mark unvisited collect-all work as blocked":
+            step("Stop all workers with a published but unvisited module")
+            val queue = recovery_fixture("inventory-blocked")
+            expect(hir_shard_recovery_inventory(queue, "closure-a", ["a.spl"])).to_equal(true)
+            expect(hir_shard_recovery_close_inventory(queue, false)).to_equal(1)
+            expect(only_recovery_terminal(queue)).to_start_with("BLOCKED\ncoordinator\na.spl\n")
+            expect(hir_shard_recovery_failure_count(queue)).to_equal(1)
+
+        it "should mark unvisited fail-fast work as skipped":
+            step("Close the inventory after fail-fast cancels further scheduling")
+            val queue = recovery_fixture("inventory-skipped")
+            expect(hir_shard_recovery_inventory(queue, "closure-a", ["a.spl"])).to_equal(true)
+            expect(hir_shard_recovery_close_inventory(queue, true)).to_equal(1)
+            expect(only_recovery_terminal(queue)).to_start_with("SKIPPED\ncoordinator\na.spl\n")
+            expect(hir_shard_recovery_failure_count(queue)).to_equal(1)
+
+        it "should reject a worker with a different frozen inventory":
+            step("Bind the invocation to its first valid frozen inventory")
+            val queue = recovery_fixture("inventory-mismatch")
+            expect(hir_shard_recovery_inventory(queue, "closure-a", ["a.spl"])).to_equal(true)
+            expect(hir_shard_recovery_inventory(queue, "closure-a", ["a.spl"])).to_equal(true)
+            expect(hir_shard_recovery_inventory(queue, "closure-b", ["a.spl"])).to_equal(false)
+            expect(hir_shard_recovery_inventory(queue, "closure-a", ["b.spl"])).to_equal(false)
+
+        it "should reject an unavailable or corrupt frozen inventory":
+            step("Require a valid inventory before claiming closure completeness")
+            val queue = recovery_fixture("inventory-corrupt")
+            expect(hir_shard_recovery_close_inventory(queue, false)).to_equal(-1)
+            expect(file_write("{queue}/inventory", "closure-only")).to_equal(true)
+            expect(hir_shard_recovery_close_inventory(queue, false)).to_equal(-1)
+
+        it "should reject an existing active claim without a terminal outcome":
+            step("Leave a worker claim active and prohibit successful inventory closure")
+            val queue = recovery_fixture("inventory-active")
+            expect(hir_shard_recovery_inventory(queue, "closure-a", ["a.spl"])).to_equal(true)
+            expect(hir_shard_recovery_claim(queue, "worker", "a.spl", "key-a")).to_equal(1)
+            expect(hir_shard_recovery_close_inventory(queue, false)).to_equal(-1)
+
+    describe "REQ-KG-004: source wiring retains prerequisite and ownership gates":
+        it "should reject missing cache identity in both shard lowering paths":
+            step("Inspect the streaming and retained lowering guards")
+            val source = file_read("src/compiler/80.driver/driver_hir_pipeline_lowering.spl")
+            expect(source.len()).to_be_greater_than(1000)
+            expect(source.split("if hir_shard_active() and not hir_shard_mode:").len()).to_equal(3)
+            expect(source.split("hir_shard_guard_block(\"HIR cache identity unavailable for shard\")").len()).to_equal(3)
+
+        it "should require a proven reap before closing worker claims or inventory":
+            step("Inspect coordinator handling of wait error and timeout statuses")
+            val source = file_read("src/app/cli/native_build_main.spl")
+            expect(source.len()).to_be_greater_than(1000)
+            expect(source).to_contain("code != -2 and code != -1")
+            expect(source).to_contain("reaped != -2 and reaped != -1")
+            expect(source).to_contain("val sealed = if owner_stopped:")
+            expect(source).to_contain("val unfinished = if all_stopped:")

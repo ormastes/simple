@@ -3,7 +3,24 @@
 During bootstrap diagnosis, reach the end of all independently runnable build
 and test work instead of ending the investigation at the first failure. This
 is the shared agent policy for SPipe, bootstrap, builds, tests, and bug repair.
-It does not assert that every runner already implements this scheduling.
+Native-build and the bootstrap phase matrix collect independent failures by
+default on a host. CI (`CI=true` or `CI=1`) defaults to fail fast. Select the
+policy with `--keep-going` or `--fail-fast`; the last explicit flag wins.
+`SIMPLE_COMPILE_FAIL_FAST=0` or `1` overrides the CI/host default and is inherited
+by worker processes. An empty or other environment value uses the CI/host
+default. This policy does not change inventory scope (`normal` versus `full`).
+
+The phase matrix retains its first failure and exits nonzero even if later rows
+succeed. In fail-fast mode, unlaunched tasks and spec rows are `SKIPPED`; already
+launched bounded workers finish. Missing prerequisites remain `BLOCKED` or
+`UNSUPPORTED`, and invalid snapshots/admission remain fatal. Successful objects
+and admitted cache entries survive either policy. A failed compile never gains
+a successful output merely because diagnostic collection reached the end.
+
+The regression `sh scripts/check/check-bootstrap-keep-going-policy.shs` exercises
+production orchestration with failing/passing fake commands and inventory rows;
+it also checks policy inheritance, ordered overrides, cache preservation, and
+fatal snapshot admission. Other runners may still need their own policy wiring.
 
 ## Implementation language
 

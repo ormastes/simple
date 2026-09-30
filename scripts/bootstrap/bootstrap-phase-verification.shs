@@ -183,6 +183,7 @@ for arg in "$@"; do
     --compiler=*) compiler=${arg#*=} ;;
     --compiler-sha256=*) expected_sha=${arg#*=} ;;
     --strategy=*) strategy=${arg#*=} ;;
+    --fail-fast|--keep-going) ;; # Resolved together below, in argument order.
     # --profile=slim is an explicit opt-in, phase=stage2 only (see
     # stage2_slim_profile below). EVERY behavioral effect of slim mode --
     # skipped MCP/LSP builds and checks, skipped compile-mode test
@@ -202,6 +203,8 @@ for arg in "$@"; do
     *) die "unknown option: $arg" ;;
   esac
 done
+
+bootstrap_compile_failure_policy "$@"
 
 case "$phase" in stage1|stage2|stage3|stage4) ;; *) die "invalid phase" ;; esac
 [ -z "$stage3_provenance" ] || [ "$phase" = stage3 ] || die "--stage3-provenance is stage3-only"
@@ -245,7 +248,7 @@ fi
 # remaining test task. A task skipped this way emits NO row at all:
 # `record_unsupported_task` would count as UNSUPPORTED and flip `overall` to
 # FAIL below (see the `failures=$(grep -cE
-# 'result=(FAIL|CRASH|TIMEOUT|BLOCKED|UNSUPPORTED)' ...)` accounting near the
+# 'result=(FAIL|CRASH|TIMEOUT|BLOCKED|UNSUPPORTED|SKIPPED)' ...)` accounting near the
 # end of this script), so silent omission -- not an unsupported row -- is the
 # only correct way to skip a task here. Default `--profile=full` keeps every
 # existing caller (run-linux-phase2-tests.shs, run-freebsd-phase2-tests.shs,
@@ -1262,6 +1265,11 @@ validate_phase_c_tool_binding() (
 
 run_phase_c_tool_build() {
   pure_tool_task=$1 pure_tool_entry=$2 pure_tool_output=$3 pure_tool_cache=$4 pure_tool_threads=$5
+  if matrix_should_skip; then
+    matrix_task_passed=0
+    record_skipped_task "$pure_tool_task"
+    return 0
+  fi
   if ! validate_phase_c_tool_binding; then
     printf 'task=%s|result=FAIL|status=authority-mismatch|elapsed_seconds=0|log=-\n' "$pure_tool_task" >>"$summary"
     matrix_failed=1 matrix_task_passed=0
@@ -1289,10 +1297,23 @@ run_phase_c_tool_worker() (
   printf '%s\n' "$matrix_task_passed" >"$work_root/$phase-tool-workers/$worker/result" || exit 1
 )
 
+matrix_should_skip() {
+  [ "${SIMPLE_COMPILE_FAIL_FAST:-0}" = 1 ] && [ "$matrix_failed" -ne 0 ]
+}
+
+record_skipped_task() {
+  printf 'task=%s|result=SKIPPED|status=fail-fast|elapsed_seconds=0|log=-\n' \
+    "$1" >>"$summary" || die "cannot append verification summary"
+}
+
 run_matrix_task() {
   task=$1
   shift
   matrix_task_passed=0
+  if matrix_should_skip; then
+    record_skipped_task "$task"
+    return 0
+  fi
   if ! run_task "$task" "$@"; then
     matrix_failed=1
   else
@@ -1305,6 +1326,7 @@ record_unsupported_task() {
   task=$1
   reason=$2
   matrix_unsupported=$((matrix_unsupported + 1))
+  matrix_failed=1
   printf 'task=%s|result=UNSUPPORTED|status=%s|elapsed_seconds=0|log=-\n' \
     "$task" "$reason" >>"$summary" || die "cannot append verification summary"
 }
@@ -1425,6 +1447,8 @@ run_inventory_rows() {
   spec_count=0
   active_count=0
   active_jobs=
+  row_stop=0
+  matrix_should_skip && row_stop=1
   while IFS= read -r spec; do
     [ -n "$spec" ] || continue
     spec_count=$((spec_count + 1))
@@ -1435,6 +1459,10 @@ run_inventory_rows() {
       "$row_dir/$spec_count.json.log" "$row_dir/$spec_count.diag.log" \
       "$row_dir/$spec_count.max-rss-kib" "$row_dir/$spec_count.wait-failed" ||
       die "cannot reset inventory row before launch: $task/$spec_count"
+    if [ "$row_stop" -eq 1 ]; then
+      printf '%s\n' 'SKIPPED 95 0 0 0 1 unavailable' >"$row_dir/$spec_count.result"
+      continue
+    fi
     run_inventory_row "$task" "$spec_count" "$relative" \
       "$row_runner" "$row_owner" "$row_mcp_server" &
     active_jobs="$active_jobs $spec_count:$!"
@@ -1448,6 +1476,15 @@ run_inventory_rows() {
             die "cannot record failed inventory worker: $task/$row_job_index"
         fi
       done
+      if [ "${SIMPLE_COMPILE_FAIL_FAST:-0}" = 1 ]; then
+        for row_job in $active_jobs; do
+          row_job_index=${row_job%%:*}
+          if [ -f "$row_dir/$row_job_index.wait-failed" ] ||
+             ! grep -q '^PASS 0 ' "$row_dir/$row_job_index.result" 2>/dev/null; then
+            row_stop=1
+          fi
+        done
+      fi
       active_jobs=
       active_count=0
     fi
@@ -1598,6 +1635,13 @@ run_repository_full_tests() {
     relative=${spec#"$source_root/"}
     row_output="$row_dir/$spec_count.json.log"
     row_rss_file="$row_dir/$spec_count.max-rss-kib"
+    if [ "${SIMPLE_COMPILE_FAIL_FAST:-0}" = 1 ] &&
+       { [ "$failed" -ne 0 ] || matrix_should_skip; }; then
+      printf '%s\tSKIPPED\t95\t0\t0\t0\t1\t-\tunavailable\n' "$relative" >>"$inventory"
+      printf 'simple-spec\t%s\tSKIPPED\t0\t1\n' "$relative" >>"$results"
+      failed=1
+      continue
+    fi
     printf 'BEGIN %s\n' "$relative" >>"$log"
     status=0
     executed=0
@@ -1701,6 +1745,10 @@ run_phase3_expanded_tests() {
   expanded_mcp_server=$3
   expanded_repository_results=$4
   task=phase3_expanded_tests
+  if matrix_should_skip; then
+    record_skipped_task "$task"
+    return 1
+  fi
   log="$logs/$task.log"
   inventory="$logs/$task.inventory.tsv"
   results="$logs/$task.results.tsv"
@@ -1729,7 +1777,8 @@ run_phase3_expanded_tests() {
   [ "$status" -eq 0 ]
 }
 
-# Both strategies collect every independent task in their selected inventory.
+# Both strategies collect independent tasks by default; explicit fail-fast
+# terminalizes unlaunched work as SKIPPED and preserves the failure status.
 # Call-site prerequisite checks block tasks whose required artifacts are absent;
 # an unrelated earlier failure must not suppress useful diagnostic evidence.
 run_matrix_task compiler_version "$compiler_snapshot" --version
@@ -1798,7 +1847,7 @@ else
     mkdir -p "$tool_outputs"
     rm -f "$compiler_cli" "$test_runner"
      if [ "$phase" = stage2 ] || [ "$phase" = stage3 ]; then
-       if [ "$build_threads" -gt 1 ]; then
+       if [ "$build_threads" -gt 1 ] && [ "${SIMPLE_COMPILE_FAIL_FAST:-0}" != 1 ]; then
          phase_worker_threads=$((build_threads / 2))
          phase_workers="$work_root/$phase-tool-workers"
          mkdir -p "$phase_workers/cli" "$phase_workers/runner" || die "cannot isolate phase C builders"
@@ -2215,7 +2264,7 @@ if [ "$stage2_slim_profile" -eq 1 ]; then
 fi
 
 summary_read_status=0
-failures=$(grep -cE 'result=(FAIL|CRASH|TIMEOUT|BLOCKED|UNSUPPORTED)' "$summary") || summary_read_status=$?
+failures=$(grep -cE 'result=(FAIL|CRASH|TIMEOUT|BLOCKED|UNSUPPORTED|SKIPPED)' "$summary") || summary_read_status=$?
 [ "$summary_read_status" -le 1 ] || die "cannot read verification summary"
 echo "terminal_failures=$failures" >>"$summary" || die "cannot append verification summary"
 echo "unsupported_tasks=$matrix_unsupported" >>"$summary" || die "cannot append verification summary"
