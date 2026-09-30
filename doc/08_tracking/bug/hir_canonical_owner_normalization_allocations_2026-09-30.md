@@ -1,6 +1,6 @@
 # Repeated HIR canonical owner normalization allocates temporary strings
 
-Status: source fix implemented; runtime qualification recorded in the report below.
+Status: source fix implemented; focused native differential/allocation fixture PASS.
 
 The Linux Phase 3 producer with SHA-256
 `9088595d5a51191f9895293c8d6c8c17ddefe4d6e12dbf04015b705372b02308`
@@ -25,6 +25,13 @@ measures heap registry growth for 256 canonical calls to each implementation.
 The unit spec additionally checks qualified hits/misses, first binding and
 module reset across canonical/path spellings. The canonical allocation budget
 does not apply to alias folding or fallback normalization.
+
+The first native run exposed six boxing allocations in the fast-path prefix
+and suffix string methods. Generated code confirmed two `rt_string_new` calls
+per method. Bounds-checked length/byte guards removed those calls; the renewed
+fixture passed with zero object growth over 256 canonical calls versus 20,224
+for the unchanged previous algorithm. The broader SymbolTable unit spec has
+not yet run, and no full-build speed/RSS improvement is claimed.
 
 Two observed RSS values (4.37 and 6.08 GiB) do not establish a leak: the driver
 retains completed HIR and per-module symbol snapshots. This patch targets
