@@ -30,6 +30,8 @@ Covers the behavior asserted here; platform-specific behavior is out of scope.
 # Tests the @when/@elif/@else/@end block directives and @cfg per-declaration
 # conditional compilation that replaced the old #if/#elif/#else/#endif syntax.
 
+use compiler.core.parser_preprocessor.{preprocess_conditionals}
+
 describe "Preprocessor @when/@cfg":
     # @manual scenario evidence
     describe "@when block directives":
@@ -137,3 +139,24 @@ describe "Preprocessor @when/@cfg":
         it "@when(unix) detects Unix-like systems":
             # Should be true on Linux, macOS, FreeBSD, etc.
             expect("@when(unix):").to_contain("unix")
+
+    describe "inactive declaration blank lines":
+        it "excludes all docstring paragraphs and preserves the following declaration line":
+            val source = "@cfg(false)\nfn hidden():\n    \"\"\"Copy array values.\n\n    Decode `[u8]` elements.\n    \"\"\"\n    return 17\nfn kept():\n    return 23\n"
+            val expected = "\n\n\n\n\n\n\nfn kept():\n    return 23\n"
+            expect(preprocess_conditionals(source)).to_equal(expected)
+
+        it "excludes statements after whitespace-only lines and retains an enabled sibling":
+            val source = "@cfg(false)\nfn hidden():\n    val first = 1\n   \t\n    return first\n@cfg(true)\nfn kept():\n    return 29\n"
+            val expected = "\n\n\n\n\n\nfn kept():\n    return 29\n"
+            expect(preprocess_conditionals(source)).to_equal(expected)
+
+        it "keeps excluding a nested method across blank lines until its sibling":
+            val source = "class Container:\n    @cfg(false)\n    fn hidden():\n        val first = 1\n\n        return first\n    fn kept():\n        return 31\n"
+            val expected = "class Container:\n\n\n\n\n\n    fn kept():\n        return 31\n"
+            expect(preprocess_conditionals(source)).to_equal(expected)
+
+        it "preserves an enabled docstring including paragraph breaks and backticks":
+            val source = "@cfg(true)\nfn kept():\n    \"\"\"Keep this paragraph.\n\n    And this `code`.\n    \"\"\"\n    return 37\n"
+            val expected = "\nfn kept():\n    \"\"\"Keep this paragraph.\n\n    And this `code`.\n    \"\"\"\n    return 37\n"
+            expect(preprocess_conditionals(source)).to_equal(expected)

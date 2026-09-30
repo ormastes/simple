@@ -40,6 +40,10 @@ In `D:/dev/simple-phase2-parser-failures-20260930`:
 - Native component build: 20 compiled, 0 reused, 0 failed. Run exits 0 and prints
   `cfg blank-line regressions: 4 passed`. Log:
   `build/native_probe/phase2_parser/fixed_probe_build.log`.
+- The same four exact-output cases are discoverable in
+  `test/01_unit/compiler/semantics/preprocessor_when_cfg_spec.spl`, under
+  `inactive declaration blank lines`. This SSpec wrapper was added after the
+  native component passed; its full-suite execution remains pending.
 
 Build command (with the reviewed Windows tool environment and
 `SIMPLE_NO_STUB_FALLBACK=1`, `SIMPLE_NO_BOOTSTRAP_DELEGATE=1`):
