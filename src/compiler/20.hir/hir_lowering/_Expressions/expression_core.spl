@@ -11,6 +11,25 @@ use compiler.hir.hir_lowering._Expressions.expression_support.{hir_expr_kind_dis
 use compiler.hir.hir_lowering._Expressions.type_test_operand.{binary_is_type_operand}
 
 impl HirLowering:
+    fn declared_static_method_resolution(receiver: HirExpr, method: text) -> MethodResolution:
+        # Keep the declared owner while HIR still owns the receiver expression.
+        # Native MIR cannot reconstruct this from a nested MethodCall payload;
+        # a leaf-name fallback is ambiguous when two types declare the method.
+        val owner = _hir_expr_symbol_or_invalid(receiver.kind)
+        if not owner.is_valid():
+            return MethodResolution.Unresolved
+        val owner_symbol = self.symbols.get_symbol_raw(owner.id)
+        if owner_symbol == nil:
+            return MethodResolution.Unresolved
+        match owner_symbol.kind:
+            case SymbolKind.Class | SymbolKind.Struct | SymbolKind.Enum:
+                val method_symbol = self.symbols.lookup_static_method_raw(owner.id, method)
+                if val declared_method = method_symbol:
+                    if declared_method != nil and declared_method.is_valid():
+                        return MethodResolution.StaticMethod(owner, declared_method)
+            case _: ()
+        MethodResolution.Unresolved
+
     me lower_hir_expr(e: Expr) -> HirExpr:
         if e == nil:
             val missing_span = Span.empty()
@@ -91,6 +110,7 @@ impl HirLowering:
                     # arguments; nested lowering may advance interpreter-owned
                     # enum payload storage.
                     val mc_lowered_receiver = self.lower_hir_expr(method_receiver_t)
+                    val mc_static_resolution = self.declared_static_method_resolution(mc_lowered_receiver, method_name_t)
                     var hir_args: [HirCallArg] = []
                     for arg in method_args_t:
                         val marg_t: CallArg = arg
@@ -278,18 +298,18 @@ impl HirLowering:
                                 case HirTypeKind.Dict(mc_dict_key, mc_dict_value):
                                     if method_name_t == "keys":
                                         return HirExpr(
-                                            kind: HirExprKind.MethodCall(mc_lowered_receiver, method_name_t, hir_args, MethodResolution.Unresolved),
+                                            kind: HirExprKind.MethodCall(mc_lowered_receiver, method_name_t, hir_args, mc_static_resolution),
                                             has_type_: true,
                                             type_: HirType(kind: HirTypeKind.Array(mc_dict_key, nil), span: e.span),
                                             span: e.span)
                                     return HirExpr(
-                                        kind: HirExprKind.MethodCall(mc_lowered_receiver, method_name_t, hir_args, MethodResolution.Unresolved),
+                                        kind: HirExprKind.MethodCall(mc_lowered_receiver, method_name_t, hir_args, mc_static_resolution),
                                         has_type_: true,
                                         type_: HirType(kind: HirTypeKind.Array(mc_dict_value, nil), span: e.span),
                                         span: e.span)
                                 case _: ()
                     return HirExpr(
-                        kind: HirExprKind.MethodCall(mc_lowered_receiver, method_name_t, hir_args, MethodResolution.Unresolved),
+                        kind: HirExprKind.MethodCall(mc_lowered_receiver, method_name_t, hir_args, mc_static_resolution),
                         has_type_: false,
                         type_: nil,
                         span: e.span
@@ -659,6 +679,7 @@ impl HirLowering:
                 # still authoritative. Lowering argument expressions can
                 # advance interpreter-owned enum payload storage.
                 val lowered_method_receiver = self.lower_hir_expr(method_receiver_t)
+                val fallback_static_resolution = self.declared_static_method_resolution(lowered_method_receiver, method_name_t)
                 var hir_args: [HirCallArg] = []
                 for arg in method_args_t:
                     val marg_t: CallArg = arg
@@ -695,17 +716,17 @@ impl HirLowering:
                             case HirTypeKind.Dict(fb_dict_key, fb_dict_value):
                                 if method_name_t == "keys":
                                     return HirExpr(
-                                        kind: HirExprKind.MethodCall(lowered_method_receiver, method_name_t, hir_args, MethodResolution.Unresolved),
+                                        kind: HirExprKind.MethodCall(lowered_method_receiver, method_name_t, hir_args, fallback_static_resolution),
                                         has_type_: true,
                                         type_: HirType(kind: HirTypeKind.Array(fb_dict_key, nil), span: e.span),
                                         span: e.span)
                                 return HirExpr(
-                                    kind: HirExprKind.MethodCall(lowered_method_receiver, method_name_t, hir_args, MethodResolution.Unresolved),
+                                    kind: HirExprKind.MethodCall(lowered_method_receiver, method_name_t, hir_args, fallback_static_resolution),
                                     has_type_: true,
                                     type_: HirType(kind: HirTypeKind.Array(fb_dict_value, nil), span: e.span),
                                     span: e.span)
                             case _: ()
-                HirExprKind.MethodCall(lowered_method_receiver, method_name_t, hir_args, MethodResolution.Unresolved)
+                HirExprKind.MethodCall(lowered_method_receiver, method_name_t, hir_args, fallback_static_resolution)
 
             case ExprKind.MatchCase(scrutinee, arms):
                 # The scrutinee is lowered FIRST and OUTSIDE every arm scope:
