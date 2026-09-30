@@ -233,6 +233,58 @@ bootstrap_cache_repair_idle_writer() (
   bootstrap_cache_error 'execution ownership unproven: wrapper PID/group evidence cannot authorize repair; writer and cache retained; genuine execution-owner repair remains unavailable'
   return 1
 )
+bootstrap_cache_refresh_source() {
+  # ROOT CACHE PHASE PRODUCER OLD-INPUTS NEW-INPUTS ENTRY OLD-COMPONENTS
+  # NEW-COMPONENTS RECORD. Canonical caller admits the Rust dependency-key owner
+  # and derives both context digests with identical current nonsource options.
+  [ "$#" -eq 10 ] && [ "$3" = stage2 ] || return 1
+  bootstrap_cache_digest "$4" && bootstrap_cache_digest "$5" && bootstrap_cache_digest "$6" || return 1
+  bootstrap_cache_validate_paths "$1" "$2" || return 1
+  [ "$(cat "$1/.bootstrap-cache-root" 2>/dev/null)" = "$(bootstrap_cache_owner)" ] || return 1
+  bootstrap_cache_binding_valid "$2/.bootstrap-cache-binding" || return 1
+  for bc_context in "$8" "$9"; do
+    bootstrap_cache_new_path_validate "$bc_context" || return 1
+    for bc_component in source-inputs-before.txt runtime-admitted.txt tool-authority-before.txt; do
+      [ -f "$bc_context/$bc_component" ] && [ ! -L "$bc_context/$bc_component" ] || return 1
+    done
+  done
+  cmp -s "$8/runtime-admitted.txt" "$9/runtime-admitted.txt" &&
+    cmp -s "$8/tool-authority-before.txt" "$9/tool-authority-before.txt" ||
+    bootstrap_cache_error 'source refresh rejected: runtime/tool identity changed; cache preserved' || return 1
+  bootstrap_cache_new_path_validate "${10}" || return 1
+  case "${10}" in "$2"|"$2"/*|"$2.writer"|"$2.writer"/*) return 1 ;; esac
+  [ ! -e "${10}" ] && [ ! -L "${10}" ] || return 1
+  bootstrap_cache_writer_acquire "$2" || return 1
+  bc_refresh_old=$(bootstrap_cache_binding "$3" "$4" "$5" "$7")
+  if [ "$(cat "$2/.bootstrap-cache-binding")" != "$bc_refresh_old" ]; then
+    bootstrap_cache_error 'source refresh rejected: predecessor context/producer/phase/entry mismatch; cache preserved'
+    bootstrap_cache_writer_release "$2"
+    return 1
+  fi
+  # One unique immutable record precedes publication. Do not change inner keys,
+  # manifests, objects, or predecessor evidence; only the actual engine admits hits.
+  if ! mkdir "${10}" ||
+     ! cp "$2/.bootstrap-cache-binding" "${10}/binding-before.env" ||
+     ! bootstrap_cache_binding "$3" "$4" "$6" "$7" > "${10}/binding-after.env"; then
+    bootstrap_cache_writer_release "$2"; return 1
+  fi
+  for bc_side in before after; do
+    [ "$bc_side" != before ] || bc_context=$8
+    [ "$bc_side" != after ] || bc_context=$9
+    for bc_component in source-inputs-before.txt runtime-admitted.txt tool-authority-before.txt; do
+      cp "$bc_context/$bc_component" "${10}/${bc_side}-${bc_component}" || { bootstrap_cache_writer_release "$2"; return 1; }
+    done
+  done
+  printf 'schema=simple-bootstrap-cache-source-transition-v1\nkey-owner=rust-native-project-dependency-v1\n' > "${10}/transition.env" || { bootstrap_cache_writer_release "$2"; return 1; }
+  bootstrap_cache_freeze_attempt "${10}" || { bootstrap_cache_writer_release "$2"; return 1; }
+  bc_refresh_tmp=$(mktemp "$2/.bootstrap-cache-binding.XXXXXX") || { bootstrap_cache_writer_release "$2"; return 1; }
+  if ! cp "${10}/binding-after.env" "$bc_refresh_tmp" || ! mv "$bc_refresh_tmp" "$2/.bootstrap-cache-binding"; then
+    rm -f "$bc_refresh_tmp"; bootstrap_cache_writer_release "$2"; return 1
+  fi
+  BOOTSTRAP_CACHE_WRITERS="${BOOTSTRAP_CACHE_WRITERS:-}${BOOTSTRAP_CACHE_WRITERS:+
+}$2"
+  echo 'Cache: source transition admitted; retained objects require compiler dependency-key validation.'
+}
 bootstrap_cache_prepare() {
   # ROOT DIRECTORY PHASE PRODUCER-SHA INPUTS-SHA ENTRY reuse|invalidate|clean
   [ "$#" -eq 7 ] || return 1
