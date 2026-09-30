@@ -42,12 +42,11 @@ Three tests call the real registered handler in `interpreter_extern/mod.rs`:
 - `rt_string_find_rejects_wrong_arity_and_non_text_arguments`: zero, one,
   and three arguments; nil receiver/needle; non-string integer.
 
-These are authored tests, not execution evidence. The actual baseline gate
-failure above is retained. The historical raw-find diagnostic lane exhausted
-three verification cycles; root requested source-only preparation. No Cargo
-test, registry gate, interpreter/native probe, or bootstrap was rerun here.
-Runtime PASS and gate PASS remain pending explicit authorization for a new
-verification cycle. Native-build delegation cannot qualify these tests.
+At initial source preparation these were authored tests, not execution
+evidence. The historical raw-find diagnostic lane had exhausted three
+verification cycles, so preparation did not rerun tests or gates. The later
+explicitly authorized focused cycle is recorded below. Native-build
+delegation cannot qualify these tests.
 
 ## SOSIX host-access audit
 
@@ -61,3 +60,54 @@ allocation and release only; they add no direct host I/O.
 The patch is isolated from the NUL-concat and hook-path commits, frozen
 bootstrap sources, and their caches. Main and release source preparation
 does not qualify or publish a release.
+
+## Subsequently authorized focused validation
+
+The user authorized one additional focused test-and-gate cycle. The three
+registered-handler tests above passed on the unchanged Rust source in
+`dc2006f8187aaa6660e670139b9aee6495e9d52a`: 3 passed, 0 failed, 0 ignored,
+4249 unrelated tests filtered out. The command used the installed Windows
+nightly toolchain, the canonical clang/LLVM environment, an isolated copy of
+the Cargo dependency cache, and two build jobs:
+
+`cargo test --offline --locked -p simple-compiler --lib --profile dev rt_string_find_ -- --test-threads=1`
+
+Sparse checkout omissions in the setup helper and a tracked backend header
+were restored before any test could execute. The retained-cache build then
+completed in 4m 20s; the three named tests ran once and passed. No product
+source was changed to accommodate those setup omissions.
+
+The standalone frozen-baseline scan at the same exact commit failed with
+220 symbols checked, 10 other new gaps, and 5 stale entries. None involved
+`rt_string_find` or `rt_string_index_of`. Static comparison against exact
+parent `0814a6dfa5eef7c5acfdb629f5e7cf82ef817dd0` found all 47 declaration,
+dispatch, and baseline rows mentioning those 15 symbols unchanged. No
+baseline entries were rewritten to hide that inherited debt.
+
+The distinct canonical push check passed with 220 symbols checked and zero
+new gaps versus that exact parent:
+
+`sh scripts/check/check-interpreter-extern-registry-gap.shs --scan-only --rev dc2006f8187aaa6660e670139b9aee6495e9d52a --baseline-rev 0814a6dfa5eef7c5acfdb629f5e7cf82ef817dd0`
+
+Evidence is retained under `D:/dev/simple-string-find-review-20260930/`:
+`registry-focused-cycle-cargo-resume.log`,
+`registry-focused-cycle-gate.log`,
+`registry-inherited-debt-source-comparison.json`, and
+`registry-focused-cycle-branch-delta.log`. This is focused handler and
+branch-delta PASS, not full-suite, frozen-baseline, or release qualification.
+
+## Exact main/release patch portability
+
+The unique registration was moved immediately after `rt_string_free` in the
+same dispatch table so the fix has identical surrounding patch context on
+main and release. The implementation file and all three registered-handler
+test bodies are byte-for-byte unchanged; removing the one registration line
+from the before/after dispatch files leaves identical bytes. The already
+passing named tests were not rerun for this order-only change.
+
+The rewritten source fix `e4b103087c73d1a3cce76d789b9cdbf170c41257`
+applies directly to release base `d921e11599ee94519c9813c4df0ab1ed6e391d70`.
+Both default stable patch IDs are
+`cbb62dddd98d1b0b73af082feefcb080683c3639`. The four-file release preview
+is unadmitted and does not move a protected ref. The prior PR head/review is
+superseded and the new head requires fresh protected checks and review.
