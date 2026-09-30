@@ -1,0 +1,81 @@
+use std.spec.*
+use app.io.env_ops.{env_get, env_set}
+use app.io.file_ops.{path_absolute}
+use app.io.time_ops.{time_now_unix_micros}
+use std.io_runtime.{dir_create_all, file_write, file_read}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.driver.driver_source_loading.{_driver_resolve_entry_import,
+    _driver_module_name_collision, _driver_unique_physical_sources}
+
+fn frozen_import_fixture() -> text:
+    val root = path_absolute("build/native_probe/frozen-import-" + time_now_unix_micros().to_string()).replace("\\", "/")
+    expect(dir_create_all(root + "/src/app/mcp")).to_be(true)
+    expect(dir_create_all(root + "/src/compiler/80.driver")).to_be(true)
+    expect(dir_create_all(root + "/src/lib/common")).to_be(true)
+    expect(file_write(root + "/src/app/mcp/shared.spl", "pub fn answer() -> i64: 42\n")).to_be(true)
+    expect(file_write(root + "/src/compiler/80.driver/frozen_probe.spl", "pub fn frozen() -> i64: 7\n")).to_be(true)
+    expect(file_write(root + "/src/lib/common/frozen_probe.spl", "pub fn frozen() -> i64: 8\n")).to_be(true)
+    root
+
+describe "entry imports retain their admitted frozen source tree":
+    it "uses one physical file for qualified and relative imports in either order":
+        val root = frozen_import_fixture()
+        val previous = env_get("SIMPLE_SCV_SNAPSHOT_ROOT")
+        expect(env_set("SIMPLE_SCV_SNAPSHOT_ROOT", root)).to_be(true)
+        val qualified_first = _driver_resolve_entry_import("app.mcp.shared", root + "/src/app/mcp")
+        val relative_second = _driver_resolve_entry_import(".shared", root + "/src/app/mcp")
+        val relative_first = _driver_resolve_entry_import(".shared", root + "/src/app/mcp")
+        val qualified_second = _driver_resolve_entry_import("app.mcp.shared.answer", root + "/src/app/mcp")
+        expect(env_set("SIMPLE_SCV_SNAPSHOT_ROOT", previous)).to_be(true)
+        expect(qualified_first).to_equal(root + "/src/app/mcp/shared.spl")
+        expect(relative_second).to_equal(qualified_first)
+        expect(relative_first).to_equal(qualified_second)
+        val sources = [
+            SourceFile(path: qualified_first, content: file_read(qualified_first), module_name: "app.mcp.shared", authored_path: "src/app/mcp/shared.spl"),
+            SourceFile(path: relative_second, content: file_read(relative_second), module_name: "app.mcp.shared", authored_path: "src/app/mcp/shared.spl")]
+        expect(_driver_unique_physical_sources(sources).len()).to_equal(1)
+        expect(_driver_unique_physical_sources(sources)[0].authored_path).to_equal("src/app/mcp/shared.spl")
+        expect(_driver_module_name_collision(sources)).to_equal("")
+
+    it "anchors numbered compiler and explicit and implicit library imports":
+        val root = frozen_import_fixture()
+        val previous = env_get("SIMPLE_SCV_SNAPSHOT_ROOT")
+        expect(env_set("SIMPLE_SCV_SNAPSHOT_ROOT", root)).to_be(true)
+        val numbered = _driver_resolve_entry_import("compiler.driver.frozen_probe", root + "/src/app/mcp")
+        val explicit_lib = _driver_resolve_entry_import("std.common.frozen_probe", root + "/src/app/mcp")
+        val implicit_lib = _driver_resolve_entry_import("frozen_probe", root + "/src/app/mcp")
+        expect(env_set("SIMPLE_SCV_SNAPSHOT_ROOT", previous)).to_be(true)
+        expect(numbered).to_equal(root + "/src/compiler/80.driver/frozen_probe.spl")
+        expect(explicit_lib).to_equal(root + "/src/lib/common/frozen_probe.spl")
+        expect(implicit_lib).to_equal(explicit_lib)
+
+    it "rejects a missing frozen source even when the working checkout owns it":
+        val root = frozen_import_fixture()
+        val previous = env_get("SIMPLE_SCV_SNAPSHOT_ROOT")
+        expect(env_set("SIMPLE_SCV_SNAPSHOT_ROOT", "")).to_be(true)
+        val live = _driver_resolve_entry_import("compiler.driver.driver_source_loading", "src/app/mcp")
+        expect(env_set("SIMPLE_SCV_SNAPSHOT_ROOT", root)).to_be(true)
+        val missing = _driver_resolve_entry_import("compiler.driver.driver_source_loading", root + "/src/app/mcp")
+        expect(env_set("SIMPLE_SCV_SNAPSHOT_ROOT", previous)).to_be(true)
+        expect(live).to_equal("src/compiler/80.driver/driver_source_loading.spl")
+        expect(missing).to_equal("")
+
+    it "requires a directory boundary and leaves unrelated checkout resolution intact":
+        val root = frozen_import_fixture()
+        val previous = env_get("SIMPLE_SCV_SNAPSHOT_ROOT")
+        expect(env_set("SIMPLE_SCV_SNAPSHOT_ROOT", root)).to_be(true)
+        val outside = _driver_resolve_entry_import("compiler.driver.driver_source_loading", root + "-sibling/src/app/mcp")
+        val normalized = _driver_resolve_entry_import("app.mcp.shared", root + "/src/app/./mcp")
+        expect(env_set("SIMPLE_SCV_SNAPSHOT_ROOT", previous)).to_be(true)
+        expect(outside).to_equal("src/compiler/80.driver/driver_source_loading.spl")
+        expect(normalized).to_equal(root + "/src/app/mcp/shared.spl")
+
+    it "still rejects two distinct physical sources with one canonical module name":
+        val root = frozen_import_fixture()
+        val first = root + "/src/app/mcp/shared.spl"
+        val other = root + "/src/app/mcp/other.spl"
+        expect(file_write(other, "pub fn answer() -> i64: 99\n")).to_be(true)
+        val sources = [SourceFile(path: first, content: file_read(first), module_name: "app.mcp.shared"),
+            SourceFile(path: other, content: file_read(other), module_name: "app.mcp.shared")]
+        expect(_driver_unique_physical_sources(sources).len()).to_equal(2)
+        expect(_driver_module_name_collision(sources)).to_contain("native module name collision after path sanitization")
