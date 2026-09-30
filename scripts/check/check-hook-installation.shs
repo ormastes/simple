@@ -71,10 +71,44 @@ fail() {
 is_absolute_path() {
     case "$1" in
         /*) return 0 ;;
+        \\\\*) return 0 ;;
         [A-Za-z]:/*) return 0 ;;
         [A-Za-z]:\\*) return 0 ;;
         *) return 1 ;;
     esac
+}
+
+resolve_hook_path() {
+    if is_absolute_path "$1"; then
+        printf '%s\n' "$1"
+    else
+        printf '%s/%s\n' "$2" "$1"
+    fi
+}
+
+hook_path_selftest() {
+    path_checks=0
+    path_failures=0
+    while IFS='|' read -r input expected; do
+        actual=$(resolve_hook_path "$input" 'D:/linked-worktree')
+        path_checks=$((path_checks + 1))
+        if [ "$actual" != "$expected" ]; then
+            printf 'FAIL hook path: %s -> %s (expected %s)\n' "$input" "$actual" "$expected"
+            path_failures=$((path_failures + 1))
+        fi
+    done <<'PATH_CASES'
+C:/shared/.git|C:/shared/.git
+C:\shared\.git|C:\shared\.git
+c:/shared/hooks|c:/shared/hooks
+/home/shared/.git|/home/shared/.git
+//server/share/hooks|//server/share/hooks
+\\server\share\hooks|\\server\share\hooks
+.git|D:/linked-worktree/.git
+local/hooks|D:/linked-worktree/local/hooks
+C:relative/hooks|D:/linked-worktree/C:relative/hooks
+PATH_CASES
+    [ "$path_checks" -eq 9 ] && [ "$path_failures" -eq 0 ] || return 1
+    printf 'PASS hook-path selftest: %s cases\n' "$path_checks"
 }
 
 selftest() {
@@ -251,6 +285,10 @@ selftest_cache_exec_bit() {
 SELF_SCRIPT_PATH=$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd -P)/$(basename -- "$0")
 
 case "${1:-}" in
+    --selftest-paths)
+        hook_path_selftest
+        exit $?
+        ;;
     --selftest)
         _st_ok=1
         selftest || _st_ok=0
@@ -308,11 +346,7 @@ expected_launcher="$repo_root/scripts/hooks/pre-push-worktree-launcher"
 # skipping it.
 _cache_dir_raw=$(git rev-parse --git-dir 2>/dev/null) || _cache_dir_raw=""
 if [ -n "$_cache_dir_raw" ]; then
-    if is_absolute_path "$_cache_dir_raw"; then
-        _cache_dir=$_cache_dir_raw
-    else
-        _cache_dir="$repo_root/$_cache_dir_raw"
-    fi
+    _cache_dir=$(resolve_hook_path "$_cache_dir_raw" "$repo_root")
 else
     _cache_dir=""
 fi
@@ -323,10 +357,7 @@ if [ -n "$_cache_dir" ] && [ -d "$_cache_dir" ]; then
     _hooks_path_now=$(git config --get core.hooksPath 2>/dev/null || true)
     _resolved_hooks_dir=""
     if [ -n "$_hooks_path_now" ]; then
-        case "$_hooks_path_now" in
-            /*) _resolved_hooks_dir=$_hooks_path_now ;;
-            *) _resolved_hooks_dir="$repo_root/$_hooks_path_now" ;;
-        esac
+        _resolved_hooks_dir=$(resolve_hook_path "$_hooks_path_now" "$repo_root")
     fi
     _hook_now="$git_dir/hooks/pre-push"
     if [ -n "$_hooks_path_now" ] && [ -d "$_resolved_hooks_dir" ] && [ -e "$_resolved_hooks_dir/pre-push" ]; then
@@ -399,10 +430,7 @@ fi
 checks=$((checks + 1))
 hooks_path=$(git config --get core.hooksPath 2>/dev/null || true)
 if [ -n "$hooks_path" ]; then
-    case "$hooks_path" in
-        /*) resolved="$hooks_path" ;;
-        *) resolved="$repo_root/$hooks_path" ;;
-    esac
+    resolved=$(resolve_hook_path "$hooks_path" "$repo_root")
     if [ ! -d "$resolved" ]; then
         fail "core.hooksPath is set to '$hooks_path' but that directory does not exist. Git silently runs NO hooks in this state — every pre-push guard is disabled." \
              "git config --unset core.hooksPath"
