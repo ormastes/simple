@@ -2067,25 +2067,10 @@ pub unsafe extern "C" fn rt_write_fill_u32s_to_raw_checksum(
 /// Convert a text RuntimeValue to a byte array ([u8]).
 #[no_mangle]
 pub extern "C" fn rt_text_to_bytes(text: RuntimeValue) -> RuntimeValue {
-    let text_len = rt_string_len(text);
-    if text_len <= 0 {
-        return rt_array_new(0);
-    }
-
-    let text_ptr = rt_string_data(text);
-    if text_ptr.is_null() {
-        return rt_array_new(0);
-    }
-
-    unsafe {
-        let bytes = std::slice::from_raw_parts(text_ptr, text_len as usize);
-        let array_handle = rt_array_new(text_len as u64);
-        for &byte in bytes {
-            let byte_value = RuntimeValue::from_int(byte as i64);
-            rt_array_push(array_handle, byte_value);
-        }
-        array_handle
-    }
+    // Keep the established tagged-byte result and invalid/empty input behavior,
+    // using the existing exact-capacity bulk fill instead of one push per byte.
+    // The core-C counterpart retains its independent packed-byte memcpy path.
+    crate::value::collections::rt_string_bytes(text)
 }
 
 /// Convert a byte array ([u8]) to a UTF-8 text value.
@@ -2308,6 +2293,41 @@ mod tests {
     use crate::value::collections::{rt_string_data, rt_string_len};
     use std::fs;
     use tempfile::TempDir;
+
+    #[test]
+    fn text_to_bytes_preserves_exact_utf8_nul_and_block_boundaries() {
+        use crate::value::collections::{rt_array_free, rt_string_free};
+
+        let mut cases = vec![String::new(), "abc".into(), "한🙂".into(), "a\0b".into()];
+        for length in [55, 56, 63, 64, 65, 127, 128, 129] {
+            cases.push("a".repeat(length));
+        }
+        for text in cases {
+            let input = rv_text(&text);
+            let bytes = rt_text_to_bytes(input);
+            assert!(!bytes.is_nil());
+            assert_eq!(rt_array_len(bytes), text.len() as i64);
+            for (index, byte) in text.bytes().enumerate() {
+                let actual = rt_array_get(bytes, index as i64);
+                assert!(actual.is_int());
+                assert_eq!(actual.as_int(), i64::from(byte));
+            }
+            rt_array_free(bytes);
+            rt_string_free(input);
+        }
+    }
+
+    #[test]
+    fn text_to_bytes_retains_empty_array_for_invalid_text() {
+        use crate::value::collections::rt_array_free;
+
+        for input in [RuntimeValue::NIL, RuntimeValue::from_int(7)] {
+            let bytes = rt_text_to_bytes(input);
+            assert!(!bytes.is_nil());
+            assert_eq!(rt_array_len(bytes), 0);
+            rt_array_free(bytes);
+        }
+    }
 
     // Helper to create string pointer for SFFI
     fn str_to_ptr(s: &str) -> (*const u8, u64) {
