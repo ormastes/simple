@@ -1,0 +1,76 @@
+"""
+Unsigned suffix decoder coverage through the core interpreter parse boundary.
+
+The positive oracle calls the production suffix decoder. The negative oracle
+calls core_interpret_expr and requires its actual parse-error result. This
+does not establish successful evaluation of EXPR_SUFFIXED_LIT: that separate
+evaluator surface is outside this parser regression's scope.
+
+Coverage and execution status:
+doc/09_report/unsigned_suffix_interpreter_coverage_2026-09-30.md
+"""
+# @cover src/compiler/10.frontend/core/_ParserPrimary/unsigned_integer_literals.spl
+# @cover src/compiler/10.frontend/core/interpreter/mod.spl
+use std.spec.*
+use std.spec.step
+use compiler.core.parser.{parser_init, parser_get_errors}
+use compiler.frontend.core._ParserPrimary.unsigned_integer_literals.{parse_unsigned_int_literal_text}
+use compiler.core.interpreter.mod.{core_interpret_expr}
+use compiler.core.interpreter.eval.{eval_has_error, eval_get_error}
+use compiler.core.interpreter.value.{val_get_int, val_is_int}
+
+fn expect_suffix_boundary(maximum: text, overflow: text, suffix: text, word: i64):
+    parser_init("")
+    expect(parse_unsigned_int_literal_text(maximum, suffix)).to_equal(word)
+    expect(parser_get_errors().len()).to_equal(0)
+
+    val rejected = core_interpret_expr(overflow + suffix)
+    expect(rejected).to_equal(-1)
+    expect(eval_has_error()).to_equal(true)
+    expect(eval_get_error()).to_equal("parse error")
+    expect(parser_get_errors().join("\n")).to_contain("integer literal out of range for " + suffix)
+
+describe "unsigned suffix interpreter frontend boundaries":
+    it "should reject decimal overflow at each supported unsigned width":
+        step("Decode each declared maximum and reject maximum plus one through the interpreter")
+        expect_suffix_boundary("255", "256", "u8", 255)
+        expect_suffix_boundary("65535", "65536", "u16", 65535)
+        expect_suffix_boundary("4294967295", "4294967296", "u32", 4294967295)
+        expect_suffix_boundary("18446744073709551615", "18446744073709551616", "u64", -1)
+
+    it "should preserve hexadecimal width boundaries through interpreter parsing":
+        step("Check hexadecimal maxima and the first value outside each width")
+        expect_suffix_boundary("0xff", "0x100", "u8", 255)
+        expect_suffix_boundary("0xffff", "0x10000", "u16", 65535)
+        expect_suffix_boundary("0xffffffff", "0x100000000", "u32", 4294967295)
+        expect_suffix_boundary("0xffffffffffffffff", "0x10000000000000000", "u64", -1)
+
+    it "should preserve binary width boundaries through interpreter parsing":
+        step("Check binary maxima and the first extra high bit")
+        expect_suffix_boundary("0b11111111", "0b100000000", "u8", 255)
+        expect_suffix_boundary("0b1111111111111111", "0b10000000000000000", "u16", 65535)
+        expect_suffix_boundary("0b11111111111111111111111111111111", "0b100000000000000000000000000000000", "u32", 4294967295)
+        expect_suffix_boundary("0b1111111111111111111111111111111111111111111111111111111111111111", "0b10000000000000000000000000000000000000000000000000000000000000000", "u64", -1)
+
+    it "should preserve octal width boundaries through interpreter parsing":
+        step("Check octal boundaries including widths not aligned to octal digits")
+        expect_suffix_boundary("0o377", "0o400", "u8", 255)
+        expect_suffix_boundary("0o177777", "0o200000", "u16", 65535)
+        expect_suffix_boundary("0o37777777777", "0o40000000000", "u32", 4294967295)
+        expect_suffix_boundary("0o1777777777777777777777", "0o2000000000000000000000", "u64", -1)
+
+    it "should preserve the signed interpreter control and signed overflow diagnostic":
+        step("Evaluate a valid unsuffixed signed maximum through the actual interpreter")
+        val accepted = core_interpret_expr("9223372036854775807")
+        expect(eval_has_error()).to_equal(false)
+        expect(parser_get_errors().len()).to_equal(0)
+        expect(val_is_int(accepted)).to_equal(true)
+        if accepted < 0:
+            fail("signed control did not produce an interpreter value")
+        expect(val_get_int(accepted)).to_equal(9223372036854775807)
+
+        step("Reject the existing signed magnitude overflow through the interpreter")
+        expect(core_interpret_expr("9223372036854775809i64")).to_equal(-1)
+        expect(eval_has_error()).to_equal(true)
+        expect(eval_get_error()).to_equal("parse error")
+        expect(parser_get_errors().join("\n")).to_contain("integer literal out of range for i64")
