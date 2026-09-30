@@ -142,3 +142,26 @@ Run a final explicit clean rebuild only after the build failures are fixed and
 focused verification passes. That clean rebuild is deferred during the repair
 loop. This update's focused validation is separate from the ongoing native
 Windows/Linux bootstraps; no running cache is cleaned by the contract fixtures.
+
+## Bug-linked source workarounds
+
+Follow [bug-linked workarounds](bug_linked_workarounds.md) when a temporary
+source change avoids a compiler/runtime bug (accepted contract; runtime
+qualification pending). Place `@workaround bug=<canonical-id>` immediately
+before the affected block, with optional recovery hash and reason. Ordinary
+`simple check-dbs bugs --bug=<canonical-id>` reads only the derived index;
+`simple check-dbs --fullscan bugs` explicitly reconciles tracked sources after
+missing coverage or a HEAD change. The parent build updates changed/untracked
+and previously linked paths once in one transaction; workers never write it.
+
+Fix the bug owner, review related links, and restore only the intended source
+blocks. Recovery references are review evidence, not checkout/reset commands.
+Preserve producer, entry, dependency, ABI, and option identities while selecting
+the smallest valid build; the index cannot authorize cache reuse. Keep the one
+final clean gate at the required qualification boundary, after repairs pass.
+
+Phase 3/4 diagnostic work can start as soon as its required compiler binary
+exists while earlier admission continues. Freeze producer bytes, isolate
+writable caches/outputs, and budget CPU and memory across Windows/Linux lanes.
+Diagnostic scheduling does not change receipt-bound cache admission or permit
+promotion before the required verification succeeds.

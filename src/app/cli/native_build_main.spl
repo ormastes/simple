@@ -6,6 +6,7 @@ use app.io.cli_ops.{_cli_self_exe_via_pid_query, cli_kernel_executable_path}
 use app.cli.native_build_producer_binding.{bootstrap_native_build_producer_binding}
 use app.io.file_ops.{path_absolute, file_size_raw}
 use app.compiler_entrypoint.inventory_events.{compiler_inventory_refresh_v1}
+use app.bug.workaround_store.{refresh_workarounds}
 # Unambiguous, non-builtin stderr write for the worker-failure relay path
 # (eprint_bounded / native_build_print_failure_hints / the `code != 0` branch
 # below). `eprint` is a compiler builtin that a co-compiled `fn eprint` in
@@ -801,6 +802,16 @@ fn run_hir_shards(args: [text], count: i64, simple_bin: text, timeout_ms: i64):
     print "[hir-shard] {done}/{count} shard(s) completed split={mode}"
 
 pub fn run_native_build_worker(args: [text]) -> i64:
+    # This is the parent coordinator; native_build_worker.spl and shard
+    # children never publish the derived index. One changed-path batch keeps
+    # recovery links current without changing compilation cache identities.
+    if (env_get("SIMPLE_NATIVE_BUILD_WORKER") ?? "") != "1":
+        match refresh_workarounds(false, []):
+            case Ok(index):
+                if not index.complete:
+                    stderr_write("workarounds: incomplete coverage; run simple check-dbs --fullscan bugs\n")
+            case Err(reason):
+                stderr_write("workarounds: refresh failed: " + reason + "\n")
     val compiled_bootstrap_route =
         (env_get("SIMPLE_BOOTSTRAP_INTERNAL_NATIVE_BUILD_ROUTING") ?? "") == "1"
     val simple_bin = if compiled_bootstrap_route:

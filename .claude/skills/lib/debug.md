@@ -111,6 +111,22 @@ Logging: `debug_log_enable(pattern)`, `debug_log_query`, `debug_log_tree`
 
 ## Bootstrap Debugging
 
+For temporary source workarounds, follow
+[bug-linked workarounds](../../../doc/07_guide/tooling/bug_linked_workarounds.md)
+(accepted contract; runtime qualification pending). Put
+`# @workaround bug=<canonical-id> [recover=<7..64hex>] [reason=<text>]`
+immediately before the affected block; `//` is also accepted. Ordinary
+`simple check-dbs bugs --bug=<canonical-id>` queries only the derived index.
+Missing coverage or HEAD mismatch requires `simple check-dbs --fullscan bugs`.
+Fix the owning bug first, review its linked blocks, then apply narrow recovery
+and the smallest justified build. A recovery hash is evidence, never automatic
+checkout/reset authority. Preserve producer/entry/dependency/ABI/options cache
+identities and defer the final clean gate to the required boundary.
+
+Start Phase 3 and Phase 4 diagnostics once their required compiler binary
+exists, alongside unfinished upstream admission. Isolate caches/outputs and
+record the exact producer; require admission before promoting those results.
+
 ```bash
 scripts/capture_bootstrap_debug.sh     # Capture output
 scripts/bootstrap.sh --stage=1         # Specific stage
