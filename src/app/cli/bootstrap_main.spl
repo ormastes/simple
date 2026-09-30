@@ -19,6 +19,8 @@ use app.cli.bootstrap_identity.{bootstrap_version}
 use app.cli.bootstrap_focused_native_build.{run_exact_stage3_focused_capsule, run_exact_stage4_focused_capsule}
 use app.cli.bootstrap_focused_native_build_args.{focused_native_build_cache_dir}
 use app.io.native_build_cache.{native_build_cache_snapshot, native_build_cache_bind, native_build_cache_restore}
+use app.cli.bootstrap_native_output_args.{native_build_flag_needs_value, bootstrap_native_build_output_mode}
+use app.io.native_build_output_mode.{native_build_output_mode_snapshot, native_build_output_mode_bind, native_build_output_mode_restore}
 use app.cli.native_build_main.{run_native_build_worker}
 use app.io._CliCompile.compile_targets.{cli_native_build_with_environment_variant_policy_v1}
 use app.io._CliCompile.compile_targets.{cli_native_build_option_error}
@@ -68,46 +70,6 @@ fn bootstrap_output_from_args(args: [text], i: i64) -> text:
         args[i].substring(9)
     else:
         bootstrap_output_from_args(args, i + 1)
-
-# ponytail: native codegen currently emits an invalid `bitcast i64 to i1`
-# when a `bool`-returning function merges more than one branch (each arm
-# stores into a shared i64 slot, then the final load is bitcast to i1
-# instead of truncated/compared) -- see filed bug. Returning `i64` (1/0)
-# instead of `bool` sidesteps that miscompile without touching the shared
-# backend; callers compare against `1`.
-fn native_build_flag_needs_value(flag: text) -> i64:
-    if flag == "-o":
-        1
-    elif flag == "--output":
-        1
-    elif flag == "--source":
-        1
-    elif flag == "--entry":
-        1
-    elif flag == "--threads":
-        1
-    elif flag == "--timeout":
-        1
-    elif flag == "--cache-dir":
-        1
-    elif flag == "--backend":
-        1
-    elif flag == "--backend-plugin":
-        1
-    elif flag == "--runtime-bundle":
-        1
-    elif flag == "--runtime-path":
-        1
-    elif flag == "--mode":
-        1
-    elif flag == "--target":
-        1
-    elif flag == "--linker-script":
-        1
-    elif flag == "--log":
-        1
-    else:
-        0
 
 fn native_build_entry_from_args(args: [text], i: i64) -> text:
     if i >= args.len():
@@ -306,7 +268,10 @@ pub fn run_native_build_bootstrap(args: [text]) -> i64:
         print "Usage: simple native-build <file>.spl [-o <output>] [--backend=<llvm|cranelift>]"
         print ""
         print "Options:"
-        print "  -o <output>                 Output executable path (default build/native/<stem>)"
+        print "  -o <output>                 Output artifact path (default build/native/<stem>)"
+        print "  --emit-object               Emit a relocatable object"
+        print "  --emit-archive              Emit a static archive"
+        print "  --emit-shared               Emit a shared library"
         print "  --backend=<llvm|cranelift>  Codegen backend (default auto)"
         print "  --mode=<dynload|one-binary> Link mode"
         print "  --no-borrow-check           Skip the borrow checker"
@@ -329,6 +294,13 @@ pub fn run_native_build_bootstrap(args: [text]) -> i64:
     val mode = native_build_mode_from_args(args, 0)
     if mode != "" and mode != "dynload" and mode != "one-binary":
         print "Error: invalid --mode '{mode}' (expected dynload or one-binary)"
+        return 1
+    val requested_output_mode = bootstrap_native_build_output_mode(args)
+    if requested_output_mode == "conflict":
+        print "Error: --emit-object, --emit-archive, and --emit-shared are mutually exclusive"
+        return 1
+    if requested_output_mode != "" and env_get("SIMPLE_BOOTSTRAP_STAGE4") == "1":
+        print "Error: Stage4 strict profile does not support object, archive, or shared output"
         return 1
     val explicit_entry = native_build_entry_from_args(args, 0)
     if explicit_entry != "":
@@ -430,12 +402,25 @@ pub fn run_native_build_bootstrap(args: [text]) -> i64:
     if not native_build_cache_bind(requested_cache):
         print "error: could not bind native-build --cache-dir '{requested_cache}'"
         return 1
+    val previous_output_mode = native_build_output_mode_snapshot()
+    if not native_build_output_mode_bind(requested_output_mode):
+        # Attempt both restores even when one fails, as below after compilation.
+        val output_restored = native_build_output_mode_restore(previous_output_mode)
+        val cache_restored = native_build_cache_restore(previous_cache)
+        if not output_restored or not cache_restored:
+            print "error: could not restore native-build environment after output-mode binding failure"
+        print "error: could not bind native-build output mode '{requested_output_mode}'"
+        return 1
     val driver = compiler_driver_create(options)
     val result = compiler_driver_run_compile(driver)
     # Restore before every result-dependent return, including compile failure
     # and missing/stub output refusal. Absent and empty are distinct states.
+    val output_restored = native_build_output_mode_restore(previous_output_mode)
     if not native_build_cache_restore(previous_cache):
         print "error: could not restore native-build cache environment"
+        return 1
+    if not output_restored:
+        print "error: could not restore native-build output-mode environment"
         return 1
     # Free-function accessors, NOT result.is_success()/.get_errors(): this
     # entry is MIR-lowered without HIR type inference, so method calls on the
