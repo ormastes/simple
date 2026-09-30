@@ -1695,36 +1695,47 @@ bootstrap_stage3_archive_prior_evidence() (
 bootstrap_stage2_sanity_output_preflight() (
   bssop_base=$1
   [ -n "${bssop_base}" ] || return 0
-  for bssop_suffix in \
-    '' .frontend-driver.log .frontend-failure.log \
-    .frontend-bootstrap-0.log .frontend-bootstrap-0.log.bounded.env \
-    .frontend-bootstrap-0.log.stage2-mir-retention .frontend-bootstrap-0.log.stage2-mir-retention.bounded.env \
-    .frontend-bootstrap-0.log.stage2-module-path-naming .frontend-bootstrap-0.log.stage2-module-path-naming.bounded.env \
-    .frontend-bootstrap-0.log.hello-world-positional .frontend-bootstrap-0.log.hello-world-positional.bounded.env \
-    .frontend-bootstrap-0.status.env \
-    .frontend-bootstrap-1.log .frontend-bootstrap-1.log.bounded.env \
-    .frontend-bootstrap-1.log.stage2-mir-retention .frontend-bootstrap-1.log.stage2-mir-retention.bounded.env \
-    .frontend-bootstrap-1.log.stage2-module-path-naming .frontend-bootstrap-1.log.stage2-module-path-naming.bounded.env \
-    .frontend-bootstrap-1.log.hello-world-positional .frontend-bootstrap-1.log.hello-world-positional.bounded.env \
-    .frontend-bootstrap-1.status.env; do
-    if [ -e "${bssop_base}${bssop_suffix}" ] || [ -L "${bssop_base}${bssop_suffix}" ]; then
-      if [ -z "${bssop_archive:-}" ]; then
-        bssop_archive=${bssop_base}.superseded-$(date +%Y%m%d-%H%M%S)
-        if ! mkdir -p "${bssop_archive}"; then
-          echo "stage2-sanity-error: stale-evidence-output-root; cannot create ${bssop_archive}" >&2
-          return 1
-        fi
-      fi
-      if ! mv "${bssop_base}${bssop_suffix}" "${bssop_archive}/"; then
-        echo "stage2-sanity-error: stale-evidence-output-root; cannot archive ${bssop_base}${bssop_suffix}" >&2
-        return 1
-      fi
-      bssop_moved=$(( ${bssop_moved:-0} + 1 ))
+  bssop_parent=$(dirname "${bssop_base}")
+  bssop_leaf=$(basename "${bssop_base}")
+  # Include every bounded substep and unfinished temporary log. A fixed list
+  # silently misses new substeps and lets an old receipt collide after a run.
+  set -- "${bssop_base}" "${bssop_base}".* "${bssop_parent}/.${bssop_leaf}".*.tmp.*
+  bssop_count=0
+  for bssop_prior do
+    [ -e "${bssop_prior}" ] || [ -L "${bssop_prior}" ] || continue
+    if [ -L "${bssop_prior}" ]; then
+      echo "stage2-sanity-error: linked prior evidence: ${bssop_prior}" >&2
+      return 1
+    fi
+    case "${bssop_prior}" in
+      "${bssop_base}".superseded-*) [ ! -d "${bssop_prior}" ] || continue ;;
+    esac
+    if [ ! -f "${bssop_prior}" ]; then
+      echo "stage2-sanity-error: non-file prior evidence: ${bssop_prior}" >&2
+      return 1
+    fi
+    bssop_count=$((bssop_count + 1))
+  done
+  [ "${bssop_count}" -gt 0 ] || return 0
+  bssop_archive=${bssop_base}.superseded-$(date -u '+%Y%m%dT%H%M%S')-$$
+  if ! mkdir "${bssop_archive}"; then
+    echo "stage2-sanity-error: prior evidence archive collision: ${bssop_archive}" >&2
+    return 1
+  fi
+  for bssop_prior do
+    [ -e "${bssop_prior}" ] || [ -L "${bssop_prior}" ] || continue
+    case "${bssop_prior}" in
+      "${bssop_base}".superseded-*) [ ! -d "${bssop_prior}" ] || continue ;;
+    esac
+    bssop_target=${bssop_archive}/$(basename "${bssop_prior}")
+    if [ -L "${bssop_prior}" ] || [ ! -f "${bssop_prior}" ] ||
+       [ -e "${bssop_target}" ] || [ -L "${bssop_target}" ] ||
+       ! mv "${bssop_prior}" "${bssop_target}"; then
+      echo "stage2-sanity-error: cannot archive prior evidence: ${bssop_prior}" >&2
+      return 1
     fi
   done
-  if [ "${bssop_moved:-0}" -gt 0 ]; then
-    echo "stage2 sanity: archived ${bssop_moved} stale evidence leaf(s) to ${bssop_archive}" >&2
-  fi
+  echo "stage2 sanity: archived ${bssop_count} prior evidence leaf(s) to ${bssop_archive}" >&2
 )
 
 # A timed-out Rust native-build leaves every already-published object in its
