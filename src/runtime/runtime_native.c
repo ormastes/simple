@@ -7393,10 +7393,14 @@ char* rt_strcat(const char* a, const char* b) {
  * interpolation, [...].join in method_calls_literals.spl) expect a raw
  * pointer. */
 int64_t rt_strcat_tagged(int64_t a, int64_t b) {
-    const char* left = rt_interp_cstr(a);
-    const char* right = rt_interp_cstr(b);
-    size_t left_len = left ? strlen(left) : 0;
-    size_t right_len = right ? strlen(right) : 0;
+    RtCoreString* left_string = rt_core_as_string(a);
+    RtCoreString* right_string = rt_core_as_string(b);
+    const char* left = left_string ? (const char*)left_string->data : rt_interp_cstr(a);
+    const char* right = right_string ? (const char*)right_string->data : rt_interp_cstr(b);
+    /* Tagged text is length-delimited and may contain NUL bytes. Raw C-string
+     * operands retain the existing pointer/low-value fallback semantics. */
+    size_t left_len = left_string ? (size_t)left_string->len : (left ? strlen(left) : 0);
+    size_t right_len = right_string ? (size_t)right_string->len : (right ? strlen(right) : 0);
     size_t total = left_len + right_len;
 
     RtCoreString* out = (RtCoreString*)malloc(sizeof(RtCoreString) + total + 1);
