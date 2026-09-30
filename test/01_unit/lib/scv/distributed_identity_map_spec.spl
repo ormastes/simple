@@ -1,0 +1,85 @@
+# codex-system-test
+# @req REQ-004
+# Pure candidate-state checks; persistence and settlement admission are separate gates.
+use std.spec.{describe, it, expect, step}
+use std.scv.distributed_identity.{ActorIncarnation, EntityUid}
+use std.scv.distributed_identity_map.{IdentityMap, IdentityMapHighWater, identity_map_empty, identity_map_allocate, identity_map_tombstone, identity_map_reverse}
+
+fn candidate_uid(counter: u64, kind: text) -> EntityUid:
+    EntityUid(database_namespace: "ffeeddccbbaa99887766554433221100", entity_kind: kind, actor: ActorIncarnation(hex: "00112233445566778899aabbccddeeff"), counter: counter)
+
+describe "SCV identity map candidate allocation":
+    it "keeps a retry on the same permanent alias":
+        step("Allocate an offline identity in an empty candidate")
+        val empty = identity_map_empty("ffeeddccbbaa99887766554433221100", 1)
+        val first = identity_map_allocate(empty, candidate_uid(1, "bug"))
+        expect(first.code).to_equal("allocated")
+        expect(first.sequence).to_equal(1)
+        step("Retry the same identity without consuming another number")
+        val retry = identity_map_allocate(first.state, candidate_uid(1, "bug"))
+        expect(retry.code).to_equal("existing")
+        expect(retry.sequence).to_equal(1)
+        expect(retry.state.bindings.len()).to_equal(1)
+        expect(empty.bindings.len()).to_equal(0)
+
+    it "retains tombstones and never recycles an accepted sequence":
+        step("Allocate then tombstone the first identity")
+        val first = identity_map_allocate(identity_map_empty("ffeeddccbbaa99887766554433221100", 1), candidate_uid(1, "bug"))
+        val deleted = identity_map_tombstone(first.state, candidate_uid(1, "bug"))
+        expect(deleted.code).to_equal("tombstoned")
+        step("Allocate a different identity and retain reverse resolution")
+        val second = identity_map_allocate(deleted.state, candidate_uid(2, "bug"))
+        expect(second.sequence).to_equal(2)
+        expect(identity_map_reverse(second.state, "bug", 1)).to_contain("c:1:1")
+        expect(identity_map_allocate(second.state, candidate_uid(1, "bug")).code).to_equal("tombstoned")
+        expect(first.state.bindings[0].tombstoned).to_be(false)
+
+    it "allocates independently per kind and refuses foreign namespaces atomically":
+        step("Allocate two entity kinds")
+        val first = identity_map_allocate(identity_map_empty("ffeeddccbbaa99887766554433221100", 1), candidate_uid(1, "bug"))
+        val second = identity_map_allocate(first.state, candidate_uid(2, "test"))
+        expect(second.sequence).to_equal(1)
+        step("Reject an identity from another database")
+        val foreign = EntityUid(database_namespace: "00112233445566778899aabbccddeeff", entity_kind: "bug", actor: ActorIncarnation(hex: "00112233445566778899aabbccddeeff"), counter: 3)
+        val rejected = identity_map_allocate(second.state, foreign)
+        expect(rejected.code).to_equal("SCVDB_NAMESPACE_MISMATCH")
+        expect(rejected.state.bindings.len()).to_equal(2)
+        expect(identity_map_allocate(rejected.state, candidate_uid(3, "bug")).sequence).to_equal(2)
+
+    it "uses retained high-water state even when no live rows remain":
+        step("Restore a candidate with retained allocator state")
+        val restored = IdentityMap(database_namespace: "ffeeddccbbaa99887766554433221100", authority_epoch: 1, bindings: [], high_water: [IdentityMapHighWater(entity_kind: "bug", sequence: 41)])
+        expect(identity_map_allocate(restored, candidate_uid(1, "bug")).sequence).to_equal(42)
+        step("Refuse exhausted u64 allocation without wrapping")
+        val exhausted = IdentityMap(database_namespace: restored.database_namespace, authority_epoch: 1, bindings: [], high_water: [IdentityMapHighWater(entity_kind: "bug", sequence: 18446744073709551615)])
+        val refused = identity_map_allocate(exhausted, candidate_uid(2, "bug"))
+        expect(refused.code).to_equal("SCVDB_ALLOCATOR_EXHAUSTED")
+        expect(refused.state.bindings.len()).to_equal(0)
+
+    it "refuses allocator regression before allocating or resolving retries":
+        step("Remove the allocator mark from a previously accepted candidate")
+        val first = identity_map_allocate(identity_map_empty("ffeeddccbbaa99887766554433221100", 1), candidate_uid(1, "bug"))
+        val regressed = IdentityMap(database_namespace: first.state.database_namespace, authority_epoch: 1, bindings: first.state.bindings, high_water: [])
+        step("Reject both a new identity and a retry against regressed state")
+        expect(identity_map_allocate(regressed, candidate_uid(2, "bug")).code).to_equal("SCVDB_ALLOCATOR_REGRESSION")
+        expect(identity_map_allocate(regressed, candidate_uid(1, "bug")).code).to_equal("SCVDB_ALLOCATOR_REGRESSION")
+
+    it "rejects duplicate reverse aliases and duplicate forward identities":
+        step("Combine independent candidates that allocated the same alias")
+        val empty = identity_map_empty("ffeeddccbbaa99887766554433221100", 1)
+        val first = identity_map_allocate(empty, candidate_uid(1, "bug"))
+        val second = identity_map_allocate(empty, candidate_uid(2, "bug"))
+        val corrupt = IdentityMap(database_namespace: empty.database_namespace, authority_epoch: 1, bindings: first.state.bindings + second.state.bindings, high_water: first.state.high_water)
+        expect(identity_map_allocate(corrupt, candidate_uid(3, "bug")).code).to_equal("SCVDB_BINDING_AMBIGUOUS")
+        expect(identity_map_reverse(corrupt, "bug", 1)).to_equal("")
+        expect(identity_map_tombstone(corrupt, candidate_uid(1, "bug")).code).to_equal("SCVDB_BINDING_AMBIGUOUS")
+        step("Reject duplicate forward identity rows without selecting the first")
+        val duplicate = IdentityMap(database_namespace: empty.database_namespace, authority_epoch: 1, bindings: first.state.bindings + first.state.bindings, high_water: first.state.high_water)
+        expect(identity_map_allocate(duplicate, candidate_uid(1, "bug")).code).to_equal("SCVDB_BINDING_AMBIGUOUS")
+
+    it "rejects bindings moved into another database namespace":
+        step("Move a retained binding beneath a different namespace header")
+        val first = identity_map_allocate(identity_map_empty("ffeeddccbbaa99887766554433221100", 1), candidate_uid(1, "bug"))
+        val foreign = IdentityMap(database_namespace: "00112233445566778899aabbccddeeff", authority_epoch: 1, bindings: first.state.bindings, high_water: first.state.high_water)
+        step("Refuse reverse resolution from the inconsistent candidate")
+        expect(identity_map_reverse(foreign, "bug", 1)).to_equal("")

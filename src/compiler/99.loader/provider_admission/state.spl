@@ -93,6 +93,8 @@ fn provider_admission_state_v1(
         case 0: ProviderAdmissionStateV1.unrequested
         case 1: ProviderAdmissionStateV1.admitting
         case 2: ProviderAdmissionStateV1.admitted
+        # Internal state 3 reserves terminal metadata for one publisher.
+        case 3: ProviderAdmissionStateV1.admitting
         case _: ProviderAdmissionStateV1.rejected
 
 fn provider_admission_try_claim_v1(admission: ProviderAdmissionV1) -> bool:
@@ -103,20 +105,26 @@ fn provider_admission_publish_v1(
     admission: ProviderAdmissionV1,
     receipt: ProviderAdmissionReceiptV1
 ) -> bool:
+    if not admission.atomic_state.compare_exchange(
+            1, 3, MemoryOrdering.AcqRel, MemoryOrdering.Acquire):
+        return false
     admission.receipt = Some(receipt)
-    admission.atomic_state.compare_exchange(
-        1, 2, MemoryOrdering.Release, MemoryOrdering.Acquire)
+    admission.atomic_state.store(2, MemoryOrdering.Release)
+    true
 
 fn provider_admission_reject_v1(
     admission: ProviderAdmissionV1,
     error: ProviderAdmissionErrorV1
 ) -> bool:
+    if not admission.atomic_state.compare_exchange(
+            1, 3, MemoryOrdering.AcqRel, MemoryOrdering.Acquire):
+        return false
     admission.failure = Some(ProviderAdmissionFailureV1(
         error, admission.descriptor.provider_identity,
         admission.descriptor.package_identity,
         admission.authority.image.archive_digest))
-    admission.atomic_state.compare_exchange(
-        1, -1, MemoryOrdering.Release, MemoryOrdering.Acquire)
+    admission.atomic_state.store(-1, MemoryOrdering.Release)
+    true
 
 fn provider_execution_ticket_v1(
     receipt: ProviderAdmissionReceiptV1
