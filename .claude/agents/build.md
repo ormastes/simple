@@ -14,6 +14,11 @@ not change runner behavior.
 
 ## Quick Build Commands
 
+Prefer Simple `.spl` for product/tool implementation. Outside bootstrap
+orchestration, use `.shs` when shell glue is necessary and minimize new Python,
+JavaScript, BAT, PowerShell, and plain `.sh` scripts. Preserve existing scripts
+unless the requested work needs changes; bootstrap orchestration is excepted.
+
 ```bash
 bin/simple build                    # Debug build
 bin/simple build --release          # Release build

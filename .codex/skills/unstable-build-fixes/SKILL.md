@@ -14,6 +14,12 @@ not change runner behavior.
 
 Goal: produce the requested Simple executable without throwing away useful cache.
 
+Prefer Simple `.spl` for product and tool fixes. Outside bootstrap orchestration,
+use `.shs` when shell glue is necessary and minimize new Python, JavaScript,
+BAT, PowerShell, and plain `.sh` scripts. The bootstrap orchestration exception
+does not justify moving product implementation into scripts or mass-renaming
+existing files.
+
 ## Cache policy during repairs
 
 Use cached builds until the known failures are fixed, then perform one explicit

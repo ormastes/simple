@@ -5,6 +5,14 @@ and test work instead of ending the investigation at the first failure. This
 is the shared agent policy for SPipe, bootstrap, builds, tests, and bug repair.
 It does not assert that every runner already implements this scheduling.
 
+## Implementation language
+
+Outside bootstrap orchestration, prefer Simple `.spl` for product code and
+tools. When shell orchestration is necessary, prefer `.shs` and minimize new
+Python, JavaScript, BAT, PowerShell, and plain `.sh` scripts. Bootstrap
+orchestration retains its exception. Apply this choice to new work; do not
+mass-rename or rewrite existing scripts merely to change their extension.
+
 ## Continue by dependency
 
 Inventory the requested phases, entries, tool builds, and test shards before
