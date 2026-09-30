@@ -7,12 +7,33 @@ mcp_spec="$root/test/02_integration/app/mcp_stdio_integration_spec.spl"
 
 fail() { echo "FAIL: $1" >&2; exit 1; }
 
-count=$(grep -F -- '--cache-dir "$tool_build_cache"' "$phase" | wc -l | tr -d ' ')
-[ "$count" = 2 ] || fail "Phase 2 MCP and LSP must share exactly one cache namespace"
-
-if grep -Eq -- '--cache-dir "\$cache/(mcp_build|lsp_build)"' "$phase"; then
-    fail "per-tool cache roots prevent cross-entry per-file reuse"
+# Every entry owns a writable cache, including the slim CLI/runner profile.
+# The path-helper behavior (identity changes and retained retry payloads) is
+# covered by bootstrap_phase_cache_defaults_test.shs; this gate binds the
+# actual producer argv/environment to those entry-specific paths.
+if grep -Fq -- '--cache-dir "$tool_build_cache"' "$phase" ||
+   grep -Fq -- '"$tool_cache/shared"' "$phase"; then
+    fail "different entry closures still share a writable cache"
 fi
+for entry in mcp lsp; do
+  [ "$(grep -Fc -- "--cache-dir \"\$service_${entry}_cache\"" "$phase")" = 2 ] ||
+    fail "Stage1/Stage4 $entry cache is not routed through the identity helper"
+  grep -Fq -- "\"\$snapshot_sha\" \"\$p1a_stamp_sha\" $entry)" "$phase" ||
+    fail "Stage1 $entry cache lacks admitted input identity"
+  grep -Fq -- "\"\$snapshot_sha\" \"\$tool_input_identity\" $entry)" "$phase" ||
+    fail "Stage4 $entry cache lacks admitted input identity"
+  grep -F -- "run_phase_c_tool_build ${entry}_build " "$phase" |
+    grep -Fq -- "\"\$tool_build_cache/$entry\"" ||
+    fail "Stage2/Stage3 $entry producer lacks an entry-specific cache"
+done
+grep -Fq -- 'tool_cache_cli="$tool_cache/full-cli"' "$phase" ||
+  fail "full CLI cache is not entry-specific"
+grep -Fq -- 'tool_cache_runner="$tool_cache/test-runner"' "$phase" ||
+  fail "test runner cache is not entry-specific"
+grep -Fq -- 'SIMPLE_NATIVE_BUILD_CACHE_DIR="$pure_tool_cache"' "$phase" ||
+  fail "positional C producer does not receive its entry cache"
+grep -Fq -- 'SIMPLE_RT_OBJ_CACHE_DIR="$pure_tool_cache/runtime-objects"' "$phase" ||
+  fail "positional C runtime objects escape the entry cache"
 
 grep -Fq -- '--output "$outputs/simple_mcp_server"' "$phase" ||
     fail "MCP output must remain isolated"
@@ -22,14 +43,22 @@ grep -Fq -- '--output "$outputs/simple_lsp_mcp_server"' "$phase" ||
 # A phase compiler is bootstrap_main and deliberately has no full `check` or
 # `test` command surface. The verifier must materialize SHA-bound command
 # owners instead of manufacturing one failure per source/spec.
-grep -Fq -- 'tool_cache="$cache_root/compiler-tools/$phase/$snapshot_sha/$runtime_cache_identity"' "$phase" ||
+grep -Fq -- 'tool_cache="$cache_root/compiler-tools/$phase/$snapshot_sha/$tool_input_identity"' "$phase" ||
   fail "full CLI/test-runner cache is not compiler/runtime-SHA-bound"
-grep -Fq -- 'tool_outputs="$outputs/compiler-tools/$phase/$snapshot_sha/$runtime_cache_identity"' "$phase" ||
-  fail "full CLI/test-runner outputs are not phase-isolated"
-grep -Fq -- 'tool_build_cache="$cache/tool_builds/$phase/$snapshot_sha/$runtime_cache_identity"' "$phase" ||
+grep -Fq -- 'tool_outputs="$outputs/compiler-tools/$phase/$(printf %.16s "$snapshot_sha")/$(printf %.16s "$tool_input_identity")"' "$phase" ||
+  fail "full CLI/test-runner outputs are not phase/producer/input-bound"
+grep -Fq -- 'tool_build_cache="$cache/tool_builds/$phase/$snapshot_sha/$tool_input_identity"' "$phase" ||
   fail "MCP/LSP cache is not phase-isolated"
-grep -Fq -- 'server_outputs="$outputs/tool-builds/$phase/$snapshot_sha/$runtime_cache_identity"' "$phase" ||
-  fail "MCP/LSP outputs are not phase-isolated"
+grep -Fq -- 'server_outputs="$outputs/tool-builds/$phase/$(printf %.16s "$snapshot_sha")/$(printf %.16s "$tool_input_identity")"' "$phase" ||
+  fail "MCP/LSP outputs are not phase/producer/input-bound"
+grep -Fq -- 'tool_input_identity=$runtime_cache_identity' "$phase" ||
+  fail "tool inputs lost the runtime capsule identity"
+grep -Fq -- 'tool_input_identity=$(printf' "$phase" ||
+  fail "positional C tool inputs lack a combined identity"
+grep -Fq -- '"$runtime_cache_identity" "$target_c_identity"' "$phase" ||
+  fail "positional C tool inputs lost runtime/target identities"
+grep -Fq -- '"$target_c_source_sha" | hash_stream)' "$phase" ||
+  fail "positional C tool inputs lost the source identity"
 grep -Fq -- 'hosted-runtime.env' "$phase" ||
     fail "hosted runtime authority is not receipt-bound"
 grep -Fq -- 'simple-bootstrap-hosted-runtime-authority-v1' "$phase" ||
@@ -40,7 +69,7 @@ grep -Fq -- 'native_all_sha256' "$phase" ||
     fail "native_all archive is not hash-bound before tool builds"
 grep -Fq -- 'phase2-runtime-capsule.env' "$phase" ||
     fail "compiler-only Phase2 publication is not rejected"
-grep -Fq -- "-name 'libspl_hosted_runtime-*.rlib'" "$phase" ||
+grep -Fq -- "-name 'libspl_hosted_runtime*.rlib'" "$phase" ||
     fail "duplicate hosted runtime artifacts are not rejected"
 if grep -Fq -- 'rust-authority-*' "$phase" || grep -Fq -- 'max_by_key' "$phase"; then
     fail "verifier searches mutable Rust targets instead of a frozen capsule"
@@ -49,8 +78,12 @@ grep -Fq -- '--entry src/app/cli/_CliMain/main_and_help.spl' "$phase" ||
     fail "phase verifier does not build the full CLI"
 grep -Fq -- '--entry src/app/test_runner_new/main.spl' "$phase" ||
     fail "phase verifier does not build the test runner"
-[ "$(grep -F -- '--runtime-bundle host-gpu --runtime-path "$runtime_path"' "$phase" | wc -l | tr -d ' ')" = 4 ] ||
-    fail "full CLI, test runner, MCP, and LSP must use the explicit host-gpu runtime"
+grep -Fq -- 'tool_runtime_bundle=host-gpu' "$phase" ||
+    fail "Stage4 tool builds lost the hosted runtime bundle"
+[ "$(grep -Fc -- '--runtime-bundle "$tool_runtime_bundle" --runtime-path "$runtime_path"' "$phase")" = 4 ] ||
+    fail "Stage4 CLI, runner, MCP, and LSP must use the explicit hosted runtime"
+grep -Fq -- 'SIMPLE_NATIVE_RUNTIME_BUNDLE=core-c-bootstrap SIMPLE_RUNTIME_PATH="$runtime_path"' "$phase" ||
+    fail "Stage2/Stage3 positional C tool builds lost their runtime binding"
 grep -Fq -- '[ "$native_internal_timeout" -gt 60 ]' "$phase" ||
     fail "native tool builds do not enforce an internal timeout above 60 seconds"
 if grep -Fq -- '"$compiler_snapshot" check ' "$phase" ||
@@ -128,4 +161,4 @@ inventory_line=$(grep -n 'run_repository_full_tests "$test_runner" "$command_own
 [ -n "$mcp_build_line" ] && [ -n "$inventory_line" ] && [ "$mcp_build_line" -lt "$inventory_line" ] ||
   fail "MCP server build is scheduled after the full inventory"
 
-echo "PASS: phase tool builds share cache while retaining distinct outputs"
+echo "PASS: phase tool builds retain producer/runtime identities and separate entry caches"
