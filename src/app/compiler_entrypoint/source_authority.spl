@@ -1,0 +1,149 @@
+# Snapshot and canonical inventory authority shared by public compiler routes.
+# This seam does not import the driver or the package-module index.
+use app.io.env_ops.{env_get, env_set}
+use app.io.file_ops.{path_absolute}
+use app.io.mod.{file_read_regular_no_follow_bounded}
+use app.compiler_entrypoint.inventory_events.{compiler_inventory_refresh_v1}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.path.{normalize as normalize_source_selector}
+use std.scv.compile_snapshot.{ScvCompileSnapshotV1,
+    scv_compile_snapshot_acquire_v1}
+use std.scv.compile_source_inventory.{CompileSourceInventoryReadV1,
+    CompileSourceInventoryBindingV1, compile_source_inventory_binding_reason_v1,
+    compile_source_inventory_read_current_v1, compile_source_inventory_read_at_pointer_v1,
+    compile_source_inventory_plain_checkout_v1, compile_source_inventory_checkout_cache_root_v1,
+    compile_source_inventory_snapshot_cache_root_v1}
+
+struct CompilerSourceAuthorityV1:
+    valid: bool
+    reason: text
+    snapshot: ScvCompileSnapshotV1
+    source_inventory_digest: text
+    inventory_generation: i64
+
+fn compiler_source_authority_invalid_v1(reason: text) -> CompilerSourceAuthorityV1:
+    val snapshot = ScvCompileSnapshotV1(
+        valid: false, reason: reason, revision_id: "", commit_id: "", tree_id: "",
+        inventory_digest: "", inventory_count: 0, snapshot_root: "",
+        provenance_path: "", receipt_path: "", source_drifted: false)
+    CompilerSourceAuthorityV1(false, reason, snapshot, "", -1)
+
+fn compiler_source_authority_clear_v1() -> bool:
+    var cleared = true
+    for name in ["SIMPLE_SCV_SNAPSHOT_ROOT", "SIMPLE_SCV_REVISION_ID",
+            "SIMPLE_SCV_COMMIT_ID", "SIMPLE_SCV_TREE_ID", "SIMPLE_SCV_INVENTORY_DIGEST",
+            "SIMPLE_SCV_SOURCE_INVENTORY_DIGEST", "SIMPLE_SCV_INVENTORY_GENERATION"]:
+        if not env_set(name, ""):
+            cleared = false
+    cleared
+
+fn compiler_source_authority_binding_reason_v1(
+    snapshot: ScvCompileSnapshotV1, expected_digest: text, expected_generation: i64,
+    actual: CompileSourceInventoryReadV1, manifest: text
+) -> text:
+    if not snapshot.valid: return snapshot.reason
+    if not actual.valid or actual.inventory == nil: return actual.reason
+    val binding = CompileSourceInventoryBindingV1(snapshot.inventory_digest, expected_digest)
+    val reason = compile_source_inventory_binding_reason_v1(binding, actual.digest)
+    if reason != "ok": return reason
+    if expected_generation < 0 or actual.inventory!.generation != expected_generation:
+        return "source-inventory-generation-mismatch"
+    if sha256_text(manifest) != snapshot.inventory_digest:
+        return "snapshot-source-manifest-mismatch"
+    val rows = if manifest == "": [] else: manifest.split("\n")
+    if rows.len() != snapshot.inventory_count:
+        return "snapshot-source-count-mismatch"
+    var admitted_rows: {text: bool} = {}
+    for entry in actual.inventory!.entries:
+        admitted_rows["{entry.source_identity}|sha256_{entry.content_digest}|{entry.byte_count}"] = true
+    for row in rows:
+        if not admitted_rows.contains_key(row):
+            return "snapshot-source-membership-mismatch"
+    "ok"
+
+fn compiler_source_authority_validate_v1(
+    root: text, cache_root: text, snapshot: ScvCompileSnapshotV1,
+    expected_digest: text, expected_generation: i64, inherited: bool
+) -> CompilerSourceAuthorityV1:
+    # Read only the generation the parent admitted; CURRENT may have advanced.
+    # Both fresh and inherited snapshots must remain owned by this checkout.
+    if compile_source_inventory_snapshot_cache_root_v1(
+            root, snapshot.snapshot_root, snapshot.revision_id) != cache_root:
+        return compiler_source_authority_invalid_v1("snapshot-source-owner-mismatch")
+    val actual = if inherited:
+        compile_source_inventory_read_at_pointer_v1(cache_root, expected_digest)
+    else:
+        compile_source_inventory_read_current_v1(cache_root)
+    val manifest = match file_read_regular_no_follow_bounded(
+            snapshot.snapshot_root + "/SCV_COMPILE_INVENTORY", 256 * 1024 * 1024):
+        case Ok(content): content
+        case Err(_): return compiler_source_authority_invalid_v1("snapshot-source-manifest-unreadable")
+    val reason = compiler_source_authority_binding_reason_v1(
+        snapshot, expected_digest, expected_generation, actual, manifest)
+    if reason != "ok": return compiler_source_authority_invalid_v1(reason)
+    CompilerSourceAuthorityV1(true, "ok", snapshot, expected_digest, expected_generation)
+
+fn compiler_source_authority_acquire_v1(
+    root: text, cache_root: text, source_roots: [text], cold_init: bool
+) -> CompilerSourceAuthorityV1:
+    val selected_families = compiler_source_authority_inventory_roots_v1(root, source_roots)
+    if selected_families.len() == 0:
+        return compiler_source_authority_invalid_v1("source-inventory-scope-unsupported")
+    var inventory_roots = selected_families
+    if cold_init:
+        if not inventory_roots.contains("src"): inventory_roots = inventory_roots.push("src")
+        if not inventory_roots.contains("test"): inventory_roots = inventory_roots.push("test")
+    val refresh = compiler_inventory_refresh_v1(root, cache_root, inventory_roots, cold_init)
+    if not refresh.valid: return compiler_source_authority_invalid_v1(refresh.reason)
+    val snapshot = scv_compile_snapshot_acquire_v1(root, cache_root, source_roots)
+    if not snapshot.valid: return compiler_source_authority_invalid_v1(snapshot.reason)
+    compiler_source_authority_validate_v1(root, cache_root, snapshot,
+        refresh.inventory_digest, refresh.inventory_generation, false)
+
+fn compiler_source_authority_inventory_roots_v1(root: text, source_roots: [text]) -> [text]:
+    # The event protocol admits whole src/test families. Snapshot roots are
+    # independent, exact selectors and must never be passed as event scopes.
+    var families: [text] = []
+    for source_root in source_roots:
+        var relative = source_root.replace("\\", "/")
+        if relative.starts_with(root + "/"):
+            relative = relative.substring(root.len() + 1)
+        # Reject parent traversal before lexical normalization could erase it.
+        # Preserve accepted spellings such as ./src/app and src/./app.
+        if relative.split("/").contains(".."):
+            return []
+        relative = normalize_source_selector(relative)
+        val family = if relative == "src" or relative.starts_with("src/"):
+            "src"
+        elif relative == "test" or relative.starts_with("test/"):
+            "test"
+        else:
+            ""
+        if family == "": return []
+        if not families.contains(family): families = families.push(family)
+    families
+
+fn compiler_source_authority_inherit_v1(snapshot: ScvCompileSnapshotV1) -> CompilerSourceAuthorityV1:
+    val root = compile_source_inventory_plain_checkout_v1(path_absolute("."))
+    val cache_root = compile_source_inventory_checkout_cache_root_v1(root)
+    val digest = env_get("SIMPLE_SCV_SOURCE_INVENTORY_DIGEST") ?? ""
+    val generation = (env_get("SIMPLE_SCV_INVENTORY_GENERATION") ?? "").to_i64() ?? -1
+    compiler_source_authority_validate_v1(root, cache_root, snapshot, digest, generation, true)
+
+fn compiler_source_authority_publish_v1(authority: CompilerSourceAuthorityV1) -> bool:
+    # The root is the permission marker. Stage every check before calling this
+    # function, clear old bindings, and publish root last. Any failed setter
+    # clears the partial record instead of leaving a mixed generation.
+    if not compiler_source_authority_clear_v1(): return false
+    if not authority.valid: return false
+    val snapshot = authority.snapshot
+    val published = env_set("SIMPLE_SCV_REVISION_ID", snapshot.revision_id) and
+        env_set("SIMPLE_SCV_COMMIT_ID", snapshot.commit_id) and
+        env_set("SIMPLE_SCV_TREE_ID", snapshot.tree_id) and
+        env_set("SIMPLE_SCV_INVENTORY_DIGEST", snapshot.inventory_digest) and
+        env_set("SIMPLE_SCV_SOURCE_INVENTORY_DIGEST", authority.source_inventory_digest) and
+        env_set("SIMPLE_SCV_INVENTORY_GENERATION", str(authority.inventory_generation)) and
+        env_set("SIMPLE_SCV_SNAPSHOT_ROOT", snapshot.snapshot_root)
+    if not published:
+        compiler_source_authority_clear_v1()
+    published

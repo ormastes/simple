@@ -6,6 +6,11 @@
 # before a single line of the shard runs. Behaviour is byte-identical: this is
 # a move, not a rewrite (doc/08_tracking/bug/memory_retention_compiler_and_interpreter_2026-08-21.md).
 use app.io.env_ops (env_get, env_set)
+use app.compiler_entrypoint.source_authority.{compiler_source_authority_acquire_v1,
+    compiler_source_authority_inherit_v1, compiler_source_authority_publish_v1,
+    compiler_source_authority_clear_v1}
+use std.scv.compile_source_inventory.{compile_source_inventory_plain_checkout_v1,
+    compile_source_inventory_checkout_cache_root_v1}
 use app.io.time_ops (time_now_unix_micros)
 use app.cli.native_build_warm_receipt.{native_build_warm_candidate_publish}
 use app.io._CliCompile.native_build_snapshot_roots.{native_build_snapshot_source_roots_v1}
@@ -17,7 +22,7 @@ use compiler.driver.driver_source_loading.{
     _driver_entry_import_dirname
 }
 use std.scv.compile_snapshot.{
-    scv_compile_snapshot_acquire_v1, scv_compile_snapshot_open_v1
+    scv_compile_snapshot_open_v1
 }
 @unsafe(reason: "raw path expansion; empty text is the invalid-or-expansion-failure sentinel", capabilities: [ffi])
 extern fn rt_path_absolute(path: text) -> text
@@ -127,7 +132,13 @@ fn _nb_scv_snapshot_path_v1(path: text) -> text:
     _nb_scv_snapshot_root_v1 + "/" + relative
 
 fn _nb_scv_key_v1(entry: text, source_dirs: [text], revision: text) -> text:
-    entry + "|" + source_dirs.join("|") + "|scv=" + revision
+    entry + "|" + source_dirs.join("|") + "|scv=" + revision +
+        "|inventory=" + (env_get("SIMPLE_SCV_SOURCE_INVENTORY_DIGEST") ?? "") +
+        "|generation=" + (env_get("SIMPLE_SCV_INVENTORY_GENERATION") ?? "") +
+        "|root=" + (env_get("SIMPLE_SCV_SNAPSHOT_ROOT") ?? "") +
+        "|manifest=" + (env_get("SIMPLE_SCV_INVENTORY_DIGEST") ?? "") +
+        "|commit=" + (env_get("SIMPLE_SCV_COMMIT_ID") ?? "") +
+        "|tree=" + (env_get("SIMPLE_SCV_TREE_ID") ?? "")
 
 fn _nb_scv_freeze_v1(entry: text, source_dirs: [text]) -> (bool, text, [text]):
     val entry_relative = _nb_scv_relative_path_v1(entry)
@@ -153,7 +164,13 @@ fn _nb_scv_freeze_v1(entry: text, source_dirs: [text]) -> (bool, text, [text]):
                 _nb_scv_snapshot_revision_v1, _nb_scv_snapshot_commit_v1,
                 _nb_scv_snapshot_tree_v1, _nb_scv_snapshot_inventory_v1)
             if not opened.valid:
+                compiler_source_authority_clear_v1()
                 _cli_eprint("SCV-E-SNAPSHOT: {opened.reason}")
+                return (false, "", [])
+            val authority = compiler_source_authority_inherit_v1(opened)
+            if not authority.valid:
+                compiler_source_authority_clear_v1()
+                _cli_eprint("SCV-E-SOURCE-AUTHORITY: {authority.reason}")
                 return (false, "", [])
             _nb_scv_snapshot_root_v1 = opened.snapshot_root
             _nb_scv_snapshot_key_v1 = _nb_scv_key_v1(
@@ -165,11 +182,19 @@ fn _nb_scv_freeze_v1(entry: text, source_dirs: [text]) -> (bool, text, [text]):
             var inventory_roots = effective_roots
             if not inventory_roots.contains(entry):
                 inventory_roots = inventory_roots.push(entry)
-            val snapshot = scv_compile_snapshot_acquire_v1(
-                ".", "build/scv", inventory_roots)
-            if not snapshot.valid:
-                _cli_eprint("SCV-E-SNAPSHOT: {snapshot.reason}")
+            val root = compile_source_inventory_plain_checkout_v1(_nb_path_absolute_raw("."))
+            val cache_root = compile_source_inventory_checkout_cache_root_v1(root)
+            val authority = compiler_source_authority_acquire_v1(
+                root, cache_root, inventory_roots,
+                (env_get("SIMPLE_SCV_INVENTORY_COLD_INIT") ?? "") == "1")
+            if not authority.valid:
+                compiler_source_authority_clear_v1()
+                _cli_eprint("SCV-E-SOURCE-AUTHORITY: {authority.reason}")
                 return (false, "", [])
+            if not compiler_source_authority_publish_v1(authority):
+                _cli_eprint("SCV-E-SOURCE-AUTHORITY: environment publication failed")
+                return (false, "", [])
+            val snapshot = authority.snapshot
             _nb_scv_snapshot_root_v1 = snapshot.snapshot_root
             _nb_scv_snapshot_revision_v1 = snapshot.revision_id
             _nb_scv_snapshot_commit_v1 = snapshot.commit_id
@@ -177,11 +202,6 @@ fn _nb_scv_freeze_v1(entry: text, source_dirs: [text]) -> (bool, text, [text]):
             _nb_scv_snapshot_inventory_v1 = snapshot.inventory_digest
             _nb_scv_snapshot_key_v1 = _nb_scv_key_v1(
                 entry, effective_roots, snapshot.revision_id)
-            env_set("SIMPLE_SCV_SNAPSHOT_ROOT", snapshot.snapshot_root)
-            env_set("SIMPLE_SCV_REVISION_ID", snapshot.revision_id)
-            env_set("SIMPLE_SCV_COMMIT_ID", snapshot.commit_id)
-            env_set("SIMPLE_SCV_TREE_ID", snapshot.tree_id)
-            env_set("SIMPLE_SCV_INVENTORY_DIGEST", snapshot.inventory_digest)
             env_set("SIMPLE_SCV_SOURCE_DRIFTED",
                 if snapshot.source_drifted: "1" else: "0")
             if snapshot.source_drifted:
