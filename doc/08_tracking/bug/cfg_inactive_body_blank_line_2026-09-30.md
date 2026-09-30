@@ -21,8 +21,11 @@ No duplicate match-arm patch is needed.
 ## Focused verification
 
 Base: verified remote main `5eb63efa451298e05201c06934f64b76ead7a8f8`.
-Runtime: admitted self-hosted Windows Phase 2 producer, SHA-256
+Invoked executable: admitted Windows Phase 2 producer, SHA-256
 `0be6e4c2a802e4fa7993fde80003eb87ffae097e564adb82ab4c937bbc640161`.
+The executable identity alone does not establish which compiler route ran.
+The positional reproductions below use the pure compiler driver. The explicit
+`--entry` component command instead selected the embedded Rust compiler.
 
 In `D:/dev/simple-phase2-parser-failures-20260930`:
 
@@ -37,13 +40,13 @@ In `D:/dev/simple-phase2-parser-failures-20260930`:
   docstring paragraphs, whitespace-only lines between statements, a nested
   inactive method followed by a retained sibling, and an enabled docstring.
   Exact output checks include unchanged line positions and retained siblings.
-- Native component build: 20 compiled, 0 reused, 0 failed. Run exits 0 and prints
+- Rust-backed component diagnostic: 20 compiled, 0 reused, 0 failed. Run exits 0 and prints
   `cfg blank-line regressions: 4 passed`. Log:
   `build/native_probe/phase2_parser/fixed_probe_build.log`.
 - The same four exact-output cases are discoverable in
   `test/01_unit/compiler/semantics/preprocessor_when_cfg_spec.spl`, under
   `inactive declaration blank lines`. This SSpec wrapper was added after the
-  native component passed; its full-suite execution remains pending.
+  Rust-backed component diagnostic passed; its full-suite execution remains pending.
 
 Build command (with the reviewed Windows tool environment and
 `SIMPLE_NO_STUB_FALLBACK=1`, `SIMPLE_NO_BOOTSTRAP_DELEGATE=1`):
@@ -51,6 +54,16 @@ Build command (with the reviewed Windows tool environment and
 ```text
 <admitted-producer> native-build --source src/compiler --source src/lib --entry-closure --entry test/fixtures/compiler/cfg_blank_line_probe.spl --cache-dir build/native_probe/phase2_parser/cache --output build/native_probe/phase2_parser/cfg_blank_line_probe.exe
 ```
+
+Correction after route review: the frozen producer's `bootstrap_main.spl`
+routes explicit `--entry` to `run_rt_native_build` when
+`SIMPLE_BOOTSTRAP_STAGE3` and `SIMPLE_BOOTSTRAP_STAGE4` are unset. The reviewed
+environment used here sets neither. `SIMPLE_NO_BOOTSTRAP_DELEGATE=1` does not
+disable this embedded FFI route. Therefore the 20-module result is diagnostic
+evidence only: it is **not pure-Simple Phase 2 verification or a qualification
+PASS**. Preserve its log and cache as Rust-backed evidence; do not reuse that
+cache for a pure compiler attempt. Corrected-source pure positional verification
+remains pending. The suitable command shape omits both `--entry` and `--source`.
 
 No full compiler rebuild, full suite, MCP/LSP gate, or original full CLI rerun
 is claimed. The producer binary remains unchanged. The Linux DevHub
