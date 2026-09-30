@@ -1,0 +1,372 @@
+#!/bin/sh
+# Scheduling contract only: fixture commands are not native compiler evidence.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+runner="$root/scripts/bootstrap/bootstrap-phase-verification.shs"
+scratch=$(mktemp -d)
+trap 'rm -rf "$scratch"' EXIT HUP INT TERM
+die() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+. "$root/scripts/bootstrap/bootstrap-cache-policy.shs"
+. "$root/scripts/bootstrap/bootstrap-module-collection.shs"
+# Use the production digest implementation and immutable snapshot validator.
+for fn in hash_file hash_stream; do
+  sed -n "/^$fn() (\$/,/^)\$/p" "$runner" >>"$scratch/admission.shs"
+done
+sed -n '/^validate_stage4_compiler_snapshot() {$/,/^}$/p' "$runner" >>"$scratch/admission.shs"
+[ -s "$scratch/admission.shs" ] || die 'production admission helpers missing'
+. "$scratch/admission.shs"
+phase=stage4
+compiler_snapshot="$scratch/compiler.snapshot"
+printf '#!/bin/sh\nexit 0\n' >"$scratch/compiler.original"
+cp "$scratch/compiler.original" "$compiler_snapshot"
+chmod +x "$compiler_snapshot"
+snapshot_sha=$(hash_file "$compiler_snapshot")
+expected_sha=$snapshot_sha
+printf 'src/a.spl\nsrc/b.spl\nsrc/c.spl\n' >"$scratch/manifest"
+
+fixture_compile() {
+  fixture_entry=$1 fixture_cache=$2 fixture_output=$3
+  fixture_name=${fixture_entry##*/}
+  printf '%s\n' "$fixture_entry" >"$case_dir/calls/$fixture_name"
+  printf '%s\n%s\n%s\n%s\n' "$fixture_cache" "$HOME" "$TMPDIR" "$4" >"$case_dir/env/$fixture_name"
+  printf 'fixture %s\n' "$fixture_entry"
+  # Preserve existing cache markers, and create a marker for the retry check.
+  [ -f "$fixture_cache/marker" ] || printf 'retained\n' >"$fixture_cache/marker"
+  case "$fixture_mode:$fixture_name" in
+    mixed:a.spl) return 17 ;;
+    mixed:b.spl) return 23 ;;
+    noartifact:*) return 0 ;;
+    executable:*) printf 'MZ executable fixture\n' >"$fixture_output"; return 0 ;;
+    mutate:*) printf 'mutated\n' >>"$compiler_snapshot" ;;
+    runtime-mutate:*) printf 'changed\n' >"$scratch/runtime-drift" ;;
+    slow:*) sleep 1; printf 'worker completed\n' >"$case_dir/finished" ;;
+  esac
+  # A minimal ELF ET_REL header satisfies the output-kind guard, not a linker.
+  printf '\177ELF\002\001\001\000\000\000\000\000\000\000\000\000\001\000\076\000' >"$fixture_output"
+}
+new_case() {
+  case_dir="$scratch/$1"
+  mkdir -p "$case_dir/calls" "$case_dir/env"
+  summary="$case_dir/summary.env"
+  : >"$summary"
+}
+run_case() {
+  case_status=0
+  run_module_compile_inventory "$scratch/manifest" "$case_dir/work" "$case_cache" \
+    "$case_workers" 2 fixture_compile validate_stage4_compiler_snapshot "$summary" || case_status=$?
+}
+row() {
+  grep -q "entry=src/$1.spl|result=$2|status=$3|" "$summary" || die "missing $1 $2/$3 in $case_dir"
+}
+calls() {
+  actual_calls=$(find "$case_dir/calls" -type f | wc -l | tr -d ' ')
+  [ "$actual_calls" -eq "$1" ] || die "expected $1 calls, got $actual_calls in $case_dir"
+}
+
+if [ "${1:-}" != --orchestration-only ]; then
+# Local default survives a binary failure: both failing rows and later success.
+unset SIMPLE_COMPILE_FAIL_FAST
+CI=; export CI
+bootstrap_compile_failure_policy
+[ "$SIMPLE_COMPILE_FAIL_FAST" = 0 ] || die 'host default did not collect'
+MODULE_COMPILE_PRIOR_FAILURE=1
+fixture_mode=mixed case_workers=2 case_cache="$scratch/cache/stage4/producer-a/inputs-a"
+new_case host_after_binary_failure
+printf 'task=stage4_native_build|result=FAIL|status=19\n' >>"$summary"
+run_case
+[ "$case_status" -ne 0 ] || die 'mixed module inventory passed'
+calls 3
+row a FAIL 17; row b FAIL 23; row c PASS 0
+[ "$(grep '^task=module_compile_' "$summary" | sed 's/.*entry=\([^|]*\).*/\1/')" = "$(cat "$scratch/manifest")" ] || die 'parallel rows not published in manifest order'
+grep -q '^task=stage4_native_build|result=FAIL|status=19$' "$summary" || die 'binary failure row erased'
+for entry in a b c; do
+  fixture_path=$(sed -n '1p' "$case_dir/env/$entry.spl")
+  [ "$(cat "$fixture_path/marker")" = retained ] || die 'cache marker lost'
+  [ "$(sed -n '4p' "$case_dir/env/$entry.spl")" = 2 ] || die 'worker thread budget changed'
+done
+[ "$(sed -n '1p' "$case_dir/env/a.spl")" != "$(sed -n '1p' "$case_dir/env/b.spl")" ] || die 'module caches alias'
+[ "$(sed -n '2p' "$case_dir/env/a.spl")" != "$(sed -n '2p' "$case_dir/env/b.spl")" ] || die 'worker HOME aliases'
+[ "$(sed -n '3p' "$case_dir/env/a.spl")" != "$(sed -n '3p' "$case_dir/env/b.spl")" ] || die 'worker TMPDIR aliases'
+old_cache=$(sed -n '1p' "$case_dir/env/c.spl")
+printf 'untouched-compatible-cache\n' >"$old_cache/marker"
+
+# A retry keeps compatible caches; unrelated phase/producer roots stay intact.
+fixture_mode=success
+new_case compatible_retry
+run_case
+[ "$case_status" -eq 0 ] || die 'compatible retry failed'
+calls 3
+[ "$(sed -n '1p' "$case_dir/env/c.spl")" = "$old_cache" ] || die 'retry abandoned compatible module cache'
+[ "$(cat "$old_cache/marker")" = untouched-compatible-cache ] || die 'retry cleared cache'
+for namespace in stage3/producer-a/inputs-a stage4/producer-b/inputs-a stage4/producer-a/inputs-b; do
+  case_cache="$scratch/cache/$namespace"
+  new_case "isolation-$(printf '%s' "$namespace" | tr / _)"
+  run_case
+  [ "$case_status" -eq 0 ] || die 'isolated namespace failed'
+  [ "$(sed -n '1p' "$case_dir/env/c.spl")" != "$old_cache" ] || die 'phase/producer/input cache alias'
+  [ "$(cat "$old_cache/marker")" = untouched-compatible-cache ] || die 'unrelated namespace invalidated original cache'
+done
+
+# CI default skips all modules after the binary failed and remains nonzero.
+unset SIMPLE_COMPILE_FAIL_FAST
+CI=true; export CI
+bootstrap_compile_failure_policy
+new_case ci_binary_failure
+run_case
+[ "$case_status" -ne 0 ] || die 'all-skipped inventory passed'
+calls 0
+for entry in a b c; do row "$entry" SKIPPED fail-fast; done
+
+# With no prior failure, the first failed batch completes; later rows skip.
+MODULE_COMPILE_PRIOR_FAILURE=0 fixture_mode=mixed case_workers=2
+new_case ci_failed_batch
+run_case
+[ "$case_status" -ne 0 ] || die 'CI failed batch passed'
+calls 2
+row a FAIL 17; row b FAIL 23; row c SKIPPED fail-fast
+
+# Explicit env and CLI policies override defaults in argument order.
+MODULE_COMPILE_PRIOR_FAILURE=1
+SIMPLE_COMPILE_FAIL_FAST=0
+bootstrap_compile_failure_policy
+new_case ci_env_keep_going
+run_case
+calls 3
+[ "$case_status" -ne 0 ] || die 'env collect erased failures'
+SIMPLE_COMPILE_FAIL_FAST=1
+bootstrap_compile_failure_policy --keep-going
+new_case ci_flag_keep_going
+run_case
+calls 3
+[ "$case_status" -ne 0 ] || die 'flag collect erased failures'
+CI= SIMPLE_COMPILE_FAIL_FAST=0
+bootstrap_compile_failure_policy --keep-going --fail-fast
+new_case host_flag_fail_fast
+run_case
+calls 0
+[ "$case_status" -ne 0 ] || die 'explicit fail-fast passed skipped inventory'
+
+# No success may come from an empty inventory or command without an object.
+SIMPLE_COMPILE_FAIL_FAST=0 MODULE_COMPILE_PRIOR_FAILURE=0 fixture_mode=noartifact
+new_case declaration_without_object
+run_case
+[ "$case_status" -ne 0 ] || die 'artifact-free compile silently passed'
+calls 3
+for entry in a b c; do row "$entry" FAIL missing-object; done
+fixture_mode=executable
+new_case executable_masquerading_object
+run_case
+[ "$case_status" -ne 0 ] || die 'executable accepted as a relocatable object'
+calls 3
+for entry in a b c; do row "$entry" FAIL invalid-object; done
+# An early scheduling error must reap an already launched worker before return.
+sed 's/^hash_stream() (/hash_stream_original() (/' "$scratch/admission.shs" >"$scratch/hash-original.shs"
+. "$scratch/hash-original.shs"
+hash_stream() (
+  fixture_hash_input=$(cat)
+  [ "$fixture_hash_input" != src/b.spl ] || return 17
+  printf '%s\n' "$fixture_hash_input" | hash_stream_original
+)
+fixture_mode=slow case_workers=2
+new_case scheduling_error_reaps_worker
+run_case
+[ "$case_status" -eq 2 ] || die 'hash failure did not fail scheduler'
+calls 1
+[ -f "$case_dir/finished" ] || die 'scheduler returned with an orphaned worker'
+. "$scratch/admission.shs"
+cp "$scratch/manifest" "$scratch/manifest.saved"
+: >"$scratch/manifest"
+new_case empty_inventory
+run_case
+[ "$case_status" -ne 0 ] || die 'empty inventory passed'
+calls 0
+grep -q 'result=FAIL|status=empty-inventory|' "$summary" || die 'empty inventory lacks explicit failure'
+mv "$scratch/manifest.saved" "$scratch/manifest"
+
+# Invalid admission is never bypassed by keep-going. Test actual snapshot guard.
+fixture_mode=success
+for corruption in missing nonexecutable mismatch expected-mismatch symlink; do
+  cp "$scratch/compiler.original" "$compiler_snapshot"
+  chmod +x "$compiler_snapshot"
+  expected_sha=$snapshot_sha
+  case "$corruption" in
+    missing) rm "$compiler_snapshot" ;;
+    nonexecutable)
+      chmod -x "$compiler_snapshot"
+      if [ -x "$compiler_snapshot" ]; then
+        printf '%s\n' 'SKIP: filesystem does not enforce POSIX executable bits'
+        continue
+      fi
+      ;;
+    mismatch) printf 'wrong bytes\n' >>"$compiler_snapshot" ;;
+    expected-mismatch) expected_sha=$(printf 'wrong' | hash_stream) ;;
+    symlink) rm "$compiler_snapshot"; ln -s "$scratch/compiler.original" "$compiler_snapshot" ;;
+  esac
+  new_case "guard-$corruption"
+  run_case
+  [ "$case_status" -ne 0 ] || die "$corruption snapshot passed"
+  calls 0
+  for entry in a b c; do row "$entry" BLOCKED prerequisite-unavailable; done
+  rm -f "$compiler_snapshot"
+done
+cp "$scratch/compiler.original" "$compiler_snapshot"
+chmod +x "$compiler_snapshot"
+expected_sha=$snapshot_sha
+fixture_mode=mutate case_workers=1
+new_case changed_during_compile
+run_case
+[ "$case_status" -ne 0 ] || die 'snapshot mutation during compile passed'
+calls 1
+row a BLOCKED authority-changed
+row b BLOCKED prerequisite-unavailable
+row c BLOCKED prerequisite-unavailable
+fi
+
+# Exercise the production binary-failure entrypoint, command constructor,
+# prerequisite chain and final matrix verdict. Only command execution and the
+# external runtime admission boundary use fixture outcomes in this group.
+for fn in run_failed_binary_module_inventory matrix_should_skip record_skipped_task run_matrix_task; do
+  sed -n "/^$fn() {\$/,/^}\$/p" "$runner" >>"$scratch/orchestration.shs"
+done
+for fn in run_module_compile_command validate_module_compile_prerequisites; do
+  sed -n "/^$fn() (\$/,/^)\$/p" "$runner" >>"$scratch/orchestration.shs"
+done
+sed -n '/^summary_read_status=0$/,$p' "$runner" >"$scratch/verdict.shs"
+. "$scratch/orchestration.shs"
+source_root="$scratch/source"
+mkdir -p "$source_root/src/compiler" "$source_root/src/lib" "$source_root/src/app" "$source_root/src/compositions/kernel_llvm_cranelift"
+for entry in a b c; do printf '# fixture module\n' >"$source_root/src/compiler/$entry.spl"; done
+cp "$scratch/compiler.original" "$compiler_snapshot"
+chmod +x "$compiler_snapshot"
+expected_sha=$snapshot_sha
+tool_authority_ready=1 runtime_fixture_ready=1
+validate_hosted_runtime_authority() { [ "$runtime_fixture_ready" = 1 ] && [ ! -f "$scratch/runtime-drift" ]; }
+run_task() {
+  fixture_task=$1
+  shift
+  fixture_status=0
+  if [ "$fixture_task" = compiler_cli_build ]; then
+    fixture_status=19
+  else
+    [ "$1" = "$compiler_snapshot" ] && [ "$2" = native-build ] || die 'diagnostic producer changed'
+    [ "$SIMPLE_NATIVE_BUILD_EMIT_OBJECT" = 1 ] || die 'object env missing'
+    fixture_entry= fixture_output=
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --entry) fixture_entry=$2; shift ;;
+        --output) fixture_output=$2; shift ;;
+      esac
+      shift
+    done
+    [ -n "$fixture_entry" ] && [ -n "$fixture_output" ] || die 'entry or output missing'
+    fixture_compile "$fixture_entry" "$pure_tool_cache" "$fixture_output" "$pure_tool_threads" "$logs/module_compile_object.log" || fixture_status=$?
+    printf 'fixture task outcome %s\n' "$fixture_status" >"$logs/module_compile_object.log"
+  fi
+  fixture_result=FAIL
+  [ "$fixture_status" -ne 0 ] || fixture_result=PASS
+  printf 'task=%s|result=%s|status=%s\n' "$fixture_task" "$fixture_result" "$fixture_status" >>"$summary"
+  return "$fixture_status"
+}
+native_internal_timeout=120 tool_runtime_bundle=fixture runtime_path="$scratch/runtime"
+stage2_slim_profile=0 module_workers=9 build_threads=2
+compiler_cli_ready=0 test_runner_ready=1 mcp_build_ready=1 lsp_build_ready=1
+tool_input_identity=$(printf fixture-inputs | hash_stream)
+cache_root="$scratch/production-cache"
+fixture_mode=mixed SIMPLE_COMPILE_FAIL_FAST=0
+new_case production_binary_failure
+work_root="$case_dir/work" tmp="$case_dir/tmp"
+mkdir -p "$work_root" "$tmp"
+matrix_failed=0 matrix_unsupported=0
+run_matrix_task compiler_cli_build false
+[ "$matrix_failed" = 1 ] || die 'binary failure did not latch'
+run_failed_binary_module_inventory
+calls 3
+grep -q 'entry=src/compiler/a.spl|result=FAIL|status=17|' "$summary" || die 'production first module failure missing'
+grep -q 'entry=src/compiler/b.spl|result=FAIL|status=23|' "$summary" || die 'production second module failure missing'
+grep -q 'entry=src/compiler/c.spl|result=PASS|status=0|' "$summary" || die 'production later success suppressed'
+grep -q '^module_compile_workers=2$' "$summary" || die 'workers exceeded build budget'
+grep -q '^module_compile_threads=1$' "$summary" || die 'thread budget not divided'
+production_cache=$(sed -n '1p' "$case_dir/env/c.spl")
+case "$production_cache" in "$cache_root/module-diagnostics/stage4/$snapshot_sha/$tool_input_identity/"*) ;; *) die 'production cache omitted phase/producer/input identity' ;; esac
+printf 'production-cache-marker\n' >"$production_cache/marker"
+verdict_status=0
+( . "$scratch/verdict.shs" ) || verdict_status=$?
+[ "$verdict_status" -eq 1 ] || die 'production aggregate exited zero'
+grep -q '^overall=FAIL$' "$summary" || die 'production overall failure missing'
+command_receipts=$(find "$work_root" -name command.argv | wc -l | tr -d ' ')
+[ "$command_receipts" -eq 3 ] || die 'per-module command receipts missing'
+producer_receipts=$(find "$work_root" -name producer.env | wc -l | tr -d ' ')
+[ "$producer_receipts" -eq 3 ] || die 'child producer receipts missing'
+[ "$(grep -c '^task=module_compile_object|' "$summary" || :)" = 0 ] || die 'workers wrote to parent summary'
+
+new_case production_ci_binary_failure
+work_root="$case_dir/work"; mkdir -p "$work_root"
+SIMPLE_COMPILE_FAIL_FAST=1 matrix_failed=1
+run_failed_binary_module_inventory
+calls 0
+[ "$(grep -c 'result=SKIPPED|status=fail-fast|' "$summary")" -eq 3 ] || die 'CI production failed to skip all modules'
+
+# A different exact producer gets its own cache without pruning the old one.
+printf '# producer B\n' >>"$compiler_snapshot"
+snapshot_sha=$(hash_file "$compiler_snapshot"); expected_sha=$snapshot_sha
+fixture_mode=success SIMPLE_COMPILE_FAIL_FAST=0
+new_case production_new_producer
+work_root="$case_dir/work"; mkdir -p "$work_root"
+run_failed_binary_module_inventory
+calls 3
+[ "$(sed -n '1p' "$case_dir/env/c.spl")" != "$production_cache" ] || die 'production cache aliased producers'
+[ "$(cat "$production_cache/marker")" = production-cache-marker ] || die 'new producer erased old cache'
+
+# Real production admission chain blocks missing runtime and missing compiler.
+for unavailable in runtime compiler strict-profile; do
+  runtime_fixture_ready=1 SIMPLE_BOOTSTRAP_STAGE4=0
+  case "$unavailable" in
+    runtime) runtime_fixture_ready=0 ;;
+    compiler) rm "$compiler_snapshot" ;;
+    strict-profile) SIMPLE_BOOTSTRAP_STAGE4=1 ;;
+  esac
+  new_case "production-guard-$unavailable"
+  work_root="$case_dir/work"; mkdir -p "$work_root"
+  run_failed_binary_module_inventory
+  calls 0
+  [ "$(grep -c 'result=BLOCKED|status=prerequisite-unavailable|' "$summary")" -eq 3 ] || die 'production admission bypassed'
+  if [ "$unavailable" = compiler ]; then
+    cp "$scratch/compiler.original" "$compiler_snapshot"; chmod +x "$compiler_snapshot"
+    snapshot_sha=$(hash_file "$compiler_snapshot"); expected_sha=$snapshot_sha
+  fi
+done
+SIMPLE_BOOTSTRAP_STAGE4=0 runtime_fixture_ready=1
+fixture_mode=success compiler_cli_ready=1
+new_case production_full_success
+work_root="$case_dir/work"; mkdir -p "$work_root"
+matrix_failed=0
+run_failed_binary_module_inventory
+calls 3
+[ "$matrix_failed" = 0 ] || die 'all-success full inventory failed'
+
+new_case production_slim_success
+work_root="$case_dir/work"; mkdir -p "$work_root"
+phase=stage2 stage2_slim_profile=1
+run_failed_binary_module_inventory
+calls 0
+[ ! -s "$summary" ] || die 'successful slim unexpectedly scheduled modules'
+phase=stage4 stage2_slim_profile=0
+
+new_case production_runtime_drift
+work_root="$case_dir/work"; mkdir -p "$work_root"
+fixture_mode=runtime-mutate matrix_failed=0
+run_failed_binary_module_inventory
+calls 3
+grep -q '^task=module_compile_authority|result=FAIL|status=source-runtime-authority-changed|' "$summary" || die 'end boundary ignored runtime drift'
+[ "$matrix_failed" = 1 ] || die 'runtime drift did not fail matrix'
+rm "$scratch/runtime-drift"
+
+new_case production_inventory_discovery_failure
+work_root="$case_dir/work"; mkdir -p "$work_root"
+mv "$source_root/src/lib" "$source_root/src/lib.saved"
+discovery_status=0
+run_failed_binary_module_inventory 2>"$case_dir/discovery.log" || discovery_status=$?
+[ "$discovery_status" -ne 0 ] || die 'find failure masked by successful sort'
+calls 0
+mv "$source_root/src/lib.saved" "$source_root/src/lib"
+printf '%s\n' 'PASS: Phase4 module orchestration, ordered parallel failures, policy overrides, compatible cache retention and snapshot guards (fixtures only)'

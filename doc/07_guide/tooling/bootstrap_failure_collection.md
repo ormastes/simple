@@ -22,6 +22,63 @@ production orchestration with failing/passing fake commands and inventory rows;
 it also checks policy inheritance, ordered overrides, cache preservation, and
 fatal snapshot admission. Other runners may still need their own policy wiring.
 
+## Module diagnostics after a tool binary fails
+
+The full phase verification profile runs `run_module_compile_inventory` after
+the required full CLI, test runner, MCP and LSP binary attempts, including when
+any of those binaries fails. The explicit slim Phase2 profile adds this sweep
+only when its required CLI or test runner fails to become available.
+The available phase producer compiles each `.spl` file under the configured
+compiler, application, library and backend composition roots as a relocatable
+object entry with its imports. This conservative source-root superset remains
+available when binary closure discovery fails; it is not an exact failed-entry
+closure. It deliberately includes platform-specific sources: compiler errors
+remain visible rather than silently excluding files by filename guesses.
+
+Phase2/3 use their supported pure-Simple positional `native-build` route with
+the driver's `SIMPLE_NATIVE_BUILD_EMIT_OBJECT=1` channel. Full phase compilers
+use `--emit-object`. These are diagnostic object builds, not executable link,
+runtime behavior or strict Stage4 admission evidence. The strict Stage4 profile
+rejects object output and remains BLOCKED; the collector never clears that
+profile to obtain a result. Missing or altered compiler/runtime authority also
+blocks compilation. Successful object results cannot repair a failed binary row.
+
+`BOOTSTRAP_VERIFY_MODULE_WORKERS` defaults to 2 (range 1–12). The scheduler caps
+that count at `BOOTSTRAP_VERIFY_BUILD_THREADS` and divides the thread budget
+among workers. Each bounded batch finishes before the next starts. Host policy
+collects remaining independent modules; fail-fast records unlaunched modules as
+SKIPPED, including the whole sweep after a prior binary failure.
+
+Caches live under `module-diagnostics/<phase>/<producer-sha>/<input-identity>/`
+with a stable hash of each relative module path. Attempts have separate logs,
+object outputs, HOME and temporary directories; retries preserve module caches.
+An absent, empty or symlink output cannot pass, even with exit zero. The emitted
+file header must identify an ELF relocatable, COFF object or Mach-O object;
+an executable accidentally written to an `.o` path fails as `invalid-object`.
+This identifies the container kind without claiming complete object validation.
+Coordinator failures reap already launched children and retain their caches.
+Declaration
+only modules and platform-incompatible modules may fail or produce no object;
+those rows leave coverage incomplete. The Phase2 positional CLI currently also
+rejects artifacts at or below 300 bytes, which can reject a valid tiny object.
+Per-module producer receipts retain exact arguments and the existing toolchain
+checks. Full source/runtime binding is revalidated before and after the sweep;
+rows remain provisional until that final check succeeds. Every invocation also
+checks the exact producer and frozen binding digest and uses the existing
+command/toolchain guard. This avoids rescanning the entire source/runtime tree
+three times per module. A global missing prerequisite is recorded once and
+blocks remaining rows without repeating those checks. No cache reuse count is
+claimed without producer evidence.
+
+A bounded Windows probe on 2026-09-30 confirmed that the Phase2 positional
+route needs the object environment channel: `--emit-object` alone was ignored
+and attempted an executable link. With the supported environment channel, the
+same no-main, no-import function fixture emitted a 566-byte AMD64 COFF object
+in 5.875 seconds with the previous cache directory preserved. The log reports
+HIR hits=0, misses=1 and native cached=0; this is not evidence of cache hits.
+This validates command semantics, not a full module sweep. Evidence is under
+`build/native_probe/module_object_probe/` (`result2.json`, `object.readobj.log`).
+
 ## Implementation language
 
 Outside bootstrap orchestration, prefer Simple `.spl` for product code and
