@@ -1,0 +1,45 @@
+"""Positional parent cache selection and exact environment restoration."""
+use std.spec.{describe, it, expect}
+use app.io.native_build_cache.{native_build_cache_snapshot, native_build_cache_bind, native_build_cache_restore}
+use app.cli.bootstrap_focused_native_build_args.{focused_native_build_cache_dir}
+use std.nogc_async_mut.sosix.environment.{sosix_env_set, sosix_env_remove}
+use std.io_runtime.{file_read}
+
+describe "positional native-build cache binding":
+    it "binds explicit CLI cache over a conflicting inherited phase root":
+        val original = native_build_cache_snapshot()
+        expect(sosix_env_set("SIMPLE_NATIVE_BUILD_CACHE_DIR", "build/phase3/producer-a/scopeprobe")).to_equal(true)
+        val before = native_build_cache_snapshot()
+        val args = ["simple", "native-build", "entry.spl", "--cache-dir", "build/phase3/producer-a/perf-mini"]
+        expect(native_build_cache_bind(focused_native_build_cache_dir(args))).to_equal(true)
+        expect(native_build_cache_snapshot()).to_equal("build/phase3/producer-a/perf-mini")
+        expect(native_build_cache_restore(before)).to_equal(true)
+        expect(native_build_cache_snapshot()).to_equal("build/phase3/producer-a/scopeprobe")
+        expect(native_build_cache_restore(original)).to_equal(true)
+
+    it "preserves inherited worker routing when CLI cache is omitted":
+        val original = native_build_cache_snapshot()
+        expect(sosix_env_set("SIMPLE_NATIVE_BUILD_CACHE_DIR", "build/phase4/producer-b/worker-2")).to_equal(true)
+        expect(native_build_cache_bind(focused_native_build_cache_dir(["simple", "native-build", "entry.spl"]))).to_equal(true)
+        expect(native_build_cache_snapshot()).to_equal("build/phase4/producer-b/worker-2")
+        expect(native_build_cache_restore(original)).to_equal(true)
+
+    it "restores an absent environment variable without creating an empty value":
+        val original = native_build_cache_snapshot()
+        expect(sosix_env_remove("SIMPLE_NATIVE_BUILD_CACHE_DIR")).to_equal(true)
+        val absent = native_build_cache_snapshot()
+        expect(absent).to_be_nil()
+        expect(native_build_cache_bind("build/phase2/producer-c/entry")).to_equal(true)
+        expect(native_build_cache_restore(absent)).to_equal(true)
+        expect(native_build_cache_snapshot()).to_be_nil()
+        expect(native_build_cache_restore(original)).to_equal(true)
+
+    it "restores before success, returned failure and artifact refusal branches":
+        val source = file_read("src/app/cli/bootstrap_main.spl")
+        val bind = source.index_of("if not native_build_cache_bind(requested_cache):")
+        val create = source.index_of("val driver = compiler_driver_create(options)", bind)
+        val compile = source.index_of("val result = compiler_driver_run_compile(driver)", create)
+        val restore = source.index_of("if not native_build_cache_restore(previous_cache):", compile)
+        val success = source.index_of("if compile_result_is_success(result):", restore)
+        expect(bind >= 0 and create > bind and compile > create).to_equal(true)
+        expect(restore > compile and success > restore).to_equal(true)
