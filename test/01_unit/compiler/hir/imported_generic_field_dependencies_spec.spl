@@ -1,0 +1,61 @@
+"""
+Imported composite fields resolve generic arguments in their defining module.
+
+Windows producer 0be6e4c reproduces unresolved Profile for Profile? and
+unresolved Key/Payload for Dict<Key, Payload> when only identity is imported.
+These are HIR behavior checks; refreshed native producer verification is required.
+"""
+# @req REQ-SSPEC-COMPILER
+use std.spec.*
+use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.common.config.{Logger}
+
+fn generic_field_lower(field_type: text, expected: [text]) -> HirLowering:
+    val logger = Logger(level: 0)
+    val dependency_source = "struct Payload:\n    value: i64"
+    val owner_source = "use fields.dependency.\{Payload as ImportedPayload\}\n\nenum Profile:\n    Debug\n    Release\n\nstruct Key:\n    value: i64\n\nclass Bridge:\n    value: " + field_type + "\n\nfn identity(value: Bridge) -> Bridge:\n    value"
+    val consumer_source = "use fields.owner.\{identity\}\n\nfn main() -> i64:\n    0"
+    var modules: Dict<text, Module> = {}
+    modules["fields.dependency"] = parse_full_frontend(dependency_source, "fields.dependency", "fields.dependency", logger)
+    modules["fields.owner"] = parse_full_frontend(owner_source, "fields.owner", "fields.owner", logger)
+    val consumer = parse_full_frontend(consumer_source, "fields.consumer", "fields.consumer", logger)
+    val sources = [
+        SourceFile(path: "fields/dependency.spl", content: dependency_source, module_name: "fields.dependency"),
+        SourceFile(path: "fields/owner.spl", content: owner_source, module_name: "fields.owner")
+    ]
+    val surfaces = module_surfaces_from_modules(modules, sources)
+    expect(surfaces.is_ok()).to_equal(true)
+    var lowering = hirlowering_for_module("fields.consumer", surfaces.unwrap())
+    val hir = lowering.lower_module(consumer)
+    expect(hir.functions.len()).to_be_greater_than(0)
+    expect(lowering.errors.len()).to_equal(0)
+    expect(lowering.symbols.lookup_qualified_type_raw("fields.owner", "Bridge") >= 0).to_equal(true)
+    for name in expected:
+        expect(lowering.symbols.lookup_qualified_type_raw("fields.owner", name) >= 0).to_equal(true)
+    lowering
+
+describe "generic imported composite field dependencies":
+    it "registers the enum inside an optional field":
+        step("import a callable whose class parameter owns Profile?")
+        val lowering = generic_field_lower("Profile?", ["Profile"])
+        expect(lowering.imported_enums.len()).to_be_greater_than(0)
+
+    it "registers dictionary keys and aliased values":
+        step("import a class carrying Dict<Key, ImportedPayload>")
+        val lowering = generic_field_lower("Dict<Key, ImportedPayload>", ["Key", "ImportedPayload"])
+        expect(lowering.symbols.lookup_qualified_type_raw("fields.dependency", "Payload") >= 0).to_equal(true)
+
+    it "registers nested optional and generic arguments":
+        step("import an optional dictionary with an optional aliased payload")
+        val lowering = generic_field_lower("Dict<Key, ImportedPayload?>?", ["Key", "ImportedPayload"])
+        expect(lowering.symbols.lookup_qualified_type_raw("fields.dependency", "Payload") >= 0).to_equal(true)
+
+    it "registers generic arguments inside array field projections":
+        step("import an array of dictionaries whose arguments are owner-local types")
+        val lowering = generic_field_lower("[Dict<Key, ImportedPayload>]", ["Key", "ImportedPayload"])
+        expect(lowering.symbols.lookup_qualified_type_raw("fields.dependency", "Payload") >= 0).to_equal(true)

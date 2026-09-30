@@ -428,6 +428,9 @@ impl HirLowering:
             # resolution is independent of the consumer's import item order.
             val fields_started = hir_phase_profile_now()
             for field in composite.fields:
+                # Scalar projections keep the outer spelling only. Resolve
+                # its arguments in the field owner's scope before projection.
+                var argument_type = field.type_
                 if field.type_name != "":
                     self.materialize_imported_field_dependency(
                         imported_mod.physical_index, imported_mod_name, field.type_name,
@@ -436,11 +439,18 @@ impl HirLowering:
                     self.materialize_imported_field_dependency(
                         imported_mod.physical_index, imported_mod_name, field.array_element_name,
                         import_span, materialize_enum)
+                    argument_type = parser_type_kind_array_element(field.type_.kind, field.type_)
                 else:
                     for dependency in parser_type_named_dependencies(field.type_):
                         self.materialize_imported_field_dependency(
                             imported_mod.physical_index, imported_mod_name, dependency,
                             import_span, materialize_enum)
+                if field.type_name != "" or field.array_element_name != "":
+                    for argument in parser_type_kind_named_args(argument_type.kind):
+                        for dependency in parser_type_named_dependencies(argument):
+                            self.materialize_imported_field_dependency(
+                                imported_mod.physical_index, imported_mod_name, dependency,
+                                import_span, materialize_enum)
             hir_phase_profile_add(HIR_PROF_RIS_FIELDS, fields_started)
             val project_started = hir_phase_profile_now()
             var imported_field_types: Dict<text, HirType> = {}
