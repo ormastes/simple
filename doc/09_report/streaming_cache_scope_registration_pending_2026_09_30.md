@@ -52,4 +52,20 @@ through BugDatabase and verify the saved database before sharing that ID.
 Then place the marker immediately before only the temporary cache-disable
 block; keep the original DB patch and the narrow annotation reviewable.
 
+Pending command, with working directory `D:/wk-workaround-tags-20260930`:
+
+```text
+<qualified-self-hosted-cli> bug-add --id=<new-canonical-id> --severity=p1 --title="Streaming frontend cold cache serialization nests an already-owned transient scope" --file=src/compiler/10.frontend/_FlatAstBridge/module_assembly.spl --line=1231 --date=2026-09-30
+```
+
+Angle-bracket fields are unresolved prerequisites, not an allocated ID or a
+runnable command. Check the ID against both active and archived canonical bug
+tables before adding it; verify the source line against the recorded revision.
+If a corrected producer becomes available before a full CLI, a focused native
+`src/app/bug_add/main.spl` executable may be built in this isolated lane. Its
+tool acceptance must first prove help/argument handling, a scratch-database
+add/save/read round trip, and CRC/interner/WAL behavior. Only then may it mutate
+the isolated canonical database. This is queued work, not an executed build or
+permission to fall back to the Rust seed.
+
 Neither the root dirty database nor any derived workaround index was changed.
