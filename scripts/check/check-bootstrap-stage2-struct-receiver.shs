@@ -27,10 +27,26 @@ else
 fi
 
 stage2_probe_dir=$(mktemp -d "${TMPDIR:-/tmp}/simple-stage2-receiver.XXXXXX")
-trap 'rm -rf "$stage2_probe_dir"' EXIT HUP INT TERM
+# Preserve failed probes for diagnosis; successful probes may be retained explicitly.
+trap 'stage2_cleanup_status=$?; if [ "$stage2_cleanup_status" -ne 0 ] || [ "${STAGE2_RECEIVER_KEEP_PROBE_DIR:-0}" = 1 ]; then printf "stage2_receiver_probe_dir=%s\n" "$stage2_probe_dir" >&2; else rm -rf "$stage2_probe_dir"; fi; exit "$stage2_cleanup_status"' EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
-stage2_probe_bin="$stage2_probe_dir/bootstrap-struct-receiver-guard"
-if ! env SIMPLE_BOOTSTRAP=1 SIMPLE_NO_DEPRECATED_WARNINGS=1 \
+stage2_probe_suffix=''
+case "$stage2_target" in
+    *windows*) stage2_probe_suffix=.exe ;;
+esac
+stage2_probe_bin="$stage2_probe_dir/bootstrap-struct-receiver-guard$stage2_probe_suffix"
+case "$stage2_target" in
+    *windows-msvc*) stage2_windows_abi=msvc; stage2_linker_flavor=msvc ;;
+    *windows-gnu*)  stage2_windows_abi=gnu;  stage2_linker_flavor=gnu ;;
+    *) stage2_windows_abi=; stage2_linker_flavor= ;;
+esac
+if env SIMPLE_BOOTSTRAP=1 SIMPLE_NO_DEPRECATED_WARNINGS=1 \
+    SIMPLE_NO_STUB_FALLBACK=1 \
+    SIMPLE_WINDOWS_ABI="$stage2_windows_abi" \
+    SIMPLE_LINKER_FLAVOR="$stage2_linker_flavor" \
     "$stage2_compiler" native-build \
     --target "$stage2_target" \
     --backend "$stage2_backend" \
@@ -41,8 +57,11 @@ if ! env SIMPLE_BOOTSTRAP=1 SIMPLE_NO_DEPRECATED_WARNINGS=1 \
     --entry test/04_smoke/bootstrap_struct_receiver_guard.spl \
     --runtime-path "$stage2_runtime_dir" \
     -o "$stage2_probe_bin"; then
-    echo "error: stage2 lacks the mutable receiver/runtime capability" >&2
-    exit 1
+    :
+else
+    stage2_compile_status=$?
+    echo "error: stage2 receiver compilation failed with status $stage2_compile_status" >&2
+    exit "$stage2_compile_status"
 fi
 
 [ -x "$stage2_probe_bin" ] || {
@@ -51,7 +70,7 @@ fi
 }
 
 set +e
-stage2_probe_output=$($stage2_probe_bin 2>&1)
+stage2_probe_output=$("$stage2_probe_bin" 2>&1)
 stage2_probe_status=$?
 set -e
 [ "$stage2_probe_status" -eq 0 ] || {
