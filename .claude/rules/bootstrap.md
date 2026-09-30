@@ -7,6 +7,17 @@ alwaysApply: false
 ---
 # Bootstrap & Binary Architecture
 
+## Bootstrap failure collection
+
+During diagnosis, continue independently runnable build and test rows after
+failures. A usable immutable compiler plus minimum sanity may start the next
+diagnostic phase before formal admission; keep that lineage unadmitted. Crash or
+sanity failure blocks its dependent chain while independent work continues.
+Follow the
+[shared collection policy](../../doc/07_guide/tooling/bootstrap_failure_collection.md) for terminal statuses, budgets,
+cache preservation, and bug evidence. This is agent workflow guidance; it does
+not change runner behavior.
+
 ## KNOWN BLOCKER (2026-08-06, check before redeploying): Stage 3 self-host fails
 
 > **STATUS UPDATE 2026-08-18 — the ByteOrder blocker below is STALE

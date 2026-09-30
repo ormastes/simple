@@ -5,6 +5,16 @@ description: SPipe Skill — runner/docgen/process around executable SSpec `.spl
 
 # SPipe — SSpec Runner and Docgen Process
 
+## Bootstrap failure collection
+
+For bootstrap build/test sweeps, continue independent scenarios after failures
+and collect terminal results. A usable artifact plus minimum sanity permits
+diagnostic continuation; failed qualification still prevents admission and
+release. Follow the
+[shared collection policy](../../doc/07_guide/tooling/bootstrap_failure_collection.md) for terminal statuses, budgets,
+cache preservation, and bug evidence. This is agent workflow guidance; it does
+not change runner behavior.
+
 SPipe is the process layer. SSpec is the executable `.spl` scenario authoring
 surface. New manuals should be written as step-based SSpec scenarios and run or
 mirrored through SPipe.
@@ -42,10 +52,11 @@ mirrored through SPipe.
 >
 > **Worktree trap (cost four cold rebuilds on 2026-07-27):** a fresh
 > `git worktree` gets its own EMPTY `build/`, so every build in it is cold even
-> though a warm cache with thousands of objects sits in the main tree. Symlink
-> `build` to the main tree, or copy `build/native_cache` in, BEFORE the first
-> build — and verify with `find <worktree>/build/native_cache -name '*.o' | wc -l`
-> rather than assuming. A cold cache looks identical to a slow compiler.
+> though a warm cache with thousands of objects sits in the main tree. Reuse
+> only an idle compatible cache, or copy it into a separately owned lane after
+> checking phase, producer, entry, and input identities. Never symlink a live
+> writable build tree between concurrent lanes. Confirm actual reuse in the
+> build receipt; an object count alone does not prove a cache hit.
 
 For installed UI/GUI/TUI CLI evidence, drive the production command (for
 example `simple ui gui` or `simple ui tui_web`) and bind the receipt to the

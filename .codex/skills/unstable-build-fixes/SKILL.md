@@ -1,9 +1,16 @@
 ---
 name: unstable-build-fixes
-description: Use when a Simple bootstrap/native-build is unstable, slow, or failing one bug at a time and needs cache-preserving retry loops, isolated parallel mini builds, grouped compiler errors, and repeat fix/rebuild cycles until a Simple executable is produced.
+description: Use when a Simple bootstrap/native-build is unstable, slow, or failing one bug at a time and needs cache-preserving repairs, isolated parallel mini builds, independent failure collection, and bounded fix/rebuild cycles toward a working Simple executable.
 ---
 
 # Unstable Build Fixes
+
+## Bootstrap failure collection
+
+Collect independent build and test failures before reporting. A usable compiler plus minimum sanity can start the next diagnostic phase while qualification continues; formal admission remains required for promotion. Keep phase/producer/entry caches and stop repair after at most three cycles. Follow the
+[shared collection policy](../../../doc/07_guide/tooling/bootstrap_failure_collection.md) for terminal statuses, budgets,
+cache preservation, and bug evidence. This is agent workflow guidance; it does
+not change runner behavior.
 
 Goal: produce the requested Simple executable without throwing away useful cache.
 
@@ -92,12 +99,16 @@ for supported invalidation commands and their scope.
    - `src/app/mcp/main.spl` -> `build/mini_cache_mcp`
    - `src/app/cli/_CliMain/main_and_help.spl` -> phase-bound `full-cli`
    - `src/app/test_runner_new/main.spl` -> phase-bound `test-runner`
-3. For each failure, group by the first real error, not warnings.
-4. Fix the smallest shared root cause. Add one focused regression.
+3. Finish independently runnable builds and test shards after an error; a crash
+   blocks only its dependent chain. Group failures by the first real error,
+   retain every affected row, and attach bug IDs and exact reproductions.
+4. Fix the smallest shared root cause. Add a focused regression and a similar
+   scenario for the same mechanism.
 5. Rerun only failed shards first, reusing their compatible caches and recording
    any explicit invalidation needed for the fix.
 6. Resume the main build with its compatible cache. Respect the session's
-   verification-cycle limit; do not repeat already-passing focused checks.
+   maximum of three verify/fix cycles; reuse green evidence for unchanged
+   inputs. Report unresolved failures and resume steps when the limit is reached.
 7. Once fixes and focused checks pass, perform the requested final clean build
    and sanity checks. Binary existence alone is not completion; report the
    actual requested executable behavior and any remaining verification gaps.

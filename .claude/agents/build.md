@@ -1,5 +1,14 @@
 # Build Agent - Building and Releasing
 
+## Bootstrap failure collection
+
+Continue independent bootstrap phases and entries after errors. Start the next
+diagnostic phase on a usable artifact plus minimum sanity, with bounded
+resources and isolated caches; aggregate failures at the end. Follow the
+[shared collection policy](../../doc/07_guide/tooling/bootstrap_failure_collection.md) for terminal statuses, budgets,
+cache preservation, and bug evidence. This is agent workflow guidance; it does
+not change runner behavior.
+
 **Use when:** Building the project, creating releases, managing packages.
 **Skills:** `/release`
 

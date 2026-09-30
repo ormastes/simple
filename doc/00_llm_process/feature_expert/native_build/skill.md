@@ -1,5 +1,12 @@
 # Feature Expert: Native Build
 
+## Bootstrap failure collection
+
+Collect failures across independent entries and test shards using bounded lanes. Bind caches to phase, producer, and entry; retain compatible outputs and invalidate narrowly. Record grouped bug IDs, exact reproductions, and similar regressions. Follow the
+[shared collection policy](../../../07_guide/tooling/bootstrap_failure_collection.md) for terminal statuses, budgets,
+cache preservation, and bug evidence. This is agent workflow guidance; it does
+not change runner behavior.
+
 ## What this is
 Compilation of Simple source code to native binaries: the `bin/simple native-build` pipeline, encompassing closure discovery, native codegen, C FFI linkage, symbol resolution, and runtime library integration for host platforms.
 

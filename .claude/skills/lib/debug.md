@@ -1,5 +1,15 @@
 # Debug Skill
 
+## Bootstrap failure collection
+
+For bootstrap/build/test defects, collect independent failures, group root
+causes under bug IDs, and preserve repro commands and phase/producer/entry
+caches. Add faithful and similar regressions after each fix; stop after at most
+three verify/fix cycles and report unresolved rows. Follow the
+[shared collection policy](../../../doc/07_guide/tooling/bootstrap_failure_collection.md) for terminal statuses, budgets,
+cache preservation, and bug evidence. This is agent workflow guidance; it does
+not change runner behavior.
+
 ## Evidence-Driven Workflow
 
 Run D0–D12: intake → preserve raw evidence/build identity → live doctor →

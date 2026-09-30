@@ -1,5 +1,14 @@
 # SPipe Phase Definitions
 
+## Bootstrap failure collection
+
+Bootstrap diagnosis may continue into independently runnable build/test work
+before full qualification. Phase exit and release gates remain strict; record
+diagnostic lineage and every failed or blocked row. Follow the
+[shared collection policy](../../../doc/07_guide/tooling/bootstrap_failure_collection.md) for terminal statuses, budgets,
+cache preservation, and bug evidence. This is agent workflow guidance; it does
+not change runner behavior.
+
 Reference for all 8 SPipe phases. Each phase has: role, focus, entry criteria, exit criteria, context budget, and key actions.
 
 ---
