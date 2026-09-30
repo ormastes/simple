@@ -1,0 +1,103 @@
+# Linux executable regression. Arguments: producer runtime-root fixture-root
+# private-cache-root. fixture-root is a committed Git copy of
+# test/fixtures/compiler/streaming_cli_entry (two source files only).
+# Run on a refreshed producer; producer 399 is the recorded negative control.
+use std.io_runtime.{get_args, process_run}
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_write}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
+
+fn run_entry_lane(lane: text, producer: text, runtime: text,
+    fixture: text, cache_root: text) -> i64:
+    val lane_root = cache_root + "/" + lane
+    val output = lane_root + "/entry-probe"
+    if file_exists(output):
+        print "FAIL: use a fresh private cache root; output already exists: {output}"
+        return 1
+    if not dir_create_all(lane_root + "/home"): return 2
+    if not dir_create_all(lane_root + "/tmp"): return 3
+    if not dir_create_all(lane_root + "/cache"): return 4
+    if not dir_create_all(lane_root + "/native-cache"): return 5
+    if not dir_create_all(fixture + "/build/scv"): return 14
+    val entry = "src/app/cli/bootstrap_main.spl"
+    # Never manufacture the entry or closure-complete state. Both tested CLI
+    # routes must publish their own entry while closure discovery is pending.
+    var command = ["-C", fixture, "-u", "SIMPLE_NATIVE_BUILD_ENTRY",
+        "-u", "SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE",
+        "-u", "SIMPLE_SCV_SNAPSHOT_ROOT",
+        "-u", "SIMPLE_SCV_REVISION_ID",
+        "-u", "SIMPLE_SCV_INVENTORY_DIGEST",
+        "-u", "SIMPLE_SCV_SOURCE_INVENTORY_DIGEST",
+        "-u", "SIMPLE_PACKAGE_INDEX_CHANGED_MODULES",
+        "-u", "SIMPLE_PACKAGE_INDEX_COLD_INIT",
+        "-u", "SIMPLE_PACKAGE_INDEX_DIGEST",
+        "-u", "SIMPLE_PACKAGE_INDEX_PRODUCER_DIGEST",
+        "-u", "SIMPLE_PACKAGE_INDEX_PUBLIC_INTERFACE_CHANGED",
+        "-u", "SIMPLE_PACKAGE_INDEX_REBUILD_PENDING",
+        "-u", "SIMPLE_PACKAGE_INDEX_ROOT_GENERATION",
+        "-u", "SIMPLE_PACKAGE_INDEX_VARIANT_DIGEST",
+        "HOME=" + lane_root + "/home",
+        "TMPDIR=" + lane_root + "/tmp",
+        "XDG_CACHE_HOME=" + lane_root + "/cache",
+        "SIMPLE_PROJECT_ROOT=" + fixture,
+        "SIMPLE_CACHE=" + fixture + "/build/scv",
+        "SIMPLE_LIB=" + fixture + "/src",
+        "SIMPLE_RUNTIME_PATH=" + runtime,
+        "SIMPLE_NATIVE_RUNTIME_BUNDLE=core-c-bootstrap",
+        "SIMPLE_NO_STUB_FALLBACK=1", "SIMPLE_NO_BOOTSTRAP_DELEGATE=1",
+        "SIMPLE_BOOTSTRAP=1", "SIMPLE_BOOTSTRAP_STAGE3=1",
+        "SIMPLE_BOOTSTRAP_STAGE4=0", "SIMPLE_STAGE3_STREAMING_SURFACES=1",
+        "SIMPLE_BOOTSTRAP_STAGE3_REQUESTED_ROUTE=direct",
+        "SIMPLE_NATIVE_ARENA_DECLS=1", "SIMPLE_SCV_INVENTORY_COLD_INIT=1",
+        "SIMPLE_FRONTEND_CACHE=1", "SIMPLE_HIR_CACHE=1",
+        "SIMPLE_NATIVE_BUILD_THREADS=1",
+        "SIMPLE_NATIVE_BUILD_CACHE_DIR=" + lane_root + "/native-cache",
+        "SIMPLE_FRONTEND_CACHE_DIR=" + lane_root + "/native-cache/frontend",
+        "SIMPLE_HIR_CACHE_DIR=" + lane_root + "/native-cache/hir",
+        "SIMPLE_BUILD_PROGRESS_EVENTS=" + lane_root + "/events.jsonl",
+        producer, "native-build"]
+    if lane == "positional": command.push(entry)
+    for arg in ["--backend", "llvm", "--runtime-bundle", "core-c-bootstrap",
+        "--runtime-path", runtime, "--source", "src/app", "--entry-closure",
+        "--threads", "1", "--cache-dir", lane_root + "/native-cache",
+        "--mode", "dynload", "--output", output]:
+        command.push(arg)
+    if lane == "named":
+        command.push("--entry")
+        command.push(entry)
+    val built = process_run("/usr/bin/env", command)
+    val log = built.0 + built.1
+    if not file_write(lane_root + "/compile.log", log): return 6
+    if built.2 != 0:
+        print "FAIL: {lane} CLI build exit={built.2}; see {lane_root}/compile.log"
+        return 7
+    if log.contains("E-DRV-STREAM-ENTRY"): return 8
+    var released = 0
+    var dependency_released = false
+    for line in log.split("\n"):
+        if line.contains("phase2:surface:file:released"):
+            released = released + 1
+            if line.contains("entry_dependency.spl"):
+                dependency_released = true
+    if released != 2 or not dependency_released:
+        print "FAIL: {lane} must stream both entry and imported dependency; released={released}"
+        return 9
+    if not file_exists(output): return 10
+    val executed = process_run(output, [])
+    if not file_write(lane_root + "/run.log", executed.0 + executed.1): return 11
+    if executed.2 != 0: return 12
+    if not executed.0.contains("PASS: entry closure dependency=37"): return 13
+    print "PASS: {lane} CLI streamed two files and executed imported dependency=37"
+    0
+
+fn main() -> i64:
+    val args = get_args()
+    if args.len() != 5:
+        print "Usage: streaming-cli-entry-regression <producer> <runtime-root> <committed-fixture-root> <fresh-private-cache-root>"
+        return 64
+    val revision = process_run("git", ["-C", args[3], "rev-parse", "--verify", "HEAD"])
+    if revision.2 != 0:
+        print "FAIL: fixture must have real committed Git provenance for SCV admission"
+        return 65
+    val named = run_entry_lane("named", args[1], args[2], args[3], args[4])
+    if named != 0: return named
+    run_entry_lane("positional", args[1], args[2], args[3], args[4])
