@@ -12,6 +12,31 @@ See `doc/07_guide/app/llm/spipe_local_knowledge_setup.md` for setup and ownershi
 Short, canonical term resolution for coding agents. Read this index when a user
 names a repository capability whose implementation owner is ambiguous.
 
+## Bug-linked workarounds
+
+The accepted workflow is
+[bug-linked workarounds](../07_guide/tooling/bug_linked_workarounds.md);
+implementation remains pending runtime qualification. Temporary source blocks
+carry an immediately preceding `# @workaround bug=<canonical-id>` comment
+(`//` also supported), optionally `recover=<7..64hex>` and `reason=<text>`.
+The bug database owns status; `.simple/workarounds.sdn` is a derived link index.
+Ordinary `simple check-dbs bugs [--bug=<canonical-id>]` reads that index only.
+Use explicit `simple check-dbs --fullscan bugs` for tracked-source reconciliation
+when coverage is missing or HEAD changes. The parent build alone updates
+changed/untracked plus previously linked paths in one transaction; workers
+never write the index. Failed validation retains the previous valid snapshot
+without claiming a successful refresh.
+
+Fix the owning bug, inspect all related links, compare optional recovery
+references, then narrowly restore intended blocks and run the smallest valid
+build. A recovery hash never authorizes checkout/reset. Preserve cache producer,
+entry, dependency, ABI, and option identities; defer the one final clean gate
+to the required boundary. For Windows/Linux bootstrap repairs, run dependent
+Phase 3/4 diagnostics once the required compiler binary exists, concurrently
+with admission using isolated outputs/caches. Retain exact producer evidence;
+admission and lineage still gate qualification and promotion. Do not turn this
+process note into a test, docgen, bootstrap, or release PASS.
+
 ## SPipe perf optimization rule
 
 Seek lower elapsed time and lower memory together. On matched baseline and

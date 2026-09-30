@@ -1,0 +1,190 @@
+# Parent-only index maintenance. Query loads never run Git or inspect sources.
+use app.bug.workaround_index.{WorkaroundIndex, WorkaroundLink, empty_workaround_index,
+    parse_workaround_source, encode_workaround_index, decode_workaround_index,
+    replace_workaround_paths, workaround_path_valid, workaround_recovery_valid}
+use std.nogc_async_mut.sosix.workaround_host.{workaround_host_read,
+    workaround_host_exists, workaround_host_publish, workaround_host_lock,
+    workaround_host_unlock, workaround_host_mkdir, workaround_host_cwd, workaround_host_process}
+use std.nogc_async_mut.database.bug.{BugDatabase}
+use std.nogc_async_mut.database.core.{SdnDatabase, parse_sdn_table, interner_from_sdn}
+use std.nogc_sync_mut.compression.gzip.crc.{crc32_text}
+use std.convert.{try_parse_int}
+
+fn workaround_source_candidate(path: text) -> bool:
+    if not workaround_path_valid(path): return false
+    if path.starts_with("src/compiler_rust/vendor/") or path.starts_with("src/runtime/vendor/"):
+        return false
+    if path == "src/runtime/miniaudio.h" or path == "src/runtime/stb_image.h" or path == "src/runtime/stb_truetype.h":
+        return false
+    for suffix in [".spl", ".c", ".h", ".rs", ".sh", ".shs", ".ps1", ".py", ".js", ".ts", ".cpp", ".hpp"]:
+        if path.ends_with(suffix): return true
+    false
+
+fn workaround_status_paths(output: text) -> Result<[text], text>:
+    # Porcelain -z uses destination NUL source NUL for renames/copies; both
+    # paths must be refreshed. Quoting and embedded spaces are preserved.
+    if output != "" and not output.ends_with("\0"):
+        return Err("truncated workaround Git status output")
+    val records = output.split("\0")
+    var paths: [text] = []
+    var i = 0
+    while i < records.len():
+        val record = records[i]
+        if record == "":
+            if i != records.len() - 1: return Err("empty workaround Git status record")
+            break
+        if record.len() < 4 or record.substring(2, 3) != " ":
+            return Err("malformed workaround Git status record")
+        val status = record.substring(0, 2)
+        val path = record.substring(3)
+        if not workaround_path_valid(path): return Err("unsafe workaround Git path: {path}")
+        if workaround_source_candidate(path) and not paths.contains(path): paths.push(path)
+        if status.contains("R") or status.contains("C"):
+            i = i + 1
+            if i >= records.len() or not workaround_path_valid(records[i]):
+                return Err("missing workaround Git rename source")
+            if workaround_source_candidate(records[i]) and not paths.contains(records[i]): paths.push(records[i])
+        i = i + 1
+    Ok(paths)
+
+fn workaround_tracked_paths(output: text) -> Result<[text], text>:
+    if output != "" and not output.ends_with("\0"):
+        return Err("truncated workaround tracked file output")
+    var paths: [text] = []
+    var seen: Dict<text, bool> = {}
+    for path in output.split("\0"):
+        if path == "": continue
+        if not workaround_path_valid(path): return Err("unsafe workaround tracked path: {path}")
+        if workaround_source_candidate(path) and not seen.contains_key(path):
+            paths.push(path)
+            seen[path] = true
+    Ok(paths)
+
+fn workaround_git(root: text, args: [text]) -> Result<text, text>:
+    var invocation = ["-C", root]
+    for arg in args: invocation.push(arg)
+    val (out, err, code) = workaround_host_process("git", invocation, 30000, 16777216)
+    if code != 0: return Err("workaround Git failed ({code}): {err}")
+    if out.len() >= 16777216: return Err("workaround Git output exceeded bound")
+    Ok(out)
+
+fn load_workarounds_at(root: text) -> Result<WorkaroundIndex, text>:
+    val path = root + "/.simple/workarounds.sdn"
+    if not workaround_host_exists(path):
+        return Err("workaround index missing; run simple check-dbs --fullscan bugs")
+    val content = workaround_host_read(path, 16777216)?
+    decode_workaround_index(content)
+
+fn load_workarounds() -> Result<WorkaroundIndex, text>:
+    load_workarounds_at(workaround_host_cwd())
+
+fn workaround_bug_snapshot(root: text) -> Result<BugDatabase, text>:
+    val path = root + "/doc/08_tracking/bug/bug_db.sdn"
+    # A checked snapshot cannot silently ignore an authoritative pending WAL.
+    if workaround_host_exists(path + ".wal"):
+        val wal = workaround_host_read(path + ".wal", 16777216)?
+        if wal.trim() != "": return Err("checkpoint the canonical bug database WAL before workaround refresh")
+    var content = workaround_host_read(path, 33554432)?
+    if content.starts_with("#sdn-crc32:"):
+        val newline = content.index_of("\n")
+        if newline < 0: return Err("malformed canonical bug database CRC header")
+        val parsed_crc = try_parse_int(content.substring(11, newline).trim())
+        if parsed_crc == nil: return Err("invalid canonical bug database CRC")
+        val body = content.substring(newline + 1)
+        if (parsed_crc ?? -1) != crc32_text(body): return Err("canonical bug database CRC mismatch")
+        content = body
+    # Verify checksum over original bytes before normalizing Windows line ends
+    # for the canonical blank-line table parser.
+    content = content.replace("\r\n", "\n")
+    var db = SdnDatabase.new(path)
+    var found = false
+    for section in content.split("\n\n"):
+        match parse_sdn_table(section):
+            case Some(table):
+                if table.name == "strings":
+                    db.interner = interner_from_sdn(table)
+                else:
+                    db.set_table(table.name, table)
+                if table.name == "bugs" or table.name == "bugs_active": found = true
+            case None: pass
+    if not found: return Err("canonical bug database has no bug table")
+    Ok(BugDatabase(db: db))
+
+fn workaround_refresh_locked(root: text, revision: text, fullscan: bool, discovered: [text]) -> Result<WorkaroundIndex, text>:
+    val index_path = root + "/.simple/workarounds.sdn"
+    var previous = empty_workaround_index(revision)
+    var previous_encoded = ""
+    # A full reconciliation can repair corrupt derived bytes. Incremental
+    # updates must preserve them and report the required explicit recovery.
+    if workaround_host_exists(index_path):
+        match load_workarounds_at(root):
+            case Ok(index):
+                previous = index
+                previous_encoded = encode_workaround_index(index)
+            case Err(reason):
+                if not fullscan: return Err(reason)
+    var paths: [text] = []
+    var seen: Dict<text, bool> = {}
+    for path in discovered:
+        if not workaround_path_valid(path): return Err("unsafe workaround refresh path: {path}")
+        if workaround_source_candidate(path) and not seen.contains_key(path):
+            paths.push(path)
+            seen[path] = true
+    # Re-read linked files even when Git status is empty (annotation reverted).
+    if not fullscan:
+        for link in previous.links:
+            if not workaround_path_valid(link.path): return Err("unsafe indexed workaround path")
+            if not seen.contains_key(link.path):
+                paths.push(link.path)
+                seen[link.path] = true
+    var links: [WorkaroundLink] = []
+    for path in paths:
+        val absolute = root + "/" + path
+        if not workaround_host_exists(absolute): continue
+        val content = workaround_host_read(absolute, 8388608)?
+        val parsed = parse_workaround_source(path, content)?
+        for link in parsed:
+            links.push(link)
+    # Ordinary builds with no markers need no canonical bug database read.
+    # Parse the whole batch before loading its validation dependency once.
+    if links.len() > 0:
+        val bugs = workaround_bug_snapshot(root)?
+        for link in links:
+            if not bugs.get_bug(link.bug_id).?:
+                return Err("{link.path}:{link.line}: unknown canonical bug ID: {link.bug_id}")
+    var base = previous
+    if fullscan: base = empty_workaround_index(revision)
+    var updated = replace_workaround_paths(base, paths, links)
+    updated.revision = revision
+    updated.complete = fullscan or (previous.complete and previous.revision == revision)
+    val encoded = encode_workaround_index(updated)
+    if encoded.len() > 16777216: return Err("workaround index exceeded bound")
+    # Validate the exact publication payload before touching the old index.
+    val checked = decode_workaround_index(encoded)?
+    val final_head = workaround_git(root, ["rev-parse", "--verify", "HEAD"])?
+    if final_head.trim() != revision:
+        return Err("Git HEAD changed during workaround refresh; retry on a stable checkout")
+    if encoded == previous_encoded: return Ok(checked)
+    if not workaround_host_publish(index_path, encoded): return Err("atomic workaround publication failed")
+    Ok(checked)
+
+fn refresh_workarounds_at(root: text, fullscan: bool, known_paths: [text]) -> Result<WorkaroundIndex, text>:
+    val head = workaround_git(root, ["rev-parse", "--verify", "HEAD"])?
+    val revision = head.trim()
+    if not workaround_recovery_valid(revision): return Err("invalid workaround Git HEAD")
+    var discovered = known_paths
+    if fullscan:
+        discovered = workaround_tracked_paths(workaround_git(root, ["ls-files", "-z"] )?)?
+    elif known_paths.len() == 0:
+        discovered = workaround_status_paths(workaround_git(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all"] )?)?
+    if not workaround_host_mkdir(root + "/.simple"): return Err("cannot create workaround index directory")
+    val lock = workaround_host_lock(root + "/.simple/workarounds.sdn.lock", 5)
+    if lock < 0: return Err("workaround writer lock unavailable")
+    # Capture every Result before releasing; no ? may escape the lock owner.
+    val result = workaround_refresh_locked(root, revision, fullscan, discovered)
+    val unlocked = workaround_host_unlock(lock)
+    if not unlocked: return Err("workaround writer lock release failed")
+    result
+
+fn refresh_workarounds(fullscan: bool, known_paths: [text]) -> Result<WorkaroundIndex, text>:
+    refresh_workarounds_at(workaround_host_cwd(), fullscan, known_paths)

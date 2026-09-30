@@ -1,0 +1,107 @@
+# REQ-003 REQ-005 NFR-002 NFR-003 NFR-004
+use std.spec.{describe, it, expect, step}
+use app.bug.workaround_store.{workaround_status_paths, workaround_tracked_paths,
+    workaround_source_candidate, refresh_workarounds_at, load_workarounds_at}
+use std.nogc_async_mut.sosix.workaround_host.{workaround_host_read,
+    workaround_host_publish, workaround_host_mkdir, workaround_host_process,
+    workaround_host_temp_dir, workaround_host_remove,
+    workaround_host_lock, workaround_host_unlock}
+
+fn workaround_test_git(root: text, args: [text]):
+    var invocation = ["-C", root]
+    for arg in args: invocation.push(arg)
+    val (_, _, code) = workaround_host_process("git", invocation, 30000, 1048576)
+    expect(code).to_equal(0)
+
+describe "workaround store maintenance":
+    it "retains both rename paths and ignores documentation and vendored code":
+        step("Decode NUL separated status without trimming path spaces")
+        val paths = workaround_status_paths("R  src/new name.spl\0src/old name.spl\0?? doc/example.md\0?? src/runtime/vendor/x.c\0").unwrap()
+        expect(paths).to_equal(["src/new name.spl", "src/old name.spl"])
+        expect(workaround_source_candidate("src/runtime/stb_image.h")).to_equal(false)
+        expect(workaround_status_paths(" M src/a.spl").is_err()).to_equal(true)
+        expect(workaround_status_paths("R  src/a.spl\0").is_err()).to_equal(true)
+        expect(workaround_tracked_paths("../outside.spl\0").is_err()).to_equal(true)
+
+    it "publishes complete batches and preserves bytes on malformed or unknown links":
+        step("Create an isolated Git fixture and canonical bug snapshot")
+        expect(workaround_host_mkdir("build/test-artifacts")).to_equal(true)
+        val root = workaround_host_temp_dir("build/test-artifacts", "workaround-store-").unwrap()
+        expect(workaround_host_mkdir(root + "/src")).to_equal(true)
+        expect(workaround_host_mkdir(root + "/doc/08_tracking/bug")).to_equal(true)
+        expect(load_workarounds_at(root).is_err()).to_equal(true)
+        expect(workaround_host_publish(root + "/doc/08_tracking/bug/bug_db.sdn",
+            "bugs |id, severity, status, title, valid|\n    sample_bug, P2, open, Sample, true\n")).to_equal(true)
+        val source = root + "/src/a.spl"
+        expect(workaround_host_publish(source, "# @workaround bug=sample_bug\nfn a(): 1\n")).to_equal(true)
+        workaround_test_git(root, ["init", "-q"])
+        workaround_test_git(root, ["add", "."])
+        workaround_test_git(root, ["-c", "user.name=Simple Test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "commit", "-qm", "fixture"])
+        val initial = refresh_workarounds_at(root, true, []).unwrap()
+        expect(initial.complete).to_equal(true)
+        expect(initial.links.len()).to_equal(1)
+        val index_path = root + "/.simple/workarounds.sdn"
+        val admitted = workaround_host_read(index_path, 16777216).unwrap()
+
+        step("An unchanged refresh returns the admitted state")
+        val unchanged = refresh_workarounds_at(root, false, ["src/a.spl"]).unwrap()
+        expect(unchanged.complete).to_equal(true)
+        expect(unchanged.links.len()).to_equal(1)
+        expect(unchanged.revision).to_equal(initial.revision)
+        expect(workaround_host_read(index_path, 16777216).unwrap()).to_equal(admitted)
+
+        step("A competing writer cannot publish while the index lock is held")
+        val held_lock = workaround_host_lock(root + "/.simple/workarounds.sdn.lock", 1)
+        expect(held_lock >= 0).to_equal(true)
+        val contended = refresh_workarounds_at(root, false, ["src/a.spl"])
+        val released = workaround_host_unlock(held_lock)
+        expect(released).to_equal(true)
+        expect(contended.is_err()).to_equal(true)
+        match contended:
+            case Err(reason): expect(reason).to_equal("workaround writer lock unavailable")
+            case Ok(_): expect(false).to_equal(true)
+        expect(workaround_host_read(index_path, 16777216).unwrap()).to_equal(admitted)
+
+        step("Reject the entire batch and retain the admitted index")
+        expect(workaround_host_publish(source, "# @workaround bug=missing_bug\nfn a(): 2\n")).to_equal(true)
+        expect(refresh_workarounds_at(root, false, ["src/a.spl"]).is_err()).to_equal(true)
+        expect(workaround_host_read(index_path, 16777216).unwrap()).to_equal(admitted)
+        expect(workaround_host_publish(source, "# @workaround bug=sample_bug recover=bad\nfn a(): 2\n")).to_equal(true)
+        expect(refresh_workarounds_at(root, false, ["src/a.spl"]).is_err()).to_equal(true)
+        expect(workaround_host_read(index_path, 16777216).unwrap()).to_equal(admitted)
+
+        step("Read the persisted index independently of invalid source contents")
+        expect(load_workarounds_at(root).unwrap().links.len()).to_equal(1)
+
+        step("Remove reverted annotations by rereading previous linked paths")
+        expect(workaround_host_publish(source, "fn a(): 1\n")).to_equal(true)
+        expect(refresh_workarounds_at(root, false, ["src/unrelated.spl"]).unwrap().links.len()).to_equal(0)
+        expect(workaround_host_publish(source, "# @workaround bug=sample_bug\nfn a(): 1\n")).to_equal(true)
+        expect(refresh_workarounds_at(root, false, ["src/a.spl"]).unwrap().links.len()).to_equal(1)
+        expect(workaround_host_remove(source)).to_equal(true)
+        expect(refresh_workarounds_at(root, false, []).unwrap().links.len()).to_equal(0)
+
+        step("A new HEAD invalidates complete coverage until explicit fullscan")
+        workaround_test_git(root, ["-c", "user.name=Simple Test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-qm", "new head"])
+        expect(refresh_workarounds_at(root, false, []).unwrap().complete).to_equal(false)
+        expect(refresh_workarounds_at(root, true, []).unwrap().complete).to_equal(true)
+
+        step("Only explicit fullscan repairs a corrupt derived index")
+        expect(workaround_host_publish(index_path, "corrupt\n")).to_equal(true)
+        expect(refresh_workarounds_at(root, false, []).is_err()).to_equal(true)
+        expect(workaround_host_read(index_path, 16777216).unwrap()).to_equal("corrupt\n")
+        expect(refresh_workarounds_at(root, true, []).unwrap().complete).to_equal(true)
+
+        step("Pending canonical WAL prevents publishing a stale bug snapshot")
+        val before_wal = workaround_host_read(index_path, 16777216).unwrap()
+        expect(workaround_host_publish(root + "/doc/08_tracking/bug/bug_db.sdn.wal", "pending\n")).to_equal(true)
+        expect(workaround_host_publish(source, "# @workaround bug=sample_bug\nfn a(): 1\n")).to_equal(true)
+        expect(refresh_workarounds_at(root, false, []).is_err()).to_equal(true)
+        expect(workaround_host_read(index_path, 16777216).unwrap()).to_equal(before_wal)
+
+        step("An empty marker batch needs no bug database snapshot")
+        expect(workaround_host_publish(source, "fn a(): 1\n")).to_equal(true)
+        expect(workaround_host_remove(root + "/doc/08_tracking/bug/bug_db.sdn")).to_equal(true)
+        val empty_batch = refresh_workarounds_at(root, false, ["src/a.spl"]).unwrap()
+        expect(empty_batch.complete).to_equal(true)
+        expect(empty_batch.links.len()).to_equal(0)
