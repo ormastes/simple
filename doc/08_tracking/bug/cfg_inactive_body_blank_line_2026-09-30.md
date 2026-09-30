@@ -65,6 +65,26 @@ PASS**. Preserve its log and cache as Rust-backed evidence; do not reuse that
 cache for a pure compiler attempt. Corrected-source pure positional verification
 remains pending. The suitable command shape omits both `--entry` and `--source`.
 
+## Final bounded pure-route attempt
+
+The final authorized attempt used positional entry only with immutable producer
+SHA-256 `cbe4a8df41e14287005e258cf57f8e16bd096dee0c09954b39495446e5ab19cc`.
+The producer hash, its existing hello PASS and all six bound runtime-authority
+file hashes were checked before launch. Source HEAD was `06dc9880573`.
+The attempt used its own `pure-final/cache/phase2/<producer-sha>/cfg-blank-line`
+cache, no fallback, a 180-second wall deadline and no RSS cap.
+
+It exited 1 before compiler dispatch with
+`SCV-E-ADMISSION: compile-event-journal-missing`; the diagnostic requests
+`SIMPLE_SCV_INVENTORY_COLD_INIT=1`, which this launch environment did not set.
+No `PureCompilerDriver` trace or executable was produced. This is an admission
+blocker, not a failure of the corrected preprocessor and not a verification PASS.
+Owned process cleanup was proven. The attempt cap was reached; no retry ran.
+
+Evidence under `build/native_probe/phase2_parser/pure-final/`: `launch.json`,
+`result.json`, `compile.stdout.log` and `compile.stderr.log`. The diagnostic
+launcher is `build/native_probe/phase2_parser/pure_probe.py`.
+
 No full compiler rebuild, full suite, MCP/LSP gate, or original full CLI rerun
 is claimed. The producer binary remains unchanged. The Linux DevHub
 `src/lib/nogc_sync_mut/ffi/io.spl` failure is separate: that facade contains no
