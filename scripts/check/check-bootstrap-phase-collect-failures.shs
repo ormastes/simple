@@ -1,0 +1,63 @@
+#!/bin/sh
+# Exercise the real scheduler, artifact gate and terminal verdict without builds.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+runner=${1:-$root/scripts/bootstrap/bootstrap-phase-verification.shs}
+scratch=$(mktemp -d)
+trap 'rm -rf "$scratch"' EXIT HUP INT TERM
+sed -n '/^run_matrix_task() {$/,/^}$/p' "$runner" >"$scratch/scheduler.shs"
+sed -n '/^[[:space:]]*for tool in simple_mcp_server simple_lsp_mcp_server; do$/,/^[[:space:]]*done$/p' \
+  "$runner" >"$scratch/tool-help.shs"
+sed -n '/^summary_read_status=0$/,$p' "$runner" >"$scratch/verdict.shs"
+for part in scheduler tool-help verdict; do
+  [ -s "$scratch/$part.shs" ] || { echo "FAIL: missing runner section $part"; exit 1; }
+done
+die() { echo "FAIL: $*" >&2; exit 1; }
+run_task() {
+  probe_task=$1
+  shift
+  printf '%s\n' "$probe_task" >>"$scratch/executed"
+  if "$@"; then probe_status=0; probe_result=PASS
+  else probe_status=$?; probe_result=FAIL; fi
+  printf 'task=%s|result=%s|status=%s\n' "$probe_task" "$probe_result" "$probe_status" >>"$summary"
+  return "$probe_status"
+}
+. "$scratch/scheduler.shs"
+for strategy in normal full; do
+  summary="$scratch/$strategy.env"
+  : >"$summary"
+  : >"$scratch/executed"
+  matrix_failed=0
+  matrix_unsupported=0
+  run_matrix_task compiler_cli_build false
+  [ "$matrix_task_passed" -eq 0 ] || die 'failed producer marked ready'
+  run_matrix_task test_runner_build true
+  [ "$matrix_task_passed" -eq 1 ] || die "$strategy suppressed independent build"
+  [ "$matrix_failed" -eq 1 ] || die 'later success erased failure'
+
+  # A stale executable cannot satisfy a failed producer. A sibling producer's
+  # successful artifact remains eligible for its help probe.
+  outputs=$scratch
+  server_outputs=$scratch
+  phase=stage2
+  mcp_build_ready=0
+  lsp_build_ready=1
+  printf '#!/bin/sh\nexit 0\n' >"$scratch/simple_mcp_server"
+  cp "$scratch/simple_mcp_server" "$scratch/simple_lsp_mcp_server"
+  chmod +x "$scratch/simple_mcp_server" "$scratch/simple_lsp_mcp_server"
+  . "$scratch/tool-help.shs"
+  grep -q '^task=simple_mcp_server_help|result=BLOCKED|status=not-built|' "$summary" || die 'missing prerequisite was not blocked'
+  if grep -q '^simple_mcp_server_help$' "$scratch/executed"; then die 'stale artifact executed'; fi
+  grep -q '^simple_lsp_mcp_server_help$' "$scratch/executed" || die 'independent help probe suppressed'
+  verdict_status=0
+  ( . "$scratch/verdict.shs" ) || verdict_status=$?
+  [ "$verdict_status" -eq 1 ] || die 'failed matrix exited successfully'
+  grep -q '^overall=FAIL$' "$summary" || die 'failed matrix lacks failure verdict'
+
+  # The in-memory failure latch survives loss of recorded failure rows.
+  printf 'task=only_success|result=PASS|status=0\n' >"$summary"
+  verdict_status=0
+  ( . "$scratch/verdict.shs" ) || verdict_status=$?
+  [ "$verdict_status" -eq 1 ] || die 'failure latch was ignored'
+done
+echo 'PASS: normal/full collect independent failures, enforce prerequisites and retain aggregate failure'
