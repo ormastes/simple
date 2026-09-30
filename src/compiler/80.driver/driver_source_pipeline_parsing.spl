@@ -7,7 +7,7 @@ use compiler.driver.driver_types.{CompileContext}
 use compiler.driver.perf.compiler_work_counters.{compiler_work_parser_schedule_v1}
 use compiler.common.driver_core_types.{SourceFile}
 use compiler.common.driver_core_modes.{CompileMode}
-use compiler.frontend.frontend.{parse_full_frontend_with_advisory_policy_v1}
+use compiler.frontend.frontend.{parse_full_frontend_with_advisory_policy_v1, parse_full_frontend_in_borrowed_scope_with_advisory_policy_v1}
 use compiler.frontend.core.lexer.{lexer_release_parse_source_globals}
 use compiler.frontend.core.lexer_struct.{core_token_text_intern_reset}
 use compiler.frontend.aspect_registry.{aspect_registry_promote_transient_owner}
@@ -374,6 +374,19 @@ impl CompilerDriver:
             case Err(_): Err(
                 "required environment variant frontend provider unavailable for {source_path}")
 
+    me parse_full_frontend_in_borrowed_scope_selected_v1(source_content: text, source_path: text,
+        source_module_name: text) -> Result<ParserModule, text>:
+        match parse_full_frontend_in_borrowed_scope_with_advisory_policy_v1(source_content,
+                source_path, source_module_name, self.ctx.logger,
+                self.ctx.frontend_advisory_policy,
+                self.ctx.environment_variant_frontend_owner_id,
+                self.ctx.environment_variant_frontend_session_id,
+                self.ctx.environment_variant_frontend_generation,
+                self.ctx.environment_variant_frontend_cache_identity):
+            case Ok(module): Ok(module)
+            case Err(_): Err(
+                "required environment variant frontend provider unavailable for {source_path}")
+
     me add_streaming_module_surface(
         builder: ModuleSurfaceBuilder,
         source_path: text,
@@ -395,7 +408,7 @@ impl CompilerDriver:
             content: source_content,
             module_name: source_module_name)
         log_module_surface_stage(source_path, "parse-start")
-        val selected_module = self.parse_full_frontend_selected_v1(
+        val selected_module = self.parse_full_frontend_in_borrowed_scope_selected_v1(
             source_content, source_path, source_module_name)
         val module = match selected_module:
             case Ok(value): value
@@ -465,6 +478,9 @@ impl CompilerDriver:
         # Same compiler-identity scope the non-streaming parse publishes: the
         # HIR cache keys off it, and without it the streaming path had no cache.
         val _cache_scope_published = _driver_publish_frontend_cache_scope()
+        # The memo retains the scope text across files. Initialize it before
+        # opening any per-file arena, so it cannot retain a reclaimed string.
+        val _cache_scope_initialized = frontend_parse_cache_enabled()
         self.ctx.modules = {}
         self.ctx.module_surfaces = nil
         # Phase 1 owns independent scalar text arrays; phase 2 never re-reads a

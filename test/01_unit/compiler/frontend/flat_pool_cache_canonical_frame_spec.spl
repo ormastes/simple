@@ -1,0 +1,33 @@
+# @req: REQ-COMPILER-FRONTEND-001
+use std.spec
+use compiler.frontend.core.flat_pool_codec.{FlatPoolReader, flat_pool_dec_i64}
+
+describe "canonical frontend cache frame":
+    it "rejects malformed count and integer fields":
+        step("Reject malformed canonical count and scalar fields")
+        for malformed in ["", "0,0", "00", "-0", "+1", " 1", "1x", "9223372036854775808"]:
+            val count_reader = FlatPoolReader.new_canonical(malformed + "\n0\n")
+            val _count = count_reader.next_len()
+            expect(count_reader.ok).to_equal(false)
+            val scalar_reader = FlatPoolReader.new_canonical("1\n" + malformed + "\n")
+            val _values = flat_pool_dec_i64(scalar_reader)
+            expect(scalar_reader.ok).to_equal(false)
+
+    it "rejects trailing data and accepts a subsequent valid frame":
+        step("Reject trailing data and decode a fresh frame")
+        val extra = FlatPoolReader.new_canonical("1\n7\nextra\n")
+        val _values = flat_pool_dec_i64(extra)
+        expect(extra.finish_canonical_frame()).to_equal(false)
+        val fresh = FlatPoolReader.new_canonical("1\n31\n")
+        val values = flat_pool_dec_i64(fresh)
+        expect(fresh.finish_canonical_frame()).to_equal(true)
+        expect(values.len()).to_equal(1)
+        expect(values[0]).to_equal(31)
+
+    it "requires exactly the serializer final newline":
+        step("Reject missing terminator and extra empty frame")
+        val missing = FlatPoolReader.new_canonical("1\n7")
+        expect(missing.ok).to_equal(false)
+        val extra = FlatPoolReader.new_canonical("1\n7\n\n")
+        val _values = flat_pool_dec_i64(extra)
+        expect(extra.finish_canonical_frame()).to_equal(false)

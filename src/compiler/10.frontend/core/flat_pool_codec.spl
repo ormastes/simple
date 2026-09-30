@@ -23,7 +23,9 @@
 # both encoded and decoded — an omitted pool is a SILENT MISCOMPILE, not a
 # loud failure, so it must never rely on review.
 #
-# FORMAT (version 1), line-oriented and self-delimiting:
+# FORMAT (version 2), line-oriented and self-delimiting:
+# Version 2 includes declaration assembly placement and rejects malformed
+# frontend-cache frames. Old FPC files remain preserved but are cache misses.
 #   every scalar occupies one line; a list emits its length, then its elements.
 #   text is escaped (\\ -> \\\\, \n -> \\n) so a value can never split a line.
 # Escaping rather than byte-length prefixes is deliberate: Simple's len() is not
@@ -32,7 +34,7 @@
 
 use std.common.encoding.utf8.{text_byte_len}
 
-val FLAT_POOL_CODEC_VERSION: text = "spl-flatpool-v1"
+val FLAT_POOL_CODEC_VERSION: text = "spl-flatpool-v2"
 
 # Generated HIR records currently top out well below this representation
 # reservation. Container entries and text are charged separately by next_len
@@ -105,6 +107,26 @@ pub class FlatPoolReader:
             max_work_units: 0, live_reserved_bytes: 0, entered_nodes: 0,
             current_depth: 0, maximum_depth: 0, charged_work_units: 0,
             audit_events: 0)
+
+    # Frontend cache bytes are produced by our canonical integer encoders.
+    # Reject malformed frames without changing the legacy trusted cursor.
+    pub static fn new_canonical(blob: text) -> FlatPoolReader:
+        var reader = FlatPoolReader.new(blob)
+        reader.canonical = true
+        if not blob.ends_with("\n"):
+            reader.reject_malformed("missing_final_newline")
+        reader
+
+    me finish_canonical_frame() -> bool:
+        if not self.ok:
+            return false
+        # split implementations may retain the final newline's empty field.
+        if self.pos == self.lines.len():
+            return true
+        if self.pos == self.lines.len() - 1 and self.lines[self.pos] == "":
+            return true
+        self.reject_malformed("trailing_data")
+        false
 
     # The explicit limits are primitives so this common codec stays below HIR
     # and can be used by generated decoders without a reverse import.
@@ -329,7 +351,7 @@ pub class FlatPoolReader:
             if not self.charge_work(byte_count):
                 return 0
         val value = flat_pool_parse_i64(raw)
-        if self.bounded and raw != "{value}":
+        if (self.bounded or self.canonical) and raw != "{value}":
             self.reject_malformed("integer")
             return 0
         value
