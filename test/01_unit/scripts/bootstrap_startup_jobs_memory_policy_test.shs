@@ -1,0 +1,52 @@
+#!/bin/sh
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+. "$root/scripts/bootstrap/bootstrap-jobs.shs"
+. "$root/scripts/bootstrap/bootstrap-build-jobs-policy.shs"
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+printf 'MemAvailable: 8388608 kB\n' >"$work/memory"
+BOOTSTRAP_MEMINFO_PATH=$work/memory
+BOOTSTRAP_BUILD_JOBS_OS_OVERRIDE=UnknownOS
+SIMPLE_BOOTSTRAP_MAX_BUILD_JOBS=24
+export BOOTSTRAP_MEMINFO_PATH BOOTSTRAP_BUILD_JOBS_OS_OVERRIDE SIMPLE_BOOTSTRAP_MAX_BUILD_JOBS
+unset SIMPLE_NATIVE_BUILD_THREADS SIMPLE_BOOTSTRAP_WORKER_MEM_MIB
+bootstrap_detect_host_cpus() { echo 24; }
+select_policy() {
+  bootstrap_select_jobs "$2" "$work/missing"
+  bootstrap_startup_jobs_apply_policy "$1" "$2"
+}
+select_policy auto 16
+test "$jobs:$selfhost_jobs:$jobs_available_kib:$jobs_memory_reason" = 2:2:8388608:memory-clamped
+bootstrap_startup_jobs_receipt_fields >"$work/auto"
+grep -qx 'resolved=16' "$work/auto"
+grep -qx 'effective=2' "$work/auto"
+grep -qx 'selfhost_effective=2' "$work/auto"
+select_policy explicit-count 16
+test "$jobs:$selfhost_jobs:$jobs_memory_reason" = 16:16:explicit-count-requested
+bootstrap_startup_jobs_receipt_fields >"$work/explicit"
+grep -qx 'effective=16' "$work/explicit"
+grep -qx 'jobs_memory_policy=explicit-count' "$work/explicit"
+select_policy auto full
+test "$jobs" = 2
+select_policy explicit-count full
+test "$jobs" = 24
+select_policy explicit-count auto
+test "$jobs" = 24
+SIMPLE_BOOTSTRAP_MAX_BUILD_JOBS=16
+select_policy explicit-count full
+test "$jobs" = 16
+if select_policy explicit-count 24 2>/dev/null; then exit 1; fi
+SIMPLE_BOOTSTRAP_MAX_BUILD_JOBS=64
+select_policy explicit-count 32
+test "$jobs" = 24
+for bad in '' 0 01 -1 nope 999999999999999999; do
+  if bootstrap_startup_jobs_policy_validate explicit-count "$bad" 2>/dev/null; then exit 1; fi
+done
+if select_policy invalid 16 2>/dev/null; then exit 1; fi
+BOOTSTRAP_MEMINFO_PATH=$work/absent
+select_policy auto 16
+test "$jobs:$jobs_memory_reason" = 16:memory-probe-unavailable
+# Actual startup receipt writers share the same fields, including Stage 3.
+test "$(grep -c '^ *bootstrap_startup_jobs_receipt_fields$' "$root/scripts/bootstrap/bootstrap-from-scratch.sh")" = 2
+printf 'PASS: startup worker memory policy, CPU/ceiling validation, receipts and missing probe\n'

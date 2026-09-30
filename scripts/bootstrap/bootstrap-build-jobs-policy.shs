@@ -176,6 +176,20 @@ BOOTSTRAP_WORKER_MEM_MIB_DEFAULT=3300
 
 bootstrap_build_jobs_memory_clamp() {
   bbj_want=$1
+  bootstrap_build_jobs_memory_sample
+  [ -n "$bbj_avail_kb" ] || { printf '%s\n' "$bbj_want"; return 0; }
+  bbj_fit=$(( bbj_avail_kb / 1024 / bbj_budget ))
+  [ "$bbj_fit" -ge 1 ] || bbj_fit=1
+  if [ "$bbj_want" -gt "$bbj_fit" ]; then
+    printf '%s\n' "$bbj_fit"
+  else
+    printf '%s\n' "$bbj_want"
+  fi
+}
+
+# Sampling is shared so both selected worker counts use the same observation.
+# This scheduling budget is independent of process RSS limits.
+bootstrap_build_jobs_memory_sample() {
   bbj_budget=${SIMPLE_BOOTSTRAP_WORKER_MEM_MIB:-$BOOTSTRAP_WORKER_MEM_MIB_DEFAULT}
   bbj_meminfo=${BOOTSTRAP_MEMINFO_PATH:-/proc/meminfo}
   # Length-bounded as well as digit-checked: an all-digits value wider than
@@ -201,14 +215,68 @@ bootstrap_build_jobs_memory_clamp() {
     bbj_avail_kb=$(bootstrap_build_jobs_available_kib_fallback)
     case "$bbj_avail_kb" in ''|*[!0-9]*) bbj_avail_kb="" ;; esac
   fi
-  [ -n "$bbj_avail_kb" ] || { printf '%s\n' "$bbj_want"; return 0; }
-  bbj_fit=$(( bbj_avail_kb / 1024 / bbj_budget ))
-  [ "$bbj_fit" -ge 1 ] || bbj_fit=1
-  if [ "$bbj_want" -gt "$bbj_fit" ]; then
-    printf '%s\n' "$bbj_fit"
-  else
-    printf '%s\n' "$bbj_want"
+  return 0
+}
+
+bootstrap_startup_jobs_policy_validate() {
+  case "$1" in
+    auto) ;;
+    explicit-count)
+      case "$2" in
+        full|auto|half|min|minimal|minimum) ;;
+        *) bootstrap_build_jobs_validate_uint "$2" 2 --jobs || return 1 ;;
+      esac
+      ;;
+    *) echo 'error: --jobs-memory-policy requires auto or explicit-count' >&2; return 1 ;;
+  esac
+}
+
+# Called after bootstrap_select_jobs. Keep legacy auto selection unchanged;
+# the opt-in uses the existing strict CPU/ceiling resolver before skipping RAM.
+bootstrap_startup_jobs_apply_policy() {
+  jobs_memory_policy=$1
+  jobs_requested=${2:-default}
+  bootstrap_startup_jobs_policy_validate "$jobs_memory_policy" "${2:-}" || return 1
+  if [ "$jobs_memory_policy" = explicit-count ]; then
+    jobs_bound_request=$2
+    # Startup's established auto token means all CPUs; the recovery resolver
+    # uses auto for one worker. Preserve startup token semantics here.
+    [ "$jobs_bound_request" != auto ] || jobs_bound_request=full
+    bootstrap_build_jobs_resolve "$jobs_bound_request" cli "$host_cpus" || return 1
+    jobs=$bootstrap_build_jobs_effective
+    selfhost_jobs=$jobs
   fi
+  jobs_resolved=$jobs
+  selfhost_jobs_resolved=$selfhost_jobs
+  bootstrap_build_jobs_memory_sample
+  jobs_available_kib=${bbj_avail_kb:-unavailable}
+  jobs_worker_mem_mib=$bbj_budget
+  jobs_memory_reason=explicit-count-requested
+  if [ "$jobs_memory_policy" = auto ]; then
+    jobs_memory_reason=memory-probe-unavailable
+    if [ -n "$bbj_avail_kb" ]; then
+      jobs_memory_fit=$((bbj_avail_kb / 1024 / bbj_budget))
+      [ "$jobs_memory_fit" -ge 1 ] || jobs_memory_fit=1
+      jobs_memory_reason=within-memory-budget
+      if [ "$jobs" -gt "$jobs_memory_fit" ]; then
+        jobs=$jobs_memory_fit
+        jobs_memory_reason=memory-clamped
+      fi
+      if [ "$selfhost_jobs" -gt "$jobs_memory_fit" ]; then
+        selfhost_jobs=$jobs_memory_fit
+        jobs_memory_reason=memory-clamped
+      fi
+      [ "$jobs_memory_reason" != memory-clamped ] || job_source="${job_source}+memory"
+    fi
+  fi
+}
+
+bootstrap_startup_jobs_receipt_fields() {
+  printf 'requested=%s\nresolved=%s\neffective=%s\n' "$jobs_requested" "$jobs_resolved" "$jobs"
+  printf 'selfhost_resolved=%s\nselfhost_effective=%s\n' "$selfhost_jobs_resolved" "$selfhost_jobs"
+  printf 'jobs_memory_policy=%s\navailable_memory_kib=%s\nworker_memory_mib=%s\nmemory_reason=%s\n' \
+    "$jobs_memory_policy" "$jobs_available_kib" "$jobs_worker_mem_mib" "$jobs_memory_reason"
+  printf 'rss_limit_policy=independent\n'
 }
 
 # Available-memory probe for hosts without /proc/meminfo (or its

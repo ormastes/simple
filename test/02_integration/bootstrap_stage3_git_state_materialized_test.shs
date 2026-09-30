@@ -5,7 +5,7 @@ root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
 . "$root/scripts/check/lib/bootstrap-stage3/authority.shs"
 case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) ;; *) exit 77 ;; esac
 test_case=${STAGE3_MATERIALIZED_TEST_CASE:-full}
-case "$test_case" in full|bounded) ;; *) echo "unknown STAGE3_MATERIALIZED_TEST_CASE: $test_case" >&2; exit 2 ;; esac
+case "$test_case" in full|bounded|startup) ;; *) echo "unknown STAGE3_MATERIALIZED_TEST_CASE: $test_case" >&2; exit 2 ;; esac
 case_name=setup
 # The v2 publisher deliberately accepts only lexically drive-qualified Windows
 # receipt paths.  MSYS /tmp is not drive-qualified, and CI-provided user temp
@@ -80,6 +80,96 @@ git_repo update-ref HEAD "$head"
 case_name=synthetic-producer
 /usr/bin/sh "$repo/scripts/setup/materialize-symlinks-windows.shs" --strict-missing --receipt "$tmp/good" "$repo" >"$tmp/error" 2>&1
 receipt="$tmp/good"
+
+if [ "$test_case" = startup ]; then
+    . "$root/scripts/bootstrap/bootstrap-materialized-startup.shs"
+    # Spy only preparation invocations; native validation remains real.
+    bash() { printf '%s\n' "$*" >>"$tmp/preparation-calls"; command bash "$@"; }
+    startup_accept() {
+        case_name=$1
+        SIMPLE_WINDOWS_MATERIALIZED_LINKS_RECEIPT=$receipt
+        bootstrap_materialized_startup "$repo" "$tmp/$1-output" >"$tmp/stdout" 2>"$tmp/error"
+        test -s "$bms_state"
+    }
+    startup_reject() {
+        case_name=$1
+        SIMPLE_WINDOWS_MATERIALIZED_LINKS_RECEIPT=$receipt
+        if bootstrap_materialized_startup "$repo" "$tmp/$1-output" >"$tmp/stdout" 2>"$tmp/error"; then
+            echo "unexpected startup acceptance: $1" >&2; exit 1
+        fi
+        grep -q 'Reprepare with' "$tmp/error"
+        test ! -e "$tmp/preparation-calls"
+    }
+    if [ "${STARTUP_OWNER_TEST_CASE:-all}" = all ]; then
+    before=$(bootstrap_stage3_hash_file "$receipt")
+    startup_accept reuse
+    test "$before" = "$(bootstrap_stage3_hash_file "$receipt")"
+    test ! -e "$tmp/preparation-calls"
+    for field in root head producer_sha256 policy_sha256 records_sha256; do
+        sed "s/^$field=.*/$field=invalid/" "$tmp/good" >"$tmp/bad"
+        receipt="$tmp/bad"
+        startup_reject "invalid-$field"
+    done
+    { cat "$tmp/good"; printf 'schema=duplicate\n'; } >"$tmp/bad"
+    startup_reject duplicate
+    head -c 50 "$tmp/good" >"$tmp/bad"
+    startup_reject truncated
+    receipt="$tmp/good"
+    cp "$repo/scripts/setup/windows-materialized-pending-policy.tsv" "$tmp/policy"
+    printf '# changed\n' >>"$repo/scripts/setup/windows-materialized-pending-policy.tsv"
+    startup_reject changed-policy
+    cp "$tmp/policy" "$repo/scripts/setup/windows-materialized-pending-policy.tsv"
+    cp "$repo/file-link" "$tmp/file-copy"
+    rm "$repo/file-link"
+    cp "$tmp/file-copy" "$repo/file-link"
+    startup_reject copied-file-identity
+    rm "$repo/file-link"
+    ln "$repo/target.txt" "$repo/file-link"
+    mkdir -p "$repo/tools/bb-cli/bin"
+    printf appeared >"$repo/tools/bb-cli/bin/bb"
+    startup_reject pending-target-appeared
+    rm "$repo/tools/bb-cli/bin/bb"
+    fi
+    if [ "${STARTUP_OWNER_TEST_CASE:-all}" != absent ]; then
+        for field in root head producer_sha256 policy_sha256 records_sha256; do
+            case "$field" in
+                root) drift=/outside ;;
+                head) drift=0000000000000000000000000000000000000000 ;;
+                *) drift=0000000000000000000000000000000000000000000000000000000000000000 ;;
+            esac
+            sed "s|^$field=.*|$field=$drift|" "$tmp/good" >"$tmp/bad"
+            receipt="$tmp/bad"
+            startup_reject "stale-$field"
+        done
+        receipt="$tmp/good"
+        cp "$repo/scripts/setup/materialize-symlinks-windows.shs" "$tmp/producer"
+        printf '# changed producer\n' >>"$repo/scripts/setup/materialize-symlinks-windows.shs"
+        startup_reject changed-producer
+        cp "$tmp/producer" "$repo/scripts/setup/materialize-symlinks-windows.shs"
+        next_head=$(printf 'next revision\n' | GIT_AUTHOR_NAME=test GIT_AUTHOR_EMAIL=test@example.invalid GIT_COMMITTER_NAME=test GIT_COMMITTER_EMAIL=test@example.invalid git_repo commit-tree "$tree" -p "$head")
+        git_repo update-ref HEAD "$next_head"
+        startup_reject changed-head
+        git_repo update-ref HEAD "$head"
+        if MSYS=winsymlinks:nativestrict ln -s "$tmp/good" "$tmp/receipt-link" 2>/dev/null; then
+            receipt="$tmp/receipt-link"
+            startup_reject symlink-receipt
+        else
+            echo 'SKIP: native receipt symlink requires Windows privilege'
+        fi
+    fi
+    if [ "${STARTUP_OWNER_TEST_CASE:-all}" != binding ]; then
+    # No supplied receipt: one undo and one preparation, followed by the same
+    # native authority. This also exercises revision-safe repair ownership.
+    receipt=
+    startup_accept absent
+    test "$(wc -l <"$tmp/preparation-calls")" -eq 2
+    test "$(grep -c -- ' --undo ' "$tmp/preparation-calls")" -eq 1
+    test "$(grep -c -- ' --strict-missing --receipt ' "$tmp/preparation-calls")" -eq 1
+    fi
+    ! grep -q 'bash .*materialize-symlinks-windows' "$root/scripts/bootstrap/bootstrap-windows.sh"
+    echo "PASS: native startup receipt cases (${STARTUP_OWNER_TEST_CASE:-all})"
+    exit 0
+fi
 
 accept() {
     case_name=$1
