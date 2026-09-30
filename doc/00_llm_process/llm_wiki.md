@@ -1,5 +1,12 @@
 # LLM Repository Wiki
 
+## Bootstrap failure collection
+
+Bootstrap failure collection means completing independently runnable builds and tests after errors. Usable compiler bytes plus minimum sanity permit the next diagnostic phase before formal admission. Crashes block dependent chains; all failed and blocked rows remain visible and prevent a successful aggregate. Follow the
+[shared collection policy](../07_guide/tooling/bootstrap_failure_collection.md) for terminal statuses, budgets,
+cache preservation, and bug evidence. This is agent workflow guidance; it does
+not change runner behavior.
+
 ## SPipe home routing
 
 Reusable core lives at `{home}/.spipe` (`SPIPE_HOME`); private/local knowledge lives
