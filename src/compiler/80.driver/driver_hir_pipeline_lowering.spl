@@ -2,10 +2,13 @@ use compiler.driver.driver_compiler_type.{CompilerDriver}
 use std.io_runtime.{exit, hash_text}
 use std.env.{env_get}
 use compiler.driver.driver_types.{CompileContext}
+use std.nogc_async_mut.sosix.environment.{sosix_env_get_nullable, sosix_cwd}
 use compiler.driver.cache.cold_hir_semantic_seed_v1.{
     cold_hir_typed_receipts_from_lowered_sources_v1
 }
-use std.scv.compile_source_inventory.{compile_source_inventory_read_current_v1}
+use std.scv.compile_source_inventory.{compile_source_inventory_read_current_v1,
+    CompileSourceInventoryBindingV1, compile_source_inventory_binding_reason_v1,
+    compile_source_inventory_snapshot_cache_root_v1}
 use std.scv.compile_snapshot.{scv_compile_snapshot_open_v1}
 use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded}
 use compiler.driver.perf.compiler_work_counters.{compiler_work_hir_schedule_v1}
@@ -145,44 +148,50 @@ impl CompilerDriver:
         self.ctx.cold_hir_objectless_modules = {}
         self.ctx.cold_hir_native_object_artifacts = []
         val compatibility_markers_present =
-            (env_get("SIMPLE_PACKAGE_INDEX_PRODUCER_DIGEST") ?? "") != "" and
-            (env_get("SIMPLE_PACKAGE_INDEX_ROOT_GENERATION") ?? "") != "" and
-            (env_get("SIMPLE_PACKAGE_INDEX_VARIANT_DIGEST") ?? "") != ""
-        val cold_init = (env_get("SIMPLE_PACKAGE_INDEX_COLD_INIT") ?? "") == "1" or
+            (sosix_env_get_nullable("SIMPLE_PACKAGE_INDEX_PRODUCER_DIGEST") ?? "") != "" and
+            (sosix_env_get_nullable("SIMPLE_PACKAGE_INDEX_ROOT_GENERATION") ?? "") != "" and
+            (sosix_env_get_nullable("SIMPLE_PACKAGE_INDEX_VARIANT_DIGEST") ?? "") != ""
+        val cold_init = (sosix_env_get_nullable("SIMPLE_PACKAGE_INDEX_COLD_INIT") ?? "") == "1" or
             not compatibility_markers_present
         if not cold_init:
             return true
-        val source_root = env_get("SIMPLE_SCV_SNAPSHOT_ROOT") ?? ""
-        val expected_digest = env_get("SIMPLE_SCV_INVENTORY_DIGEST") ?? ""
-        if source_root == "" and expected_digest == "":
+        val source_root = sosix_env_get_nullable("SIMPLE_SCV_SNAPSHOT_ROOT") ?? ""
+        val inventory_binding = CompileSourceInventoryBindingV1(
+            snapshot_manifest_digest: sosix_env_get_nullable("SIMPLE_SCV_INVENTORY_DIGEST") ?? "",
+            source_inventory_digest: sosix_env_get_nullable("SIMPLE_SCV_SOURCE_INVENTORY_DIGEST") ?? "")
+        if source_root == "" and inventory_binding.snapshot_manifest_digest == "" and inventory_binding.source_inventory_digest == "":
             return true
-        if source_root == "" or expected_digest == "":
+        if source_root == "" or inventory_binding.snapshot_manifest_digest == "" or inventory_binding.source_inventory_digest == "":
             self.ctx.add_error("cold HIR receipt authority incomplete")
             return false
-        # Inventory belongs to the admitted SCV snapshot's worktree cache,
-        # while the package index and HIR artifacts use the host machine cache.
-        val snapshot_path = source_root.replace("\\", "/")
-        val snapshot_marker = snapshot_path.last_index_of("/snapshots/")
-        if snapshot_marker <= 0:
+        val inventory_cache_root = compile_source_inventory_snapshot_cache_root_v1(
+            sosix_cwd(), source_root,
+            sosix_env_get_nullable("SIMPLE_SCV_REVISION_ID") ?? "")
+        if inventory_cache_root == "":
             self.ctx.add_error("cold HIR inventory snapshot owner invalid")
             return false
-        val inventory_cache_root = snapshot_path.substring(0, snapshot_marker)
         val admitted = compile_source_inventory_read_current_v1(inventory_cache_root)
         if not admitted.valid:
             self.ctx.add_error("cold HIR inventory admission failed: {admitted.reason}")
             return false
+        val binding_reason = compile_source_inventory_binding_reason_v1(
+            inventory_binding, admitted.digest)
+        if binding_reason != "ok":
+            self.ctx.add_error("cold HIR inventory admission failed: {binding_reason}")
+            return false
+        val revision_id = sosix_env_get_nullable("SIMPLE_SCV_REVISION_ID") ?? ""
         val snapshot = scv_compile_snapshot_open_v1(
-            ".", source_root,
-            env_get("SIMPLE_SCV_REVISION_ID") ?? "",
-            env_get("SIMPLE_SCV_COMMIT_ID") ?? "",
-            env_get("SIMPLE_SCV_TREE_ID") ?? "", expected_digest)
+            sosix_cwd(), source_root, revision_id,
+            sosix_env_get_nullable("SIMPLE_SCV_COMMIT_ID") ?? "",
+            sosix_env_get_nullable("SIMPLE_SCV_TREE_ID") ?? "",
+            inventory_binding.snapshot_manifest_digest)
         if not snapshot.valid:
             self.ctx.add_error("cold HIR snapshot admission failed: {snapshot.reason}")
             return false
-        val inventory_generation_text = env_get("SIMPLE_SCV_INVENTORY_GENERATION") ?? ""
+        val inventory_generation_text = sosix_env_get_nullable("SIMPLE_SCV_INVENTORY_GENERATION") ?? ""
         val expected_inventory_generation = inventory_generation_text.to_i64() ?? -1
-        # The snapshot digest covers its selected source rows, not the
-        # structured CURRENT generation (which also includes facets and tests).
+        # The snapshot digest covers selected source rows, while CURRENT also
+        # includes facets and tests. Validate both encodings independently.
         val snapshot_inventory = match file_read_regular_no_follow_bounded(
                 "{source_root}/SCV_COMPILE_INVENTORY", 256 * 1024 * 1024):
             case Ok(content): content
@@ -192,8 +201,9 @@ impl CompilerDriver:
         match admitted.inventory:
             case Some(inventory):
                 match cold_hir_typed_receipts_from_lowered_sources_v1(
-                        source_root, admitted.digest, expected_inventory_generation, inventory,
-                        snapshot_inventory, expected_digest,
+                        source_root, inventory_binding.source_inventory_digest,
+                        expected_inventory_generation, inventory,
+                        snapshot_inventory, inventory_binding.snapshot_manifest_digest,
                         self.ctx.source_paths_owner,
                         self.ctx.source_identities_owner,
                         self.ctx.source_byte_lengths_owner,
