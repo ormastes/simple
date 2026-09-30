@@ -3192,8 +3192,9 @@ else
   mkdir -p "${stage3_provenance_dir}"
   bootstrap_stage2_sanity_output_preflight "${stage2_sanity_evidence}" || exit 1
   bootstrap_stage2_sanity_output_preflight "${stage3_sanity_evidence}" || exit 1
-  # Keep each prior attempt's immutable evidence and admitted binaries. Only
-  # the parent needs write permission for rename; never thaw old receipts.
+  # Keep each prior attempt's immutable evidence and admitted binaries:
+  # regular files move into the attempt. Sealed directories retain their parent
+  # and are bound through its mapping; never thaw old receipts.
   chmod u+w "${stage3_provenance_dir}" || {
     echo "error: could not prepare Stage 3 provenance parent" >&2
     exit 1
@@ -3210,10 +3211,10 @@ else
     "${runtime_admitted_snapshot}" "${tool_authority_before}" "${tool_authority_after}" \
     "${stage2_admitted_dir}" "${stage2_runtime_authority}"; do
     [ ! -L "${prior}" ] || { echo "error: refusing linked prior attempt artifact: ${prior}" >&2; exit 1; }
-    [ ! -e "${prior}" ] || mv "${prior}" "${attempt_archive}/" || exit 1
+    bootstrap_cache_archive_prior "${prior}" "${attempt_archive}" || exit 1
   done
   for phase_log in "${log_dir}/stage2-native-build.log" "${log_dir}/stage3-native-build.log"; do
-    [ ! -e "${phase_log}" ] || mv "${phase_log}" "${attempt_archive}/" || exit 1
+    bootstrap_cache_archive_prior "${phase_log}" "${attempt_archive}" || exit 1
   done
   rm -f "${stage3_provenance_manifest}" \
     "${stage3_source_before}" "${stage3_source_after}" \

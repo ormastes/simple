@@ -7,12 +7,92 @@ bootstrap_cache_hash_file() {
   elif command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'
   else return 1; fi
 }
+# Historical directories stay beside their original path: Linux needs write
+# permission on a directory to change its '..' entry during cross-parent rename.
+# Bind their names into the attempt instead of thawing sealed runtime authority.
+bootstrap_cache_attempt_directory_list() (
+  bc_map_root=$1
+  bc_map="$bc_map_root/attempt-directories.tsv"
+  [ ! -L "$bc_map" ] || return 1
+  [ -e "$bc_map" ] || return 0
+  [ -f "$bc_map" ] && [ -s "$bc_map" ] || return 1
+  bootstrap_cache_new_path_validate "$bc_map_root" || return 1
+  bc_map_parent=${bc_map_root%/*}
+  [ "${bc_map_parent##*/}" = attempts ] || return 1
+  bc_map_provenance=${bc_map_parent%/*}
+  bc_map_attempt=${bc_map_root##*/}
+  case "$bc_map_attempt" in attempt-?*) ;; *) return 1 ;; esac
+  case "$bc_map_attempt" in *[!a-zA-Z0-9_.-]*) return 1 ;; esac
+  bc_map_tab=$(printf '\t') bc_map_seen=:
+  while IFS= read -r bc_map_line || [ -n "$bc_map_line" ]; do
+    case "$bc_map_line" in *"$bc_map_tab"*) ;; *) return 1 ;; esac
+    bc_map_original=${bc_map_line%%"$bc_map_tab"*}
+    bc_map_retained=${bc_map_line#*"$bc_map_tab"}
+    case "$bc_map_original" in ''|.|..|*[!a-zA-Z0-9_.-]*) return 1 ;; esac
+    [ "$bc_map_retained" = "$bc_map_original.prior-$bc_map_attempt" ] || return 1
+    case "$bc_map_seen" in *":$bc_map_original:"*) return 1 ;; esac
+    bc_map_seen="$bc_map_seen$bc_map_original:"
+    bc_map_target="$bc_map_provenance/$bc_map_retained"
+    [ -d "$bc_map_target" ] && [ ! -L "$bc_map_target" ] || return 1
+    bootstrap_cache_new_path_validate "$bc_map_target" || return 1
+    printf '../../%s\n' "$bc_map_retained"
+  done < "$bc_map"
+)
+bootstrap_cache_archive_directory() (
+  bc_prior=$1 bc_archive=$2
+  [ -d "$bc_prior" ] && [ ! -L "$bc_prior" ] || return 1
+  [ -d "$bc_archive" ] && [ ! -L "$bc_archive" ] || return 1
+  bootstrap_cache_new_path_validate "$bc_prior" || return 1
+  bootstrap_cache_new_path_validate "$bc_archive" || return 1
+  [ ! -e "$bc_archive/attempt-files.sha256" ] && [ ! -L "$bc_archive/attempt-files.sha256" ] || return 1
+  bc_original=${bc_prior##*/} bc_attempt=${bc_archive##*/}
+  case "$bc_original" in ''|.|..|*[!a-zA-Z0-9_.-]*) return 1 ;; esac
+  case "$bc_attempt" in attempt-?*) ;; *) return 1 ;; esac
+  case "$bc_attempt" in *[!a-zA-Z0-9_.-]*) return 1 ;; esac
+  [ "${bc_archive%/*}" = "${bc_prior%/*}/attempts" ] || return 1
+  [ "$bc_prior" != "${bc_archive%/*}" ] || return 1
+  bc_retained="$bc_prior.prior-$bc_attempt"
+  [ ! -e "$bc_retained" ] && [ ! -L "$bc_retained" ] || return 1
+  # Reject partial mutable authority before any mapping or expensive rebuild,
+  # not only when the terminal attempt receipt is finally frozen.
+  bc_unsealed=$(find "$bc_prior" \( -type l -o -perm -200 -o -perm -020 -o -perm -002 \) -print) || return 1
+  [ -z "$bc_unsealed" ] || bootstrap_cache_error 'prior directory is not sealed nonsymlink evidence' || return 1
+  bootstrap_cache_attempt_directory_list "$bc_archive" >/dev/null || return 1
+  bc_map="$bc_archive/attempt-directories.tsv"
+  bc_pending="$bc_map.pending.$$"
+  (set -C; : > "$bc_pending") || return 1
+  trap 'rm -f "$bc_pending"' EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  [ ! -f "$bc_map" ] || cat "$bc_map" > "$bc_pending" || return 1
+  printf '%s\t%s\n' "$bc_original" "${bc_retained##*/}" >> "$bc_pending" || return 1
+  # Publish intent first. If rename fails, freeze rejects the missing target;
+  # the original sealed directory and the explicit intended mapping survive.
+  mv "$bc_pending" "$bc_map" || return 1
+  mv "$bc_prior" "$bc_retained" || return 1
+)
+bootstrap_cache_archive_prior() (
+  bc_prior=$1 bc_archive=$2
+  [ ! -L "$bc_prior" ] || return 1
+  [ -e "$bc_prior" ] || return 0
+  if [ -d "$bc_prior" ]; then
+    bootstrap_cache_archive_directory "$bc_prior" "$bc_archive"
+  else
+    [ -f "$bc_prior" ] && [ -d "$bc_archive" ] || return 1
+    bootstrap_cache_new_path_validate "$bc_archive" || return 1
+    [ ! -e "$bc_archive/attempt-files.sha256" ] && [ ! -L "$bc_archive/attempt-files.sha256" ] || return 1
+    bc_destination="$bc_archive/${bc_prior##*/}"
+    [ ! -e "$bc_destination" ] && [ ! -L "$bc_destination" ] || return 1
+    mv "$bc_prior" "$bc_destination"
+  fi
+)
 bootstrap_cache_freeze_attempt() (
   [ -d "$1" ] && [ ! -L "$1" ] || return 1
   bootstrap_cache_new_path_validate "$1" || return 1
   bc_attempt_root=$1
   bc_list=$(mktemp "${1%/*}/.attempt-enumeration.XXXXXX") || return 1
-  trap 'rm -f "$bc_list" "$bc_list.sorted" "$bc_list.links" "$bc_attempt_root/attempt-files.sha256.tmp"' EXIT
+  trap 'rm -f "$bc_list" "$bc_list.sorted" "$bc_list.links" "$bc_list.directories" "$bc_list.writable" "$bc_attempt_root/attempt-files.sha256.tmp"' EXIT
   trap 'exit 129' HUP
   trap 'exit 130' INT
   trap 'exit 143' TERM
@@ -21,6 +101,16 @@ bootstrap_cache_freeze_attempt() (
   find . -type l -print > "$bc_list.links" || return 1
   [ ! -s "$bc_list.links" ] || return 1
   find . -type f ! -name 'attempt-files.sha256*' > "$bc_list" || return 1
+  bootstrap_cache_attempt_directory_list "$bc_attempt_root" > "$bc_list.directories" || return 1
+  while IFS= read -r bc_retained; do
+    find "$bc_retained" -type l -print > "$bc_list.links" || return 1
+    [ ! -s "$bc_list.links" ] || return 1
+    # These are frozen historical directories, not mutable cache. Never thaw
+    # or silently seal an untrusted mapped tree during receipt generation.
+    find "$bc_retained" \( -perm -200 -o -perm -020 -o -perm -002 \) -print > "$bc_list.writable" || return 1
+    [ ! -s "$bc_list.writable" ] || return 1
+    find "$bc_retained" -type f >> "$bc_list" || return 1
+  done < "$bc_list.directories"
   LC_ALL=C sort "$bc_list" > "$bc_list.sorted" || return 1
   while IFS= read -r bc_evidence; do
     bc_evidence_sha=$(bootstrap_cache_hash_file "$bc_evidence") || exit 1
