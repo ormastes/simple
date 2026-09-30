@@ -60,6 +60,7 @@ use std.spec.step
 
 use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module}
 use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.context_helpers.*
 use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName, module_surfaces_from_modules}
 use compiler.frontend.frontend.{parse_full_frontend}
 use compiler.frontend.parser_types.{Module}
@@ -75,6 +76,63 @@ fn boot20_owner_spec_surfaces(modules: Dict<text, Module>, sources: [SourceFile]
         case Err(error):
             assert_true(false)
             ModuleSurfacesByName.empty()
+
+fn local_enum_owner_spec_lower(consumer_source: text, expected_count: i64) -> HirLowering:
+    val log = boot20_owner_spec_logger()
+    val a_source = "enum Kind:\n    Alpha\n    Beta"
+    val owner = parse_full_frontend(a_source, "localowner.a", "localowner.a", log)
+    val consumer = parse_full_frontend(consumer_source, "localowner.consumer", "localowner.consumer", log)
+    var modules: Dict<text, Module> = {}
+    modules["localowner.a"] = owner
+    modules["localowner.consumer"] = consumer
+    val sources = [
+        SourceFile(path: "localowner/a.spl", content: a_source, module_name: "localowner.a"),
+        SourceFile(path: "localowner/consumer.spl", content: consumer_source, module_name: "localowner.consumer")
+    ]
+    var lowering = hirlowering_for_module("localowner.consumer", boot20_owner_spec_surfaces(modules, sources))
+    val hir = lowering.lower_module(consumer)
+    expect(lowering.errors.len()).to_equal(0)
+    expect(lowering.imported_enum_symbol_ids.len()).to_equal(expected_count)
+    expect(hir.enums.len()).to_equal(expected_count)
+    for enum_ in hir.enums.values():
+        expect(enum_.symbol.is_valid()).to_equal(true)
+        expect(enum_.symbol.id).to_equal(lowering.imported_enum_symbol_ids[enum_.name])
+        expect(lowering.imported_enum_owner_module(enum_.name)).to_equal("localowner.a")
+    lowering
+
+describe "function-local imported enum finalization":
+    it "preserves both aliases after a nested function scope exits":
+        step("construct two locally aliased values of the same declared enum")
+        val source = "fn probe() -> i64:\n    if true:\n        use localowner.a.\{Kind as First, Kind as Second\}\n        val first = First.Alpha\n        val second = Second.Beta\n    7"
+        val lowering = local_enum_owner_spec_lower(source, 2)
+        expect(lowering.imported_enum_symbol_ids["First"] >= 0).to_equal(true)
+        expect(lowering.imported_enum_symbol_ids["Second"] >= 0).to_equal(true)
+        expect(lowering.imported_enum_symbol_ids["First"] == lowering.imported_enum_symbol_ids["Second"]).to_equal(false)
+
+    it "reuses the first materialized identity across sibling local imports":
+        step("import the same alias in two function scopes")
+        val source = "fn first() -> i64:\n    use localowner.a.\{Kind\}\n    val item = Kind.Alpha\n    1\nfn second() -> i64:\n    use localowner.a.\{Kind\}\n    val item = Kind.Beta\n    2"
+        val lowering = local_enum_owner_spec_lower(source, 1)
+        expect(lowering.imported_enum_owner_rows.len()).to_equal(1)
+        var declared_symbols = 0
+        for symbol in lowering.symbols.symbols.values():
+            if symbol.name == "Kind" and (symbol.defining_module ?? "") == "localowner.a":
+                declared_symbols = declared_symbols + 1
+        expect(declared_symbols).to_equal(1)
+
+    it "ignores a later lexical value with the imported enum name":
+        step("shadow the expired local enum alias in another function")
+        val source = "fn first() -> i64:\n    use localowner.a.\{Kind\}\n    val item = Kind.Alpha\n    1\nfn second() -> i64:\n    val Kind = 9\n    Kind"
+        val lowering = local_enum_owner_spec_lower(source, 1)
+        expect(lowering.imported_enum_owner_module("Kind")).to_equal("localowner.a")
+
+    it "clears imported owner and symbol state when reusing a lowering context":
+        step("lower a local import and then begin a different module")
+        var lowering = local_enum_owner_spec_lower("fn probe() -> i64:\n    use localowner.a.\{Kind\}\n    val item = Kind.Beta\n    2", 1)
+        lowering.begin_module("localowner.next")
+        expect(lowering.imported_enum_symbol_ids.len()).to_equal(0)
+        expect(lowering.imported_enum_owner_rows.len()).to_equal(0)
+        expect(lowering.imported_enum_owner_module("Kind")).to_equal("")
 
 describe "BOOT-20 imported enum owner survives a plain single-hop import":
     # @manual scenario evidence

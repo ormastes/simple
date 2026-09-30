@@ -182,9 +182,6 @@ impl HirLowering:
         lookup_or_invalid -> bracket-read pattern
         `claim_materialized_payload_binding` already relies on for exactly
         this reason."""
-        val existing_id = self.symbols.lookup_or_invalid(local_name)
-        if not existing_id.is_valid():
-            return ""
         # BOOT-20-robust path: answer from the plain [text] rows mirror
         # first -- class-field Dict reads (membership AND bracket) on the
         # symbol table under-report/misread under Stage-2 native codegen
@@ -195,6 +192,11 @@ impl HirLowering:
         for owner_row in self.imported_enum_owner_rows:
             if owner_row.starts_with(row_prefix):
                 return owner_row[row_prefix.len():]
+        # Function-local imports have left lexical scope before finalization.
+        # Only the fallback depends on the still-visible symbol table.
+        val existing_id = self.symbols.lookup_or_invalid(local_name)
+        if not existing_id.is_valid():
+            return ""
         val raw = existing_id.id
         val trace_owner = (hir_module_env_get("SIMPLE_HIR_ENUM_OWNER_TRACE") ?? "") == "1"
         if trace_owner:
@@ -264,6 +266,8 @@ impl HirLowering:
         self.imported_traits = {}
         self.imported_enums = {}
         self.imported_enum_owners = {}
+        self.imported_enum_symbol_ids = {}
+        self.imported_enum_owner_rows = []
         self.materialized_payload_origins = {}
         self.materialized_payload_bindings = {}
         # NOTE (moved): the struct field-type pre-scan that used to run HERE
@@ -698,8 +702,9 @@ impl HirLowering:
         val lowered_impl_function_keys = self.lowered_impl_functions.keys()
         lower_idx = 0
         while lower_idx < lowered_impl_function_keys.len():
-            val sym = lowered_impl_function_keys[lower_idx]
-            functions[sym] = self.lowered_impl_functions[sym]
+            val symbol_number = lowered_impl_function_keys[lower_idx]
+            val method = self.lowered_impl_functions[symbol_number]
+            functions[method.symbol] = method
             lower_idx = lower_idx + 1
 
         val lower_const_names = module.constants.keys()
