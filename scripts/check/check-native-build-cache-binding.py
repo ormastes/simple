@@ -144,11 +144,15 @@ fn compiler_driver_run_compile(status: i64) -> i64:
     # and evidence untracked; initialize only this new disposable fixture.
     if not (args.work / ".git").exists():
         subprocess.run(["git", "init", "-q", str(args.work)], check=True)
-        (args.work / ".gitignore").write_text("*\n!.gitignore\n!src/\n!src/cache-owner-projection.spl\n")
-        subprocess.run(["git", "-C", str(args.work), "add", ".gitignore", str(source.relative_to(args.work))], check=True)
+    (args.work / ".gitignore").write_text("*\n!.gitignore\n!src/\n!src/cache-owner-projection.spl\n")
+    subprocess.run(["git", "-C", str(args.work), "add", ".gitignore", str(source.relative_to(args.work))], check=True)
+    staged = subprocess.run(["git", "-C", str(args.work), "diff", "--cached", "--quiet"])
+    if staged.returncode == 1:
         subprocess.run(["git", "-C", str(args.work), "-c", "user.name=Cache owner fixture",
                         "-c", "user.email=fixture@example.invalid", "commit", "-q", "-m",
                         "test: freeze production cache owner projection"], check=True)
+    elif staged.returncode != 0:
+        raise SystemExit("FAIL: fixture Git index unavailable")
     cache = args.work / "native-cache"
     cache.mkdir(exist_ok=args.retry)
     binary = args.work / "cache-owner-projection"
@@ -157,12 +161,25 @@ fn compiler_driver_run_compile(status: i64) -> i64:
                "--threads", "2", "--cache-dir", str(cache), "--mode", "one-binary", "--output", str(binary)]
     env = os.environ.copy()
     env.update(SIMPLE_NATIVE_BUILD_CACHE_DIR=str(cache), SIMPLE_FRONTEND_CACHE_DIR=str(args.work / "frontend-cache"),
+               SIMPLE_CACHE=str(args.work / "build" / "scv"),
                SIMPLE_NO_STUB_FALLBACK="1", SIMPLE_RUNTIME_PATH=str(args.runtime), SIMPLE_SCV_INVENTORY_COLD_INIT="1")
     evidence = {"schema": "native-cache-owner-projection-v1", "source_sha256": originals,
                 "projection_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
                 "compiler_sha256": hashlib.sha256(args.compiler.read_bytes()).hexdigest(),
                 "argv": command, "negative_control": args.negative_control,
+                "cache_environment": {key: env[key] for key in ("SIMPLE_CACHE", "SIMPLE_NATIVE_BUILD_CACHE_DIR", "SIMPLE_FRONTEND_CACHE_DIR")},
                 "qualification": "production owner bodies with recording driver; not full compiler/bootstrap"}
+    # Validate all admission and isolation prerequisites together before the
+    # single native invocation. Retrying changes only this fixture's revision.
+    head = subprocess.check_output(["git", "-C", str(args.work), "rev-parse", "HEAD"], text=True).strip()
+    listed = subprocess.check_output(["git", "-C", str(args.work), "ls-files", "--", "src"], text=True).splitlines()
+    assert "src/cache-owner-projection.spl" in listed and head
+    assert command[command.index("--cache-dir") + 1] == env["SIMPLE_NATIVE_BUILD_CACHE_DIR"]
+    assert env["SIMPLE_CACHE"] == str(args.work / "build" / "scv")
+    assert args.compiler.is_file() and os.access(args.compiler, os.X_OK) and args.runtime.is_dir()
+    assert not re.search(r"(?m)^(?:export )?use ", source.read_text())
+    evidence["preflight"] = {"git_head": head, "tracked_sources": listed,
+                             "cli_environment_cache_match": True, "compiler_imports": False}
     (args.work / "plan.json").write_text(json.dumps(evidence, indent=2))
     with (args.work / "compile.log").open("w") as log:
         compiled = subprocess.run(command, cwd=args.work, env=env, stdout=log, stderr=subprocess.STDOUT, timeout=120)

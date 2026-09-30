@@ -55,3 +55,16 @@ inventories `src/` and `test/`. The harness now places its source under `src/`,
 but the repository's three-attempt limit stopped further native verification.
 No test-body execution or native PASS is claimed. Logs and source-hash plans
 remain under `/mnt/simple-bootstrap-6b2/native-cache-parent-routing-20260930/`.
+
+An explicitly renewed single validation attempt passed fixture Git inventory
+preflight and lowered one HIR module with zero any-escape/enum diagnostics in
+each positive/negative case. Both then failed before codegen at
+`cold HIR inventory admission failed: inventory-cache-root-invalid`. The
+entrypoint publishes at `cwd/build/scv`, while the cold HIR reader uses
+`machine_cache_root()`; without `SIMPLE_CACHE`, that reader selects the default
+host cache, which the inventory root validator rejects. Native/frontend cache
+paths were private, but this additional machine-cache selector was not bound.
+The harness now binds `SIMPLE_CACHE` to its own `work/build/scv` and records all
+three cache selectors. That correction has not been rerun. The production
+default inventory-root discrepancy remains outside this positional-routing fix;
+no admission validation is weakened, and no previous cache is removed.
