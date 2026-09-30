@@ -1,0 +1,111 @@
+use std.spec.*
+use app.compiler_entrypoint.source_authority.{
+    CompilerSourceAuthorityV1, compiler_source_authority_binding_reason_v1,
+    compiler_source_authority_acquire_v1, compiler_source_authority_validate_v1,
+    compiler_source_authority_publish_v1, compiler_source_authority_clear_v1,
+    compiler_source_authority_invalid_v1, compiler_source_authority_inventory_roots_v1}
+use app.io.env_ops.{env_get}
+use app.io.file_ops.{path_absolute}
+use app.io.time_ops.{time_now_unix_micros}
+use std.io_runtime.{dir_create_all, file_write, file_read}
+use std.nogc_async_mut.sosix.host_facade.{sosix_run}
+use std.common.crypto.sha256.{sha256_text}
+use std.scv.compile_snapshot.{ScvCompileSnapshotV1}
+use std.scv.compile_source_inventory.{CompileSourceInventoryV1,
+    CompileSourceInventoryEntryV1, CompileSourceInventoryReadV1,
+    compile_source_inventory_digest_v1, compile_source_inventory_read_current_v1,
+    compile_source_inventory_apply_and_publish_v1, compile_source_inventory_git_event_v1,
+    compile_source_inventory_plain_checkout_v1}
+
+fn authority_fixture_git(root: text, args: [text]) -> bool:
+    val result = sosix_run("git", ["-C", root] + args)
+    result.exit_code == 0
+
+fn authority_fixture(root_path: text, roots: [text]) -> text:
+    val root = compile_source_inventory_plain_checkout_v1(path_absolute(root_path))
+    if not dir_create_all(root + "/src/app/cli"): return "mkdir"
+    val code = "fn main() -> i64:\n    print \"phase2-hello-ok\"\n    0\n"
+    if not file_write(root + "/src/app/cli/bootstrap_main.spl", code): return "write"
+    if not authority_fixture_git(root, ["init", "-q"]): return "git-init"
+    if not authority_fixture_git(root, ["add", "src"]): return "git-add"
+    if not authority_fixture_git(root, ["-c", "user.name=Authority fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "fixture"]): return "git-commit"
+    if not compiler_source_authority_clear_v1(): return "env-clear"
+    val cache = root + "/build/scv"
+    val admitted = compiler_source_authority_acquire_v1(root, cache, roots, true)
+    if not admitted.valid: return "acquire:" + admitted.reason
+    if admitted.snapshot.inventory_count != 1: return "count"
+    if not compiler_source_authority_publish_v1(admitted): return "publish"
+    val current = compile_source_inventory_read_current_v1(cache)
+    if not current.valid: return "current"
+    if (env_get("SIMPLE_SCV_SOURCE_INVENTORY_DIGEST") ?? "") != current.digest: return "canonical-domain"
+    if (env_get("SIMPLE_SCV_INVENTORY_DIGEST") ?? "") != admitted.snapshot.inventory_digest: return "manifest-domain"
+    if current.digest == admitted.snapshot.inventory_digest: return "domains-collapsed"
+    if file_read(admitted.snapshot.snapshot_root + "/src/app/cli/bootstrap_main.spl") != code: return "frozen-bytes"
+    val advanced = compile_source_inventory_apply_and_publish_v1(cache,
+        [compile_source_inventory_git_event_v1("create", "src/app/next.spl", "fn next() -> i64: 1\n")])
+    if not advanced.valid: return "advance"
+    if compile_source_inventory_read_current_v1(cache).digest == current.digest: return "current-did-not-advance"
+    val inherited = compiler_source_authority_validate_v1(root, cache, admitted.snapshot,
+        admitted.source_inventory_digest, admitted.inventory_generation, true)
+    if not inherited.valid: return "inherited:" + inherited.reason
+    val stale_fresh = compiler_source_authority_validate_v1(root, cache, admitted.snapshot,
+        admitted.source_inventory_digest, admitted.inventory_generation, false)
+    if stale_fresh.valid: return "fresh-accepted-moved-current"
+    val bad_generation = compiler_source_authority_validate_v1(root, cache, admitted.snapshot,
+        admitted.source_inventory_digest, admitted.inventory_generation + 1, true)
+    if bad_generation.valid: return "generation-accepted"
+    val absent_digest = compiler_source_authority_validate_v1(root, cache, admitted.snapshot,
+        "", admitted.inventory_generation, true)
+    if absent_digest.valid: return "partial-binding-accepted"
+    # Validate corrupted metadata as input; never mutate a sealed snapshot.
+    val corrupt_reason = compiler_source_authority_binding_reason_v1(admitted.snapshot,
+        admitted.source_inventory_digest, admitted.inventory_generation, current, "corrupt")
+    if corrupt_reason != "snapshot-source-manifest-mismatch": return "corrupt-manifest-accepted"
+    val corrupt = compiler_source_authority_invalid_v1(corrupt_reason)
+    if compiler_source_authority_publish_v1(corrupt): return "invalid-published"
+    if (env_get("SIMPLE_SCV_SNAPSHOT_ROOT") ?? "") != "": return "failed-root-retained"
+    if (env_get("SIMPLE_SCV_SOURCE_INVENTORY_DIGEST") ?? "") != "": return "failed-digest-retained"
+    ""
+
+describe "native-build canonical source authority":
+    it "publishes distinct digests for a fresh positional source selection and preserves inherited authority":
+        step("admit the actual one-file Hello fixture from a Git event refresh")
+        val root = "build/tests/source-authority-positional-{time_now_unix_micros()}"
+        expect(authority_fixture(root, ["src/app", "src/lib", "src/compiler", "src/app/cli/bootstrap_main.spl"])).to_equal("")
+
+    it "preserves exact finite roots for a named entry and rejects corrupt or partial authority":
+        step("admit only the explicit Hello entry using the same shared publication helper")
+        val root = "build/tests/source-authority-named-{time_now_unix_micros()}"
+        expect(authority_fixture(root, ["./src/app", "./src/app/cli/bootstrap_main.spl"])).to_equal("")
+
+    it "maps exact snapshot selections to supported event families and refuses other families":
+        step("separate event refresh scopes from snapshot selection without widening snapshots")
+        expect(compiler_source_authority_inventory_roots_v1("/repo",
+            ["src/app", "src/lib", "src/compiler", "src/app/cli/bootstrap_main.spl"])).to_equal(["src"])
+        expect(compiler_source_authority_inventory_roots_v1("/repo",
+            ["src/app", "test/fixture/main.spl"])).to_equal(["src", "test"])
+        expect(compiler_source_authority_inventory_roots_v1("/repo",
+            ["/repo/src/app/main.spl"])).to_equal(["src"])
+        expect(compiler_source_authority_inventory_roots_v1("/repo",
+            ["./src/app", "./src/app/cli/bootstrap_main.spl"])).to_equal(["src"])
+        expect(compiler_source_authority_inventory_roots_v1("/repo",
+            ["src/./app", "././test/fixture/main.spl"])).to_equal(["src", "test"])
+        expect(compiler_source_authority_inventory_roots_v1("/repo",
+            ["./src/../outside/main.spl"])).to_equal([])
+        expect(compiler_source_authority_inventory_roots_v1("/repo", ["examples/main.spl"])).to_equal([])
+        expect(compiler_source_authority_inventory_roots_v1("/repo", ["src/../outside/main.spl"])).to_equal([])
+
+    it "rejects a matching manifest whose row is not in the admitted canonical inventory":
+        step("validate content membership even when both digest strings are well formed")
+        val good_content = sha256_text("good")
+        val wrong_content = sha256_text("wrong")
+        val row = "src/app/main.spl|sha256_{wrong_content}|4"
+        val entry = CompileSourceInventoryEntryV1("src/app/main.spl", good_content,
+            good_content, good_content, good_content, good_content, 4)
+        val inventory = CompileSourceInventoryV1(1, 7, [entry])
+        val digest = compile_source_inventory_digest_v1(inventory)
+        val read = CompileSourceInventoryReadV1(true, "ok", digest, Some(inventory))
+        val snapshot = ScvCompileSnapshotV1(true, "ok", "revision", "commit", "tree",
+            sha256_text(row), 1, "root", "provenance", "receipt", false)
+        expect(compiler_source_authority_binding_reason_v1(snapshot, digest, 7, read, row)).to_equal(
+            "snapshot-source-membership-mismatch")
