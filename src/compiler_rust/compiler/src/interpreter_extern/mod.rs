@@ -2244,6 +2244,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_stdout_write_text", io::stdout_write);
     insert_simple!("rt_string_concat", sffi_string::rt_string_concat_fn);
     insert_simple!("rt_string_free", sffi_string::rt_string_free_fn);
+    insert_simple!("rt_string_find", sffi_string::rt_string_find_fn);
     insert_simple!("rt_string_builder_new", sffi_string::rt_string_builder_new_fn);
     insert_simple!("rt_string_builder_push", sffi_string::rt_string_builder_push_fn);
     insert_simple!("rt_string_builder_finish", sffi_string::rt_string_builder_finish_fn);
@@ -3883,6 +3884,92 @@ mod tests {
             )
             .expect("rt_string_rfind should not error on two text arguments");
             assert_eq!(result, Value::Int(expected), "rt_string_rfind({subject:?}, {needle:?})");
+        }
+    }
+
+    /// Compiler core/types.spl uses raw byte offsets, not Option or character indices.
+    #[test]
+    fn rt_string_find_is_registered_and_returns_raw_byte_offsets() {
+        let handler = EXTERN_DISPATCH.get("rt_string_find").expect("registered rt_string_find handler");
+        let cases: &[(&str, &str, i64)] = &[
+            ("abcabc", "abc", 0),
+            ("a/b/c", "/", 1),
+            ("abc", "c", 2),
+            ("abc", "zz", -1),
+            ("ab", "abc", -1),
+            ("abc", "", 0),
+            ("", "", 0),
+            ("", "a", -1),
+            ("é🙂xé", "x", 6),
+            ("é🙂xé", "é", 0),
+            ("a\0b\0c", "b\0", 2),
+            ("a\0b", "\0", 1),
+            ("a\0b", "\0c", -1),
+        ];
+        for &(subject, needle, expected) in cases {
+            let result = handler(
+                &[Value::text(subject), Value::text(needle)],
+                &mut Env::new(),
+                &mut HashMap::new(),
+                &mut HashMap::new(),
+                &HashMap::new(),
+                &HashMap::new(),
+            ).expect("two text arguments");
+            assert_eq!(result, Value::Int(expected), "find({subject:?}, {needle:?})");
+        }
+    }
+
+    #[test]
+    fn rt_string_find_preserves_runtime_handle_bytes_and_mixed_arguments() {
+        use simple_runtime::value::{rt_string_free, rt_string_new};
+        let handler = EXTERN_DISPATCH.get("rt_string_find").expect("registered rt_string_find handler");
+        // A runtime string is a byte span; lossy UTF-8 decoding would move 'x'
+        // from byte 2 to byte 4 and corrupt the raw-byte needle match.
+        let subject_bytes = b"\xff\0x\xff";
+        let needle_bytes = b"\xff";
+        let subject = rt_string_new(subject_bytes.as_ptr(), subject_bytes.len() as u64);
+        let needle = rt_string_new(needle_bytes.as_ptr(), needle_bytes.len() as u64);
+        let cases = [
+            (Value::Int(subject.to_raw() as i64), Value::text("x"), 2),
+            (Value::Int(subject.to_raw() as i64), Value::Int(needle.to_raw() as i64), 0),
+            (Value::text("text"), Value::Int(needle.to_raw() as i64), -1),
+            (Value::Int(subject.to_raw() as i64), Value::text(""), 0),
+        ];
+        for (subject_value, needle_value, expected) in cases {
+            let result = handler(
+                &[subject_value, needle_value],
+                &mut Env::new(),
+                &mut HashMap::new(),
+                &mut HashMap::new(),
+                &HashMap::new(),
+                &HashMap::new(),
+            ).expect("valid runtime string handle");
+            assert_eq!(result, Value::Int(expected));
+        }
+        rt_string_free(subject);
+        rt_string_free(needle);
+    }
+
+    #[test]
+    fn rt_string_find_rejects_wrong_arity_and_non_text_arguments() {
+        let handler = EXTERN_DISPATCH.get("rt_string_find").expect("registered rt_string_find handler");
+        for args in [
+            vec![],
+            vec![Value::text("one")],
+            vec![Value::text("one"), Value::text("two"), Value::text("three")],
+            vec![Value::Nil, Value::text("")],
+            vec![Value::text(""), Value::Nil],
+            vec![Value::Int(42), Value::text("x")],
+        ] {
+            let result = handler(
+                &args,
+                &mut Env::new(),
+                &mut HashMap::new(),
+                &mut HashMap::new(),
+                &HashMap::new(),
+                &HashMap::new(),
+            );
+            assert!(result.is_err(), "rt_string_find accepted invalid arguments {args:?}");
         }
     }
 
