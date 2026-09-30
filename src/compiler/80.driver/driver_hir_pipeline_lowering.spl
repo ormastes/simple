@@ -53,6 +53,7 @@ use compiler.driver.driver_typecheck_severity.{TypecheckPassSeverity, typecheck_
 use std.nogc_sync_mut.io.process_ops.{eprint}
 use compiler.hir.hir_codec.{hir_codec_roundtrip_selfcheck, hir_codec_roundtrip_line}
 use compiler.driver.driver_hir_cache.{hir_cache_enabled, hir_cache_closure_digest, hir_cache_key, hir_cache_has, hir_cache_load, hir_cache_store, hir_cache_summary, hir_cache_last_warnings, hir_shard_active, hir_shard_owns, hir_shard_levels, hir_shard_level_count, hir_shard_visit_order, hir_shard_summary}
+use compiler.driver.driver_hir_cache.{hir_shard_begin, hir_shard_finish, hir_shard_complete, hir_shard_guard_block, hir_shard_inventory}
 use compiler.hir.hir_lowering.items.{bootstrap_hir_modules_add_from_module, hir_module_logical_name_from_path}
 use compiler.common.cache.reverse_reference_facts.{
     reverse_reference_owner_register_source_alias_v1
@@ -314,6 +315,10 @@ impl CompilerDriver:
         else:
             ""
         val hir_shard_mode: bool = hir_shard_active() and hir_closure_digest != ""
+        if hir_shard_active() and not hir_shard_mode:
+            hir_shard_guard_block("HIR cache identity unavailable for shard")
+            self.ctx.add_error("HIR cache identity unavailable for shard")
+            return false
         # Stage 3 requests this durable sink even when phase 2 selected the
         # streaming surface owner. Shard children only fill the HIR cache and
         # may share the parent's configured path; they must not open its
@@ -335,6 +340,10 @@ impl CompilerDriver:
             "pending", 2, 6, 0, 0, "running")
 
         val source_count = self.ctx.source_paths_owner.len()
+        if hir_shard_mode and not hir_shard_inventory(hir_closure_digest, self.ctx.source_paths_owner):
+            hir_shard_guard_block("HIR frozen inventory publication failed")
+            self.ctx.add_error("HIR frozen inventory publication failed")
+            return false
         while hir_loop_pos < hir_visit_order.len():
             source_index = hir_visit_order[hir_loop_pos]
             val source = SourceFile(
@@ -344,6 +353,7 @@ impl CompilerDriver:
                 module_name: self.ctx.source_module_names_owner[source_index])
             if not surfaces.index_by_name.contains_key(source.module_name):
                 self.ctx.add_error("Missing module surface alias for {source.module_name}")
+                hir_shard_guard_block("durable memory snapshot or source identity guard failed")
                 mem_snapshot_abort()
                 return false
             val surface_index = surfaces.index_by_name[source.module_name]
@@ -351,6 +361,7 @@ impl CompilerDriver:
 
             if surface_index < 0 or surface_index >= surfaces.surfaces.len():
                 self.ctx.add_error("Invalid module surface index for {source.module_name}: {surface_index}")
+                hir_shard_guard_block("durable memory snapshot or source identity guard failed")
                 mem_snapshot_abort()
                 return false
             if lowered_by_surface.contains_key(surface_index):
@@ -364,6 +375,7 @@ impl CompilerDriver:
                     validation_module_keys.len(), validation_module_values.len(),
                     lowering.lowered_trait_count_value):
                     self.ctx.add_error("durable memory snapshot write failed at hir-alias-reuse")
+                    hir_shard_guard_block("durable memory snapshot or source identity guard failed")
                     mem_snapshot_abort()
                     return false
                 hir_loop_pos = hir_loop_pos + 1
@@ -410,6 +422,7 @@ impl CompilerDriver:
                         surfaces.surfaces[surface_index].content_hash,
                         source_index, source.path, source.module_name,
                         source_content_length, source_content_hash))
+                hir_shard_guard_block("durable memory snapshot or source identity guard failed")
                 mem_snapshot_abort()
                 return false
 
@@ -418,7 +431,12 @@ impl CompilerDriver:
             else:
                 ""
             if hir_shard_mode:
-                if hir_stream_key == "" or hir_cache_has(hir_stream_key) or not hir_shard_owns(source.path):
+                val claim = hir_shard_begin(source.path, hir_stream_key)
+                if claim < 0 or hir_stream_key == "":
+                    hir_shard_guard_block("HIR claim or cache identity unavailable")
+                    self.ctx.add_error("HIR shard ledger claim failed")
+                    return false
+                if claim == 0:
                     hir_loop_pos = hir_loop_pos + 1
                     continue
             val hir_stream_cached: HirModule? = if hir_stream_key != "":
@@ -434,6 +452,7 @@ impl CompilerDriver:
                 validation_module_keys.len(), validation_module_values.len(),
                 lowering.lowered_trait_count_value):
                 self.ctx.add_error("durable memory snapshot write failed at hir-file-start")
+                hir_shard_guard_block("durable memory snapshot or source identity guard failed")
                 mem_snapshot_abort()
                 return false
             lowering.begin_module(source.path)
@@ -446,6 +465,7 @@ impl CompilerDriver:
                 surfaces.surfaces.len(), source.module_name,
                 2, 6, 0, 0, "running")
             var hir_module: HirModule = nil
+            var hir_cache_stored: bool = hir_stream_cached != nil
             if hir_stream_cached != nil:
                 hir_module = hir_stream_cached.unwrap()
                 val hir_registry_name = if is_requested_bootstrap_entry:
@@ -463,6 +483,7 @@ impl CompilerDriver:
                     validation_module_keys.len(), validation_module_values.len(),
                     lowering.lowered_trait_count_value):
                     self.ctx.add_error("durable memory snapshot write failed at hir-post-lowering")
+                    hir_shard_guard_block("durable memory snapshot or source identity guard failed")
                     mem_snapshot_abort()
                     return false
             else:
@@ -472,6 +493,26 @@ impl CompilerDriver:
                     # failure), so it is poisoned by definition -- but the other
                     # units are still checkable.
                     val streaming_error = lower_result.unwrap_err()
+                    # Ownership/scope failures are infrastructure guards. They
+                    # cannot be made safe by rotating to another process.
+                    if (streaming_error.starts_with("transient parser scope ") or
+                        streaming_error.starts_with("HIR ownership promotion ") or
+                        streaming_error.starts_with("HIR diagnostic ownership promotion ") or
+                        streaming_error.starts_with("HIR phase memo ownership promotion ") or
+                        streaming_error.starts_with("HIR symbol table ownership promotion ") or
+                        streaming_error.starts_with("flat HIR row ownership promotion ") or
+                        streaming_error.starts_with("frontend registry promotion ") or
+                        streaming_error.ends_with("; transient parser scope pause failed") or
+                        streaming_error.ends_with("; transient parser scope end failed") or
+                        streaming_error.ends_with("; frontend registry promotion failed")):
+                        hir_shard_guard_block(streaming_error)
+                        val _terminal = hir_shard_finish(source.path, "BLOCKED", false)
+                        self.ctx.add_error(streaming_error)
+                        return false
+                    if not hir_shard_finish(source.path, "FAILED", false):
+                        hir_shard_guard_block("HIR failure receipt publication failed")
+                        self.ctx.add_error("HIR failure receipt publication failed")
+                        return false
                     eprint("[hir-owner-fatal] {streaming_error}")
                     self.ctx.add_error("Streaming HIR lowering error: {streaming_error}")
                     poisoned_by_surface[surface_index] = true
@@ -490,6 +531,7 @@ impl CompilerDriver:
                     validation_module_keys.len(), validation_module_values.len(),
                     lowering.lowered_trait_count_value):
                     self.ctx.add_error("durable memory snapshot write failed at hir-post-lowering")
+                    hir_shard_guard_block("durable memory snapshot or source identity guard failed")
                     mem_snapshot_abort()
                     return false
                 # Keep the aggregate diagnostic array inside its canonical
@@ -521,6 +563,10 @@ impl CompilerDriver:
                         self.ctx.add_error(module_error_message)
                     module_error_index = module_error_index + 1
                 if module_fatal_error_count > 0:
+                    if not hir_shard_finish(source.path, "FAILED", false):
+                        hir_shard_guard_block("HIR diagnostic receipt publication failed")
+                        self.ctx.add_error("HIR diagnostic receipt publication failed")
+                        return false
                     eprint("[hir-fatal-count] source_idx={source_index} path={source.path} count={module_fatal_error_count} shown={driver_shown_fatal_count(module_fatal_error_count, false)}")
                     # Drop the partially-lowered aggregate (never store it) and
                     # keep checking the remaining modules. See the non-streaming
@@ -541,13 +587,19 @@ impl CompilerDriver:
                 if hir_stream_key != "":
                     if hir_cache_store(hir_stream_key, hir_module, hir_module_warnings):
                         hir_shard_lowered = hir_shard_lowered + 1
+                        hir_cache_stored = true
             if not driver_hir_mem_snapshot(
                 "hir-post-diagnostics", source_index, source.path,
                 streaming_hir_module_count,
                 validation_module_keys.len(), validation_module_values.len(),
                 lowering.lowered_trait_count_value):
                 self.ctx.add_error("durable memory snapshot write failed at hir-post-diagnostics")
+                hir_shard_guard_block("durable memory snapshot or source identity guard failed")
                 mem_snapshot_abort()
+                return false
+            if not hir_shard_finish(source.path, "PASS", hir_cache_stored):
+                hir_shard_guard_block("HIR completion receipt publication failed")
+                self.ctx.add_error("HIR completion receipt publication failed")
                 return false
             driver_log_typed_hir_abi_interface_v1(hir_module, source.path)
             lowered_by_surface[surface_index] = hir_module
@@ -569,6 +621,7 @@ impl CompilerDriver:
                 validation_module_keys.len(), validation_module_values.len(),
                 lowering.lowered_trait_count_value):
                 self.ctx.add_error("durable memory snapshot write failed at hir-post-store")
+                hir_shard_guard_block("durable memory snapshot or source identity guard failed")
                 mem_snapshot_abort()
                 return false
             # Concrete key count, not `.len()`: the seed-compiled Stage-2 binary
@@ -595,8 +648,11 @@ impl CompilerDriver:
             print hir_cache_summary()
         if hir_shard_mode:
             print hir_shard_summary(hir_level_count, hir_shard_lowered)
+            if not hir_shard_complete():
+                hir_shard_guard_block("HIR traversal receipt publication failed")
+                exit(1)
             rt_stdout_flush()
-            exit(0)
+            exit(if self.ctx.error_count_value > 0: 1 else: 0)
         # Poisoned modules below the budget still fail this phase at the
         # error-count check further down; label the terminal row accordingly.
         val hir_terminal_outcome: text = if self.ctx.error_count_value > 0: "hir-diagnostic" else: "hir-complete"
@@ -825,6 +881,10 @@ impl CompilerDriver:
         # The sequential build keeps source order; the set of entries produced
         # is the same either way, so the real build's output cannot change.
         val hir_shard_mode: bool = hir_shard_active() and hir_closure_digest != ""
+        if hir_shard_active() and not hir_shard_mode:
+            hir_shard_guard_block("HIR cache identity unavailable for shard")
+            self.ctx.add_error("HIR cache identity unavailable for shard")
+            return (self.ctx, false)
         var hir_level_count: i64 = 0
         var hir_shard_lowered: i64 = 0
         var hir_levels: [i64] = []
@@ -837,15 +897,29 @@ impl CompilerDriver:
         val hir_visit_order: [i64] = hir_shard_visit_order(hir_order_names, retained_module_surfaces, hir_levels)
         var hir_loop_pos: i64 = 0
         if mem_snapshot_begin() < 0:
+            hir_shard_guard_block("durable memory snapshot initialization failed")
             self.ctx.add_error("SIMPLE_MEM_SNAPSHOT_FILE could not be established safely")
             return (self.ctx, false)
+        if hir_shard_mode:
+            var inventory_paths: [text] = []
+            for inventory_source in self.ctx.sources:
+                inventory_paths = inventory_paths.push(inventory_source.path)
+            if not hir_shard_inventory(hir_closure_digest, inventory_paths):
+                hir_shard_guard_block("HIR frozen inventory publication failed")
+                self.ctx.add_error("HIR frozen inventory publication failed")
+                return (self.ctx, false)
         while hir_loop_pos < hir_visit_order.len():
             source_idx = hir_visit_order[hir_loop_pos]
             val src = self.ctx.sources[source_idx]
             val name = src.module_name
             if hir_shard_mode:
                 val hir_shard_key = hir_cache_key(src.path, hir_closure_digest, source_idx == entry_source_index)
-                if hir_shard_key == "" or hir_cache_has(hir_shard_key) or not hir_shard_owns(src.path):
+                val claim = hir_shard_begin(src.path, hir_shard_key)
+                if claim < 0 or hir_shard_key == "":
+                    hir_shard_guard_block("HIR claim or cache identity unavailable")
+                    self.ctx.add_error("HIR shard ledger claim failed")
+                    return (self.ctx, false)
+                if claim == 0:
                     hir_loop_pos = hir_loop_pos + 1
                     continue
             # Baseline for the per-module poison check below. Errors already in
@@ -867,6 +941,7 @@ impl CompilerDriver:
                 validation_module_keys.len(), validation_module_values.len(),
                 lowering.lowered_trait_count_value):
                 self.ctx.add_error("durable memory snapshot write failed at hir-file-start")
+                hir_shard_guard_block("durable memory snapshot or source identity guard failed")
                 mem_snapshot_abort()
                 return (self.ctx, false)
             log_trace("processing module")
@@ -938,6 +1013,7 @@ impl CompilerDriver:
                     lowering, bootstrap_module_for_hir, src.path, is_bootstrap_entry)
                 if bootstrap_lower_result.is_err():
                     self.ctx.add_error(bootstrap_lower_result.unwrap_err())
+                    hir_shard_guard_block("durable memory snapshot or source identity guard failed")
                     mem_snapshot_abort()
                     return (self.ctx, false)
                 bootstrap_lower_result.unwrap()
@@ -950,6 +1026,7 @@ impl CompilerDriver:
                     lowering, self.ctx.modules[name], src.path, is_bootstrap_entry)
                 if cached_lower_result.is_err():
                     self.ctx.add_error(cached_lower_result.unwrap_err())
+                    hir_shard_guard_block("durable memory snapshot or source identity guard failed")
                     mem_snapshot_abort()
                     return (self.ctx, false)
                 cached_lower_result.unwrap()
@@ -965,6 +1042,7 @@ impl CompilerDriver:
                     lowering, entry_module_for_hir, src.path, is_bootstrap_entry)
                 if reparsed_lower_result.is_err():
                     self.ctx.add_error(reparsed_lower_result.unwrap_err())
+                    hir_shard_guard_block("durable memory snapshot or source identity guard failed")
                     mem_snapshot_abort()
                     return (self.ctx, false)
                 val lowered_hm: HirModule = reparsed_lower_result.unwrap()
@@ -1006,6 +1084,7 @@ impl CompilerDriver:
                 validation_module_keys.len(), validation_module_values.len(),
                 lowering.lowered_trait_count_value):
                 self.ctx.add_error("durable memory snapshot write failed at hir-post-lowering")
+                hir_shard_guard_block("durable memory snapshot or source identity guard failed")
                 mem_snapshot_abort()
                 return (self.ctx, false)
             val focused_future_driver_diag = src.path == "src/lib/nogc_async_mut/async/future.spl"
@@ -1055,6 +1134,7 @@ impl CompilerDriver:
                 validation_module_keys.len(), validation_module_values.len(),
                 lowering.lowered_trait_count_value):
                 self.ctx.add_error("durable memory snapshot write failed at hir-post-diagnostics")
+                hir_shard_guard_block("durable memory snapshot or source identity guard failed")
                 mem_snapshot_abort()
                 return (self.ctx, false)
             if focused_future_driver_diag:
@@ -1063,6 +1143,10 @@ impl CompilerDriver:
             # Drop a fatally poisoned partial aggregate but keep checking later
             # modules. The count delta prevents poisoning them transitively.
             if self.ctx.error_count_value > module_errors_before:
+                if not hir_shard_finish(src.path, "FAILED", false):
+                    hir_shard_guard_block("HIR diagnostic receipt publication failed")
+                    self.ctx.add_error("HIR diagnostic receipt publication failed")
+                    return (self.ctx, false)
                 # Fail LOUDLY rather than silently: the module is about to be
                 # poisoned and dropped. If the rise in error_count did not come
                 # from the diagnostic loop above, nothing has printed a reason,
@@ -1093,9 +1177,15 @@ impl CompilerDriver:
                 hir_module = hir_round_trip.module
 
             driver_log_typed_hir_abi_interface_v1(hir_module, src.path)
+            var hir_cache_stored: bool = hir_cache_hit
             if hir_cache_key_value != "" and not hir_cache_hit:
                 if hir_cache_store(hir_cache_key_value, hir_module, hir_module_warnings):
                     hir_shard_lowered = hir_shard_lowered + 1
+                    hir_cache_stored = true
+            if not hir_shard_finish(src.path, "PASS", hir_cache_stored):
+                hir_shard_guard_block("HIR completion receipt publication failed")
+                self.ctx.add_error("HIR completion receipt publication failed")
+                return (self.ctx, false)
             val hir_function_count: i64 = driver_dict_entry_count(hir_module.functions)
             if focused_future_driver_diag:
                 eprint("[driver-hir] functions={hir_function_count}")
@@ -1111,6 +1201,7 @@ impl CompilerDriver:
                 validation_module_keys.len(), validation_module_values.len(),
                 lowering.lowered_trait_count_value):
                 self.ctx.add_error("durable memory snapshot write failed at hir-post-store")
+                hir_shard_guard_block("durable memory snapshot or source identity guard failed")
                 mem_snapshot_abort()
                 return (self.ctx, false)
             if source_idx < 3:
@@ -1206,8 +1297,11 @@ impl CompilerDriver:
             # Shard children exist only to fill the HIR cache. Everything after
             # this point is the real build's job and must not run N times.
             print hir_shard_summary(hir_level_count, hir_shard_lowered)
+            if not hir_shard_complete():
+                hir_shard_guard_block("HIR traversal receipt publication failed")
+                exit(1)
             rt_stdout_flush()
-            exit(0)
+            exit(if self.ctx.error_count_value > 0: 1 else: 0)
         log_debug("HIR lowering complete")
 
         if not mem_snapshot_finish():

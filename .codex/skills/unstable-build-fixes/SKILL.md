@@ -9,8 +9,12 @@ description: Use when a Simple bootstrap/native-build is unstable, slow, or fail
 
 Collect independent build and test failures before reporting. A usable compiler plus minimum sanity can start the next diagnostic phase while qualification continues; formal admission remains required for promotion. Keep phase/producer/entry caches and stop repair after at most three cycles. Follow the
 [shared collection policy](../../../doc/07_guide/tooling/bootstrap_failure_collection.md) for terminal statuses, budgets,
-cache preservation, and bug evidence. This is agent workflow guidance; it does
-not change runner behavior.
+cache preservation, and bug evidence. Host native-build/bootstrap runs default
+to collecting independent failures; CI=true/1 defaults to fail fast. Use
+`--keep-going` to collect CI diagnostics or `--fail-fast` for a short host run.
+The last flag wins over `SIMPLE_COMPILE_FAIL_FAST=0|1`, which overrides CI/host
+defaults. Preserve nonzero aggregate failure and explicit unrun SKIPPED/BLOCKED
+rows; never bypass snapshot or admission failures to continue.
 
 Goal: produce the requested Simple executable without throwing away useful cache.
 

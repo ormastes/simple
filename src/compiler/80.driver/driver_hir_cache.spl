@@ -39,6 +39,8 @@ use std.common.crypto.sha256.{sha256_text}
 use std.io.{file_lock, file_unlock, file_write}
 use std.nogc_sync_mut.io_runtime.{file_exists, file_read_nullable}
 use compiler.driver.driver_source_pipeline_parsing.{driver_parse_shard_hash}
+use compiler.driver.driver_hir_recovery.{hir_shard_recovery_claim, hir_shard_recovery_terminal, hir_shard_recovery_complete, hir_shard_recovery_block, hir_shard_recovery_blocked}
+use compiler.driver.driver_hir_recovery.{hir_shard_recovery_inventory}
 
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_file_hash_sha256(path: text) -> text
@@ -138,7 +140,8 @@ fn hir_cache_has(key: text) -> bool:
     val path = hir_cache_path(key)
     if not file_exists(path):
         return false
-    _hir_cache_entry_header_valid(path)
+    # A current header on a truncated/corrupt body is not completed work.
+    hir_cache_load(key) != nil
 
 # nil for a miss, a foreign/corrupt entry, or a truncated one: every one of
 # those is "lower it in process", and the caller must not need to tell them
@@ -261,6 +264,35 @@ fn hir_cache_summary() -> text:
 var _hir_shard_memo: text = "@@unset@@"
 var _hir_shard_queue_memo: text = "@@unset@@"
 var _hir_shard_claimed: i64 = 0
+
+fn hir_shard_owner() -> text:
+    sosix_env_get_nullable("SIMPLE_HIR_SHARD_OWNER") ?? hir_shard_spec()
+
+fn hir_shard_begin(path: text, key: text) -> i64:
+    val queue = _hir_shard_queue_dir()
+    if queue == "":
+        return if hir_shard_owns(path): 1 else: 0
+    if hir_shard_recovery_blocked(queue): return -1
+    val claimed = hir_shard_recovery_claim(queue, hir_shard_owner(), path, key)
+    if claimed > 0:
+        _hir_shard_claimed = _hir_shard_claimed + 1
+    claimed
+
+fn hir_shard_finish(path: text, state: text, cache_stored: bool) -> bool:
+    if not hir_shard_active() or _hir_shard_queue_dir() == "": return true
+    hir_shard_recovery_terminal(_hir_shard_queue_dir(), hir_shard_owner(), path, state, cache_stored)
+
+fn hir_shard_complete() -> bool:
+    if _hir_shard_queue_dir() == "": return true
+    hir_shard_recovery_complete(_hir_shard_queue_dir(), hir_shard_owner())
+
+fn hir_shard_inventory(identity: text, paths: [text]) -> bool:
+    if not hir_shard_active() or _hir_shard_queue_dir() == "": return true
+    hir_shard_recovery_inventory(_hir_shard_queue_dir(), identity, paths)
+
+fn hir_shard_guard_block(reason: text):
+    if hir_shard_active() and _hir_shard_queue_dir() != "":
+        val _blocked = hir_shard_recovery_block(_hir_shard_queue_dir(), reason)
 
 fn hir_shard_spec() -> text:
     if _hir_shard_memo != "@@unset@@":
@@ -416,3 +448,5 @@ export hir_cache_has, hir_cache_load, hir_cache_store, hir_cache_last_warnings
 export hir_cache_hits, hir_cache_misses, hir_cache_stores, hir_cache_summary
 export hir_shard_spec, hir_shard_active, hir_shard_claimed, hir_shard_owns
 export hir_shard_levels, hir_shard_level_count, hir_shard_visit_order, hir_shard_summary
+export hir_shard_begin, hir_shard_finish, hir_shard_complete, hir_shard_guard_block
+export hir_shard_inventory
