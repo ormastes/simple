@@ -52,6 +52,9 @@ while [ "${bootstrap_argc}" -gt 0 ]; do
 done
 # -- argv-normalize end
 
+. "${bootstrap_entry_dir}/bootstrap-cache-policy.shs"
+bootstrap_compile_failure_policy "$@"
+
 # The coordinated strategy supervisor is the default entry for an ordinary
 # multi-stage bootstrap. Single-stage recovery, receipt validation, help, and
 # diagnostic sweeps keep their direct fail-closed paths. The supervisor sets
@@ -235,6 +238,10 @@ Options:
                      loader suites through them. A failing suite, an incomplete
                      verification summary, or a missing admitted artifact stops
                      the bootstrap.
+  --fail-fast        Stop independent work after the first failure (CI default).
+  --keep-going       Collect all independent failures (host default). Last policy
+                     flag wins over SIMPLE_COMPILE_FAIL_FAST=1. Admission and
+                     prerequisite failures still block dependent stages.
   --strategy=<name>  Bootstrap scheduling strategy: adhoc, normal, or full
                      (default: normal; env: SIMPLE_BOOTSTRAP_STRATEGY).
                      normal reuses incremental caches and schedules isolated
@@ -405,6 +412,9 @@ while [ "$#" -gt 0 ]; do
       ;;
     --full-bootstrap)
       full_bootstrap=1
+      ;;
+    --fail-fast|--keep-going)
+      # Resolved before supervisor dispatch; inherited by every child.
       ;;
     --strategy=*)
       bootstrap_strategy=${1#*=}

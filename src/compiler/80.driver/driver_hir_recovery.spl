@@ -1,0 +1,153 @@
+# Invocation-local HIR work ledger. Cache identity and validity remain owned by
+# driver_hir_cache: PASS is a lowering outcome, never permission to load bytes.
+use std.common.crypto.sha256.{sha256_text}
+use std.io.{file_lock, file_unlock}
+use std.io_runtime.{file_exists, file_read, file_write, file_rename, dir_list_optional, getpid}
+
+fn hir_shard_claim_valid(record: text) -> bool:
+    val fields = record.split("\n")
+    fields.len() == 4 and fields[0] != "" and fields[1] != "" and fields[2] != "" and fields[3] == ""
+
+pub fn hir_shard_recovery_can_replace(fail_fast: bool, exit_code: i64, new_claims: i64) -> bool:
+    not fail_fast and exit_code != 0 and new_claims > 0
+
+pub fn hir_shard_aggregate_exit(failed_workers: i64, failed_modules: i64) -> i64:
+    if failed_workers != 0 or failed_modules != 0: 1 else: 0
+
+fn hir_shard_record_base(queue: text, path: text) -> text:
+    "{queue}/{sha256_text(path)}"
+
+fn hir_shard_record_publish(path: text, content: text) -> bool:
+    val temporary = "{path}.{getpid()}.tmp"
+    file_write(temporary, content) and file_rename(temporary, path)
+
+# All claim/terminal mutations are serialized; a failed lock never falls back
+# to duplicate static writers. Claims are immutable until the invocation ends.
+pub fn hir_shard_recovery_claim(queue: text, owner: text, path: text, key: text) -> i64:
+    if owner == "" or path == "" or key == "" or owner.contains("\n") or path.contains("\n") or key.contains("\n"):
+        return -1
+    val base = hir_shard_record_base(queue, path)
+    val fd = file_lock("{queue}/.lock", 30)
+    if fd < 0: return -1
+    var result: i64 = 0
+    if not file_exists("{base}.claim"):
+        val record = owner + "\n" + path + "\n" + key + "\n"
+        result = if hir_shard_record_publish("{base}.claim", record): 1 else: -1
+    elif not hir_shard_claim_valid(file_read("{base}.claim")):
+        result = -1
+    val _released = file_unlock(fd)
+    result
+
+pub fn hir_shard_recovery_terminal(queue: text, owner: text, path: text, state: text, cache_stored: bool) -> bool:
+    if state != "PASS" and state != "FAILED" and state != "CRASH" and state != "BLOCKED" and state != "SKIPPED":
+        return false
+    val base = hir_shard_record_base(queue, path)
+    val fd = file_lock("{queue}/.lock", 30)
+    if fd < 0: return false
+    val claim = file_read("{base}.claim")
+    var written = false
+    if hir_shard_claim_valid(claim) and claim.starts_with(owner + "\n") and not file_exists("{base}.terminal"):
+        val cache = if cache_stored: "CACHE_STORED" else: "UNCACHED"
+        written = hir_shard_record_publish("{base}.terminal", state + "\n" + claim + cache + "\n")
+    val _released = file_unlock(fd)
+    written
+
+# Called only after the coordinator has reaped this owner. No other owner's
+# claim can be released or terminalized, and the offender is never requeued.
+pub fn hir_shard_recovery_seal(queue: text, owner: text, state: text) -> i64:
+    var sealed: i64 = 0
+    val listing = dir_list_optional(queue)
+    if listing == nil: return -1
+    for name in listing.unwrap():
+        if name.ends_with(".claim"):
+            val claim = file_read("{queue}/{name}")
+            if not hir_shard_claim_valid(claim): return -1
+            val fields = claim.split("\n")
+            if fields.len() >= 3 and fields[0] == owner:
+                val terminal_path = "{queue}/{name.substring(0, name.len() - 6)}.terminal"
+                if not file_exists(terminal_path):
+                    if not hir_shard_recovery_terminal(queue, owner, fields[1], state, false):
+                        return -1
+                    sealed = sealed + 1
+    sealed
+
+pub fn hir_shard_recovery_progress(queue: text, owner: text) -> i64:
+    var claimed: i64 = 0
+    val listing = dir_list_optional(queue)
+    if listing == nil: return -1
+    for name in listing.unwrap():
+        if name.ends_with(".claim"):
+            val claim = file_read("{queue}/{name}")
+            if not hir_shard_claim_valid(claim): return -1
+            if claim.starts_with(owner + "\n"):
+                claimed = claimed + 1
+    claimed
+
+pub fn hir_shard_recovery_failure_count(queue: text) -> i64:
+    var failures: i64 = 0
+    val listing = dir_list_optional(queue)
+    if listing == nil: return -1
+    for name in listing.unwrap():
+        if name.ends_with(".terminal"):
+            val record = file_read("{queue}/{name}")
+            val fields = record.split("\n")
+            if fields.len() != 6 or fields[1] == "" or fields[2] == "" or fields[3] == "" or fields[5] != "":
+                return -1
+            if fields[4] != "CACHE_STORED" and fields[4] != "UNCACHED": return -1
+            val claim_path = "{queue}/{name.substring(0, name.len() - 9)}.claim"
+            if file_read(claim_path) != fields[1] + "\n" + fields[2] + "\n" + fields[3] + "\n": return -1
+            if not record.starts_with("PASS\n"):
+                failures = failures + 1
+    failures
+
+pub fn hir_shard_recovery_complete(queue: text, owner: text) -> bool:
+    hir_shard_record_publish("{queue}/{sha256_text(owner)}.done", owner)
+
+pub fn hir_shard_recovery_finished(queue: text, owner: text) -> bool:
+    file_read("{queue}/{sha256_text(owner)}.done") == owner
+
+pub fn hir_shard_recovery_block(queue: text, reason: text) -> bool:
+    file_write("{queue}/BLOCKED", reason)
+
+pub fn hir_shard_recovery_blocked(queue: text) -> bool:
+    file_exists("{queue}/BLOCKED")
+
+# Every worker publishes the same frozen source inventory before taking its
+# first claim. A partial preflight has no inventory and remains global BLOCKED.
+pub fn hir_shard_recovery_inventory(queue: text, identity: text, paths: [text]) -> bool:
+    if identity == "" or paths.len() == 0: return false
+    var rows: [text] = [identity]
+    for path in paths:
+        if path == "" or path.contains("\n"): return false
+        rows = rows.push(path)
+    val record = rows.join("\n")
+    val fd = file_lock("{queue}/.lock", 30)
+    if fd < 0: return false
+    var published = false
+    if file_exists("{queue}/inventory"):
+        published = file_read("{queue}/inventory") == record
+    else:
+        published = hir_shard_record_publish("{queue}/inventory", record)
+    val _released = file_unlock(fd)
+    published
+
+# Coordinator only, after every child has stopped. Acquire only unclaimed
+# inventory rows; existing worker claims and their terminals stay immutable.
+pub fn hir_shard_recovery_close_inventory(queue: text, fail_fast: bool) -> i64:
+    val inventory = file_read("{queue}/inventory").split("\n")
+    if inventory.len() < 2 or inventory[0] == "": return -1
+    var unfinished: i64 = 0
+    var index: i64 = 1
+    while index < inventory.len():
+        val path = inventory[index]
+        if path == "": return -1
+        val base = hir_shard_record_base(queue, path)
+        if not file_exists("{base}.claim"):
+            if hir_shard_recovery_claim(queue, "coordinator", path, inventory[0]) != 1: return -1
+            val state = if fail_fast: "SKIPPED" else: "BLOCKED"
+            if not hir_shard_recovery_terminal(queue, "coordinator", path, state, false): return -1
+            unfinished = unfinished + 1
+        elif not file_exists("{base}.terminal"):
+            return -1
+        index = index + 1
+    unfinished
