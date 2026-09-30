@@ -17,6 +17,8 @@ use compiler.common.driver_core_types (CompileMode, CompileResult, driver_core_c
 use compiler.common.driver_compile_options.{CompileOptions}
 use app.cli.bootstrap_identity.{bootstrap_version}
 use app.cli.bootstrap_focused_native_build.{run_exact_stage3_focused_capsule, run_exact_stage4_focused_capsule}
+use app.cli.bootstrap_focused_native_build_args.{focused_native_build_cache_dir}
+use app.io.native_build_cache.{native_build_cache_snapshot, native_build_cache_bind, native_build_cache_restore}
 use app.cli.native_build_main.{run_native_build_worker}
 use app.io._CliCompile.compile_targets.{cli_native_build_with_environment_variant_policy_v1}
 use app.io._CliCompile.compile_targets.{cli_native_build_option_error}
@@ -420,8 +422,21 @@ pub fn run_native_build_bootstrap(args: [text]) -> i64:
     options.opt_level = if backend == "cranelift": 2 else: 3
     options.no_borrow_check = native_build_no_borrow_check_from_args(args, 0)
     options = compileoptions_normalize_mir_optimization(options)
+    # Positional builds enter the driver directly. Bind the same CLI-over-env
+    # cache selection used by focused builds before any driver/cache work.
+    # Per-worker dispatch above retains its own explicit routing contract.
+    val previous_cache = native_build_cache_snapshot()
+    val requested_cache = focused_native_build_cache_dir(args)
+    if not native_build_cache_bind(requested_cache):
+        print "error: could not bind native-build --cache-dir '{requested_cache}'"
+        return 1
     val driver = compiler_driver_create(options)
     val result = compiler_driver_run_compile(driver)
+    # Restore before every result-dependent return, including compile failure
+    # and missing/stub output refusal. Absent and empty are distinct states.
+    if not native_build_cache_restore(previous_cache):
+        print "error: could not restore native-build cache environment"
+        return 1
     # Free-function accessors, NOT result.is_success()/.get_errors(): this
     # entry is MIR-lowered without HIR type inference, so method calls on the
     # lazy-import-returned result never resolve (Task #145 erased-receiver
