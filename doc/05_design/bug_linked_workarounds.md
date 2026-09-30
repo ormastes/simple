@@ -16,7 +16,7 @@ Incremental maintenance collects changed/untracked candidates plus previously
 linked paths, so deletion and reversion of an annotation remove stale links.
 For each supplied path, replace that path's records from its current contents;
 absence removes its records. Preserve records for other paths. Reconcile all
-tracked candidates only on explicit fullscan. A missing index or HEAD mismatch
+tracked plus nonignored untracked candidates only on explicit fullscan. A missing index or HEAD mismatch
 reports that fullscan is required before claiming current coverage.
 
 Mutation sequence: discover candidates once; acquire index writer lock; reload;

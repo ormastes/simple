@@ -16,10 +16,12 @@ flowchart LR
 
 The parent native-build entry performs one changed-path update. Compiler
 workers never write the index. Explicit `check-dbs --fullscan bugs` reconciles
-tracked candidates. Query paths load index data and bug records without source
+tracked and nonignored untracked candidates. Query paths load index data and bug records without source
 walking or Git discovery. A missing index requires explicit initialization.
 A different recorded HEAD requires fullscan; no incremental update silently
-claims completeness after a branch change.
+claims completeness after a branch change. A read-only query explicitly reports
+current checkout freshness unchecked; persisted completeness concerns the
+recorded refresh revision only, because the query performs no Git discovery.
 
 The coordinator locks, reloads current state, validates the entire batch,
 and publishes atomically. Any malformed annotation or failed update retains
