@@ -33,10 +33,13 @@ the index. Open bugs show linked locations; fixed or closed bugs with remaining
 links need recovery review. Unknown bug IDs are reported.
 
 A missing index, invalid metadata, or HEAD mismatch cannot establish current
-coverage. Run explicit fullscan to reconcile tracked source paths. An empty
+coverage. Run explicit fullscan to reconcile tracked and nonignored untracked source paths. An empty
 indexed result does not prove the source tree is clear when coverage is
-incomplete. Fullscan covers tracked paths; an untracked file is handled by the
-next incremental build update or by tracking it before fullscan.
+incomplete. Fullscan collects both kinds with one bounded Git invocation.
+Read-only queries explicitly say that current checkout freshness is unchecked:
+the stored `complete` flag describes coverage at the recorded refresh revision,
+not live branch state. A build detects a changed HEAD and marks coverage incomplete;
+queries do not run Git to discover a branch switch themselves.
 
 The parent `native-build` invocation discovers changed/untracked candidates
 plus previously linked paths once. It reparses current contents, removes links
@@ -44,6 +47,17 @@ for deleted files or removed/reverted annotations, and publishes one validated
 transaction. Workers never update the index. A malformed batch preserves the
 last valid index and reports failure; that retained snapshot is not successful
 refresh evidence. Do not hand-edit this derived database.
+
+Operation budget per parent refresh: two `rev-parse` calls and at most one
+changed-path Git collection (each has a 30-second deadline and 16 MiB output
+bound); one lock wait of at most five seconds; at most one 8 MiB bounded read
+per changed/untracked or previously linked candidate; one canonical bug DB read
+of at most 32 MiB only when the batch contains markers; one index payload of at
+most 16 MiB; at most one atomic publication, skipped when unchanged. Known
+changed-path callers omit Git status discovery. These are operation and safety
+bounds, not latency results. Warm query and refresh time, Git time, candidate
+counts, bytes read, and actual publication counts still need measurement on
+an admitted runtime before a performance claim or release acceptance.
 
 ## Recover intended source
 

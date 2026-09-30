@@ -40,6 +40,9 @@ Static checks completed once after source review: `git diff --check` passed;
 reported `STATUS: PASS`; the staged check covered an empty staging area.
 The `doc/06_spec` executable-spec count was zero. These are structural checks,
 not execution evidence for the newly authored `.spl` scenarios.
+After staging all 25 owned files, the staged env guard also passed on the actual
+change. Normal local commit hooks examined all 25 text files and passed without
+bypass. This does not establish runtime verification or release admission.
 
 ## Source review
 
@@ -51,7 +54,9 @@ reads/processes, locks, and atomic publication without new runtime externs.
 Refresh reloads after taking the writer lock, parses the whole replacement
 batch, validates canonical bug IDs, checks HEAD stability, and publishes once.
 Malformed batches preserve previous bytes. Missing/changed revision coverage
-is explicit. Fullscan alone enumerates tracked files or repairs index corruption.
+is explicit. Fullscan alone enumerates tracked plus nonignored untracked files
+or repairs index corruption. Queries always state current checkout freshness
+unchecked; they do not label historical completeness as live branch coverage.
 
 Limits: the existing no-follow reader protects the final component, not ancestor
 replacement races; Git/source changes are not globally frozen during indexing;
