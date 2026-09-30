@@ -184,6 +184,45 @@ pub fn rt_string_rfind_fn(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(found.map_or(-1, |i| i as i64)))
 }
 
+/// First byte offset, or -1 when absent; an empty needle returns 0.
+/// This is the raw `rt_string_find` contract used by compiler core/types.spl,
+/// not the boxed Option returned by the Rust runtime's `rt_string_index_of`.
+pub fn rt_string_find_fn(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 2 {
+        return Err(CompileError::semantic_with_context(
+            "rt_string_find expects 2 arguments".to_string(),
+            ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+        ));
+    }
+    let bytes = |value: &Value| -> Result<Vec<u8>, CompileError> {
+        match value {
+            Value::Str(text) => Ok(text.as_bytes().to_vec()),
+            other => {
+                let handle = RuntimeValue::from_raw(other.as_int()? as u64);
+                let ptr = rt_string_data(handle);
+                let len = rt_string_len(handle);
+                if ptr.is_null() || len < 0 {
+                    return Err(CompileError::semantic_with_context(
+                        "rt_string_find expects text arguments".to_string(),
+                        ErrorContext::new().with_code(codes::TYPE_MISMATCH),
+                    ));
+                }
+                // SAFETY: the runtime validated this handle and supplies its
+                // live byte span. Copy before resolving the other argument.
+                // Do not decode UTF-8: replacement characters change offsets.
+                Ok(unsafe { std::slice::from_raw_parts(ptr, len as usize) }.to_vec())
+            }
+        }
+    };
+    let subject = bytes(&args[0])?;
+    let needle = bytes(&args[1])?;
+    if needle.is_empty() {
+        return Ok(Value::Int(0));
+    }
+    let found = subject.windows(needle.len()).position(|window| window == needle);
+    Ok(Value::Int(found.map_or(-1, |offset| offset as i64)))
+}
+
 /// Resolve two `text`-typed extern arguments to owned Rust strings.
 ///
 /// A `Value::Str` is used directly; anything else is treated as an already
