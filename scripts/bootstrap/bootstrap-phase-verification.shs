@@ -7,6 +7,7 @@ set -u
 . "$(dirname -- "$0")/bootstrap-windows-cl-mode.shs"
 . "$(dirname -- "$0")/bootstrap-phase-toolchain.shs"
 . "$(dirname -- "$0")/bootstrap-cache-policy.shs"
+. "$(dirname -- "$0")/bootstrap-module-collection.shs"
 . "$(dirname -- "$0")/bootstrap-scv-prime.shs"
 bootstrap_windows_preserve_cl_mode
 
@@ -174,6 +175,7 @@ timeout_seconds=${BOOTSTRAP_VERIFY_TIMEOUT_SECONDS:-1800}
 spec_timeout_seconds=${BOOTSTRAP_VERIFY_SPEC_TIMEOUT_SECONDS:-120}
 native_internal_timeout=${BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT:-600}
 build_threads=${BOOTSTRAP_VERIFY_BUILD_THREADS:-4}
+module_workers=${BOOTSTRAP_VERIFY_MODULE_WORKERS:-2}
 test_workers=${BOOTSTRAP_VERIFY_TEST_WORKERS:-1}
 
 for arg in "$@"; do
@@ -222,6 +224,7 @@ case "$spec_timeout_seconds" in ''|*[!0-9]*|0) die "spec timeout must be a posit
 case "$native_internal_timeout" in ''|*[!0-9]*) die "native internal timeout must be an integer" ;; esac
 [ "$native_internal_timeout" -gt 60 ] || die "native internal timeout must exceed 60 seconds"
 case "$build_threads" in ''|*[!0-9]*|0) die "build threads must be a positive integer" ;; esac
+case "$module_workers" in [1-9]|1[0-2]) ;; *) die "module workers must be from 1 to 12" ;; esac
 [ "$phase" != stage3 ] || [ "$build_threads" -le 12 ] || die "Stage3 build threads must be from 1 to 12"
 case "$test_workers" in
   [1-9]|1[0-2]) ;;
@@ -779,7 +782,7 @@ run_task() {
       if { [ "$phase" = stage2 ] || [ "$phase" = stage3 ]; } && \
          [ "${1:-}" = "$compiler_snapshot" ] && \
          [ "${2:-}" = native-build ]; then
-        case "$task" in compiler_cli_build|test_runner_build|mcp_build|lsp_build) ;; *) exit 89 ;; esac
+        case "$task" in compiler_cli_build|test_runner_build|mcp_build|lsp_build|module_compile_*) ;; *) exit 89 ;; esac
         # Keep the actual compiler at argv[0] so the existing pinned-toolchain
         # boundary still recognizes and validates this native-build invocation.
         SIMPLE_NATIVE_RUNTIME_BUNDLE=core-c-bootstrap SIMPLE_RUNTIME_PATH="$runtime_path"
@@ -1296,6 +1299,105 @@ run_phase_c_tool_worker() (
   run_phase_c_tool_build "$@"
   printf '%s\n' "$matrix_task_passed" >"$work_root/$phase-tool-workers/$worker/result" || exit 1
 )
+
+# A missing full CLI must not hide compiler/module errors. Objects are a
+# separate diagnostic surface and never satisfy executable/admission rows.
+validate_module_compile_prerequisites() (
+  tmp=${TMPDIR:-$tmp}
+  [ "${MODULE_COMPILE_PREREQUISITE_BLOCKED:-0}" != 1 ] || { cat "$work_root/module-prerequisite.log"; exit 1; }
+  [ "${tool_authority_ready:-0}" = 1 ] || { echo 'compiler runtime authority unavailable'; exit 1; }
+  [ -x "$compiler_snapshot" ] && [ ! -L "$compiler_snapshot" ] || { echo 'compiler snapshot missing or invalid'; exit 1; }
+  [ "$(hash_file "$compiler_snapshot")" = "$expected_sha" ] || { echo 'compiler snapshot digest mismatch'; exit 1; }
+  # Strict Stage4 only permits executable outputs. Do not weaken its profile.
+  [ "${SIMPLE_BOOTSTRAP_STAGE4:-0}" != 1 ] || { echo 'strict Stage4 profile does not support diagnostic object output'; exit 1; }
+  if [ "${MODULE_COMPILE_VALIDATE_FULL:-0}" != 1 ]; then
+    case "$phase" in
+      stage2|stage3) [ "$(hash_file "$target_c_binding")" = "$target_c_identity" ] ;;
+      stage4) validate_stage4_compiler_snapshot ;;
+      *) exit 1 ;;
+    esac
+    exit $?
+  fi
+  case "$phase" in
+    stage2|stage3) validate_phase_c_tool_binding ;;
+    stage4) validate_stage4_compiler_snapshot && validate_hosted_runtime_authority "$runtime_path" ;;
+    *) exit 1 ;;
+  esac
+)
+
+run_module_compile_command() (
+  module_entry=$1 pure_tool_cache=$2 module_output=$3 pure_tool_threads=$4
+  module_log=$5
+  home=$HOME tmp=$TMPDIR logs=$(dirname "$module_log")
+  summary="$logs/producer.env"
+  cache="$pure_tool_cache"
+  SIMPLE_NATIVE_BUILD_EMIT_OBJECT=1
+  SIMPLE_RT_OBJ_CACHE_DIR="$pure_tool_cache/runtime-objects"
+  export SIMPLE_NATIVE_BUILD_EMIT_OBJECT SIMPLE_RT_OBJ_CACHE_DIR
+  # Keep run_task's timeout, exact producer and toolchain authority checks.
+  # Positional Phase2/3 dispatch consumes the driver's existing object env;
+  # their bootstrap CLI does not parse the full CLI's --emit-object switch.
+  if [ "$phase" = stage2 ] || [ "$phase" = stage3 ]; then
+    set -- "$compiler_snapshot" native-build "$module_entry" --backend=llvm -o "$module_output"
+  else
+    set -- "$compiler_snapshot" native-build --emit-object \
+      --timeout "$native_internal_timeout" --runtime-bundle "$tool_runtime_bundle" --runtime-path "$runtime_path" \
+      --source src/compositions/kernel_llvm_cranelift --source src/compiler --source src/app --source src/lib \
+      --entry-closure --entry "$module_entry" --threads "$pure_tool_threads" \
+      --cache-dir "$pure_tool_cache" --output "$module_output"
+  fi
+  printf '%s\n' "SIMPLE_NATIVE_BUILD_EMIT_OBJECT=1" "$@" >"$logs/command.argv"
+  module_status=0
+  run_task module_compile_object "$@" || module_status=$?
+  cat "$logs/module_compile_object.log"
+  exit "$module_status"
+)
+
+run_failed_binary_module_inventory() {
+  [ "$phase" != stage1 ] || return 0
+  module_prior_failure=1
+  if [ "${compiler_cli_ready:-0}" = 1 ] && [ "${test_runner_ready:-0}" = 1 ] && \
+     { [ "$stage2_slim_profile" = 1 ] || { [ "${mcp_build_ready:-0}" = 1 ] && [ "${lsp_build_ready:-0}" = 1 ]; }; }; then
+    module_prior_failure=0
+    # Slim explicitly limits its successful proof to CLI/runner behavior.
+    [ "$stage2_slim_profile" != 1 ] || return 0
+  fi
+  [ "${matrix_failed:-0}" = 0 ] || module_prior_failure=1
+  module_manifest="$work_root/module-compile-inventory.txt"
+  # This conservative source-root superset also works when closure discovery
+  # failed before producing a graph. It does not claim exact entry membership.
+  (cd "$source_root" && find src/compositions/kernel_llvm_cranelift src/compiler src/app src/lib \
+      -type f -name '*.spl' -print) >"$module_manifest.unsorted" || return 1
+  LC_ALL=C sort -u "$module_manifest.unsorted" >"$module_manifest" || return 1
+  module_effective_workers=$module_workers
+  [ "$module_effective_workers" -le "$build_threads" ] || module_effective_workers=$build_threads
+  module_threads=$((build_threads / module_effective_workers))
+  module_cache="$cache_root/module-diagnostics/$phase/$snapshot_sha/${tool_input_identity:-unavailable}"
+  printf 'module_compile_scope=source-roots-superset\nmodule_compile_mode=diagnostic-relocatable-object\nmodule_compile_inventory=%s\nmodule_compile_workers=%s\nmodule_compile_threads=%s\n' \
+    "$module_manifest" "$module_effective_workers" "$module_threads" >>"$summary"
+  MODULE_COMPILE_PRIOR_FAILURE=$module_prior_failure
+  export MODULE_COMPILE_PRIOR_FAILURE
+  # Full source/runtime authority is validated at inventory boundaries; each
+  # invocation still uses run_task's pinned toolchain boundary and immutable
+  # producer/binding checks. Diagnostic rows remain provisional until the end.
+  MODULE_COMPILE_PREREQUISITE_BLOCKED=0
+  if ! MODULE_COMPILE_VALIDATE_FULL=1 validate_module_compile_prerequisites >"$work_root/module-prerequisite.log" 2>&1; then
+    MODULE_COMPILE_PREREQUISITE_BLOCKED=1
+  fi
+  if ! run_module_compile_inventory "$module_manifest" "$work_root/module-diagnostics" "$module_cache" \
+      "$module_effective_workers" "$module_threads" run_module_compile_command \
+      validate_module_compile_prerequisites "$summary"; then
+    matrix_failed=1
+  fi
+  if [ "$MODULE_COMPILE_PREREQUISITE_BLOCKED" = 0 ] && \
+     ! MODULE_COMPILE_VALIDATE_FULL=1 validate_module_compile_prerequisites >>"$work_root/module-prerequisite.log" 2>&1; then
+    printf 'task=module_compile_authority|result=FAIL|status=source-runtime-authority-changed|log=%s\n' \
+      "$work_root/module-prerequisite.log" >>"$summary"
+    matrix_failed=1
+  fi
+  unset MODULE_COMPILE_PRIOR_FAILURE
+  unset MODULE_COMPILE_PREREQUISITE_BLOCKED
+}
 
 matrix_should_skip() {
   [ "${SIMPLE_COMPILE_FAIL_FAST:-0}" = 1 ] && [ "$matrix_failed" -ne 0 ]
@@ -1953,6 +2055,8 @@ else
     record_unsupported_task mcp_build host-gpu-hosted-runtime-authority-unavailable
     record_unsupported_task lsp_build host-gpu-hosted-runtime-authority-unavailable
   fi
+
+  run_failed_binary_module_inventory || die "cannot inventory diagnostic modules"
 
   if [ -n "$compiler_cli_sha" ] && [ -n "$test_runner_sha" ]; then
     if [ "$phase" = stage2 ] || [ "$phase" = stage3 ]; then
