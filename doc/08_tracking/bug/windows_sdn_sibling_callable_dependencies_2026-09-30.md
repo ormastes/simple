@@ -1,7 +1,8 @@
 # SDN parser sibling triggers unresolved SdnSpan
 
-Status: reduced to a four-module pure-Simple HIR reproducer. No compiler fix
-has been established; stopped after the three authorized verification cycles.
+Status: reduced to a four-module pure-Simple HIR reproducer; canonical class
+reuse binding fix and prevention specs prepared by source review. The fix and
+new specs are unexecuted. Stopped after the three authorized verification cycles.
 
 ## Authority and route
 
@@ -80,3 +81,48 @@ An independently scoped follow-up can inspect the imported callable dependency
 route with the four-module fixture and propose the smallest owner-binding fix.
 Neither the successful one-module control nor the old 75-module facade should
 be rerun without a concrete change. No broad source changes were made here.
+
+## Source-only follow-up: canonical reuse skipped lexical publication
+
+`SymbolTable.define_with_binding` in `src/compiler/20.hir/hir_types.spl` returned
+an existing qualified class ID before inspecting `bind_lexical`. Imported
+callable dependency registration allocates the defining module's class with
+lexical publication disabled, then binds a qualified spelling. Later,
+`declare_module_symbols` calls `define` with lexical publication enabled, but
+the canonical-ID early return omitted both the current-scope name and the
+`exact_symbols` index. This matches the sibling/direct differential; a direct
+declaration without prior dependency allocation uses the ordinary path and
+publishes both indexes.
+
+The patch retains the canonical ID and, only when `bind_lexical` is true,
+inserts an absent exact-name entry and calls `bind_local_type_if_free` for the
+current scope. It mirrors the ordinary allocation path: a competing short name
+in the same scope wins, while a child scope may bind the requested owner without
+replacing its parent's binding. Requests with `bind_lexical=false` stay nonlocal.
+Other type kinds retain their existing registration paths.
+
+Prepared, **unexecuted** prevention coverage:
+
+- `canonical_class_rebinding_spec.spl`: nonlexical-to-lexical publication,
+  repeated nonlexical registration, same-scope competing owner, child-scope
+  shadowing/restore, exact lookup, qualified lookup, and unchanged allocation ID.
+- `sibling_callable_owner_selftype_spec.spl`: parser-shaped nested
+  `Result<(i64, Dict<text, SpanProbe>), text>` sibling signature plus four local
+  class self-type annotations, requiring zero HIR errors and canonical binding.
+- The already recorded four-module fixture remains the native reproducer for
+  qualification with a newly compiled producer. No fourth probe was run here.
+
+## Interpreter analogue and numeric widths
+
+The app interpreter uses a separate registration path:
+`src/app/interpreter/module/evaluator.spl` handles `Node.Class` by writing
+`state.classes` and calling `interp.env.define` for the constructor. It has no
+matching canonical-ID early return at that site. The core interpreter's
+`module_loader_core.spl` also binds exports for a caller when loading an already
+loaded module, and its `env_define` updates or inserts the current-scope entry.
+These source paths do not share HIR's `SymbolTable.define_with_binding` defect.
+No interpreter execution or broader interpreter correctness is claimed, and no
+interpreter patch is justified by this evidence.
+
+Numeric width variants: **N/A**. The failure is publication of nominal owner/name
+bindings; it does not inspect integer width, signedness, or numeric values.
