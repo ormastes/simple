@@ -1,0 +1,31 @@
+# Prevent stale module declarations from breaking the self-hosted bootstrap closure.
+use app.io.mod.{file_read}
+use compiler.driver.driver_source_loading.{
+    _driver_entry_sibling_module_paths, _driver_entry_import_module_paths,
+    _driver_resolve_entry_import
+}
+
+describe "bootstrap module declaration resolution":
+    it "resolves every declared child in the compiler core manifest":
+        val source = file_read("src/compiler/10.frontend/core/__init__.spl")
+        expect(source.len()).to_be_greater_than(0)
+        val children = _driver_entry_sibling_module_paths(source)
+        expect(children.len()).to_be_greater_than(0)
+        for child in children:
+            val resolved = _driver_resolve_entry_import(child, "src/compiler/10.frontend/core")
+            expect(resolved.len()).to_be_greater_than(0)
+
+    it "imports crypto string helpers through their actual library owner":
+        val source = file_read("src/lib/common/crypto/types.spl")
+        expect(source.len()).to_be_greater_than(0)
+        expect(_driver_entry_sibling_module_paths(source)).to_equal([])
+        expect(_driver_entry_import_module_paths(source)).to_contain("std.common.string_core")
+        expect(_driver_resolve_entry_import("std.common.string_core", "src/lib/common/crypto").len()).to_be_greater_than(0)
+
+    it "retains the existing dotted declaration sibling semantics":
+        expect(_driver_entry_sibling_module_paths("mod common.string_core\n")).to_equal([".string_core"])
+        expect(_driver_resolve_entry_import(".string_core", "src/lib/common/crypto")).to_equal("")
+
+    it "rejects a child directory that has no module entrypoint":
+        expect(_driver_resolve_entry_import(".hir", "src/compiler/10.frontend/core")).to_equal("")
+        expect(_driver_resolve_entry_import(".wffi", "src/compiler/10.frontend/core")).to_equal("")
