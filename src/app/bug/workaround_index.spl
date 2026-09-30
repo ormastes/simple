@@ -1,0 +1,229 @@
+# Pure workaround annotation and derived SDN index transformations.
+# Bug state remains in the canonical BugDatabase; this index stores locations.
+
+struct WorkaroundLink:
+    bug_id: text
+    path: text
+    line: i64
+    recover: text
+    reason: text
+
+struct WorkaroundIndex:
+    revision: text
+    complete: bool
+    links: [WorkaroundLink]
+
+fn empty_workaround_index(revision: text) -> WorkaroundIndex:
+    WorkaroundIndex(revision: revision, complete: false, links: [])
+
+fn workaround_bug_id_valid(value: text) -> bool:
+    if value == "": return false
+    for ch in value:
+        if not "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-".contains(ch):
+            return false
+    true
+
+fn workaround_recovery_valid(value: text) -> bool:
+    if value.len() < 7 or value.len() > 64: return false
+    for ch in value:
+        if not "0123456789abcdefABCDEF".contains(ch): return false
+    true
+
+fn workaround_path_valid(path: text) -> bool:
+    if path == "" or path.starts_with("/") or path.contains("\\") or path.contains(":"):
+        return false
+    for part in path.split("/"):
+        if part == "" or part == "." or part == "..": return false
+    not path.contains("\n") and not path.contains("\r") and not path.contains("\t") and not path.contains("\0")
+
+fn workaround_lexical_state(line: text, previous: text) -> text:
+    # Ignore marker examples embedded in multiline strings or C block comments.
+    var state = previous
+    var quote = ""
+    var escaped = false
+    var i = 0
+    while i < line.len():
+        val ch = line.substring(i, i + 1)
+        val pair = if i + 2 <= line.len(): line.substring(i, i + 2) else: ""
+        val triple = if i + 3 <= line.len(): line.substring(i, i + 3) else: ""
+        if state == "/*":
+            if pair == "*/":
+                state = ""
+                i = i + 1
+        elif state != "":
+            if triple == state and not escaped:
+                state = ""
+                i = i + 2
+            escaped = ch == "\\" and not escaped
+        elif quote != "":
+            if ch == quote and not escaped: quote = ""
+            escaped = ch == "\\" and not escaped
+        elif ch == "#" or pair == "//":
+            return state
+        elif pair == "/*":
+            state = "/*"
+            i = i + 1
+        elif triple == "\"\"\"" or triple == "'''":
+            state = triple
+            i = i + 2
+        elif ch == "\"" or ch == "'":
+            quote = ch
+        i = i + 1
+    state
+
+fn parse_workaround_source(path: text, content: text) -> Result<[WorkaroundLink], text>:
+    """Parse standalone markers immediately before an affected source block."""
+    if not workaround_path_valid(path): return Err("unsafe workaround path: {path}")
+    val lines = content.split("\n")
+    var links: [WorkaroundLink] = []
+    var lexical_state = ""
+    for offset in 0..lines.len():
+        val trimmed = lines[offset].trim()
+        val in_source = lexical_state == ""
+        lexical_state = workaround_lexical_state(lines[offset], lexical_state)
+        if not in_source: continue
+        var body = ""
+        if trimmed.starts_with("#"):
+            body = trimmed.substring(1).trim()
+        elif trimmed.starts_with("//"):
+            body = trimmed.substring(2).trim()
+        if not body.starts_with("@workaround"): continue
+        val location = "{path}:{offset + 1}"
+        if not body.starts_with("@workaround "):
+            return Err("{location}: expected @workaround bug=<canonical-id>")
+        var fields: [text] = []
+        for field in body.substring(12).replace("\t", " ").split(" "):
+            if field != "": fields.push(field)
+        if fields.len() == 0 or not fields[0].starts_with("bug="):
+            return Err("{location}: mandatory bug=<canonical-id> must be first")
+        val bug_id = fields[0].substring(4)
+        if not workaround_bug_id_valid(bug_id):
+            return Err("{location}: invalid canonical bug ID")
+        var recover = ""
+        var reason = ""
+        var in_reason = false
+        for i in 1..fields.len():
+            val field = fields[i]
+            if in_reason:
+                reason = reason + " " + field
+            elif field.starts_with("recover=") and recover == "":
+                recover = field.substring(8)
+                if not workaround_recovery_valid(recover):
+                    return Err("{location}: recover must be 7-64 hexadecimal characters")
+            elif field.starts_with("reason="):
+                reason = field.substring(7)
+                in_reason = true
+            else:
+                return Err("{location}: unexpected or duplicate workaround field: {field}")
+        if offset + 1 >= lines.len():
+            return Err("{location}: workaround must immediately precede the affected block")
+        val affected = lines[offset + 1].trim()
+        if affected == "" or affected.starts_with("#") or affected.starts_with("//") or affected.starts_with("/*"):
+            return Err("{location}: workaround must immediately precede the affected block")
+        links.push(WorkaroundLink(bug_id: bug_id, path: path, line: offset + 1,
+            recover: recover, reason: reason))
+    Ok(links)
+
+fn replace_workaround_paths(index: WorkaroundIndex, paths: [text], replacements: [WorkaroundLink]) -> WorkaroundIndex:
+    """Replace one complete source batch, removing deleted/reverted markers."""
+    var links: [WorkaroundLink] = []
+    for link in index.links:
+        if not paths.contains(link.path): links.push(link)
+    for link in replacements:
+        links.push(link)
+    WorkaroundIndex(revision: index.revision, complete: index.complete, links: links)
+
+fn workaround_sdn_quote(value: text) -> text:
+    val escaped = value.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
+    "\"" + escaped + "\""
+
+fn encode_workaround_index(index: WorkaroundIndex) -> text:
+    """Serialize a versioned SDN table without copying mutable bug status."""
+    var out = "workaround_index |schema, revision, complete|\n    1, "
+    out = out + workaround_sdn_quote(index.revision)
+    val completeness = if index.complete: ", true\n" else: ", false\n"
+    out = out + completeness
+    out = out + "workarounds |bug_id, path, line, recover, reason|\n"
+    for link in index.links:
+        out = out + "    " + workaround_sdn_quote(link.bug_id) + ", "
+        out = out + workaround_sdn_quote(link.path) + ", {link.line}, "
+        out = out + workaround_sdn_quote(link.recover) + ", " + workaround_sdn_quote(link.reason) + "\n"
+    out
+
+# Strict SDN subset: quoted strings with escapes and bare scalars. Reject
+# malformed persisted rows rather than silently truncating a damaged index.
+fn workaround_sdn_fields(row: text) -> Result<[text], text>:
+    var fields: [text] = []
+    var current = ""
+    var quoted = false
+    var escaped = false
+    var closed = false
+    var started = false
+    for ch in row:
+        if escaped:
+            match ch:
+                "n": current = current + "\n"
+                "r": current = current + "\r"
+                "t": current = current + "\t"
+                "\\": current = current + "\\"
+                "\"": current = current + "\""
+                _: return Err("invalid SDN escape")
+            escaped = false
+        elif quoted:
+            if ch == "\\": escaped = true
+            elif ch == "\"":
+                quoted = false
+                closed = true
+            else: current = current + ch
+        elif ch == ",":
+            fields.push(if closed: current else: current.trim())
+            current = ""
+            started = false
+            closed = false
+        elif ch == "\"":
+            if started or closed: return Err("invalid SDN quote")
+            current = ""
+            started = true
+            quoted = true
+        elif closed:
+            if ch != " " and ch != "\t": return Err("text after SDN quote")
+        else:
+            current = current + ch
+            if ch != " " and ch != "\t": started = true
+    if quoted or escaped: return Err("unterminated SDN string")
+    fields.push(if closed: current else: current.trim())
+    Ok(fields)
+
+fn decode_workaround_index(content: text) -> Result<WorkaroundIndex, text>:
+    val lines = content.split("\n")
+    if lines.len() < 3 or lines[0].trim() != "workaround_index |schema, revision, complete|":
+        return Err("unknown workaround index schema; run check-dbs --fullscan bugs")
+    val header = workaround_sdn_fields(lines[1].trim())?
+    if header.len() != 3: return Err("invalid workaround index metadata")
+    if header[0] != "1" or not workaround_recovery_valid(header[1]):
+        return Err("unsupported workaround schema or revision")
+    if header[2] != "true" and header[2] != "false": return Err("invalid completeness flag")
+    if lines[2].trim() != "workarounds |bug_id, path, line, recover, reason|":
+        return Err("invalid workaround table header")
+    var links: [WorkaroundLink] = []
+    var locations: [text] = []
+    for i in 3..lines.len():
+        val row = lines[i].trim()
+        if row == "": continue
+        val fields = workaround_sdn_fields(row)?
+        if fields.len() != 5: return Err("invalid workaround row width")
+        if not workaround_bug_id_valid(fields[0]) or not workaround_path_valid(fields[1]):
+            return Err("invalid workaround bug or source path")
+        if fields[2] == "": return Err("missing workaround line")
+        for ch in fields[2]:
+            if not "0123456789".contains(ch): return Err("invalid workaround line")
+        val line = fields[2].to_i64()
+        if line <= 0: return Err("invalid workaround line")
+        if fields[3] != "" and not workaround_recovery_valid(fields[3]):
+            return Err("invalid workaround recovery reference")
+        val location = fields[1] + ":{line}"
+        if locations.contains(location): return Err("duplicate workaround location")
+        locations.push(location)
+        links.push(WorkaroundLink(bug_id: fields[0], path: fields[1], line: line,
+            recover: fields[3], reason: fields[4]))
+    Ok(WorkaroundIndex(revision: header[1], complete: header[2] == "true", links: links))

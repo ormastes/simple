@@ -41,6 +41,22 @@ for supported invalidation commands and their scope.
 
 ## Rules
 
+- Link temporary source workarounds to their owning bug using an immediately
+  preceding `# @workaround bug=<canonical-id> [recover=<7..64hex>] [reason=<text>]`
+  comment (`//` is also supported). Follow the accepted
+  [workaround workflow](../../../doc/07_guide/tooling/bug_linked_workarounds.md);
+  runtime qualification is pending. Ordinary
+  `simple check-dbs bugs --bug=<canonical-id>` reads the derived index only;
+  missing index or HEAD mismatch requires explicit
+  `simple check-dbs --fullscan bugs` reconciliation. Fix the bug owner, review
+  related links, then narrowly restore intended code. Recovery hashes never
+  authorize automatic checkout/reset.
+- Start dependent Phase 3/4 diagnostic builds when their required compiler
+  binary exists, concurrently with upstream admission and independent Windows/
+  Linux lanes. Use immutable producer bytes and isolated caches/outputs, with
+  CPU and memory budgets. Keep results provisional until admission and lineage
+  pass; binary existence is not an admission result.
+
 - Keep one main cache-backed build as source of truth:
   `--cache-dir build/bootstrap/native_cache --mode dynload`.
 - Preserve caches between retries; use explicit scoped invalidation for changed

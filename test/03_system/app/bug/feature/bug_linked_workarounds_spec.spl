@@ -1,0 +1,142 @@
+# @req REQ-001 REQ-002 REQ-003 REQ-004 REQ-005 REQ-006
+# @cover src/app/bug/workaround_index.spl
+# @cover src/app/bug/workaround_query.spl
+use std.spec.{describe, it, expect, step}
+use app.bug.workaround_index.{WorkaroundLink, WorkaroundIndex, parse_workaround_source,
+    empty_workaround_index, replace_workaround_paths, encode_workaround_index,
+    decode_workaround_index}
+use app.bug.workaround_query.{workaround_issues}
+use std.database.bug.{BugDatabase}
+use std.database.core.{SdnDatabase, SdnTable, SdnRow}
+
+fn require_links(source: text) -> [WorkaroundLink]:
+    match parse_workaround_source("src/fixture.spl", source):
+        case Ok(links): links
+        case Err(reason):
+            fail(reason)
+            []
+
+fn require_index(encoded: text) -> WorkaroundIndex:
+    match decode_workaround_index(encoded):
+        case Ok(index): index
+        case Err(reason):
+            fail(reason)
+            empty_workaround_index("abcdef0")
+
+fn marker_rejected(source: text) -> bool:
+    match parse_workaround_source("src/fixture.spl", source):
+        case Ok(_): false
+        case Err(_): true
+
+fn index_rejected(encoded: text) -> bool:
+    match decode_workaround_index(encoded):
+        case Ok(_): false
+        case Err(_): true
+
+fn bug_fixture(status: text) -> BugDatabase:
+    val raw = SdnDatabase.new("unused-in-memory-fixture")
+    val active = SdnTable.new("bugs_active", ["id", "severity", "status", "title"])
+    val row = SdnRow.empty()
+    row.set("id", "bug_alpha")
+    row.set("severity", "P1")
+    row.set("status", status)
+    row.set("title", "fixture bug")
+    active.add_row(row)
+    raw.set_table("bugs_active", active)
+    BugDatabase(db: raw)
+
+describe "Bug-linked source workarounds":
+    it "locates hash and slash comments immediately above affected blocks":
+        step("Annotate two source blocks with canonical IDs and recovery evidence")
+        val links = require_links("# @workaround bug=bug_alpha\nfn first(): 1\n// @workaround bug=bug_beta recover=ABC1234 reason=preserve original behavior\nfn second(): 2\n")
+        expect(links.len()).to_equal(2)
+        expect(links[0].line).to_equal(1)
+        expect(links[0].recover).to_equal("")
+        expect(links[1].line).to_equal(3)
+        expect(links[1].recover).to_equal("ABC1234")
+        expect(links[1].reason).to_equal("preserve original behavior")
+
+    it "rejects missing IDs malformed references and detached annotations":
+        step("Reject invalid annotations with a source location diagnostic")
+        val malformed = ["# @workaround\nfn x(): 1", "# @workaround reason=why\nfn x(): 1",
+            "# @workaround bug=\nfn x(): 1", "# @workaround bug=../bad\nfn x(): 1",
+            "# @workaround bug=bug_alpha recover=123\nfn x(): 1",
+            "# @workaround bug=bug_alpha recover=xyz0123\nfn x(): 1",
+            "# @workaround bug=bug_alpha bug=another\nfn x(): 1",
+            "# @workaround bug=bug_alpha recover=abcdef0 recover=abcdef1\nfn x(): 1",
+            "# @workaround bug=bug_alpha\n\nfn x(): 1",
+            "# @workaround bug=bug_alpha\n# unrelated comment\nfn x(): 1",
+            "# @workaround bug=bug_alpha"]
+        for source in malformed:
+            expect(marker_rejected(source)).to_equal(true)
+        match parse_workaround_source("src/fixture.spl", malformed[0]):
+            case Err(reason): expect(reason).to_start_with("src/fixture.spl:1:")
+            case Ok(_): fail("malformed marker accepted")
+
+    it "ignores mentions inside source strings and unrelated comments":
+        val links = require_links("val example = \"@workaround bug=not_a_marker\"\n# explain @workaround in prose\nfn x(): 1\n")
+        expect(links.len()).to_equal(0)
+        val multiline = require_links("\"\"\"\n# @workaround bug=doc_example\nfn example(): 1\n\"\"\"\n/*\n// @workaround bug=c_example\n*/\n# @workaround bug=bug_alpha\nfn real(): 1\n")
+        expect(multiline.len()).to_equal(1)
+        expect(multiline[0].bug_id).to_equal("bug_alpha")
+
+    it "round trips quoted commas newlines tabs and backslashes in SDN fields":
+        step("Persist recovery metadata without copying canonical bug status")
+        val link = WorkaroundLink(bug_id: "bug_alpha", path: "src/a.spl", line: 14,
+            recover: "abcdef0", reason: "quote \"value\", slash \\ and\nnew\tline")
+        val original = WorkaroundIndex(revision: "abcdef0123456789", complete: true, links: [link])
+        val encoded = encode_workaround_index(original)
+        val decoded = require_index(encoded)
+        expect(decoded.links.len()).to_equal(1)
+        expect(decoded.links[0].reason).to_equal(link.reason)
+        expect(decoded.links[0].line).to_equal(14)
+        expect(decoded.complete).to_equal(true)
+        expect(decoded.revision).to_equal(original.revision)
+
+    it "rejects corrupt schema escaped strings unsafe paths and duplicate rows":
+        val links = require_links("# @workaround bug=bug_alpha\nfn x(): 1")
+        val index = WorkaroundIndex(revision: "abcdef0", complete: true, links: links)
+        val encoded = encode_workaround_index(index)
+        expect(index_rejected(encoded.replace("1, \"abcdef0\"", "2, \"abcdef0\""))).to_equal(true)
+        expect(index_rejected(encoded.replace("src/fixture.spl", "../outside.spl"))).to_equal(true)
+        expect(index_rejected(encoded.replace("true", "maybe"))).to_equal(true)
+        expect(index_rejected(encoded + "    \"unterminated\n")).to_equal(true)
+        val duplicate = WorkaroundIndex(revision: "abcdef0", complete: true, links: [links[0], links[0]])
+        expect(index_rejected(encode_workaround_index(duplicate))).to_equal(true)
+
+    it "replaces only affected paths and removes deleted or reverted markers":
+        step("Keep another file's workaround while refreshing one changed path")
+        val first = WorkaroundLink(bug_id: "bug_alpha", path: "src/a.spl", line: 1, recover: "", reason: "")
+        val other = WorkaroundLink(bug_id: "bug_beta", path: "src/b.spl", line: 2, recover: "", reason: "")
+        val initial = WorkaroundIndex(revision: "abcdef0", complete: true, links: [first, other])
+        val moved = WorkaroundLink(bug_id: "bug_alpha", path: "src/a.spl", line: 9, recover: "abcdef0", reason: "moved")
+        val refreshed = replace_workaround_paths(initial, ["src/a.spl"], [moved])
+        expect(refreshed.links.len()).to_equal(2)
+        expect(refreshed.links[0].path).to_equal("src/b.spl")
+        expect(refreshed.links[1].line).to_equal(9)
+        step("Delete or revert the marker and retain unrelated records")
+        val removed = replace_workaround_paths(refreshed, ["src/a.spl"], [])
+        expect(removed.links.len()).to_equal(1)
+        expect(removed.links[0].bug_id).to_equal("bug_beta")
+
+    it "joins current bug status without accessing any source file":
+        step("Use an in-memory canonical active bug and an indexed source location")
+        val link = WorkaroundLink(bug_id: "bug_alpha", path: "nonexistent/source.spl", line: 7, recover: "abcdef0", reason: "temporary")
+        val index = WorkaroundIndex(revision: "abcdef0", complete: true, links: [link])
+        val open = workaround_issues(index, bug_fixture("open"), "")
+        expect(open[1].issue_type).to_equal("workaround_link")
+        val fixed = workaround_issues(index, bug_fixture("fixed"), "bug_alpha")
+        expect(fixed[1].issue_type).to_equal("workaround_recovery_review")
+        expect(fixed[1].severity).to_equal("warning")
+        expect(fixed[1].message).to_contain("review original at abcdef0")
+        expect(workaround_issues(index, bug_fixture("closed"), "bug_alpha")[1].issue_type).to_equal("workaround_recovery_review")
+        expect(workaround_issues(index, bug_fixture("open"), "other_bug").len()).to_equal(1)
+
+    it "makes missing canonical bugs and incomplete coverage visible":
+        val link = WorkaroundLink(bug_id: "missing_bug", path: "src/a.spl", line: 1, recover: "", reason: "")
+        val index = WorkaroundIndex(revision: "abcdef0", complete: false, links: [link])
+        val issues = workaround_issues(index, bug_fixture("open"), "")
+        expect(issues[0].issue_type).to_equal("workaround_index_incomplete")
+        expect(issues[0].message).to_contain("--fullscan")
+        expect(issues[2].issue_type).to_equal("workaround_unknown_bug")
+        expect(issues[2].severity).to_equal("error")

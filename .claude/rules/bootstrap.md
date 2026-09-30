@@ -123,6 +123,21 @@ Canonical hash mismatches remain fatal for admission, publication, release, and
 deployment. Warning-only mismatch handling is permitted solely for explicitly
 labeled temporary diagnostic rows.
 
+For the Windows/Linux parallel repair workflow, start dependent Phase 3/4
+diagnostic builds as soon as each required compiler binary exists while
+upstream admission continues. Freeze the producer bytes and source identity,
+isolate writable caches and outputs, and share CPU capacity within memory
+limits. This diagnostic scheduling rule does not change the admitted scheduler
+or its receipt requirements; binary existence is not admission evidence.
+
+Temporary source workarounds must link the owning canonical bug immediately
+before the affected block. Use the
+[bug-linked workaround workflow](../../doc/07_guide/tooling/bug_linked_workarounds.md)
+for marker syntax, indexed review, and narrow recovery (runtime qualification
+pending). Fix the owner, review related links, restore intended blocks, then
+rebuild the smallest valid scope. Never use a recovery hash for automatic
+checkout/reset or rewrite cache identities to force reuse.
+
 The ordinary `bootstrap-from-scratch.sh` entry automatically uses this
 supervisor. Explicit Stage-2 stop, Stage-3 recovery, receipt validation,
 target-VM, and diagnostic-sweep commands remain direct specialized lanes.

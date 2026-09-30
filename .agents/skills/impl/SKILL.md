@@ -100,6 +100,17 @@ description: Implement a feature end-to-end. Self-sufficient — if research, re
   binary per that guide. Record path/hash/stage/provenance/commands, isolate
   output/cache, fail closed, and label evidence by stage; never promote it to
   Stage 4, general SPipe/docgen/test, release, convergence, or cross-host proof.
+- During bootstrap repairs, temporary source workarounds use the owning bug's
+  canonical ID and the immediately preceding `@workaround` comment described in
+  `doc/07_guide/tooling/bug_linked_workarounds.md` (runtime qualification pending).
+  Query indexed links with `simple check-dbs bugs --bug=<canonical-id>`;
+  missing index or HEAD mismatch requires `simple check-dbs --fullscan bugs`.
+  Fix the owner, review links, restore only the intended blocks, and build the
+  smallest valid scope. Preserve cache identities; recovery hashes do not
+  authorize automatic checkout/reset. Phase 3/4 diagnostic work may start as
+  soon as its required compiler binary exists, concurrently with admission,
+  using isolated caches/outputs; qualification and promotion still need the
+  required admission and lineage receipts.
 - If `src/compiler/**`, `src/lib/**`, `src/app/mcp/**`, `src/app/simple_lsp_mcp/**`, or MCP packaging files changed, finish with:
   - `<runtime> check src/compiler`
   - `<runtime> check src/lib`
