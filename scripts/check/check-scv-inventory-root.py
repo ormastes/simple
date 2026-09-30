@@ -48,6 +48,7 @@ def main():
     assert 'source_inventory_digest: refresh.inventory_digest' in code["publisher"]
     assert '"SIMPLE_SCV_SOURCE_INVENTORY_DIGEST", inventory_binding.source_inventory_digest' in code["publisher"]
     assert '"SIMPLE_SCV_INVENTORY_DIGEST", inventory_binding.snapshot_manifest_digest' in code["publisher"]
+    assert code["publisher"].index("val snapshot = scv_compile_snapshot_acquire_v1(") < code["publisher"].index("val source_inventory = compile_source_inventory_read_current_v1(cache_root)") < code["publisher"].index('env_set("SIMPLE_SCV_SOURCE_INVENTORY_DIGEST"')
     assert "sosix_cwd(), source_root" in code["hir"]
     assert "cwd_process as sosix_cwd" in code["sosix"]
     assert "compile_source_inventory_snapshot_cache_root_v1(" in code["snapshot"]
@@ -85,6 +86,7 @@ def main():
               for index, (a, b, c, d) in enumerate(cases, 1)]
     canonical_digest = hashlib.sha256(b"simple-compile-source-inventory-v1\ngeneration=1\ncount=0").hexdigest()
     manifest_digest = hashlib.sha256(b"").hexdigest()
+    changed_digest = hashlib.sha256(b"simple-compile-source-inventory-v1\ngeneration=2\ncount=0").hexdigest()
     assert canonical_digest != manifest_digest
     checks += [f'    val correct = CompileSourceInventoryBindingV1("{manifest_digest}", "{canonical_digest}")',
                f'    if compile_source_inventory_binding_reason_v1(correct, "{canonical_digest}") != "ok": return 40',
@@ -95,6 +97,7 @@ def main():
                f'    if compile_source_inventory_binding_reason_v1(missing, "{canonical_digest}") != "source-inventory-digest-invalid": return 43',
                f'    val malformed = CompileSourceInventoryBindingV1("bad", "{canonical_digest}")',
                f'    if compile_source_inventory_binding_reason_v1(malformed, "{canonical_digest}") != "snapshot-manifest-digest-invalid": return 44',
+               f'    if compile_source_inventory_binding_reason_v1(correct, "{changed_digest}") != "source-inventory-digest-mismatch": return 45',
                f"    if compile_source_inventory_checkout_cache_root_v1({json.dumps(root)}) != {json.dumps(root + '/build/scv')}: return 30",
                '    if compile_source_inventory_cache_root_valid_v1("/home/user/.cache/simple/v1/projects/default"): return 31',
                '    val before = sosix_env_get_nullable("SIMPLE_CACHE") ?? ""',

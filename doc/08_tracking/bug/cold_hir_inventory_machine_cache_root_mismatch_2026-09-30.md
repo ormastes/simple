@@ -55,6 +55,21 @@ instead of printing a successful read reason. Missing new canonical authority
 fails closed; old externally prepared environments must be readmitted by the
 updated entrypoint.
 
+The snapshot manifest is still authenticated by the existing snapshot-open
+provenance, inventory hash, frozen-content and receipt validation; the new
+binding helper's 64-hex shape check does not replace that authority. The
+post-snapshot CURRENT check relies on the event publisher's monotonic encoded
+generation and compare-and-publish contract: a changed generation cannot
+return to the same digest through an ordinary source edit/revert. Deliberate
+out-of-protocol pointer rollback (ABA) is outside that assumption. The typed
+receipt owner additionally checks every lowered source against the admitted
+canonical inventory. No additional tree scan is introduced.
+
+Regression source covers a canonical generation changing after refresh but
+before publication, requiring `source-inventory-digest-mismatch`, and verifies
+the reread precedes environment publication. This case was added after the
+third native attempt and remains unexecuted with the rest of the native bodies.
+
 The entrypoint uses canonical current directory as its checkout root, not a
 Git root search. HIR uses SOSIX cwd and the same path normalization. A parent
 checkout snapshot cannot be inherited from a child cwd. Windows drive and
