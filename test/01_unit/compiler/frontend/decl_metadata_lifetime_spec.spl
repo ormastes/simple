@@ -1,0 +1,74 @@
+use std.spec.{describe, it, expect}
+use compiler.core.ast.{ast_reset, decl_alloc, decl_set_memory_banks, decl_get_memory_banks, decl_set_unroll_factor, decl_get_unroll_factor, decl_set_pipeline_ii, decl_get_pipeline_ii, decl_set_param_defaults, decl_get_param_defaults, decl_set_asm_placement, decl_get_asm_placement, flat_decl_pools_dump, flat_decl_pools_restore, flat_decl_pools_consistent, decl_memory_banks, ast_module_decl_count_slot, module_decl_slots}
+use compiler.frontend.core.flat_pool_codec.{FlatPoolReader}
+
+fn metadata_fixture_decl(banks: i64, default_id: i64, placement: text) -> i64:
+    val index = decl_alloc(1, 0)
+    decl_set_memory_banks(index, banks)
+    decl_set_unroll_factor(index, 8)
+    decl_set_pipeline_ii(index, 2)
+    decl_set_param_defaults(index, [default_id])
+    decl_set_asm_placement(index, placement)
+    index
+
+fn expect_metadata_values(index: i64, banks: i64, default_id: i64, placement: text):
+    expect(decl_get_memory_banks(index)).to_equal(banks)
+    expect(decl_get_unroll_factor(index)).to_equal(8)
+    expect(decl_get_pipeline_ii(index)).to_equal(2)
+    expect(decl_get_param_defaults(index)).to_equal([default_id])
+    expect(decl_get_asm_placement(index)).to_equal(placement)
+
+describe "Declaration metadata file ownership":
+    it "keeps all declaration pool lengths aligned across repeated larger and smaller files":
+        var file_index = 0
+        while file_index < 64:
+            ast_reset()
+            var index = 0
+            val count = if file_index % 2 == 0: 32 else: 1
+            while index < count:
+                metadata_fixture_decl(4, index + 11, "section(.text.boot)")
+                index = index + 1
+            expect(flat_decl_pools_consistent()).to_equal(true)
+            expect_metadata_values(0, 4, 11, "section(.text.boot)")
+            file_index = file_index + 1
+        ast_reset()
+        expect(flat_decl_pools_consistent()).to_equal(true)
+
+    it "restores banks defaults and assembly placement values after reset":
+        ast_reset()
+        val index = metadata_fixture_decl(7, 41, "section(.text.boot)|align(16)")
+        val saved = flat_decl_pools_dump()
+        ast_reset()
+        metadata_fixture_decl(99, 99, "section(.wrong)")
+        expect(flat_decl_pools_restore(FlatPoolReader.new(saved))).to_equal(true)
+        expect(flat_decl_pools_consistent()).to_equal(true)
+        expect_metadata_values(index, 7, 41, "section(.text.boot)|align(16)")
+        ast_reset()
+
+    it "recovers metadata values after a rejected truncated restore and a fresh declaration":
+        ast_reset()
+        metadata_fixture_decl(99, 99, "section(.stale)")
+        expect(flat_decl_pools_restore(FlatPoolReader.new("0\n"))).to_equal(false)
+        # parser_init_with_path invokes this reset before the cache-miss parse.
+        ast_reset()
+        val fresh = metadata_fixture_decl(3, 17, "section(.fresh)")
+        expect(flat_decl_pools_consistent()).to_equal(true)
+        expect_metadata_values(fresh, 3, 17, "section(.fresh)")
+        ast_reset()
+
+    it "rejects mismatched metadata lengths and invalid active module references":
+        ast_reset()
+        metadata_fixture_decl(4, 11, "section(.ok)")
+        decl_memory_banks.push(123)
+        expect(flat_decl_pools_consistent()).to_equal(false)
+        ast_reset()
+        metadata_fixture_decl(4, 11, "section(.ok)")
+        # A preallocated unused tail is supported by module_add_decl.
+        module_decl_slots.push(0)
+        module_decl_slots.push(0)
+        expect(flat_decl_pools_consistent()).to_equal(true)
+        ast_module_decl_count_slot[0] = 1
+        expect(flat_decl_pools_consistent()).to_equal(true)
+        module_decl_slots[0] = 1
+        expect(flat_decl_pools_consistent()).to_equal(false)
+        ast_reset()

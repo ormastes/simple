@@ -1,0 +1,142 @@
+# Run with a cold isolated SIMPLE_FRONTEND_CACHE_DIR and nonempty
+# SIMPLE_FRONTEND_CACHE_SCOPE. This executable verifies actual cache dispatch.
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{
+    parse_full_frontend_in_borrowed_scope_with_advisory_policy_v1,
+    parse_full_frontend_in_borrowed_scope
+}
+use compiler.frontend.frontend_advisory_preprocess_port_v1.{FrontendAdvisoryPreprocessPolicyV1}
+use compiler.frontend.frontend_parse_cache.{
+    frontend_parse_cache_enabled, frontend_parse_cache_hits, frontend_parse_cache_stores,
+    frontend_parse_cache_key, frontend_parse_cache_store, frontend_parse_cache_load
+}
+use compiler.frontend.flat_ast_bridge.{flat_pool_capture_take}
+use compiler.frontend.core.flat_pool_codec.{FLAT_POOL_CODEC_VERSION}
+use compiler.core.parser.{parser_has_errors}
+use compiler.driver.driver_source_pipeline_parsing.{
+    driver_end_transient_parse_scope, driver_promote_frontend_registry_owners
+}
+
+@unsafe(reason: "native memory lifetime integration fixture", capabilities: [ffi])
+extern fn rt_transient_array_scope_begin() -> bool
+@unsafe(reason: "owner pauses memory before promotion", capabilities: [ffi])
+extern fn rt_transient_array_scope_pause() -> bool
+
+fn parse_with_parent_owner(require_missing_provider: bool, invalid_source: bool, hir_reference_entry: bool) -> i64:
+    val source = if invalid_source:
+        "fn scope_cached() -> i64:\n    return )\n"
+    else:
+        "fn scope_cached() -> i64:\n    return 31\n"
+    val path = if invalid_source:
+        "test/fixtures/native/flat_pool_cache_borrowed_scope/invalid_input.txt"
+    else:
+        "test/fixtures/native/flat_pool_cache_borrowed_scope/cache_input.spl"
+    val policy = if require_missing_provider:
+        FrontendAdvisoryPreprocessPolicyV1.RequireSimd
+    else:
+        FrontendAdvisoryPreprocessPolicyV1.Reference
+    var began = false
+    unsafe(capabilities: [ffi]):
+        began = rt_transient_array_scope_begin()
+    if not began:
+        return 1
+    var code: i64 = 0
+    val result = if hir_reference_entry:
+        Ok(parse_full_frontend_in_borrowed_scope(source, path, "scope_cached", Logger(level: 0)))
+    else:
+        parse_full_frontend_in_borrowed_scope_with_advisory_policy_v1(
+            source, path, "scope_cached", Logger(level: 0), policy,
+            0u64, 0u64, 0u64, "borrowed-scope-integration")
+    if require_missing_provider:
+        if not result.is_err():
+            code = 2
+    elif result.is_err():
+        code = 3
+    elif invalid_source:
+        if not parser_has_errors():
+            code = 4
+    elif not result.unwrap().functions.contains_key("scope_cached"):
+        code = 5
+    # frontend_parse_or_restore must take/disarm the global capture before
+    # the driver ends its owner scope, including the parser-error path.
+    if flat_pool_capture_take() != "":
+        code = 6
+    var nested = false
+    var paused = false
+    unsafe(capabilities: [ffi]):
+        nested = rt_transient_array_scope_begin()
+        paused = rt_transient_array_scope_pause()
+    if nested or not paused:
+        code = 7
+    if not driver_promote_frontend_registry_owners():
+        code = 8
+    if not driver_end_transient_parse_scope():
+        code = 9
+    code
+
+fn main() -> i64:
+    # Initialize the process-lived cache memo outside any per-file owner,
+    # exactly as the corrected streaming driver does.
+    if not frontend_parse_cache_enabled():
+        return 50
+    val stores_before = frontend_parse_cache_stores()
+    val hits_before = frontend_parse_cache_hits()
+    val cold = parse_with_parent_owner(false, false, false)
+    if cold != 0:
+        return cold
+    if frontend_parse_cache_stores() != stores_before + 1:
+        return 51
+    val warm = parse_with_parent_owner(false, false, false)
+    if warm != 0:
+        return warm + 10
+    if frontend_parse_cache_hits() != hits_before + 1:
+        return 52
+    val provider = parse_with_parent_owner(true, false, false)
+    if provider != 0:
+        return provider + 20
+    val invalid = parse_with_parent_owner(false, true, false)
+    if invalid != 0:
+        return invalid + 30
+    if frontend_parse_cache_stores() != stores_before + 1:
+        return 53
+    # Reuse the surviving process memo after both failure cleanup paths.
+    val final_warm = parse_with_parent_owner(false, false, false)
+    if final_warm != 0:
+        return final_warm + 40
+    if frontend_parse_cache_hits() != hits_before + 2:
+        return 54
+    # HIR reparses use the nonadvisory reference entry with a distinct key.
+    # Exercise its cold miss and warm hit while the caller still owns cleanup.
+    val hir_cold = parse_with_parent_owner(false, false, true)
+    if hir_cold != 0:
+        return hir_cold + 60
+    if frontend_parse_cache_stores() != stores_before + 2:
+        return 70
+    val hir_warm = parse_with_parent_owner(false, false, true)
+    if hir_warm != 0:
+        return hir_warm + 80
+    if frontend_parse_cache_hits() != hits_before + 3:
+        return 90
+    # A corrupt persisted frame must become a miss and a real fresh parse in
+    # the same process, with the driver's owner still active until cleanup.
+    val key = frontend_parse_cache_key("test/fixtures/native/flat_pool_cache_borrowed_scope/cache_input.spl")
+    if key == "" or not frontend_parse_cache_store(key, FLAT_POOL_CODEC_VERSION + "\n0,0\n"):
+        return 91
+    val malformed_fallback = parse_with_parent_owner(false, false, true)
+    if malformed_fallback != 0:
+        return malformed_fallback + 100
+    if frontend_parse_cache_stores() != stores_before + 4:
+        return 111
+    if frontend_parse_cache_hits() != hits_before + 3:
+        return 112
+    val valid_blob = frontend_parse_cache_load(key)
+    if valid_blob == "" or not frontend_parse_cache_store(key, valid_blob + "extra\n"):
+        return 113
+    val trailing_fallback = parse_with_parent_owner(false, false, true)
+    if trailing_fallback != 0:
+        return trailing_fallback + 120
+    if frontend_parse_cache_stores() != stores_before + 6:
+        return 131
+    if frontend_parse_cache_hits() != hits_before + 3:
+        return 132
+    0

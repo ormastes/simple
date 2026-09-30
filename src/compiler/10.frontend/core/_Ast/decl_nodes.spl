@@ -343,6 +343,26 @@ var decl_empty_i64: [i64] = []
 var decl_empty_text: [text] = []
 var decl_empty_text_lists: [[text]] = []
 
+# These pools grow in decl_push_default_slot just like decl_tag. Reset them
+# in their defining module so replacement of a nil native owner persists.
+# Omission retained every previous file's tail in the frontend cache snapshot.
+pub fn decl_metadata_pools_reset():
+    if decl_asm_placement == nil:
+        decl_asm_placement = []
+    if decl_unroll_factor == nil:
+        decl_unroll_factor = []
+    if decl_pipeline_ii == nil:
+        decl_pipeline_ii = []
+    if decl_memory_banks == nil:
+        decl_memory_banks = []
+    if decl_param_default_text == nil:
+        decl_param_default_text = []
+    decl_asm_placement.clear()
+    decl_unroll_factor.clear()
+    decl_pipeline_ii.clear()
+    decl_memory_banks.clear()
+    decl_param_default_text.clear()
+
 fn decl_count() -> i64:
     ast_decl_count_get()
 
@@ -1556,6 +1576,7 @@ pub fn flat_decl_pools_dump() -> text:
     parts = parts.push(flat_pool_enc_i64(ast_decl_mirror_high_slot))
     parts = parts.push(flat_pool_enc_i64(ast_module_decl_count_slot))
     parts = parts.push(flat_pool_enc_i64(ast_module_decl_mirror_high_slot))
+    parts = parts.push(flat_pool_enc_text(decl_asm_placement))
     # Same erasure dodge, without changing the pool owner or its children.
     var encoded_decl_body_stmts: [[i64]] = []
     for decl_body_flat_entry in decl_body_stmts_flat:
@@ -1624,6 +1645,7 @@ pub fn flat_decl_pools_restore(r: FlatPoolReader) -> bool:
     ast_decl_mirror_high_slot = flat_pool_dec_i64(r)
     ast_module_decl_count_slot = flat_pool_dec_i64(r)
     ast_module_decl_mirror_high_slot = flat_pool_dec_i64(r)
+    decl_asm_placement = flat_pool_dec_text_into(decl_asm_placement, r)
     decl_body_stmts = flat_pool_dec_i64_list_into(decl_body_stmts, r)
     decl_body_stmts_flat = flat_pool_dec_text_into(decl_body_stmts_flat, r)
     decl_clocked_args = flat_pool_dec_text_list_into(decl_clocked_args, r)
@@ -1648,21 +1670,21 @@ pub fn flat_decl_pools_restore(r: FlatPoolReader) -> bool:
     decl_is_simd = flat_pool_dec_i64_into(decl_is_simd, r)
     decl_is_trait = flat_pool_dec_i64_into(decl_is_trait, r)
     decl_is_value_type = flat_pool_dec_i64_into(decl_is_value_type, r)
-    decl_memory_banks = flat_pool_dec_i64(r)
+    decl_memory_banks = flat_pool_dec_i64_into(decl_memory_banks, r)
     decl_name = flat_pool_dec_text_into(decl_name, r)
-    decl_param_default_text = flat_pool_dec_text(r)
+    decl_param_default_text = flat_pool_dec_text_into(decl_param_default_text, r)
     decl_param_mut_text = flat_pool_dec_text_into(decl_param_mut_text, r)
     decl_param_names = flat_pool_dec_text_list_into(decl_param_names, r)
     decl_param_types = flat_pool_dec_i64_list_into(decl_param_types, r)
     decl_params = flat_pool_dec_i64_list_into(decl_params, r)
-    decl_pipeline_ii = flat_pool_dec_i64(r)
+    decl_pipeline_ii = flat_pool_dec_i64_into(decl_pipeline_ii, r)
     decl_ret_type = flat_pool_dec_i64_into(decl_ret_type, r)
     decl_span = flat_pool_dec_i64_into(decl_span, r)
     decl_tag = flat_pool_dec_i64_into(decl_tag, r)
     decl_type_param_constraint_mode = flat_pool_dec_text_list_into(decl_type_param_constraint_mode, r)
     decl_type_param_constraints = flat_pool_dec_text_list_list_into(decl_type_param_constraints, r)
     decl_type_params = flat_pool_dec_text_list_into(decl_type_params, r)
-    decl_unroll_factor = flat_pool_dec_i64(r)
+    decl_unroll_factor = flat_pool_dec_i64_into(decl_unroll_factor, r)
     decl_vhdl_generic_args = flat_pool_dec_i64_list_into(decl_vhdl_generic_args, r)
     decl_visibility = flat_pool_dec_text_into(decl_visibility, r)
     elif_body = flat_pool_dec_i64_list(r)
@@ -1676,3 +1698,66 @@ pub fn flat_decl_pools_restore(r: FlatPoolReader) -> bool:
     r.ok
 
 export flat_decl_pools_dump, flat_decl_pools_restore
+# Strict frontend cache admission calls this after every pool is restored.
+# The count slots are scalar arrays; an empty pristine slot means zero.
+# module_decls is a legacy compatibility pool: module_add_decl writes the
+# authoritative module_decl_slots. That owner supports a preallocated tail;
+# validate its active prefix rather than rejecting legitimate spare slots.
+pub fn flat_decl_pools_consistent() -> bool:
+    if ast_decl_count_slot.len() > 1 or ast_module_decl_count_slot.len() > 1:
+        return false
+    val count = if ast_decl_count_slot.len() == 0: 0 else: ast_decl_count_slot[0]
+    val module_count = if ast_module_decl_count_slot.len() == 0: 0 else: ast_module_decl_count_slot[0]
+    if count < 0 or module_count < 0 or module_count > count:
+        return false
+    if module_decl_slots.len() < module_count:
+        return false
+    var module_index = 0
+    while module_index < module_count:
+        val decl_index = module_decl_slots[module_index]
+        if decl_index < 0 or decl_index >= count:
+            return false
+        module_index = module_index + 1
+    if decl_tag.len() != count: return false
+    if decl_span.len() != count: return false
+    if decl_name.len() != count: return false
+    if decl_params.len() != count: return false
+    if decl_param_names.len() != count: return false
+    if decl_param_types.len() != count: return false
+    if decl_ret_type.len() != count: return false
+    if decl_body_stmts.len() != count: return false
+    if decl_body_stmts_flat.len() != count: return false
+    if decl_field_names.len() != count: return false
+    if decl_field_types.len() != count: return false
+    if decl_field_defaults.len() != count: return false
+    if decl_field_bits.len() != count: return false
+    if decl_imports.len() != count: return false
+    if decl_visibility.len() != count: return false
+    if decl_is_async.len() != count: return false
+    if decl_is_comptime.len() != count: return false
+    if decl_type_params.len() != count: return false
+    if decl_type_param_constraints.len() != count: return false
+    if decl_type_param_constraint_mode.len() != count: return false
+    if decl_is_lazy.len() != count: return false
+    if decl_is_gpu_kernel.len() != count: return false
+    if decl_rt_hal_flags.len() != count: return false
+    if decl_asm_placement.len() != count: return false
+    if decl_gpu_target_text.len() != count: return false
+    if decl_gpu_target_arg_name_text.len() != count: return false
+    if decl_gpu_backends_text.len() != count: return false
+    if decl_is_simd.len() != count: return false
+    if decl_is_packed.len() != count: return false
+    if decl_derives.len() != count: return false
+    if decl_impl_trait.len() != count: return false
+    if decl_is_trait.len() != count: return false
+    if decl_is_hardware.len() != count: return false
+    if decl_clocked_args.len() != count: return false
+    if decl_vhdl_generic_args.len() != count: return false
+    if decl_flatten_struct_output.len() != count: return false
+    if decl_unroll_factor.len() != count: return false
+    if decl_pipeline_ii.len() != count: return false
+    if decl_memory_banks.len() != count: return false
+    if decl_is_value_type.len() != count: return false
+    if decl_param_mut_text.len() != count: return false
+    if decl_param_default_text.len() != count: return false
+    true
