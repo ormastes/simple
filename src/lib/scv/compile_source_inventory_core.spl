@@ -87,7 +87,7 @@ fn compile_source_inventory_facet_text_v1(content: text, facet: text) -> text:
     compile_source_inventory_facet_rows_from_canonical_v1(
         compile_source_inventory_strip_comments_v1(content), facet)
 
-# NOTE on hashing cost: `sha256_text` (used below, 4x per file) is already
+# NOTE on hashing cost: `sha256_text` is already
 # runtime-native — src/lib/common/crypto/sha256.spl:211 calls the extern
 # `rt_tls13_sha256` and only falls back to an interpreted compression loop on
 # an invalid-length result. So a per-file "pass a natively-hashed digest in"
@@ -104,14 +104,58 @@ fn compile_source_inventory_event_from_content_v1(
     if operation == "delete":
         return CompileSourceEventV1(
             source, operation, source_identity, "", "", "", "", "", 0)
-    val canonical = compile_source_inventory_strip_comments_v1(content)
+    # Build all views while each normalized line is already available. The
+    # public single-facet helpers retain their contract; cold inventory need
+    # not split and allocate the complete canonical source three more times.
+    var semantic_rows: [text] = []
+    var export_rows: [text] = []
+    var initializer_rows: [text] = []
+    var provider_rows: [text] = []
+    for line in content.split("\n"):
+        val trimmed = line.trim()
+        if trimmed == "" or trimmed.starts_with("#"):
+            continue
+        val normalized = split_whitespace(trimmed).join(" ")
+        semantic_rows = semantic_rows.push(normalized)
+        if normalized.starts_with("export ") or normalized.starts_with("pub "):
+            export_rows = export_rows.push(normalized)
+        if normalized.starts_with("val ") or normalized.starts_with("var ") or normalized.starts_with("init "):
+            initializer_rows = initializer_rows.push(normalized)
+        if normalized.starts_with("use ") or normalized.starts_with("impl ") or normalized.starts_with("provider "):
+            provider_rows = provider_rows.push(normalized)
+    val canonical = semantic_rows.join("\n")
+    val exports = export_rows.join("\n")
+    val initializers = initializer_rows.join("\n")
+    val providers = provider_rows.join("\n")
+    val content_digest = sha256_text(content)
+    val semantic_digest = if canonical == content:
+        content_digest
+    else:
+        sha256_text(canonical)
+    # Empty and whole-source facets frequently coincide. Reuse only a digest
+    # computed for byte-identical text in this event; no cross-source cache or
+    # membership/publication authority is introduced.
+    val export_digest = if exports == canonical:
+        semantic_digest
+    else:
+        sha256_text(exports)
+    val initializer_digest = if initializers == canonical:
+        semantic_digest
+    elif initializers == exports:
+        export_digest
+    else:
+        sha256_text(initializers)
+    val provider_digest = if providers == canonical:
+        semantic_digest
+    elif providers == exports:
+        export_digest
+    elif providers == initializers:
+        initializer_digest
+    else:
+        sha256_text(providers)
     CompileSourceEventV1(
-        source, operation, source_identity, sha256_text(content),
-        sha256_text(compile_source_inventory_facet_rows_from_canonical_v1(canonical, "semantic")),
-        sha256_text(compile_source_inventory_facet_rows_from_canonical_v1(canonical, "export")),
-        sha256_text(compile_source_inventory_facet_rows_from_canonical_v1(canonical, "initializer")),
-        sha256_text(compile_source_inventory_facet_rows_from_canonical_v1(canonical, "provider")),
-        content.len())
+        source, operation, source_identity, content_digest, semantic_digest,
+        export_digest, initializer_digest, provider_digest, content.len())
 
 fn compile_source_inventory_git_event_v1(
     operation: text, source_identity: text, content: text
