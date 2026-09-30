@@ -1,0 +1,134 @@
+"""F11 prevention: parsed function bodies retain their declared callable IDs.
+
+The explicit declaration order and prefix make the old main=6 collision
+deterministic without depending on Dict order.
+"""
+
+use std.spec.{describe, expect, it, step}
+use std.env.variables.{env_get, env_has, env_set, env_unset}
+use compiler.common.config.{Logger}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_types.{SymbolTable, SymbolKind}
+use compiler.hir.hir_symbol_table_methods.*
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind, HirStmtKind, HirTypeKind}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir_lowering.{MirLowering}
+
+fn entry_identity_call_target(expr: HirExpr) -> i64:
+    match expr.kind:
+        case HirExprKind.Call(callee, _, _):
+            match callee.kind:
+                case HirExprKind.Var(symbol): return symbol.id
+                case HirExprKind.NamedVar(symbol, _): return symbol.id
+                case _: ()
+        case _: ()
+    -1
+
+fn check_entry_declaration_identity(source: text, declaration_order: [text], prefix_count: i64):
+    val had_bootstrap = env_has("SIMPLE_BOOTSTRAP")
+    val prior_bootstrap = env_get("SIMPLE_BOOTSTRAP")
+    val enabled = env_set("SIMPLE_BOOTSTRAP", "1")
+    val parsed = parse_full_frontend(source, "entry_identity.spl", "entry_identity", Logger(level: 0))
+    var lowering = HirLowering.with_filename("entry_identity.spl")
+    val bootstrap_active = lowering.ambient_bootstrap_enabled()
+    lowering.symbols = SymbolTable.new()
+    var prefix = 0
+    while prefix < prefix_count:
+        lowering.symbols.define("prior_callable_{prefix}", SymbolKind.Function, nil, Span.empty(), Visibility.Private, false, nil)
+        prefix = prefix + 1
+
+    var expected_ids: [i64] = []
+    for name in declaration_order:
+        val declaration = parsed.functions[name]
+        val signature = lowering.declared_callable_type(declaration, nil)
+        val declared = lowering.symbols.define(name, SymbolKind.Function, signature, declaration.span, declaration.visibility, false, nil)
+        expected_ids.push(declared.id)
+
+    var matching_ids = 0
+    var matching_names = 0
+    var scalar_externs = 0
+    var text_externs = 0
+    var main_call_id = -1
+    var scalar_id = -1
+    var version_id = -1
+    var version_call_id = -1
+    var main_id = -1
+    var main_link_name = ""
+    var mir_errors = -1
+    var ordinal = 0
+    for name in declaration_order:
+        val lowered = lowering.lower_function(parsed.functions[name])
+        if lowered.symbol.id == expected_ids[ordinal]:
+            matching_ids = matching_ids + 1
+        if lowering.symbols.symbol_name_scalar_raw(lowered.symbol.id) == name:
+            matching_names = matching_names + 1
+        if name == "rt_identity_scalar":
+            scalar_id = lowered.symbol.id
+            if lowered.is_extern and lowered.return_type.kind == HirTypeKind.Int(64, true):
+                scalar_externs = scalar_externs + 1
+        if name == "rt_identity_text":
+            if lowered.is_extern and lowered.return_type.kind == HirTypeKind.Str:
+                text_externs = text_externs + 1
+        if name == "bootstrap_version":
+            version_id = lowered.symbol.id
+        if name == "main":
+            main_id = lowered.symbol.id
+            if lowered.body.has:
+                main_call_id = entry_identity_call_target(lowered.body.value)
+            for statement in lowered.body.stmts:
+                match statement.kind:
+                    case HirStmtKind.Let(_, _, initial):
+                        version_call_id = entry_identity_call_target(initial)
+                    case _: ()
+            var mir_lowering = MirLowering.new(lowering.symbols)
+            val mir_function = mir_lowering.lower_function(lowered)
+            main_link_name = mir_function.name
+            mir_errors = mir_lowering.errors.len()
+        ordinal = ordinal + 1
+
+    var restored = false
+    if had_bootstrap:
+        restored = env_set("SIMPLE_BOOTSTRAP", prior_bootstrap)
+    else:
+        restored = env_unset("SIMPLE_BOOTSTRAP")
+
+    step("Require declaration identity through HIR bodies and MIR linkage")
+    expect(enabled).to_equal(true)
+    expect(bootstrap_active).to_equal(true)
+    expect(restored).to_equal(true)
+    expect(lowering.errors.len()).to_equal(0)
+    expect(matching_ids).to_equal(declaration_order.len())
+    expect(matching_names).to_equal(declaration_order.len())
+    expect(main_link_name).to_equal("main")
+    expect(mir_errors).to_equal(0)
+    if parsed.functions.has("rt_identity_scalar"):
+        expect(scalar_externs).to_equal(1)
+        expect(main_call_id).to_equal(scalar_id)
+        expect(main_id == scalar_id).to_equal(false)
+    if parsed.functions.has("rt_identity_text"):
+        expect(text_externs).to_equal(1)
+    if parsed.functions.has("bootstrap_version"):
+        expect(version_call_id).to_equal(version_id)
+        expect(main_id == version_id).to_equal(false)
+
+describe "bootstrap entry and local extern declaration identity":
+    it "allocates a real entry row with no extern declarations":
+        check_entry_declaration_identity("fn main() -> i64:\n    0\n", ["main"], 7)
+
+    it "retains another known bootstrap function's allocated row":
+        check_entry_declaration_identity("fn bootstrap_version() -> text:\n    \"identity-probe\"\nfn main() -> i64:\n    val version = bootstrap_version()\n    0\n", ["bootstrap_version", "main"], 8)
+
+    it "does not borrow row six from an extern preceding main":
+        check_entry_declaration_identity("extern fn rt_identity_scalar() -> i64\nfn main() -> i64:\n    rt_identity_scalar()\n", ["rt_identity_scalar", "main"], 6)
+
+    it "preserves an extern declared after main":
+        check_entry_declaration_identity("fn main() -> i64:\n    rt_identity_scalar()\nextern fn rt_identity_scalar() -> i64\n", ["main", "rt_identity_scalar"], 6)
+
+    it "keeps scalar and text externs before the entry distinct":
+        check_entry_declaration_identity("extern fn rt_identity_scalar() -> i64\nextern fn rt_identity_text(bytes: [u8]) -> text\nfn main() -> i64:\n    rt_identity_scalar()\n", ["rt_identity_scalar", "rt_identity_text", "main"], 6)
+
+    it "keeps mixed externs on either side of the entry distinct":
+        check_entry_declaration_identity("extern fn rt_identity_text(bytes: [u8]) -> text\nfn main() -> i64:\n    rt_identity_scalar()\nextern fn rt_identity_scalar() -> i64\n", ["rt_identity_text", "main", "rt_identity_scalar"], 6)
