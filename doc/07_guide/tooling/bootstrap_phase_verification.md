@@ -1,5 +1,12 @@
 # Per-Phase Bootstrap Verification
 
+## Bootstrap failure collection
+
+For diagnostic sweeps, continue independent phase builds and test rows after failures. Minimum sanity on a usable compiler permits further diagnostic compilation before formal admission. The admission-based live checks below still require their stated manifests and evidence. Follow the
+[shared collection policy](bootstrap_failure_collection.md) for terminal statuses, budgets,
+cache preservation, and bug evidence. This is agent workflow guidance; it does
+not change runner behavior.
+
 Authoritative map of the full bootstrap's phases, the gate that covers each, and
 — the most valuable part of this document — the phases that are **not** covered.
 

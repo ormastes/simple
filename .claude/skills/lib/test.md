@@ -1,5 +1,15 @@
 # Test Writing Skill
 
+## Bootstrap failure collection
+
+During bootstrap collection, retain failing assertions and continue independent
+shards. A crash blocks its dependent chain, not every suite. Report
+FAILED/BLOCKED/SKIPPED/PASS with non-vacuous evidence and an unsuccessful
+aggregate when required work fails or cannot run. Follow the
+[shared collection policy](../../../doc/07_guide/tooling/bootstrap_failure_collection.md) for terminal statuses, budgets,
+cache preservation, and bug evidence. This is agent workflow guidance; it does
+not change runner behavior.
+
 ## Critical Rules
 
 - NEVER ignore/skip/comment-out failing tests without user approval

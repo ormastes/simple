@@ -1,5 +1,12 @@
 # bootstrap Layer Expert
 
+## Bootstrap failure collection
+
+During diagnosis, a usable phase artifact plus minimum sanity permits the next diagnostic phase without waiting for formal admission or the full suite. Continue independent tool builds and test shards after errors; preserve lineage and strict promotion gates. Follow the
+[shared collection policy](../../../07_guide/tooling/bootstrap_failure_collection.md) for terminal statuses, budgets,
+cache preservation, and bug evidence. This is agent workflow guidance; it does
+not change runner behavior.
+
 ## Role
 
 Own layer-specific process knowledge for the 4-stage bootstrap pipeline (see

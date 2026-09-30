@@ -1,9 +1,23 @@
 # Build Agent - Building and Releasing
 
+## Bootstrap failure collection
+
+Continue independent bootstrap phases and entries after errors. Start the next
+diagnostic phase on a usable artifact plus minimum sanity, with bounded
+resources and isolated caches; aggregate failures at the end. Follow the
+[shared collection policy](../../doc/07_guide/tooling/bootstrap_failure_collection.md) for terminal statuses, budgets,
+cache preservation, and bug evidence. This is agent workflow guidance; it does
+not change runner behavior.
+
 **Use when:** Building the project, creating releases, managing packages.
 **Skills:** `/release`
 
 ## Quick Build Commands
+
+Prefer Simple `.spl` for product/tool implementation. Outside bootstrap
+orchestration, use `.shs` when shell glue is necessary and minimize new Python,
+JavaScript, BAT, PowerShell, and plain `.sh` scripts. Preserve existing scripts
+unless the requested work needs changes; bootstrap orchestration is excepted.
 
 ```bash
 bin/simple build                    # Debug build
