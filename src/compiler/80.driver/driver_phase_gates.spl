@@ -14,6 +14,10 @@ use compiler.common.driver_core_types.{CompileMode, CompileOptions}
 use compiler.driver.driver_source_loading.{_driver_physical_source_key}
 use compiler.core.interpreter.hashmap.{hm_hash_text}
 use std.io_runtime.{env_get_opt}
+use compiler.driver.driver_streaming_surface_policy.{
+    driver_streaming_surface_requested_values,
+    driver_streaming_surface_route_values
+}
 
 # Keep the nullable façade at this decision boundary: unset and explicit-empty
 # are equivalent for the current flags, but callers retain the option shape so
@@ -64,20 +68,23 @@ pub fn driver_source_matches_entry(
         path == "./src/app/cli/bootstrap_main.spl" or
         module_name == "app.cli.bootstrap_main"
 
+pub fn driver_streaming_surface_route(ctx: CompileContext) -> i64:
+    val requested = driver_streaming_surface_requested_values(
+        driver_env_get_opt("SIMPLE_STAGE3_STREAMING_SURFACES") ?? "",
+        driver_env_get_opt("SIMPLE_BOOTSTRAP_STAGE4") ?? "",
+        driver_env_get_opt("SIMPLE_STAGE4_STREAMING_SURFACES") ?? "")
+    # compiler_source_entry is published before phase routing by ordinary
+    # native-build as well as bootstrap. Do not require a bootstrap-only flag
+    # to honor an explicit request for bounded per-file parser ownership.
+    driver_streaming_surface_route_values(requested,
+        ctx.options.mode == CompileMode.Aot or ctx.options.cli_mode_text == "aot",
+        driver_source_entry_closure_enabled(ctx),
+        ctx.config.contains_key("coverage"),
+        (ctx.config["mcdc_mode"] ?? "off") == "off",
+        ctx.options.backend == "vhdl")
+
 fn driver_streaming_surface_enabled(ctx: CompileContext) -> bool:
-    (ctx.options.mode == CompileMode.Aot or ctx.options.cli_mode_text == "aot") and
-        not ctx.config.contains_key("coverage") and
-        # native-build publishes the requested entry in compiler_source_entry
-        # before phase routing.  Treat that as entry authority; rejecting it
-        # silently selected the legacy retain-all ParserModule path for the
-        # canonical Stage 3 invocation and grew RSS past the host guard.
-        driver_source_entry_closure_enabled(ctx) and
-        (ctx.config["mcdc_mode"] ?? "off") == "off" and
-        (driver_env_get_opt("SIMPLE_BOOTSTRAP") ?? "") == "1" and
-        ((driver_env_get_opt("SIMPLE_STAGE3_STREAMING_SURFACES") ?? "") == "1" or
-         ((driver_env_get_opt("SIMPLE_BOOTSTRAP_STAGE4") ?? "") == "1" and
-          (driver_env_get_opt("SIMPLE_STAGE4_STREAMING_SURFACES") ?? "") == "1")) and
-        ctx.options.backend != "vhdl"
+    driver_streaming_surface_route(ctx) == 1
 
 
 fn bootstrap_last_fixed_input(options: CompileOptions) -> text:

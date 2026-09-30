@@ -53,6 +53,8 @@ use std.nogc_sync_mut.io.env_ops.{env_get}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 
 pub use compiler.driver.driver_phase_gates.{driver_streaming_surface_enabled}
+use compiler.driver.driver_phase_gates.{driver_streaming_surface_route}
+use compiler.driver.driver_streaming_surface_policy.{driver_streaming_surface_rejection}
 use compiler.driver.cache.cache_root.{machine_cache_root}
 
 fn driver_noop_default_output_v1(input_files: [text]) -> text:
@@ -161,6 +163,12 @@ impl CompilerDriver:
         if self.ctx.options.cli_mode_text != "":
             compile_mode_text = self.ctx.options.cli_mode_text
 
+        val streaming_route = driver_streaming_surface_route(self.ctx)
+        if streaming_route < 0:
+            val streaming_error = driver_streaming_surface_rejection(streaming_route)
+            self.ctx.add_error(streaming_error)
+            return CompileResult.CodegenError(streaming_error)
+
         val native_noop_eligible = compile_mode_text == "aot" and
             self.ctx.options.output_format == driver_output_format_native() and
             (env_get("SIMPLE_NATIVE_BUILD_CLEAN") ?? "") != "1"
@@ -190,7 +198,7 @@ impl CompilerDriver:
         log_build_progress("load_sources", "files", -1, -1,
             "starting", 0, 6, 0, 0, "running")
         log_phase("phase1:load_sources:start")
-        val sources_streaming_in_place = driver_streaming_surface_enabled(self.ctx)
+        val sources_streaming_in_place = streaming_route == 1
         val (loaded_ctx, load_ok) = self.load_sources_impl()
         # `load_sources_impl` commits directly for the streaming owner. A
         # second aggregate assignment at this exact boundary corrupted the
