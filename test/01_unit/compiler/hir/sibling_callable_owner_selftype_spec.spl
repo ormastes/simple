@@ -15,9 +15,19 @@ describe "a sibling callable dependency preserves the defining class binding":
         val owner_source = "pub class SpanProbe:\n    value: i64\n    static fn empty() -> SpanProbe:\n        SpanProbe(value: 0)\n    static fn at(value: i64) -> SpanProbe:\n        SpanProbe(value: value)\n    fn merge(self, other: SpanProbe) -> SpanProbe:\n        SpanProbe(value: self.value + other.value)"
         val sibling_source = "use graph.value.\{SpanProbe\}\n\nfn parse_with_spans() -> Result<(i64, Dict<text, SpanProbe>), text>:\n    Ok((0, \{\}))"
         val owner = parse_full_frontend(owner_source, "graph.value", "graph.value", logger)
+        val sibling = parse_full_frontend(sibling_source, "graph.parser", "graph.parser", logger)
+        # ParserModule has no diagnostic list: require the declarations and
+        # method signatures that make this a regression before lowering it.
+        expect(owner.classes.has("SpanProbe")).to_equal(true)
+        var method_count = owner.classes["SpanProbe"].methods.len()
+        for implementation in owner.impls:
+            method_count = method_count + implementation.methods.len()
+        expect(method_count).to_equal(3)
+        expect(sibling.functions.has("parse_with_spans")).to_equal(true)
+        expect(sibling.functions["parse_with_spans"].has_return_type).to_equal(true)
         var modules: Dict<text, Module> = {}
         modules["graph.value"] = owner
-        modules["graph.parser"] = parse_full_frontend(sibling_source, "graph.parser", "graph.parser", logger)
+        modules["graph.parser"] = sibling
         val sources = [
             SourceFile(path: "graph/value.spl", content: owner_source, module_name: "graph.value"),
             SourceFile(path: "graph/parser.spl", content: sibling_source, module_name: "graph.parser")
