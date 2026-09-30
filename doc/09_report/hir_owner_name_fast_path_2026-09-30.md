@@ -77,8 +77,40 @@ The first runtime failure ended validation; no further semantic fix/retry was
 performed. `run.log` and `link-resume/final-result.json` are authoritative for
 the actual execution; the earlier `result.json` remains the failed full build.
 
-STATUS: FAIL — zero-allocation acceptance unmet. Differential fixture reached
+Historical status before the renewed fix: FAIL — zero-allocation acceptance unmet. Differential fixture reached
 the measurement successfully; full SymbolTable tests remain unexecuted.
+
+## Renewed zero-allocation correction
+
+After the first failure was reported, the user authorized one new focused fix
+and verification cycle. Generated disassembly identified exactly six
+`rt_string_new` calls in the canonical validator: `starts_with` and two
+`ends_with` calls each boxed the receiver and argument. The guard now compares
+length and byte values for the same alias/suffix exclusions. No string-method
+boxing remains on the accepted path; bounds checks precede every byte probe.
+
+The same isolated private cache was retained, with CLI and environment cache
+roots verified equal before launch. Only the production helper changed; hashes
+confirm that the differential fixture and reference oracle were unchanged.
+The narrow five-object closure rebuilt and linked through the normal native
+command successfully; compiler exit 0, fixture exit 0. No large compiler/tool
+closure or live build source was touched.
+
+| Renewed 256 canonical calls | Registered object growth |
+|---|---:|
+| Corrected fast path | **0** |
+| Unchanged previous algorithm | **20,224** |
+
+The 32-case differential section and unchanged zero-allocation assertion both
+passed. Generated validator disassembly contains zero `rt_string_new`
+relocations. Evidence: `zero-allocation-cycle/{receipt.json,result.json,run.log,
+compile.log,fixture-hashes-before.json,after-fastpath-disassembly.txt}` under
+the probe lane. Original failure/link-equivalence evidence remains preserved.
+
+STATUS: PASS for the focused native differential/allocation fixture. This is
+not a full compiler/SPipe admission: the broader qualified-symbol unit spec and
+full-closure CPU/RSS comparison remain unexecuted. No CPU-time speedup or
+whole-build memory reduction is claimed. No passing check was rerun.
 
 ## Separate memory event
 
