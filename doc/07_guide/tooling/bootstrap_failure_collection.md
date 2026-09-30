@@ -16,8 +16,10 @@ mass-rename or rewrite existing scripts merely to change their extension.
 ## Continue by dependency
 
 Inventory the requested phases, entries, tool builds, and test shards before
-launching them. Record dependencies and bound concurrency, memory, disk, and
-per-process timeouts to the host's available resources. Continue independent
+launching them. Record dependencies and plan concurrency against available
+memory and disk, with explicit per-process timeout budgets. Memory planning
+controls scheduling; it does not impose an RSS cap when the user selected a
+lane without memory caps. Preserve that selection. Continue independent
 rows when another row fails; resource pressure queues work rather than launching
 unbounded retries. Respect explicit user stop points and scope.
 
