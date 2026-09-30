@@ -23,6 +23,41 @@ fail() {
     exit 1
 }
 
+resolve_git_common_dir() {
+    # Match the POSIX, drive-rooted, and UNC forms accepted by Git for Windows.
+    # A drive-relative path (C:repo) still needs the coordinator prefix.
+    case $1 in
+        /*|[A-Za-z]:/*|[A-Za-z]:\\*|\\\\*) printf '%s\n' "$1" ;;
+        *) printf '%s/%s\n' "$2" "$1" ;;
+    esac
+}
+
+path_selftest() {
+    path_checks=0
+    while IFS='|' read -r input expected; do
+        actual=$(resolve_git_common_dir "$input" '/linked-worktree')
+        [ "$actual" = "$expected" ] || fail "common Git path mismatch: $input -> $actual"
+        path_checks=$((path_checks + 1))
+    done <<'PATH_CASES'
+/home/shared/.git|/home/shared/.git
+C:/shared/.git|C:/shared/.git
+C:\shared\.git|C:\shared\.git
+c:/shared/repo with spaces/.git|c:/shared/repo with spaces/.git
+//server/share/repo.git|//server/share/repo.git
+\\server\share\repo.git|\\server\share\repo.git
+.git|/linked-worktree/.git
+../shared/.git|/linked-worktree/../shared/.git
+C:relative/.git|/linked-worktree/C:relative/.git
+PATH_CASES
+    [ "$path_checks" -eq 9 ] || fail "incomplete common Git path selftest"
+    printf 'converge-reviewed-fix: PASS common Git paths (%s cases)\n' "$path_checks"
+}
+
+if [ "$#" -eq 1 ] && [ "$1" = --selftest-paths ]; then
+    path_selftest
+    exit 0
+fi
+
 value=
 take_value() {
     [ "$#" -ge 2 ] || usage
@@ -146,7 +181,7 @@ case $direction in
 esac
 
 common_dir=$(git -C "$root" rev-parse --git-common-dir)
-case $common_dir in /*) ;; *) common_dir="$root/$common_dir" ;; esac
+common_dir=$(resolve_git_common_dir "$common_dir" "$root")
 common_dir=$(CDPATH= cd -- "$common_dir" && pwd -P)
 ref_base="refs/spipe/convergence/$session_id"
 created=0
