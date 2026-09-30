@@ -1,0 +1,34 @@
+#!/bin/sh
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+mkdir -p "$work/repo/scripts/bootstrap" "$work/bin"
+cp "$root/scripts/bootstrap/bootstrap-windows.sh" "$work/repo/scripts/bootstrap/"
+printf 'bootstrap_windows_preserve_cl_mode() { :; }\n' >"$work/repo/scripts/bootstrap/bootstrap-windows-cl-mode.shs"
+cat >"$work/bin/git" <<'EOF'
+#!/bin/sh
+printf 'git %s\n' "$*" >>"$STARTUP_CALLS"
+EOF
+printf '#!/bin/sh\nexit 0\n' >"$work/bin/sleep"
+cat >"$work/repo/scripts/bootstrap/bootstrap-from-scratch.sh" <<'EOF'
+#!/bin/sh
+printf 'canonical %s receipt=%s\n' "$*" "${SIMPLE_WINDOWS_MATERIALIZED_LINKS_RECEIPT:-absent}" >>"$STARTUP_CALLS"
+EOF
+chmod +x "$work/bin/git" "$work/bin/sleep"
+STARTUP_CALLS=$work/calls
+export STARTUP_CALLS
+PATH="$work/bin:$PATH" SIMPLE_WINDOWS_MATERIALIZED_LINKS_RECEIPT=supplied-receipt \
+  bash "$work/repo/scripts/bootstrap/bootstrap-windows.sh" --jobs=full --jobs-memory-policy=explicit-count
+grep -q 'git .* submodule update --init -- .spipe/spipe' "$STARTUP_CALLS"
+test "$(grep -c '^canonical ' "$STARTUP_CALLS")" = 1
+tail -n 1 "$STARTUP_CALLS" | grep -qx 'canonical --jobs=full --jobs-memory-policy=explicit-count receipt=supplied-receipt'
+# Pin actual engine ordering: the owner relies on the loaded native authority
+# and must execute before the Rust seed section or any source snapshots.
+awk '
+  /\. "\$\{BOOTSTRAP_STAGE3_FACADE_PATH\}"/ { authority=NR }
+  /bootstrap_materialized_startup "\$\{repo_root\}"/ { owner=NR }
+  /bootstrap_stage3_source_snapshot "\$\{stage3_source_before\}"/ { if (!snapshot) snapshot=NR }
+  END { if (!(authority > 0 && owner > authority && snapshot > owner)) exit 1 }
+' "$root/scripts/bootstrap/bootstrap-from-scratch.sh"
+printf 'PASS: Windows wrapper hydrates recorded submodule then delegates once and preserves receipt/policy\n'
