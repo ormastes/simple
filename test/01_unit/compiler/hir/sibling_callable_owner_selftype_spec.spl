@@ -1,0 +1,33 @@
+# @req REQ-SSPEC-COMPILER
+# SDN-shaped sibling signatures can register a class before its local declaration.
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+
+describe "a sibling callable dependency preserves the defining class binding":
+    it "lowers local self annotations after registering a nested sibling signature":
+        val logger = Logger(level: 0)
+        val owner_source = "pub class SpanProbe:\n    value: i64\n    static fn empty() -> SpanProbe:\n        SpanProbe(value: 0)\n    static fn at(value: i64) -> SpanProbe:\n        SpanProbe(value: value)\n    fn merge(self, other: SpanProbe) -> SpanProbe:\n        SpanProbe(value: self.value + other.value)"
+        val sibling_source = "use graph.value.\{SpanProbe\}\n\nfn parse_with_spans() -> Result<(i64, Dict<text, SpanProbe>), text>:\n    Ok((0, \{\}))"
+        val owner = parse_full_frontend(owner_source, "graph.value", "graph.value", logger)
+        var modules: Dict<text, Module> = {}
+        modules["graph.value"] = owner
+        modules["graph.parser"] = parse_full_frontend(sibling_source, "graph.parser", "graph.parser", logger)
+        val sources = [
+            SourceFile(path: "graph/value.spl", content: owner_source, module_name: "graph.value"),
+            SourceFile(path: "graph/parser.spl", content: sibling_source, module_name: "graph.parser")
+        ]
+        val surfaces = module_surfaces_from_modules(modules, sources)
+        expect(surfaces.is_ok()).to_equal(true)
+        var lowering = hirlowering_for_module("graph.value", surfaces.unwrap())
+        val hir = lowering.lower_module(owner)
+        expect(lowering.errors.len()).to_equal(0)
+        expect(hir.classes.len()).to_equal(1)
+        val canonical = lowering.symbols.lookup_qualified_type_raw("graph.value", "SpanProbe")
+        expect(canonical >= 0).to_equal(true)
+        expect(lowering.symbols.lookup_or_invalid("SpanProbe").id).to_equal(canonical)
