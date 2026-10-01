@@ -1,0 +1,127 @@
+use std.spec.{describe, it, expect}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_create_exclusive}
+use std.scv.compile_source_inventory_core.{
+    CompileSourceInventoryEntryV1, CompileSourceInventoryV1,
+    compile_source_inventory_digest_v1
+}
+use compiler.driver.cache.cold_hir_semantic_seed_v1.{
+    ColdHirSemanticSeedV1, ColdHirTypedReceiptV1
+}
+use compiler.driver.cache.cold_hir_native_object_persistence_v1.{
+    ColdHirNativeObjectArtifactV1
+}
+use compiler.driver.cache.cold_hir_compiled_package_outputs_v1.{
+    ColdHirCompiledPayloadFileV1, ColdHirCompiledPackageArtifactV1,
+    cold_hir_package_outputs_from_driver_v1
+}
+use compiler.driver.cache.package_tldr_metadata.{ConfigVariantKeyV1}
+use compiler.driver.cache.package_module_index_builder.{
+    PackageModuleIndexBuildAuthorityV1,
+    PACKAGE_MODULE_INDEX_NO_MANIFEST_DIGEST_V1
+}
+
+fn cold_compiled_test_file(root: text, name: text,
+        content: text) -> ColdHirCompiledPayloadFileV1:
+    val path = "{root}/{name}"
+    expect(file_create_exclusive(path, content)).to_equal(true)
+    ColdHirCompiledPayloadFileV1(path, sha256_text(content), content.len())
+
+describe "cold HIR compiled package output bridge":
+    it "pairs all frozen modules with real emitted facets and semantic action":
+        val root = secure_temp_dir(".", "cold-compiled-output-").unwrap()
+        val source_content = "source-a"
+        val source_digest = sha256_text(source_content)
+        val source = CompileSourceInventoryEntryV1(
+            "src/a.spl", source_digest, source_digest, source_digest,
+            source_digest, source_digest, source_content.len())
+        val inventory = CompileSourceInventoryV1(1, 1, [source])
+        val inventory_digest = compile_source_inventory_digest_v1(inventory)
+        val authority = PackageModuleIndexBuildAuthorityV1(
+            sha256_text("producer"), "root", "revision", "commit", "tree",
+            inventory_digest, ConfigVariantKeyV1(
+                "x86_64-unknown-linux-gnu", "llvm", [], "debug", "abi-v1", [], []))
+        val abi = "typed-abi-a"
+        val abi_digest = sha256_text(abi)
+        val seed = ColdHirSemanticSeedV1("a", "src/a.spl", source_digest,
+            inventory_digest, abi_digest, [])
+        val interface_content = "symbol|a|module|{abi_digest}|{abi_digest}"
+        val typed = ColdHirTypedReceiptV1(seed, abi, interface_content)
+        val objectless = ColdHirNativeObjectArtifactV1(
+            "a", "", 0, "none", "", "")
+        val export_file = cold_compiled_test_file(root, "export", "export-a")
+        val initializer_file = cold_compiled_test_file(root, "initializer", "init-a")
+        val provider_file = cold_compiled_test_file(root, "provider", "provider-a")
+        val generated_file = cold_compiled_test_file(root, "generated", "generated-a")
+        val mir_file = cold_compiled_test_file(root, "mir", "mir-body-a")
+        val witness = sha256_text("simple-cold-hir-source-witness-v1|" +
+            "{inventory_digest}|revision|commit|tree|9:src/a.spl|" +
+            "{source_digest}|{source_content.len()}")
+        val action_key = sha256_text("simple-cold-hir-semantic-action-v1|" +
+            "{abi_digest}|{witness}|{mir_file.digest}")
+        val action_text = "action|{action_key}|compile-semantic|a|{mir_file.digest}"
+        val action_file = cold_compiled_test_file(root, "action", action_text)
+        val artifact = ColdHirCompiledPackageArtifactV1(
+            "a", "package-a", export_file, initializer_file, provider_file,
+            generated_file, mir_file, action_file, "")
+
+        val result = cold_hir_package_outputs_from_driver_v1(
+            [typed], [objectless], inventory, authority, [artifact])
+        expect(result.is_ok()).to_equal(true)
+        val outputs = result.unwrap()
+        expect(outputs.len()).to_equal(1)
+        expect(outputs[0].source_witness_digest).to_equal(witness)
+        expect(outputs[0].export_digest).to_equal(export_file.digest)
+        expect(outputs[0].initializer_digest).to_equal(initializer_file.digest)
+        expect(outputs[0].provider_digest).to_equal(provider_file.digest)
+        expect(outputs[0].generated_source_digest).to_equal(generated_file.digest)
+        expect(outputs[0].interface_archive_digest).to_equal(
+            sha256_text(interface_content))
+        expect(outputs[0].action_archive_digest).to_equal(
+            sha256_text(action_text))
+        expect(outputs[0].manifest_digest).to_equal(
+            PACKAGE_MODULE_INDEX_NO_MANIFEST_DIGEST_V1)
+
+        val incomplete = cold_hir_package_outputs_from_driver_v1(
+            [typed], [], inventory, authority, [artifact])
+        expect(incomplete.unwrap_err()).to_equal("cold-compiled-inventory-incomplete")
+        val duplicate = cold_hir_package_outputs_from_driver_v1(
+            [typed], [objectless], inventory, authority, [artifact, artifact])
+        expect(duplicate.unwrap_err()).to_equal("cold-compiled-inventory-incomplete")
+        var forged = artifact
+        forged.mir_file.digest = sha256_text("not-the-emitted-mir")
+        val changed = cold_hir_package_outputs_from_driver_v1(
+            [typed], [objectless], inventory, authority, [forged])
+        expect(changed.unwrap_err()).to_equal("cold-compiled-facet-read-invalid:a")
+
+    it "rejects a guessed action and a missing HIR facet file":
+        val root = secure_temp_dir(".", "cold-compiled-negative-").unwrap()
+        val digest = sha256_text("x")
+        val source = CompileSourceInventoryEntryV1(
+            "src/x.spl", digest, digest, digest, digest, digest, 1)
+        val inventory = CompileSourceInventoryV1(1, 1, [source])
+        val authority = PackageModuleIndexBuildAuthorityV1(
+            sha256_text("producer"), "root", "revision", "commit", "tree",
+            compile_source_inventory_digest_v1(inventory), ConfigVariantKeyV1(
+                "x86_64-unknown-linux-gnu", "llvm", [], "debug", "abi-v1", [], []))
+        val abi = "typed-x"
+        val abi_digest = sha256_text(abi)
+        val typed = ColdHirTypedReceiptV1(
+            ColdHirSemanticSeedV1("x", "src/x.spl", digest,
+                authority.inventory_digest, abi_digest, []), abi,
+            "symbol|x|module|{abi_digest}|{abi_digest}")
+        val facet = cold_compiled_test_file(root, "facet", "facet-x")
+        val mir = cold_compiled_test_file(root, "mir", "mir-x")
+        val wrong_action = cold_compiled_test_file(root, "action",
+            "action|guess|compile-semantic|x|{mir.digest}")
+        val objectless = ColdHirNativeObjectArtifactV1("x", "", 0, "none", "", "")
+        val artifact = ColdHirCompiledPackageArtifactV1(
+            "x", "package-x", facet, facet, facet, facet, mir, wrong_action, "")
+        expect(cold_hir_package_outputs_from_driver_v1(
+            [typed], [objectless], inventory, authority, [artifact]).unwrap_err()
+        ).to_equal("cold-compiled-action-invalid:x")
+        var missing = artifact
+        missing.provider_file.path = "{root}/missing-provider"
+        expect(cold_hir_package_outputs_from_driver_v1(
+            [typed], [objectless], inventory, authority, [missing]).unwrap_err()
+        ).to_equal("cold-compiled-facet-read-invalid:x")
