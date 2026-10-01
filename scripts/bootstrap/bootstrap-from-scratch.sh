@@ -4580,20 +4580,13 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
   # Phase 3 and Phase 4 are independent children of this exact producer. The
   # grouped runner publishes completion only after five binary receipts and
   # both backend module ledgers pass their compiled admission gates.
-  managed_phase_root="$(absolute_path "${output_dir}/managed/${PLATFORM}")"
+  managed_producer_sha=$(bootstrap_stage3_manifest_value candidate_sha256 "${stage2_admission_receipt_absolute}") || exit 1
+  managed_phase_root="$(absolute_path "${output_dir}/managed/task3-run4/${PLATFORM}/${managed_producer_sha}")"
   managed_runner="${repo_root}/scripts/bootstrap/bootstrap-phase4-grouped.shs"
   if [ ! -f "${managed_runner}" ]; then
     echo "error: tracked post-Stage-2 manager handoff is unavailable" >&2
     exit 1
   fi
-  managed_required_environment='SIMPLE_BOOTSTRAP_MANAGED_SOURCE_ROOT'
-  for managed_name in ${managed_required_environment}; do
-    eval "managed_value=\${${managed_name}:-}"
-    if [ -z "${managed_value}" ]; then
-      echo "error: post-Stage-2 manager handoff blocked: ${managed_name} is missing" >&2
-      exit 1
-    fi
-  done
   managed_image_preparer="${repo_root}/scripts/bootstrap/prepare-phase2-build-manager.shs"
   managed_policy_preparer="${repo_root}/scripts/bootstrap/prepare-phase2-managed-policy.shs"
   [ -f "${managed_policy_preparer}" ] || {
@@ -4626,7 +4619,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
   managed_image_receipt="${managed_phase_root}/manager-images/manager-images.env"
   sh "${managed_image_preparer}" \
     "--producer-receipt=${stage2_admission_receipt_absolute}" \
-    "--source-root=${SIMPLE_BOOTSTRAP_MANAGED_SOURCE_ROOT}" \
+    "--source-root=${repo_root}" \
     "--output-root=${managed_phase_root}/manager-images" \
     "--target=${PLATFORM}" \
     "--runtime-bundle=${SIMPLE_BOOTSTRAP_MANAGED_RUNTIME_BUNDLE:-core-c-bootstrap}" \
@@ -4640,20 +4633,88 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
   managed_group_worker=$(bootstrap_stage3_manifest_value group_worker "${managed_image_receipt}") || exit 1
   managed_group_broker=$(bootstrap_stage3_manifest_value group_broker "${managed_image_receipt}") || exit 1
   managed_index_program=$(bootstrap_stage3_manifest_value index_program "${managed_image_receipt}") || exit 1
-  managed_required_environment='SIMPLE_BOOTSTRAP_MANAGED_SCV_RECEIPT SIMPLE_BOOTSTRAP_MANAGED_SOURCE_INVENTORY SIMPLE_BOOTSTRAP_MANAGED_MODULE_INVENTORY SIMPLE_BOOTSTRAP_MANAGED_LLVM_INDEX_CONFIG SIMPLE_BOOTSTRAP_MANAGED_CRANELIFT_INDEX_CONFIG'
-  for managed_name in ${managed_required_environment}; do
-    eval "managed_value=\${${managed_name}:-}"
-    if [ -z "${managed_value}" ]; then
-      echo "error: post-Stage-2 manager handoff blocked: ${managed_name} is missing" >&2
+  managed_authority_program=$(bootstrap_stage3_manifest_value authority_program "${managed_image_receipt}") || exit 1
+  managed_worker_program=$(bootstrap_stage3_manifest_value worker_program "${managed_image_receipt}") || exit 1
+  managed_image_pin() {
+    managed_pin_path=$(bootstrap_stage3_manifest_value "$1" "${managed_image_receipt}") || return 1
+    managed_pin_sha=$(bootstrap_stage3_manifest_value "$2" "${managed_image_receipt}") || return 1
+    [ -f "${managed_pin_path}" ] && [ ! -L "${managed_pin_path}" ] &&
+      [ "$(bootstrap_stage3_hash_file "${managed_pin_path}")" = "${managed_pin_sha}" ]
+  }
+  for managed_role in 'manifest_program manifest_sha256' 'builder_program builder_sha256' \
+      'worker_program worker_sha256' 'group_program group_sha256' \
+      'group_worker group_worker_sha256' 'group_broker group_broker_sha256' \
+      'index_program index_sha256' 'authority_program authority_sha256' \
+      'template template_sha256'; do
+    managed_path_field=${managed_role%% *}
+    managed_digest_field=${managed_role#* }
+    managed_image_pin "${managed_path_field}" "${managed_digest_field}" || {
+      echo "error: manager image or template differs from Phase 2 image receipt: ${managed_path_field}" >&2
       exit 1
-    fi
+    }
   done
+  managed_authority_root="${managed_phase_root}/authority"
+  managed_authority_receipt="${managed_authority_root}/authority.receipt"
+  managed_canonical_snapshot="${managed_authority_root}/canonical-source.$$.txt"
+  mkdir -p "${managed_authority_root}" || exit 1
+  if [ -e "${managed_authority_receipt}" ]; then
+    bootstrap_stage3_source_snapshot "${managed_canonical_snapshot}" "${managed_authority_root}/source-root" || exit 1
+    managed_admitted_snapshot=$(bootstrap_stage3_manifest_value source_snapshot_path "${stage2_admission_receipt_absolute}") || exit 1
+    cmp -s "${managed_canonical_snapshot}" "${managed_admitted_snapshot}" || {
+      echo "error: resumed private source differs from admitted Stage 2 bytes" >&2; exit 1;
+    }
+    managed_authority_report=$("${managed_authority_program}" phase2-native-authority \
+      --producer-receipt "${stage2_admission_receipt_absolute}" \
+      --source-checkout "${repo_root}" --output-root "${managed_authority_root}" \
+      --target "${PLATFORM}" --receipt "${managed_authority_receipt}" \
+      --canonical-snapshot "${managed_canonical_snapshot}") || exit 1
+  else
+    managed_authority_report=$("${managed_authority_program}" phase2-native-authority \
+      --producer-receipt "${stage2_admission_receipt_absolute}" \
+      --source-checkout "${repo_root}" --output-root "${managed_authority_root}" \
+      --target "${PLATFORM}" --receipt "${managed_authority_receipt}") || exit 1
+  fi
+  [ -f "${managed_authority_receipt}" ] && [ ! -L "${managed_authority_receipt}" ] || exit 1
+  managed_authority_digest=$(bootstrap_stage3_hash_file "${managed_authority_receipt}") || exit 1
+  [ "${managed_authority_report}" = "${managed_authority_digest}" ] || {
+    echo "error: compiled authority digest differs from receipt readback" >&2; exit 1;
+  }
+  bootstrap_stage3_source_snapshot "${managed_canonical_snapshot}" "${managed_authority_root}/source-root" || exit 1
+  managed_admitted_snapshot=$(bootstrap_stage3_manifest_value source_snapshot_path "${stage2_admission_receipt_absolute}") || exit 1
+  cmp -s "${managed_canonical_snapshot}" "${managed_admitted_snapshot}" || {
+    echo "error: private source differs from admitted Stage 2 bytes" >&2; exit 1;
+  }
+  "${managed_authority_program}" phase2-native-authority-verify \
+    --receipt "${managed_authority_receipt}" --digest "${managed_authority_digest}" \
+    --canonical-snapshot "${managed_canonical_snapshot}" >/dev/null || exit 1
+  managed_authority_field() {
+    "${managed_authority_program}" phase2-native-authority-field \
+      --receipt "${managed_authority_receipt}" --digest "${managed_authority_digest}" \
+      --field "$1"
+  }
+  managed_source_root=$(managed_authority_field source_root) || exit 1
+  managed_scv_receipt=$(managed_authority_field scv_receipt_path) || exit 1
+  managed_source_inventory=$(managed_authority_field full_source_inventory_path) || exit 1
+  managed_source_links=$(managed_authority_field full_source_links_path) || exit 1
+  managed_module_inventory=$(managed_authority_field module_inventory_path) || exit 1
+  managed_llvm_index_config=$(managed_authority_field llvm_index_config_path) || exit 1
+  managed_cranelift_index_config=$(managed_authority_field cranelift_index_config_path) || exit 1
+  [ "$(managed_authority_field producer_digest)" = "${managed_producer_sha}" ] &&
+    [ "$(managed_authority_field target)" = "${PLATFORM}" ] || {
+    echo "error: authority producer or target differs from Stage 2" >&2; exit 1;
+  }
+  rm -f "${managed_canonical_snapshot}"
   sh "${managed_runner}" \
     "--producer-receipt=${stage2_admission_receipt_absolute}" \
-    "--scv-receipt=${SIMPLE_BOOTSTRAP_MANAGED_SCV_RECEIPT}" \
-    "--source-root=${SIMPLE_BOOTSTRAP_MANAGED_SOURCE_ROOT}" \
-    "--source-inventory=${SIMPLE_BOOTSTRAP_MANAGED_SOURCE_INVENTORY}" \
-    "--module-inventory=${SIMPLE_BOOTSTRAP_MANAGED_MODULE_INVENTORY}" \
+    "--scv-receipt=${managed_scv_receipt}" \
+    "--source-root=${managed_source_root}" \
+    "--source-inventory=${managed_source_inventory}" \
+    "--source-links=${managed_source_links}" \
+    "--module-inventory=${managed_module_inventory}" \
+    "--authority-program=${managed_authority_program}" \
+    "--authority-receipt=${managed_authority_receipt}" \
+    "--authority-digest=${managed_authority_digest}" \
+    "--image-receipt=${managed_image_receipt}" \
     "--root=${managed_phase_root}" \
     "--template=${managed_template}" \
     "--manifest-program=${managed_manifest_program}" \
@@ -4662,8 +4723,8 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     "--group-worker=${managed_group_worker}" \
     "--group-broker=${managed_group_broker}" \
     "--index-program=${managed_index_program}" \
-    "--llvm-index-config=${SIMPLE_BOOTSTRAP_MANAGED_LLVM_INDEX_CONFIG}" \
-    "--cranelift-index-config=${SIMPLE_BOOTSTRAP_MANAGED_CRANELIFT_INDEX_CONFIG}" \
+    "--llvm-index-config=${managed_llvm_index_config}" \
+    "--cranelift-index-config=${managed_cranelift_index_config}" \
     "--threads=${build_threads}" \
     "--memory-bytes=${managed_memory_bytes}" \
     "--reserve-bytes=${managed_reserve_bytes}" \
