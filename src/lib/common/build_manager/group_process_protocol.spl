@@ -39,6 +39,7 @@ struct GroupProcessPollV1:
     timed_out: bool
     cancelled: bool
     memory_peak_bytes: i64
+    memory_current_bytes: i64
 
 fn group_process_launch_validate_v1(value: GroupProcessLaunchV1) -> text:
     val request = value.request
@@ -125,7 +126,8 @@ fn group_process_observation_encode_v1(identity: text, value: GroupProcessPollV1
     var out = "SIMPLE-GROUP-OBSERVATION-1\n" + builder_wire_line_v1(identity)
     for flag in [value.terminal, value.leader_reaped, value.tree_empty, value.timed_out, value.cancelled]:
         out = out + (if flag: "1\n" else: "0\n")
-    out + str(value.active_processes) + "\n" + str(value.exit_code) + "\n" + str(value.memory_peak_bytes) + "\n"
+    out + str(value.active_processes) + "\n" + str(value.exit_code) + "\n" +
+        str(value.memory_peak_bytes) + "\n" + str(value.memory_current_bytes) + "\n"
 
 fn group_process_observation_decode_v1(identity: text, payload: text) -> Result<GroupProcessPollV1, text>:
     var reader = BuilderWireReaderV1.create(payload)
@@ -138,9 +140,13 @@ fn group_process_observation_decode_v1(identity: text, payload: text) -> Result<
     val active = reader.number(1000000, false)
     val code = reader.number(4294967295, true)
     val peak = reader.number(1125899906842624, false)
-    val result = GroupProcessPollV1(terminal, leader, empty, active, code, timeout, cancelled, peak)
+    val current = reader.number(1125899906842624, false)
+    val result = GroupProcessPollV1(terminal, leader, empty, active, code,
+        timeout, cancelled, peak, current)
     if reader.reason != "": return Err(reader.reason)
     if terminal and (not leader or not empty or active != 0 or code < 0): return Err("inconsistent terminal group evidence")
+    if current > peak or (terminal and current != 0):
+        return Err("inconsistent current group memory charge")
     if group_process_observation_encode_v1(identity, result) != payload: return Err("noncanonical group observation")
     Ok(result)
 

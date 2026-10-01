@@ -38,7 +38,7 @@ typedef struct {
     int active, collected, parent_fd, group_fd, pidfd;
     pid_t pid;
     char name[80];
-    int64_t started_ms, timeout_ms, peak;
+    int64_t started_ms, timeout_ms, peak, current;
     int leader_reaped, tree_empty, timed_out, cancelled, exit_code;
 } RtLinuxGroup;
 
@@ -292,7 +292,11 @@ static int rt_lg_poll(RtLinuxGroup *owner) {
         }
     }
     int populated = 1;
+    char current_text[128];
     if (!rt_lg_populated(owner->group_fd, &populated) ||
+        !rt_lg_read_at(owner->group_fd, "memory.current", current_text,
+            sizeof(current_text)) ||
+        !rt_lg_number(current_text, &owner->current) ||
         !rt_lg_peak(owner->group_fd, &owner->peak)) return EIO;
     if (owner->leader_reaped && populated) {
         if (!rt_lg_kill(owner)) return errno ? errno : EIO;
@@ -305,8 +309,9 @@ static SplArray *rt_lg_observation(int error) {
     RtLinuxGroup *o = &rt_linux_group;
     const int64_t values[] = {error, o->leader_reaped && o->tree_empty,
         o->leader_reaped, o->tree_empty, o->tree_empty ? 0 : 1,
-        o->exit_code, o->timed_out, o->cancelled, o->peak};
-    return owned_adapter_values(values, 9);
+        o->exit_code, o->timed_out, o->cancelled, o->peak,
+        o->leader_reaped && o->tree_empty ? 0 : o->current};
+    return owned_adapter_values(values, 10);
 }
 
 /* Double-fork leaves the broker independent of manager death. The exact

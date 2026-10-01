@@ -566,21 +566,28 @@ export windows_process_file_digest_v1
 export _windows_process_wide_v1, _windows_process_pin_v1
 
 # Microsoft JOBOBJECT_EXTENDED_LIMIT_INFORMATION Win64 layout: 144 bytes,
-# JobMemoryLimit at120, PeakJobMemoryUsed at136. This measures aggregate committed
-# memory, not resident working-set bytes. Query while the native owner is live.
+# JobMemoryLimit at120, JobMemoryUsed at128, PeakJobMemoryUsed at136. These
+# measure aggregate committed bytes, not resident working-set bytes.
 @unsafe(reason: "queries actual retained JobObject aggregate memory accounting", capabilities: [ffi, raw_ptr])
-fn windows_process_peak_memory_v1(lease: WindowsProcessLeaseV1) -> Result<i64, text>:
+fn windows_process_memory_charge_v1(lease: WindowsProcessLeaseV1) -> Result<(i64, i64), text>:
     if lease.slot < 0 or lease.slot >= _windows_process_slots_v1.len(): return Err("invalid Windows owner slot")
     val state = _windows_process_slots_v1[lease.slot]
     if state.closed: return Err("Windows owner already collected")
     val information = HeapAlloc(state.heap, 8u32, 144u64)
     if information == 0: return Err("job memory query allocation failed")
     val queried = QueryInformationJobObject(state.job, 9, information, 144u32, 0)
+    val current = if queried != 0: volatile_read_u64(information + 128) else: -1
     val peak = if queried != 0: volatile_read_u64(information + 136) else: -1
     val released = HeapFree(state.heap, 0u32, information)
-    if queried == 0 or released == 0 or peak < 0: return Err("job memory accounting unavailable")
+    if queried == 0 or released == 0 or current < 0 or peak < current:
+        return Err("job memory accounting unavailable")
+    Ok((current, peak))
+
+fn windows_process_peak_memory_v1(lease: WindowsProcessLeaseV1) -> Result<i64, text>:
+    val (_current, peak) = windows_process_memory_charge_v1(lease)?
     Ok(peak)
 
 export windows_process_start_with_memory_v1, windows_process_peak_memory_v1
+export windows_process_memory_charge_v1
 export WindowsProcessAdmissionV1, windows_process_admit_v1, windows_process_admit_with_reserve_v1
 export windows_available_physical_memory_v1

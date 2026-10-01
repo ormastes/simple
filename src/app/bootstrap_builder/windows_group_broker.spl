@@ -5,11 +5,14 @@ use app.io.file_ops.{file_read_regular_no_follow_bounded, file_atomic_write, fil
 use app.io.time_ops.{sleep_ms, current_time_ms}
 use std.common.build_manager.group_process_protocol.{GroupProcessLaunchV1, GroupProcessPollV1, group_process_launch_decode_v1, group_process_identity_v1, group_process_observation_encode_v1}
 use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
-use std.nogc_sync_mut.io.windows_process_owner.{WindowsProcessInputV1, WindowsProcessRequestV1, WindowsProcessLeaseV1, WindowsProcessPollV1, windows_process_start_with_memory_v1, windows_process_peak_memory_v1, windows_process_poll_v1, windows_process_cancel_v1, windows_process_collect_v1, windows_process_path_valid_v1, windows_process_file_digest_v1}
+use std.nogc_sync_mut.io.windows_process_owner.{WindowsProcessInputV1, WindowsProcessRequestV1, WindowsProcessLeaseV1, WindowsProcessPollV1, windows_process_start_with_memory_v1, windows_process_peak_memory_v1, windows_process_memory_charge_v1, windows_process_poll_v1, windows_process_cancel_v1, windows_process_collect_v1, windows_process_path_valid_v1, windows_process_file_digest_v1}
 
-fn _group_broker_observation_v1(observed: WindowsProcessPollV1, peak: i64) -> GroupProcessPollV1:
+fn _group_broker_observation_v1(observed: WindowsProcessPollV1,
+        peak: i64, current: i64) -> GroupProcessPollV1:
+    val active_charge = if observed.terminal: 0 else: current
     GroupProcessPollV1(observed.terminal, observed.leader_reaped, observed.tree_empty,
-        observed.active_processes, observed.exit_code, observed.timed_out, observed.cancelled, peak)
+        observed.active_processes, observed.exit_code, observed.timed_out,
+        observed.cancelled, peak, active_charge)
 
 fn _group_broker_control_v1(root: text, identity: text) -> text:
     val request = match file_read_regular_no_follow_bounded(root + "/broker.control.request", 4096):
@@ -23,7 +26,8 @@ fn _group_broker_control_v1(root: text, identity: text) -> text:
 fn _group_broker_finish_v1(root: text, identity: text, lease: WindowsProcessLeaseV1, peak: i64) -> Result<bool, text>:
     val receipt = windows_process_collect_v1(lease)?
     if not receipt.terminal or not receipt.leader_reaped or not receipt.tree_empty: return Err("native group tree cleanup not proven")
-    val payload = group_process_observation_encode_v1(identity, _group_broker_observation_v1(receipt, peak))
+    val payload = group_process_observation_encode_v1(identity,
+        _group_broker_observation_v1(receipt, peak, 0))
     # Atomic publication follows native collect; per-action success never enters
     # this path. A crash in this gap remains unknown and cannot authorize retry.
     if not file_atomic_write(root + "/broker.tree.sdn", payload): return Err("cannot persist group tree cleanup receipt")
@@ -66,14 +70,16 @@ fn _group_broker_run_v1(launch: GroupProcessLaunchV1, identity: text) -> Result<
             Err(message):
                 error = message
                 break
-        val peak = match windows_process_peak_memory_v1(lease):
+        val charge = match windows_process_memory_charge_v1(lease):
             Ok(value): value
             Err(message):
                 error = message
                 break
+        val (current, peak) = charge
         if observed.terminal: return _group_broker_finish_v1(launch.root, identity, lease, peak)
         if control != "" and control != last_control:
-            val payload = group_process_observation_encode_v1(identity, _group_broker_observation_v1(observed, peak))
+            val payload = group_process_observation_encode_v1(identity,
+                _group_broker_observation_v1(observed, peak, current))
             if not file_atomic_write(launch.root + "/broker.control.response", control + "\n" + payload):
                 error = "cannot publish fresh broker observation"
                 break

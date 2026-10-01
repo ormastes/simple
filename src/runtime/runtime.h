@@ -1308,7 +1308,9 @@ SplArray* rt_process_inspection_v1_input_receipt_value(SplArray* ticket);
 
 /* Broker-only Linux cgroup-v2/pidfd owner. The start result is [token,error];
  * poll/collect return [error,terminal,leader_reaped,tree_empty,active,
- * exit_code,timed_out,cancelled,memory_peak]. Unsupported hosts fail closed. */
+ * exit_code,timed_out,cancelled,memory_peak,memory_current]. The latter is
+ * cgroup memory.current while live and zero after the tree is reaped.
+ * Unsupported hosts fail closed. */
 #ifdef __linux__
 SplArray* rt_linux_group_launch_broker_v1(const char* program,
     uint64_t program_len, const char* digest, uint64_t digest_len,
