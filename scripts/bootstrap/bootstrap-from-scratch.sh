@@ -620,13 +620,9 @@ if [ -n "${produce_stage3_receipt_reason}" ] &&
   exit 64
 fi
 if [ "${produce_managed_receipt_requested}" -eq 1 ]; then
-  [ -n "${produce_managed_receipt_reason}" ] &&
-    { [ "${stop_after_stage2}" -eq 1 ] ||
-      { [ "${full_bootstrap}" -eq 1 ] && [ -n "${bootstrap_receipt_path}" ] &&
-        [ -f "${bootstrap_receipt_path}" ]; }; } || {
-    echo "bootstrap-policy-error: managed planner production requires a typed reason and Stage 2 trust-root stop or receipt-authorized full bootstrap" >&2
-    exit 64
-  }
+  sh "${bootstrap_entry_dir}/lib/managed-planner-policy.shs" \
+    "${produce_managed_receipt_reason}" "${stop_after_stage2}" \
+    "${full_bootstrap}" "${bootstrap_receipt_path}" || exit 64
 fi
 bootstrap_stage2_trust_root=0
 bootstrap_stage2_parent_override=
