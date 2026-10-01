@@ -28,7 +28,7 @@ while [ "${bootstrap_argc}" -gt 0 ]; do
   shift
   bootstrap_argc=$((bootstrap_argc - 1))
   case "${bootstrap_arg}" in
-    --backend|--output|--bootstrap-receipt|--produce-stage3-receipt|\
+    --backend|--output|--bootstrap-receipt|--produce-stage3-receipt|--produce-managed-receipt|\
     --strategy|--resume-stage3-from-admitted|--resume-stage4-from-admitted|\
     --resume-managed-from-admitted|\
     --mode|--diagnostic-root|--diagnostic-child-compiler|--target|--jobs|\
@@ -238,6 +238,9 @@ Options:
                      yours to type; it is validated by the producer's allow-list
                      and never defaulted. Fail-closed: a producer failure fails
                      the run and no receipt is written.
+  --produce-managed-receipt=<typed-reason>
+                     After admitting the new Stage 2, publish a Stage 4 planner
+                     receipt bound to that exact parent for managed completion.
   --stop-after-stage3
                      Stop after producing and independently verifying the
                      provenance-bound Stage 3 compiler. Requires a planner
@@ -387,6 +390,7 @@ validate_bootstrap_receipt=0
 # trust-root Stage-2 lane. Empty means 'do not produce' -- the reason is NEVER
 # invented here; the operator types it, exactly as the planner policy requires.
 produce_stage3_receipt_reason=''
+produce_managed_receipt_reason=''
 stop_after_stage3=0
 stage3_current_acceptance_status=unverified
 case "${SIMPLE_NO_STUB_FALLBACK:-0}" in
@@ -410,6 +414,9 @@ while [ "$#" -gt 0 ]; do
       ;;
     --produce-stage3-receipt=*)
       produce_stage3_receipt_reason=${1#*=}
+      ;;
+    --produce-managed-receipt=*)
+      produce_managed_receipt_reason=${1#*=}
       ;;
     --stop-after-stage3)
       stop_after_stage3=1
@@ -4085,6 +4092,25 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
             echo "bootstrap-policy: stage3-planner-receipt=${stage3_planner_receipt}"
             echo "bootstrap-policy: resume with: sh scripts/bootstrap/bootstrap-from-scratch.sh --resume-stage3-from-admitted=${output_dir} --bootstrap-receipt=${stage3_planner_receipt}"
           fi
+          if [ -n "${produce_managed_receipt_reason}" ]; then
+            managed_stage4_planner_receipt="$(absolute_path "${output_dir}/managed-stage4-planner-admission-v2.env")"
+            if ! env "SIMPLE_BOOTSTRAP_EXTERNAL_OUTPUT_ROOT=${SIMPLE_BOOTSTRAP_EXTERNAL_OUTPUT_ROOT:-${output_dir}}" \
+              sh "${repo_root}/scripts/bootstrap/produce-bootstrap-planner-admission-v2.shs" \
+              "--target=//bootstrap:stage4" \
+              "--reason=${produce_managed_receipt_reason}" \
+              "--parent-compiler=${stage2_bin}" \
+              "--bootstrap-output=${output_dir}" \
+              "--out=${managed_stage4_planner_receipt}"; then
+              echo "error: could not produce the managed Stage 4 planner admission" >&2
+              exit 1
+            fi
+            [ -f "${managed_stage4_planner_receipt}" ] || {
+              echo "error: managed Stage 4 planner admission producer wrote no receipt" >&2
+              exit 1
+            }
+            echo "bootstrap-policy: managed-stage4-planner-receipt=${managed_stage4_planner_receipt}"
+            echo "bootstrap-policy: resume with: sh scripts/bootstrap/bootstrap-from-scratch.sh --resume-managed-from-admitted=${output_dir} --bootstrap-receipt=${managed_stage4_planner_receipt}"
+          fi
         fi
         # Publish the platform's runtime names and bind the exact capsule to
         # this admission before exposing a completed Stage 2 to verification.
@@ -4596,10 +4622,13 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     exit 0
   fi
 
+  [ -n "${managed_stage4_planner_receipt:-}" ] || {
+    echo "error: managed completion requires --produce-managed-receipt from this exact Stage 2" >&2; exit 1;
+  }
   sh "$repo_root/scripts/bootstrap/run-managed-from-admitted.shs" \
     "--output=$(absolute_path "$output_dir")" \
     "--producer-receipt=$stage2_admission_receipt_absolute" \
-    "--planner-receipt=$bootstrap_receipt_path" "--threads=$build_threads" || exit 1
+    "--planner-receipt=$managed_stage4_planner_receipt" "--threads=$build_threads" || exit 1
   exit 0
 
   # Stage 3: stage2 recompiles bootstrap_main.spl (self-host verification)

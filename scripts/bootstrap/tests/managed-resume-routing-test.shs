@@ -17,6 +17,34 @@ grep -q 'typed planner admission invalid' "$tmp/stderr" || exit 1
 printf 'candidate_path=%s\n' "$tmp/elsewhere/simple" >"$admitted/admission.env"
 if run; then echo 'FAIL: receipt candidate outside Stage 2 admission resumed' >&2; exit 1; fi
 grep -q 'Stage 2 candidate path differs' "$tmp/stderr" || exit 1
+parent_dir="$tmp/stage2/x86_64-unknown-linux-gnu"
+mkdir -p "$parent_dir"
+parent="$parent_dir/simple"
+printf 'same-stage2-bytes\n' >"$admitted/simple"
+cp "$admitted/simple" "$parent"
+candidate_sha=$(sha256sum "$admitted/simple" | cut -d ' ' -f 1)
+printf 'candidate_path=%s\ncandidate_sha256=%s\n' \
+  "$admitted/simple" "$candidate_sha" >"$admitted/admission.env"
+admission_sha=$(sha256sum "$admitted/admission.env" | cut -d ' ' -f 1)
+for name in sanity provenance; do
+  printf 'admission_receipt_path=%s\nadmission_receipt_sha256=%s\n' \
+    "$admitted/admission.env" "$admission_sha" >"$parent_dir/$name.env"
+done
+printf 'parent_compiler_path=%s\nparent_compiler_sha256=%s\nparent_stage2_sanity_path=%s\nparent_stage2_provenance_path=%s\n' \
+  "$parent" "$candidate_sha" "$parent_dir/sanity.env" "$parent_dir/provenance.env" >"$planner"
+relation="$script_root/lib/managed-planner-parent.shs"
+sh "$relation" "$tmp" x86_64-unknown-linux-gnu "$admitted/admission.env" "$planner" || {
+  echo 'FAIL: matching planner parent copy rejected' >&2; exit 1;
+}
+printf 'changed-parent\n' >"$parent"
+if sh "$relation" "$tmp" x86_64-unknown-linux-gnu "$admitted/admission.env" "$planner" >/dev/null 2>&1; then
+  echo 'FAIL: wrong planner parent bytes admitted' >&2; exit 1
+fi
+cp "$admitted/simple" "$parent"
+printf 'admission_receipt_sha256=%s\n' "$(printf wrong | sha256sum | cut -d ' ' -f 1)" >"$parent_dir/provenance.env"
+if sh "$relation" "$tmp" x86_64-unknown-linux-gnu "$admitted/admission.env" "$planner" >/dev/null 2>&1; then
+  echo 'FAIL: wrong parent admission binding admitted' >&2; exit 1
+fi
 # The real positive path requires the full typed admission and exact source
 # snapshot; both are replayed before any manager image/task in the helper.
 grep -Fq 'bootstrap_stage3_verify_stage2_admission_receipt' \
@@ -25,4 +53,4 @@ grep -Fq 'bootstrap_planner_v2_verify' \
   "$script_root/run-managed-from-admitted.shs" || exit 1
 grep -Fq 'cmp -s "$source_observed" "$source_authority"' \
   "$script_root/run-managed-from-admitted.shs" || exit 1
-echo 'PASS: managed resume rejects missing, unplanned, and mismatched Stage 2 evidence'
+echo 'PASS: managed resume binds planner parent copy to exact Stage 2 admission'
