@@ -67,6 +67,20 @@ pub struct GroupNativeLlvmWorkerReceiptV1:
     status: i64
     object_sha256: text
 
+pub struct GroupNativeThreadExecutionV1:
+    module_a: text
+    module_b: text
+    process_id_a: i64
+    process_id_b: i64
+    thread_id_a: i64
+    thread_id_b: i64
+    llvm_start_us_a: i64
+    llvm_end_us_a: i64
+    llvm_start_us_b: i64
+    llvm_end_us_b: i64
+    object_sha256_a: text
+    object_sha256_b: text
+
 pub struct GroupNativeLlvmPairResultV1:
     accepted: bool
     reason: text
@@ -75,6 +89,7 @@ pub struct GroupNativeLlvmPairResultV1:
     threaded_status_a: i64
     threaded_status_b: i64
     qualification: GroupNativeThreadQualificationV1?
+    execution: GroupNativeThreadExecutionV1?
 
 # One group-process owner installs the two immutable slots before spawning.
 # Workers receive only (slot, generation), never a heap address. The atomic
@@ -86,6 +101,10 @@ var _group_native_llvm_jobs_v1: [GroupNativeLlvmJobV1] = []
 var _group_native_llvm_generation_v1: i64 = 0
 var _group_native_llvm_last_generation_v1: i64 = 0
 var _group_native_llvm_qualified_proof_hash_v1: text = ""
+var _group_native_llvm_calibration_key_v1: text = ""
+var _group_native_llvm_calibration_policy_v1: text = ""
+var _group_native_llvm_calibration_pid_v1: i64 = 0
+var _group_native_llvm_calibration_proof_v1: GroupNativeThreadQualificationV1? = nil
 
 fn _group_native_proof_hash_v1(proof: GroupNativeThreadQualificationV1) -> text:
     sha256_text("{proof.backend}|{proof.module_a}|{proof.module_b}|{proof.process_id_a}|{proof.process_id_b}|{proof.thread_id_a}|{proof.thread_id_b}|{proof.llvm_start_us_a}|{proof.llvm_end_us_a}|{proof.llvm_start_us_b}|{proof.llvm_end_us_b}|{proof.baseline_object_sha256_a}|{proof.baseline_object_sha256_b}|{proof.threaded_object_sha256_a}|{proof.threaded_object_sha256_b}")
@@ -122,6 +141,15 @@ fn _group_native_same_policy_v1(a: GroupNativeLlvmJobV1, b: GroupNativeLlvmJobV1
         a.target.triple.env == b.target.triple.env and
         a.target.to_cpu_string() == b.target.to_cpu_string() and
         a.target.to_feature_string() == b.target.to_feature_string()
+
+fn _group_native_policy_fingerprint_v1(a: GroupNativeLlvmJobV1,
+    b: GroupNativeLlvmJobV1) -> text:
+    sha256_text("{a.options.target}|{a.options.opt_level}|" +
+        "{a.options.debug_info}|{a.target.triple.arch}|" +
+        "{a.target.triple.vendor}|{a.target.triple.os}|" +
+        "{a.target.triple.env}|{a.target.to_cpu_string()}|" +
+        "{a.target.to_feature_string()}|{a.bootstrap_mode}|" +
+        "{a.is_entry}|{b.is_entry}")
 
 fn _group_native_emit_v1(job: GroupNativeLlvmJobV1, object_path: text,
     diagnostic_path: text, receipt_path: text) -> i64:
@@ -168,11 +196,54 @@ fn _group_native_receipt_v1(path: text) -> GroupNativeLlvmWorkerReceiptV1:
 fn _group_native_llvm_pair_failure_v1(reason: text, baseline_a: i64,
     baseline_b: i64, threaded_a: i64, threaded_b: i64) -> GroupNativeLlvmPairResultV1:
     GroupNativeLlvmPairResultV1(false, reason, baseline_a, baseline_b,
-        threaded_a, threaded_b, nil)
+        threaded_a, threaded_b, nil, nil)
+
+fn _group_native_execution_v1(a: GroupNativeLlvmJobV1, b: GroupNativeLlvmJobV1,
+    receipt_a: GroupNativeLlvmWorkerReceiptV1,
+    receipt_b: GroupNativeLlvmWorkerReceiptV1) -> GroupNativeThreadExecutionV1:
+    GroupNativeThreadExecutionV1(a.module.name, b.module.name,
+        receipt_a.process_id, receipt_b.process_id,
+        receipt_a.thread_id, receipt_b.thread_id,
+        receipt_a.llvm_start_us, receipt_a.llvm_end_us,
+        receipt_b.llvm_start_us, receipt_b.llvm_end_us,
+        receipt_a.object_sha256, receipt_b.object_sha256)
+
+fn _group_native_execution_valid_v1(execution: GroupNativeThreadExecutionV1) -> bool:
+    execution.module_a != "" and execution.module_b != "" and
+        execution.module_a != execution.module_b and
+        execution.process_id_a == getpid() and
+        execution.process_id_a == execution.process_id_b and
+        execution.thread_id_a > 0 and execution.thread_id_b > 0 and
+        execution.thread_id_a != execution.thread_id_b and
+        execution.llvm_start_us_a > 0 and execution.llvm_start_us_b > 0 and
+        execution.llvm_end_us_a > execution.llvm_start_us_a and
+        execution.llvm_end_us_b > execution.llvm_start_us_b and
+        execution.llvm_start_us_a < execution.llvm_end_us_b and
+        execution.llvm_start_us_b < execution.llvm_end_us_a and
+        execution.object_sha256_a.len() == 64 and
+        execution.object_sha256_b.len() == 64
+
+fn _group_native_llvm_calibration_matches_unlocked_v1(key: text) -> bool:
+    if key == "" or _group_native_llvm_calibration_pid_v1 != getpid() or
+        _group_native_llvm_calibration_key_v1 != key:
+        return false
+    match _group_native_llvm_calibration_proof_v1:
+        Some(proof):
+            _group_native_llvm_qualified_proof_hash_v1 != "" and
+                _group_native_llvm_qualified_proof_hash_v1 == _group_native_proof_hash_v1(proof)
+        nil: false
+
+pub fn group_native_llvm_has_calibration_v1(key: text) -> bool:
+    if not _group_native_llvm_gate_v1.compare_exchange(
+        0, 2, MemoryOrdering.SeqCst, MemoryOrdering.SeqCst):
+        return false
+    val matched = _group_native_llvm_calibration_matches_unlocked_v1(key)
+    _group_native_llvm_gate_v1.store(0, MemoryOrdering.SeqCst)
+    matched
 
 pub fn group_native_llvm_qualify_pair_v1(
     job_a: GroupNativeLlvmJobV1, job_b: GroupNativeLlvmJobV1,
-    generation: i64
+    generation: i64, calibration_key: text
 ) -> GroupNativeLlvmPairResultV1:
     if not _group_native_llvm_gate_v1.compare_exchange(
         0, 1, MemoryOrdering.SeqCst, MemoryOrdering.SeqCst):
@@ -182,7 +253,7 @@ pub fn group_native_llvm_qualify_pair_v1(
         _group_native_llvm_gate_v1.store(0, MemoryOrdering.SeqCst)
         return _group_native_llvm_pair_failure_v1(
             "stale group generation", 4, 4, 4, 4)
-    if job_a.module.name == "" or job_b.module.name == "" or
+    if calibration_key == "" or job_a.module.name == "" or job_b.module.name == "" or
         job_a.module.name == job_b.module.name or
         job_a.storage_bindings.len() != 0 or job_b.storage_bindings.len() != 0 or
         not _group_native_same_policy_v1(job_a, job_b) or
@@ -204,6 +275,10 @@ pub fn group_native_llvm_qualify_pair_v1(
             "bootstrap debug translation is not private", 4, 4, 4, 4)
     _group_native_llvm_last_generation_v1 = generation
     _group_native_llvm_qualified_proof_hash_v1 = ""
+    _group_native_llvm_calibration_key_v1 = ""
+    _group_native_llvm_calibration_policy_v1 = ""
+    _group_native_llvm_calibration_pid_v1 = 0
+    _group_native_llvm_calibration_proof_v1 = nil
 
     # Produce the serial baseline through the ordinary builtin-session LLVM
     # path, retaining its admitted target config and llc argument policy. It runs
@@ -258,6 +333,12 @@ pub fn group_native_llvm_qualify_pair_v1(
         return _group_native_llvm_pair_failure_v1(
             "LLVM worker artifact changed after its receipt", base_a, base_b,
             threaded_a, threaded_b)
+    val execution = _group_native_execution_v1(job_a, job_b, receipt_a, receipt_b)
+    if not _group_native_execution_valid_v1(execution):
+        _group_native_llvm_gate_v1.store(0, MemoryOrdering.SeqCst)
+        return _group_native_llvm_pair_failure_v1(
+            "LLVM worker lifecycle or overlap invalid", base_a, base_b,
+            threaded_a, threaded_b)
     val proof = GroupNativeThreadQualificationV1(
         "llvm", job_a.module.name, job_b.module.name,
         receipt_a.process_id, receipt_b.process_id,
@@ -272,9 +353,81 @@ pub fn group_native_llvm_qualify_pair_v1(
             "LLVM worker overlap or object parity unqualified", base_a, base_b,
             threaded_a, threaded_b)
     _group_native_llvm_qualified_proof_hash_v1 = _group_native_proof_hash_v1(proof)
+    _group_native_llvm_calibration_key_v1 = calibration_key
+    _group_native_llvm_calibration_policy_v1 =
+        _group_native_policy_fingerprint_v1(job_a, job_b)
+    _group_native_llvm_calibration_pid_v1 = getpid()
+    _group_native_llvm_calibration_proof_v1 = Some(proof)
     _group_native_llvm_gate_v1.store(0, MemoryOrdering.SeqCst)
     GroupNativeLlvmPairResultV1(true, "qualified", base_a, base_b,
-        threaded_a, threaded_b, Some(proof))
+        threaded_a, threaded_b, Some(proof), Some(execution))
+
+# A later pair may skip serial baselines only under the exact calibration key
+# issued in this process. Its own native threads, receipts, SHA-256 artifacts,
+# and overlapping LLVM translation intervals are still checked before return.
+pub fn group_native_llvm_emit_calibrated_pair_v1(
+    job_a: GroupNativeLlvmJobV1, job_b: GroupNativeLlvmJobV1,
+    generation: i64, calibration_key: text
+) -> GroupNativeLlvmPairResultV1:
+    if not _group_native_llvm_gate_v1.compare_exchange(
+        0, 1, MemoryOrdering.SeqCst, MemoryOrdering.SeqCst):
+        return _group_native_llvm_pair_failure_v1(
+            "another LLVM group owns the slot registry", 4, 4, 4, 4)
+    if not _group_native_llvm_calibration_matches_unlocked_v1(calibration_key) or
+        _group_native_llvm_calibration_policy_v1 !=
+            _group_native_policy_fingerprint_v1(job_a, job_b) or
+        generation <= 0 or generation <= _group_native_llvm_last_generation_v1 or
+        job_a.module.name == "" or job_b.module.name == "" or
+        job_a.module.name == job_b.module.name or
+        job_a.storage_bindings.len() != 0 or job_b.storage_bindings.len() != 0 or
+        not _group_native_same_policy_v1(job_a, job_b) or
+        not _group_native_unique_job_paths_v1(job_a, job_b):
+        _group_native_llvm_gate_v1.store(0, MemoryOrdering.SeqCst)
+        return _group_native_llvm_pair_failure_v1(
+            "calibration, generation, or frozen worker input invalid", 4, 4, 4, 4)
+    if (env_get_opt("SIMPLE_NATIVE_BUILD_NO_MANGLE") ?? "") == "1" or
+        (env_get_opt("SIMPLE_BOOTSTRAP_DEBUG") ?? "") == "1" or
+        ((env_get_opt("SIMPLE_BOOTSTRAP") ?? "") == "1") != job_a.bootstrap_mode:
+        _group_native_llvm_gate_v1.store(0, MemoryOrdering.SeqCst)
+        return _group_native_llvm_pair_failure_v1(
+            "ambient LLVM policy drifted after calibration", 4, 4, 4, 4)
+    _group_native_llvm_last_generation_v1 = generation
+    _group_native_llvm_jobs_v1 = [job_a, job_b]
+    _group_native_llvm_generation_v1 = generation
+    val handle_a = thread_spawn_with_i64_args_id(0, generation, _group_native_llvm_slot_worker_v1)
+    val handle_b = thread_spawn_with_i64_args_id(1, generation, _group_native_llvm_slot_worker_v1)
+    var threaded_a: i64 = 4
+    var threaded_b: i64 = 4
+    if handle_a > 0:
+        threaded_a = thread_join_by_id(handle_a) ?? 4
+    if handle_b > 0:
+        threaded_b = thread_join_by_id(handle_b) ?? 4
+    _group_native_llvm_jobs_v1 = []
+    _group_native_llvm_generation_v1 = 0
+    if handle_a <= 0 or handle_b <= 0 or threaded_a != 0 or threaded_b != 0:
+        _group_native_llvm_gate_v1.store(0, MemoryOrdering.SeqCst)
+        return _group_native_llvm_pair_failure_v1(
+            "calibrated LLVM worker spawn or emission failed", 4, 4,
+            threaded_a, threaded_b)
+    val receipt_a = _group_native_receipt_v1(job_a.receipt_path)
+    val receipt_b = _group_native_receipt_v1(job_b.receipt_path)
+    if receipt_a.status != 0 or receipt_b.status != 0 or
+        receipt_a.object_sha256 != _group_native_sha256_file_v1(job_a.object_path) or
+        receipt_b.object_sha256 != _group_native_sha256_file_v1(job_b.object_path):
+        _group_native_llvm_gate_v1.store(0, MemoryOrdering.SeqCst)
+        return _group_native_llvm_pair_failure_v1(
+            "calibrated LLVM receipt or object hash invalid", 4, 4,
+            threaded_a, threaded_b)
+    val execution = _group_native_execution_v1(job_a, job_b, receipt_a, receipt_b)
+    if not _group_native_execution_valid_v1(execution):
+        _group_native_llvm_gate_v1.store(0, MemoryOrdering.SeqCst)
+        return _group_native_llvm_pair_failure_v1(
+            "calibrated LLVM thread overlap invalid", 4, 4,
+            threaded_a, threaded_b)
+    val proof = _group_native_llvm_calibration_proof_v1
+    _group_native_llvm_gate_v1.store(0, MemoryOrdering.SeqCst)
+    GroupNativeLlvmPairResultV1(true, "calibrated", -1, -1,
+        threaded_a, threaded_b, proof, Some(execution))
 
 fn _group_native_llvm_overlap_v1(proof: GroupNativeThreadQualificationV1) -> bool:
     if proof.backend != "llvm" or proof.module_a == "" or proof.module_b == "":
@@ -362,3 +515,5 @@ export GroupNativeThreadQualificationV1, GroupNativeThreadCapabilityV1
 export group_native_thread_capability_v1
 export GroupNativeLlvmJobV1, GroupNativeLlvmWorkerReceiptV1
 export GroupNativeLlvmPairResultV1, group_native_llvm_qualify_pair_v1
+export GroupNativeThreadExecutionV1, group_native_llvm_has_calibration_v1
+export group_native_llvm_emit_calibrated_pair_v1

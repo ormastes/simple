@@ -15,9 +15,13 @@ use compiler.backend.backend_plugin.builtin_adapter.{builtin_backend_target}
 use compiler.backend.backend.llvm_target.{LlvmTargetConfig}
 use compiler.backend.backend.group_native_thread_capability.{
     GroupNativeLlvmJobV1, GroupNativeThreadQualificationV1,
-    group_native_llvm_qualify_pair_v1, group_native_thread_capability_v1}
+    GroupNativeThreadExecutionV1, group_native_llvm_qualify_pair_v1,
+    group_native_llvm_has_calibration_v1,
+    group_native_llvm_emit_calibrated_pair_v1,
+    group_native_thread_capability_v1}
 use std.nogc_sync_mut.io.file_ops.{file_exists}
 use std.nogc_sync_mut.io_runtime.{env_get_opt}
+use std.common.crypto.sha256.{sha256_text}
 use compiler.mir.mir_instructions.{MirModule}
 use compiler.common.module_path_naming.{module_logical_name_from_path}
 use compiler.mir_opt.mir_opt.mod.{
@@ -37,6 +41,7 @@ pub struct GroupNativeCompilePairResultV1:
     effective_threads: i64
     units: [GroupNativeCompiledUnitV1]
     qualification: GroupNativeThreadQualificationV1?
+    execution: GroupNativeThreadExecutionV1?
 
 pub fn group_native_options_for_capsule_v1(
     capsule: FrozenNativeModuleCapsuleV1,
@@ -89,7 +94,7 @@ fn _group_native_pair_rejected_v1(
         false, reason, 1,
         [GroupNativeCompiledUnitV1(a.module_name, a.object_path, status_a, reason),
          GroupNativeCompiledUnitV1(b.module_name, b.object_path, status_b, reason)],
-        nil)
+        nil, nil)
 
 fn _group_native_target_text_v1(config: LlvmTargetConfig) -> text:
     var target = "{config.triple.arch}-{config.triple.vendor}-{config.triple.os}"
@@ -172,6 +177,7 @@ pub fn group_native_compile_pairs_v1(
     options: BackendCompileOptions,
     target_config: LlvmTargetConfig,
     generation: i64,
+    group_scope: text,
     private_root: text,
     host_cpus: i64,
     available_bytes: i64,
@@ -183,7 +189,8 @@ pub fn group_native_compile_pairs_v1(
     if not _group_native_capsule_pair_valid_v1(batch, a, b, options, target_config):
         return _group_native_pair_rejected_v1(a, b,
             "frozen LLVM capsule or target policy invalid", 4, 4)
-    if private_root == "" or not file_exists(private_root) or generation <= 0:
+    if group_scope == "" or private_root == "" or
+        not file_exists(private_root) or generation <= 0:
         return _group_native_pair_rejected_v1(a, b,
             "private output root or generation invalid", 4, 4)
     val memory_workers = if measured_per_thread_bytes > 0 and
@@ -212,6 +219,12 @@ pub fn group_native_compile_pairs_v1(
 
     val bootstrap_mode = (env_get_opt("SIMPLE_BOOTSTRAP") ?? "") == "1"
     val native_entry = env_get_opt("SIMPLE_NATIVE_BUILD_ENTRY") ?? ""
+    val no_mangle = env_get_opt("SIMPLE_NATIVE_BUILD_NO_MANGLE") ?? ""
+    val bootstrap_debug = env_get_opt("SIMPLE_BOOTSTRAP_DEBUG") ?? ""
+    val empty_native_object = env_get_opt("SIMPLE_BOOTSTRAP_EMPTY_NATIVE_OBJ") ?? ""
+    if no_mangle == "1" or bootstrap_debug == "1" or empty_native_object == "1":
+        return _group_native_pair_rejected_v1(a, b,
+            "ambient LLVM policy does not admit inner threads", 4, 4)
     val entry_module = if native_entry == "": "" else:
         module_logical_name_from_path(native_entry)
     val prefix = "{private_root}/group-native-{generation}"
@@ -235,13 +248,33 @@ pub fn group_native_compile_pairs_v1(
         object_path: b.object_path,
         diagnostic_path: "{prefix}-b.thread.diagnostic",
         receipt_path: "{prefix}-b.thread.receipt")
-    val paired = group_native_llvm_qualify_pair_v1(job_a, job_b, generation)
+    # This key is issued only by the backend after an ordinary serial object
+    # parity witness. Every later pair must have exactly the same builtin
+    # provider/session, target CPU/features, options, entry pattern, and
+    # ambient bootstrap policy in this manifest and process.
+    val calibration_key = sha256_text(
+        "{group_scope}|{batch.registry_identity}|{a.provider_receipt_hash}|" +
+        "{a.target}|{a.target_cpu}|{canonical_config.to_cpu_string()}|" +
+        "{canonical_config.to_feature_string()}|{a.opt_level}|{a.is_release}|" +
+        "{canonical_options.opt_level}|{canonical_options.debug_info}|" +
+        "{native_entry}|{job_a.is_entry}|{job_b.is_entry}|" +
+        "{bootstrap_mode}|{no_mangle}|{bootstrap_debug}|{empty_native_object}")
+    val paired = if group_native_llvm_has_calibration_v1(calibration_key):
+        group_native_llvm_emit_calibrated_pair_v1(
+            job_a, job_b, generation, calibration_key)
+    else:
+        group_native_llvm_qualify_pair_v1(
+            job_a, job_b, generation, calibration_key)
     if not a.identity_valid() or not b.identity_valid():
         return _group_native_pair_rejected_v1(a, b,
             "frozen MIR capsule changed during worker loan",
             paired.threaded_status_a, paired.threaded_status_b)
     if not paired.accepted:
         return _group_native_pair_rejected_v1(a, b, paired.reason,
+            paired.threaded_status_a, paired.threaded_status_b)
+    if not paired.execution.?:
+        return _group_native_pair_rejected_v1(a, b,
+            "pair lacks its own native thread execution receipt",
             paired.threaded_status_a, paired.threaded_status_b)
     val capability = group_native_thread_capability_v1(
         "llvm", 2, 2, host_cpus, available_bytes,
@@ -254,7 +287,7 @@ pub fn group_native_compile_pairs_v1(
         2,
         [GroupNativeCompiledUnitV1(a.module_name, a.object_path, 0, ""),
          GroupNativeCompiledUnitV1(b.module_name, b.object_path, 0, "")],
-        paired.qualification)
+        paired.qualification, paired.execution)
 
 export GroupNativeCompiledUnitV1, GroupNativeCompilePairResultV1
 export group_native_compile_pairs_v1, group_native_options_for_capsule_v1

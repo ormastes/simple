@@ -5,7 +5,7 @@
 use std.spec.{describe, it, expect}
 use std.spec.step
 use std.io_runtime.{env_get_opt}
-use std.nogc_sync_mut.io.file_ops.{secure_temp_dir}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_exists}
 use compiler.common.config.{Logger}
 use compiler.frontend.frontend.{parse_full_frontend}
 use compiler.hir.hir_lowering.types.{HirLowering}
@@ -16,6 +16,8 @@ use compiler.backend.backend.backend_types.{CodegenTarget, compileoptions_defaul
 use compiler.backend.backend.llvm_target.{LlvmTargetConfig}
 use compiler.backend.backend.group_native_thread_capability.{
     GroupNativeLlvmJobV1, group_native_llvm_qualify_pair_v1,
+    group_native_llvm_emit_calibrated_pair_v1,
+    group_native_llvm_has_calibration_v1,
     group_native_thread_capability_v1}
 
 fn grouped_thread_fixture_module(name: text) -> MirModule:
@@ -57,7 +59,8 @@ describe "grouped native LLVM inner-thread qualification", tag: ["only-compiled"
         val job_b = grouped_thread_job(grouped_thread_fixture_module("test.group_thread_b"), root, "b")
 
         step("Spawn two native LLVM workers with scalar slot and generation handles")
-        val result = group_native_llvm_qualify_pair_v1(job_a, job_b, 1)
+        val result = group_native_llvm_qualify_pair_v1(
+            job_a, job_b, 1, "group-thread-spec-calibration")
         expect(result.accepted).to_equal(true)
         expect(result.baseline_status_a).to_equal(0)
         expect(result.baseline_status_b).to_equal(0)
@@ -71,6 +74,34 @@ describe "grouped native LLVM inner-thread qualification", tag: ["only-compiled"
         expect(capability.effective_threads).to_equal(2)
         expect(capability.overlap_qualified).to_equal(true)
         expect(capability.object_parity_qualified).to_equal(true)
+
+        step("Reuse the process-local calibration for a new frozen pair without serial baselines")
+        expect(group_native_llvm_has_calibration_v1(
+            "group-thread-spec-calibration")).to_equal(true)
+        val job_c = grouped_thread_job(grouped_thread_fixture_module("test.group_thread_c"), root, "c")
+        val job_d = grouped_thread_job(grouped_thread_fixture_module("test.group_thread_d"), root, "d")
+        val reused = group_native_llvm_emit_calibrated_pair_v1(
+            job_c, job_d, 2, "group-thread-spec-calibration")
+        expect(reused.accepted).to_equal(true)
+        expect(reused.threaded_status_a).to_equal(0)
+        expect(reused.threaded_status_b).to_equal(0)
+        expect(reused.execution.?).to_equal(true)
+        if val execution = reused.execution:
+            expect(execution.thread_id_a == execution.thread_id_b).to_equal(false)
+            expect(execution.process_id_a).to_equal(execution.process_id_b)
+            expect(execution.llvm_start_us_a < execution.llvm_end_us_b).to_equal(true)
+            expect(execution.llvm_start_us_b < execution.llvm_end_us_a).to_equal(true)
+        expect(file_exists(job_c.baseline_object_path)).to_equal(false)
+        expect(file_exists(job_d.baseline_object_path)).to_equal(false)
+        expect(group_native_llvm_has_calibration_v1(
+            "different-group-or-policy")).to_equal(false)
+        val job_e = grouped_thread_job(grouped_thread_fixture_module("test.group_thread_e"), root, "e")
+        val job_f = grouped_thread_job(grouped_thread_fixture_module("test.group_thread_f"), root, "f")
+        val drifted = group_native_llvm_emit_calibrated_pair_v1(
+            job_e, job_f, 3, "different-group-or-policy")
+        expect(drifted.accepted).to_equal(false)
+        expect(file_exists(job_e.object_path)).to_equal(false)
+        expect(file_exists(job_f.object_path)).to_equal(false)
 
     it "fails closed without a native qualification receipt":
         # @req REQ-GROUP-NATIVE-INNER-THREADS
