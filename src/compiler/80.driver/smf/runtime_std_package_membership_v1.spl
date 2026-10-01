@@ -23,7 +23,7 @@ use std.scv.compile_source_inventory_core.{
     compile_source_inventory_path_valid_v1,
     compile_source_inventory_identity_cmp_v1
 }
-use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_is_real_no_follow}
 use std.nogc_sync_mut.io.file_ops.{
     file_create_exclusive, file_read_regular_no_follow_bounded
 }
@@ -195,6 +195,36 @@ fn runtime_std_package_members_v1(
 fn _runtime_std_hir_aggregate_frame_v1(value: text) -> text:
     "{text_byte_len(value)}:{value}"
 
+# The index worker writes inside its private attempt root. Check every
+# existing ancestor, not just the final directory: a swapped parent must not
+# redirect a seven-section package write outside that root.
+fn _runtime_std_hir_aggregate_dirs_real_v1(path: text) -> bool:
+    val normalized = path.replace("\\", "/")
+    if normalized == "" or normalized.contains("//"): return false
+    val parts = normalized.split("/")
+    if parts.len() == 0: return false
+    var current = "."
+    var index = 0
+    if normalized.starts_with("/"):
+        current = "/"
+        index = 1
+    elif parts[0].len() == 2 and (parts[0].byte_at(1) as i64) == 58:
+        current = parts[0] + "/"
+        index = 1
+    elif parts[0] == ".":
+        index = 1
+    if not dir_is_real_no_follow(current): return false
+    while index < parts.len():
+        val part = parts[index]
+        if part == "" or part == "." or part == "..": return false
+        if current.ends_with("/"):
+            current = current + part
+        else:
+            current = current + "/" + part
+        if not dir_is_real_no_follow(current): return false
+        index = index + 1
+    true
+
 fn runtime_std_package_hir_sections_write_v1(
     artifact_root: text,
     membership: RuntimeStdPackageMembershipV1,
@@ -242,7 +272,9 @@ fn runtime_std_package_hir_sections_write_v1(
     if closure == "":
         return Err("runtime-std-hir-aggregate-closure-invalid")
     val output_root = "{artifact_root}/{package_identity}"
-    if not dir_create_all(output_root):
+    if not _runtime_std_hir_aggregate_dirs_real_v1(artifact_root) or
+            not dir_create_all(output_root) or
+            not _runtime_std_hir_aggregate_dirs_real_v1(output_root):
         return Err("runtime-std-hir-aggregate-output-root-unavailable")
     var receipts: [RuntimeStdCompiledSectionReceiptV1] = []
     var section_index = 0
@@ -268,11 +300,13 @@ fn runtime_std_package_hir_sections_write_v1(
             index = index + 1
         val content = header + rows.join("")
         val path = "{output_root}/{names[section_index]}"
-        if not file_create_exclusive(path, content):
+        if not _runtime_std_hir_aggregate_dirs_real_v1(output_root) or
+                not file_create_exclusive(path, content):
             return Err("runtime-std-hir-aggregate-write-refused")
         val readback = file_read_regular_no_follow_bounded(
             path, RUNTIME_STD_COMPILED_SECTION_MAX_BYTES_V1)
-        if readback.is_err() or readback.unwrap() != content:
+        if not _runtime_std_hir_aggregate_dirs_real_v1(output_root) or
+                readback.is_err() or readback.unwrap() != content:
             return Err("runtime-std-hir-aggregate-readback-mismatch")
         receipts = receipts.push(RuntimeStdCompiledSectionReceiptV1(
             kinds[section_index], names[section_index], path,
