@@ -40,9 +40,12 @@ field() { bootstrap_stage3_manifest_value "$1" "$producer_receipt"; }
 producer=$(field candidate_path) || die "producer missing from admission"
 producer_sha=$(field candidate_sha256) || die "producer hash missing"
 source_authority=$(field source_snapshot_path) || die "source authority missing"
+source_authority_sha=$(field source_snapshot_sha256) || die "source authority digest missing"
 runtime_snapshot=$(field runtime_snapshot_path) || die "runtime snapshot missing"
+runtime_snapshot_sha=$(field runtime_snapshot_sha256) || die "runtime snapshot digest missing"
 runtime_path=$(field runtime_authority_path) || die "runtime path missing"
 tool_authority=$(field tool_authority_path) || die "tool authority missing"
+tool_authority_sha=$(field tool_authority_sha256) || die "tool authority digest missing"
 args_digest=$(field build_args_sha256) || die "build args missing"
 sanity=$(field sanity_evidence_path) || die "sanity receipt missing"
 receiver=$(field receiver_evidence_path) || die "receiver receipt missing"
@@ -60,6 +63,12 @@ regular "$source_authority" || die "source authority missing"
 # Reuse the canonical snapshotter, which also validates the admitted source
 # symlink records and checks every file for mutation while it is read.
 verify_sources() {
+  for pin in "$source_authority:$source_authority_sha" \
+      "$runtime_snapshot:$runtime_snapshot_sha" "$tool_authority:$tool_authority_sha"; do
+    pin_path=${pin%:*} pin_sha=${pin##*:}
+    regular "$pin_path" && [ "$(hash_file "$pin_path")" = "$pin_sha" ] \
+      || die "admitted source/tool/runtime authority changed: $pin_path"
+  done
   observed="$output_root/logs/source-verify.$$.txt"
   bootstrap_stage3_source_snapshot "$observed" "$source_root" \
     || die "canonical source snapshot failed"
@@ -89,14 +98,16 @@ esac
 manifest_entry=src/app/bootstrap_builder/manifest_main.spl
 group_worker_entry=src/app/bootstrap_builder/grouped_native_worker.spl
 index_entry=src/app/bootstrap_builder/native_group_index_main.spl
+authority_entry=src/app/bootstrap_builder/native_group_phase2_main.spl
 for entry in "$manifest_entry" "$manager_entry" "$worker_entry" \
-    "$group_manager_entry" "$group_worker_entry" "$broker_entry" "$index_entry"; do
+    "$group_manager_entry" "$group_worker_entry" "$broker_entry" "$index_entry" "$authority_entry"; do
   regular "$source_root/$entry" || die "manager image entry unavailable: $entry"
 done
 
 build_image() {
   name=$1 entry=$2
   image="$output_root/images/$name$suffix"
+  verify_sources
   if [ -e "$receipt" ]; then
     regular "$image" || die "sealed image missing: $name"
     return
@@ -137,12 +148,14 @@ build_image group-manager "$group_manager_entry"
 build_image group-worker "$group_worker_entry"
 build_image group-broker "$broker_entry"
 build_image index-builder "$index_entry"
+build_image phase2-authority "$authority_entry"
 manifest_image="$output_root/images/manifest$suffix"
 builder_image="$output_root/images/builder$suffix"
 group_image="$output_root/images/group-manager$suffix"
 group_worker_image="$output_root/images/group-worker$suffix"
 broker_image="$output_root/images/group-broker$suffix"
 index_image="$output_root/images/index-builder$suffix"
+authority_image="$output_root/images/phase2-authority$suffix"
 template="$output_root/host-template.sdn"
 if [ ! -e "$template" ]; then
   "$manifest_image" --template "$worker_image" "$output_root/template-workspace" "$template" 1 \
@@ -151,7 +164,7 @@ if [ ! -e "$template" ]; then
 fi
 regular "$template" || die "host template missing"
 IFS= read -r template_header <"$template" || die "host template header unreadable"
-[ "$template_header" = SIMPLE-BUILD-RUN-3 ] \
+[ "$template_header" = SIMPLE-BUILD-RUN-4 ] \
   || die "host template uses an obsolete manager wire; preserve it and use a new output root"
 verify_sources
 tmp="$receipt.tmp.$$"
@@ -168,6 +181,7 @@ umask 077
     "group_worker=$group_worker_image" "group_worker_sha256=$(hash_file "$group_worker_image")" \
     "group_broker=$broker_image" "group_broker_sha256=$(hash_file "$broker_image")" \
     "index_program=$index_image" "index_sha256=$(hash_file "$index_image")" \
+    "authority_program=$authority_image" "authority_sha256=$(hash_file "$authority_image")" \
     "template=$template" "template_sha256=$(hash_file "$template")"
 } >"$tmp" || die "image receipt write failed"
 if [ -e "$receipt" ]; then
