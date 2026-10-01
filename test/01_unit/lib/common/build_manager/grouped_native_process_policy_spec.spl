@@ -1,0 +1,42 @@
+use std.spec
+use std.common.build_manager.grouped_native_process_policy.{
+    NativeGroupActiveChargeV1, native_group_process_budget_v1}
+
+describe "Grouped process admission counts only future active growth":
+    it "admits a second group when measured headroom covers the remaining cap":
+        val active = [NativeGroupActiveChargeV1(1073741824, 805306368, 1)]
+        match native_group_process_budget_v1(4, 1, 1073741824, 268435456,
+                1879048192, 2147483648, true, active):
+            case Ok(budget):
+                expect(budget.admitted).to_equal(true)
+                expect(budget.required_growth_bytes).to_equal(1610612736)
+                expect(budget.active_threads).to_equal(1)
+            case Err(reason): fail(reason)
+
+    it "refuses Windows commit exhaustion even when physical memory fits":
+        val active = [NativeGroupActiveChargeV1(1073741824, 805306368, 1)]
+        match native_group_process_budget_v1(4, 1, 1073741824, 268435456,
+                1879048192, 1342177280, true, active):
+            case Ok(budget):
+                expect(budget.admitted).to_equal(false)
+                expect(budget.reason).to_equal("Windows system commit headroom exhausted")
+            case Err(reason): fail(reason)
+
+    it "marks Linux commit unavailable and still bounds CPU and memory":
+        val active = [NativeGroupActiveChargeV1(1073741824, 805306368, 1)]
+        match native_group_process_budget_v1(2, 1, 1073741824, 268435456,
+                1342177280, 0, false, active):
+            case Ok(budget):
+                expect(budget.admitted).to_equal(false)
+                expect(budget.reason).to_equal("available host/cgroup memory exhausted")
+            case Err(reason): fail(reason)
+        match native_group_process_budget_v1(1, 1, 1073741824, 268435456,
+                2147483648, 0, false, active):
+            case Ok(budget): expect(budget.reason).to_equal("CPU threads exhausted")
+            case Err(reason): fail(reason)
+
+    it "rejects a fabricated Linux commit value":
+        match native_group_process_budget_v1(2, 1, 1073741824, 0,
+                2147483648, 1, false, []):
+            case Ok(_): fail("unmeasured commit bytes were admitted")
+            case Err(reason): expect(reason).to_equal("invalid native group process budget input")
