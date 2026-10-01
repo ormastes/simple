@@ -8,7 +8,7 @@ absolute() { case "$1" in /*|[A-Za-z]:/*) return 0 ;; *) return 1 ;; esac; }
 positive() { case "$1" in ''|*[!0-9]*|0) return 1 ;; *) [ "$1" -gt 0 ] 2>/dev/null ;; esac; }
 hash_file() { sha256sum "$1" | cut -d ' ' -f 1; }
 
-producer_receipt= scv_receipt= llvm_variant_receipt= cranelift_variant_receipt= index_read_root= source_root= source_inventory= module_inventory=
+producer_receipt= scv_receipt= llvm_variant_receipt= cranelift_variant_receipt= runtime_std_authority= index_read_root= source_root= source_inventory= module_inventory=
 root= template= manifest_program= builder_program= group_program= group_worker= group_broker=
 threads= memory_bytes= reserve_bytes= target= group_size= max_attempts= poll_ms= lifetime_ms=
 estimated_group_disk_bytes= minimum_free_disk_bytes=
@@ -18,6 +18,7 @@ for arg in "$@"; do
     --scv-receipt=*) scv_receipt=${arg#*=} ;;
     --llvm-variant-receipt=*) llvm_variant_receipt=${arg#*=} ;;
     --cranelift-variant-receipt=*) cranelift_variant_receipt=${arg#*=} ;;
+    --runtime-std-authority=*) runtime_std_authority=${arg#*=} ;;
     --index-read-root=*) index_read_root=${arg#*=} ;;
     --source-root=*) source_root=${arg#*=} ;;
     --source-inventory=*) source_inventory=${arg#*=} ;;
@@ -42,15 +43,18 @@ for arg in "$@"; do
     *) die "unknown option: $arg" ;;
   esac
 done
-for path in "$producer_receipt" "$scv_receipt" "$llvm_variant_receipt" "$cranelift_variant_receipt" "$index_read_root" "$source_root" "$source_inventory" \
+for path in "$producer_receipt" "$scv_receipt" "$llvm_variant_receipt" "$cranelift_variant_receipt" "$runtime_std_authority" "$index_read_root" "$source_root" "$source_inventory" \
     "$module_inventory" "$root" "$template" "$manifest_program" "$builder_program" \
     "$group_program" "$group_worker" "$group_broker"; do
   [ -n "$path" ] && absolute "$path" || die "absolute path required: $path"
 done
-for path in "$producer_receipt" "$scv_receipt" "$llvm_variant_receipt" "$cranelift_variant_receipt" "$source_inventory" "$module_inventory" \
+for path in "$producer_receipt" "$scv_receipt" "$llvm_variant_receipt" "$cranelift_variant_receipt" "$runtime_std_authority" "$source_inventory" "$module_inventory" \
     "$template" "$manifest_program" "$builder_program" "$group_program" \
     "$group_worker" "$group_broker"; do regular "$path" || die "missing pinned input: $path"; done
 [ -d "$source_root" ] && [ ! -L "$source_root" ] || die "source root unavailable"
+case "$source_inventory" in "$source_root"/*) source_inventory_relative=${source_inventory#"$source_root"/} ;; *) die "source inventory must be inside immutable source root" ;; esac
+case "$root/" in "$source_root/"*) die "output root overlaps immutable source root" ;; esac
+case "$source_root/" in "$root/"*) die "immutable source root overlaps output root" ;; esac
 for n in "$threads" "$memory_bytes" "$reserve_bytes" "$group_size" "$max_attempts" \
     "$poll_ms" "$lifetime_ms" "$estimated_group_disk_bytes" "$minimum_free_disk_bytes"; do
   positive "$n" || die "positive resource policy required"
@@ -81,7 +85,8 @@ prepare_backend() {
   esac
   backend_root="$root/modules/$backend"
   sh "$prepare" --phase=phase4 --producer-receipt="$producer_receipt" \
-    --scv-receipt="$scv_receipt" --variant-receipt="$variant_receipt" --source-root="$source_root" \
+    --scv-receipt="$scv_receipt" --variant-receipt="$variant_receipt" \
+    --runtime-std-authority="$runtime_std_authority" --source-root="$source_root" \
     --index-read-root="$index_read_root" \
     --inventory="$module_inventory" --backend="$backend" \
     --output-root="$backend_root" --manager-program="$group_program" \
@@ -95,23 +100,36 @@ prepare_backend() {
     --minimum-free-disk-bytes="$minimum_free_disk_bytes" >/dev/null \
     || die "$backend preparation blocked"
 }
-# One immutable source inventory is copied for each manager job. A completed
-# job retains its staged inputs and receipt for exact resume verification.
-stage_job() {
-  job_root=$1
-  if [ -f "$job_root/source.inventory" ]; then
-    cmp -s "$source_inventory" "$job_root/source.inventory" || die "staged source inventory changed"
-    return
-  fi
-  [ ! -e "$job_root/manifest.sdn" ] || die "job manifest exists without staged inventory"
-  mkdir -p "$job_root" || die "cannot create job root"
-  archive="$job_root/source.tar.tmp.$$"
-  trap 'rm -f "$archive"' EXIT HUP INT TERM
-  tar -C "$source_root" -cf "$archive" -T "$source_inventory" || die "source staging archive failed"
-  tar -C "$job_root" -xf "$archive" || die "source staging extraction failed"
-  rm -f "$archive"
-  cp "$source_inventory" "$job_root/source.inventory" || die "source inventory staging failed"
-  trap - EXIT HUP INT TERM
+# The source snapshot is shared and read-only. Each job keeps only its output,
+# manager manifest, state, and receipt. The manager owns isolated attempt data.
+verify_shared_source() {
+  perl -e '
+    use strict; use warnings; use Digest::SHA ();
+    my ($source, $inventory, $authority) = @ARGV;
+    my %expected;
+    open my $proof, "<:raw", $authority or die "open source authority\n";
+    while (my $row = <$proof>) {
+      $row =~ s/\n\z//;
+      $row =~ /^file-hex:([0-9a-f]+):[01]:([0-9a-f]{64})$/
+        or die "invalid source authority row\n";
+      my $path = pack("H*", $1);
+      $expected{$path} = $2 if $path =~ m{^src/};
+    }
+    open my $rows, "<:raw", $inventory or die "open inventory\n";
+    while (my $relative = <$rows>) {
+      $relative =~ s/\n\z//;
+      $relative =~ /^src\/[A-Za-z0-9._\/+\-]+$/ &&
+        $relative !~ m{(?:^|/)\.\.? (?:/|$)}x or die "unsafe source path\n";
+      my @original = lstat("$source/$relative");
+      @original && -f _ && !-l _ or die "source is not regular: $relative\n";
+      defined $expected{$relative} or die "source path lacks admitted digest\n";
+      open my $input, "<:raw", "$source/$relative" or die "open source input\n";
+      my $digest = Digest::SHA->new(256)->addfile($input)->hexdigest;
+      close $input or die "close source input\n";
+      $digest eq $expected{$relative} or die "source digest differs: $relative\n";
+    }
+  ' "$source_root" "$source_inventory" "$source_authority" \
+    || die "shared source differs from admitted Stage 2 input bytes"
 }
 
 # The manager's worker runs in its own work root, so output and cache paths in
@@ -119,11 +137,11 @@ stage_job() {
 build_binary() {
   id=$1 entry=$2 output=$3 task_phase=$4
   job_root="$root/$task_phase/binaries/$id"
-  stage_job "$job_root"
   mkdir -p "$job_root/bin" "$job_root/cache" "$job_root/state" || die "job directories unavailable"
   if [ ! -f "$job_root/manifest.sdn" ]; then
-    "$manifest_program" --job-from-inventory "$template" "$producer" "$job_root" \
-      "$id" "$task_phase" "$output" source.inventory -- \
+    "$manifest_program" --job-from-inventory "$template" "$producer" "$source_root" \
+      "$id" "$task_phase" "$output" "$source_inventory_relative" \
+      --manifest "$job_root/manifest.sdn" -- \
       native-build --target "$target" --backend llvm \
       --source src/compiler --source src/app --source src/lib \
       --entry-closure --entry "$entry" --threads "$threads" \
@@ -132,7 +150,12 @@ build_binary() {
   fi
   SIMPLE_BUILD_PRESPAWN_REQUIRED_MEMORY_BYTES="$((memory_bytes + reserve_bytes))" \
   "$builder_program" run --manifest "$job_root/manifest.sdn" \
-    --state "$job_root/state" --source-root "$job_root" || die "$id manager task failed"
+    --state "$job_root/state" --source-root "$source_root" \
+    --output-root "$job_root" || die "$id manager task failed"
+  verify_shared_source
+  "$builder_program" verify --manifest "$job_root/manifest.sdn" \
+    --state "$job_root/state" --source-root "$source_root" \
+    --output-root "$job_root" || die "$id receipt/output verification failed"
   regular "$job_root/$output" && regular "$job_root/state/receipts/$id.sdn" \
     || die "$id has no published output and terminal receipt"
   printf '%s=%s\n' "$id" "$(hash_file "$job_root/$output")" >>"$root/binary-hashes.tmp.$$"
@@ -181,6 +204,7 @@ perl -e '
 cmp -s "$expected_inventory" "$source_inventory" \
   || die "binary source inventory differs from complete admitted Stage 2 source paths"
 rm -f "$expected_inventory"
+verify_shared_source
 
 hashes="$root/binary-hashes.tmp.$$"
 trap 'rm -f "$hashes"' EXIT HUP INT TERM
