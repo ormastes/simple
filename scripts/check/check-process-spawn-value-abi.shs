@@ -1,0 +1,20 @@
+#!/bin/sh
+# Real native ABI probe, optionally linked to the admitted/bootstrap Rust archive.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+cd "$root"
+out=${SIMPLE_SPAWN_ABI_OUTPUT:-build/native_probe/process-spawn-value-abi}
+mkdir -p "$out"
+cc=${CC:-cc}
+if [ "$#" -eq 1 ]; then
+    "$cc" -std=gnu11 -DSIMPLE_RUST_RUNTIME_PROVIDER=1 -I src/runtime scripts/check/fixtures/process_spawn_value_abi.c "$1" -lpthread -ldl -lm -lz -lzstd -lsqlite3 -o "$out/probe"
+elif [ "$#" -eq 0 ]; then
+    for unit in runtime_native runtime_legacy_core runtime_process; do
+        "$cc" -std=gnu11 -DSIMPLE_CORE_C_STANDALONE=1 -ffunction-sections -fdata-sections -I src/runtime -I src/runtime/platform -c "src/runtime/$unit.c" -o "$out/$unit.o"
+    done
+    "$cc" -std=gnu11 -Wl,--gc-sections -I src/runtime scripts/check/fixtures/process_spawn_value_abi.c "$out/runtime_native.o" "$out/runtime_legacy_core.o" "$out/runtime_process.o" -lpthread -ldl -lm -o "$out/probe"
+else
+    echo "usage: $0 [libsimple_runtime.a]" >&2
+    exit 2
+fi
+timeout 30 "$out/probe" --parent
