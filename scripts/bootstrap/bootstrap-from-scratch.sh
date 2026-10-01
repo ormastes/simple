@@ -3092,6 +3092,7 @@ bootstrap_step_mark cargo-build-or-skip
 # pure-Simple compiler stage starts. The cleanup traps and output lock are
 # already active here, making every refusal release ownership correctly.
 if [ "${full_bootstrap}" -eq 1 ]; then
+  bootstrap_progress_mark bootstrap-preflight ""
   bootstrap_preflight_receipt="${output_dir}/bootstrap-preflight.env"
   rm -f "${bootstrap_preflight_receipt}"
   bootstrap_preflight_config="platform=${PLATFORM};backend=${backend};mode=${bootstrap_mode};lane=full-bootstrap"
