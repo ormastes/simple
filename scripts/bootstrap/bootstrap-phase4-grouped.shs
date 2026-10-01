@@ -9,7 +9,8 @@ positive() { case "$1" in ''|*[!0-9]*|0) return 1 ;; *) [ "$1" -gt 0 ] 2>/dev/nu
 hash_file() { sha256sum "$1" | cut -d ' ' -f 1; }
 
 producer_receipt= scv_receipt= llvm_variant_receipt= cranelift_variant_receipt= runtime_std_authority= index_read_root= source_root= source_inventory= module_inventory=
-root= template= manifest_program= builder_program= group_program= group_worker= group_broker=
+root= template= manifest_program= builder_program= group_program= group_worker= group_broker= index_program=
+llvm_index_config= cranelift_index_config=
 threads= memory_bytes= reserve_bytes= target= group_size= max_attempts= poll_ms= lifetime_ms=
 estimated_group_disk_bytes= minimum_free_disk_bytes=
 for arg in "$@"; do
@@ -30,6 +31,9 @@ for arg in "$@"; do
     --group-program=*) group_program=${arg#*=} ;;
     --group-worker=*) group_worker=${arg#*=} ;;
     --group-broker=*) group_broker=${arg#*=} ;;
+    --index-program=*) index_program=${arg#*=} ;;
+    --llvm-index-config=*) llvm_index_config=${arg#*=} ;;
+    --cranelift-index-config=*) cranelift_index_config=${arg#*=} ;;
     --threads=*) threads=${arg#*=} ;;
     --memory-bytes=*) memory_bytes=${arg#*=} ;;
     --reserve-bytes=*) reserve_bytes=${arg#*=} ;;
@@ -45,12 +49,14 @@ for arg in "$@"; do
 done
 for path in "$producer_receipt" "$scv_receipt" "$llvm_variant_receipt" "$cranelift_variant_receipt" "$runtime_std_authority" "$index_read_root" "$source_root" "$source_inventory" \
     "$module_inventory" "$root" "$template" "$manifest_program" "$builder_program" \
-    "$group_program" "$group_worker" "$group_broker"; do
+    "$group_program" "$group_worker" "$group_broker" "$index_program" \
+    "$llvm_index_config" "$cranelift_index_config"; do
   [ -n "$path" ] && absolute "$path" || die "absolute path required: $path"
 done
 for path in "$producer_receipt" "$scv_receipt" "$llvm_variant_receipt" "$cranelift_variant_receipt" "$runtime_std_authority" "$source_inventory" "$module_inventory" \
     "$template" "$manifest_program" "$builder_program" "$group_program" \
-    "$group_worker" "$group_broker"; do regular "$path" || die "missing pinned input: $path"; done
+    "$group_worker" "$group_broker" "$index_program" \
+    "$llvm_index_config" "$cranelift_index_config"; do regular "$path" || die "missing pinned input: $path"; done
 [ -d "$source_root" ] && [ ! -L "$source_root" ] || die "source root unavailable"
 case "$source_inventory" in "$source_root"/*) source_inventory_relative=${source_inventory#"$source_root"/} ;; *) die "source inventory must be inside immutable source root" ;; esac
 case "$root/" in "$source_root/"*) die "output root overlaps immutable source root" ;; esac
@@ -163,6 +169,55 @@ build_binary() {
   printf '%s=%s\n' "$id" "$(hash_file "$job_root/$output")" >>"$root/binary-hashes.tmp.$$"
 }
 
+# The complete V2 index is a post-readiness build task. Its only staged input
+# is a pinned config; the compiled CLI admits the absolute frozen source and
+# SCV authority named there. The generic manager owns retries and publication.
+build_index() {
+  backend=$1 config=$2
+  job_root="$root/phase4/index/$backend"
+  input_root="$job_root/inputs"
+  output_root="$job_root/output"
+  state_root="$job_root/state"
+  mkdir -p "$input_root" "$output_root" "$state_root" || die "$backend index roots unavailable"
+  if [ -e "$input_root/index.config" ]; then
+    regular "$input_root/index.config" && cmp -s "$config" "$input_root/index.config" \
+      || die "$backend staged index config differs from replay"
+  else
+    cp "$config" "$input_root/index.config" || die "$backend index config staging failed"
+  fi
+  printf 'index.config\n' >"$input_root/source.inventory.tmp.$$" \
+    || die "$backend index inventory staging failed"
+  if [ -e "$input_root/source.inventory" ]; then
+    cmp -s "$input_root/source.inventory.tmp.$$" "$input_root/source.inventory" \
+      || die "$backend index inventory differs from replay"
+    rm -f "$input_root/source.inventory.tmp.$$"
+  else
+    mv "$input_root/source.inventory.tmp.$$" "$input_root/source.inventory" \
+      || die "$backend index inventory publication failed"
+  fi
+  if [ ! -e "$job_root/manifest.sdn" ]; then
+    "$manifest_program" --job-from-inventory "$template" "$index_program" \
+      "$input_root" "index-$backend" phase4 index-output/receipt.sdn \
+      source.inventory --manifest "$job_root/manifest.sdn" -- \
+      native-groups-index-build --manager-work --config index.config \
+      --receipt @WORK@/index-output/receipt.sdn \
+      || die "$backend index manifest blocked"
+  fi
+  SIMPLE_BUILD_PRESPAWN_REQUIRED_MEMORY_BYTES="$((memory_bytes + reserve_bytes))" \
+  "$builder_program" run --manifest "$job_root/manifest.sdn" \
+    --state "$state_root" --source-root "$input_root" --output-root "$output_root" \
+    || die "$backend managed index build failed"
+  "$builder_program" verify --manifest "$job_root/manifest.sdn" \
+    --state "$state_root" --source-root "$input_root" --output-root "$output_root" \
+    || die "$backend managed index receipt verification failed"
+  regular "$output_root/index-output/receipt.sdn" \
+    || die "$backend V2 index receipt unavailable"
+  # A generic task receipt alone cannot bind the V2 index, variant and
+  # runtime/std outputs to the group preparer. The compiled typed admission
+  # command must establish that relationship before group dispatch is enabled.
+  die "$backend V2 index receipt needs compiled downstream admission"
+}
+
 # Read the exact producer from the verified admission receipt; never use the
 # Stage 3 output or ambient `bin/simple` as a Phase 4 producer.
 . "$repo_root/scripts/check/lib/bootstrap-stage3-provenance.shs"
@@ -220,9 +275,13 @@ phase4_status=0
   build_binary mcp src/app/mcp/main.spl "bin/simple_mcp_server$exe_suffix" phase4
   build_binary lsp src/app/simple_lsp_mcp/main.spl "bin/simple_lsp_mcp_server$exe_suffix" phase4
   build_binary test-runner src/app/test_runner_new/main.spl "bin/simple_test_runner$exe_suffix" phase4
+  build_index llvm "$llvm_index_config"
   prepare_backend llvm
   for backend in llvm cranelift; do
-    [ "$backend" = llvm ] || prepare_backend cranelift
+    if [ "$backend" = cranelift ]; then
+      build_index cranelift "$cranelift_index_config"
+      prepare_backend cranelift
+    fi
     manifest="$root/modules/$backend/state/manifest.sdn"
     "$group_program" native-groups-run --manifest "$manifest" \
       || die "$backend module run failed or produced only diagnostic objects"
