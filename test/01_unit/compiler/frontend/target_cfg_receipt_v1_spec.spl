@@ -6,9 +6,45 @@ use compiler.common.config.Logger
 use compiler.frontend.frontend.parse_full_frontend_target_receipted_v1
 use compiler.frontend.frontend_target_cfg_receipt_v1.{
     FrontendCfgDecisionV1, frontend_cfg_decision_digest_v1,
+    frontend_cfg_portable_parse_identity_v1,
     frontend_cfg_receipt_valid_v1, frontend_cfg_excluded_emit_count_v1}
+use compiler.core.parser_preprocessor.{_pp_preprocess_conditionals_target_receipted_v1}
 
 describe "explicit target cfg decision receipt":
+    it "shares only equal target-preprocessed bytes and cfg decisions across hosts":
+        val plain = "fn plain() -> i64:\n    1\n"
+        val win_plain = _pp_preprocess_conditionals_target_receipted_v1(
+            plain, "windows", "x86_64")
+        val linux_plain = _pp_preprocess_conditionals_target_receipted_v1(
+            plain, "linux", "x86_64")
+        assert_true(win_plain.is_ok() and linux_plain.is_ok())
+        assert_equal(frontend_cfg_portable_parse_identity_v1(
+            win_plain.unwrap().source, win_plain.unwrap().decisions),
+            frontend_cfg_portable_parse_identity_v1(
+                linux_plain.unwrap().source, linux_plain.unwrap().decisions))
+
+        val same_directive = "@cfg(true)\nfn included() -> i64:\n    2\n"
+        val win_same = _pp_preprocess_conditionals_target_receipted_v1(
+            same_directive, "windows", "x86_64")
+        val linux_same = _pp_preprocess_conditionals_target_receipted_v1(
+            same_directive, "linux", "x86_64")
+        assert_true(win_same.is_ok() and linux_same.is_ok())
+        assert_equal(frontend_cfg_portable_parse_identity_v1(
+            win_same.unwrap().source, win_same.unwrap().decisions),
+            frontend_cfg_portable_parse_identity_v1(
+                linux_same.unwrap().source, linux_same.unwrap().decisions))
+
+        val selected = "@cfg(windows)\nfn selected() -> i64:\n    3\n"
+        val win_selected = _pp_preprocess_conditionals_target_receipted_v1(
+            selected, "windows", "x86_64")
+        val linux_selected = _pp_preprocess_conditionals_target_receipted_v1(
+            selected, "linux", "x86_64")
+        assert_true(win_selected.is_ok() and linux_selected.is_ok())
+        assert_false(frontend_cfg_portable_parse_identity_v1(
+            win_selected.unwrap().source, win_selected.unwrap().decisions) ==
+            frontend_cfg_portable_parse_identity_v1(
+                linux_selected.unwrap().source, linux_selected.unwrap().decisions))
+
     it "binds stacked cfg exclusions and active declarations to a Linux x86_64 target":
         step("binds stacked cfg exclusions and active declarations to a Linux x86_64 target")
         val source = "@cfg(\"target_arch\", \"arm\")\n" +

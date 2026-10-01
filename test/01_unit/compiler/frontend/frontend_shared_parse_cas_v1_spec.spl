@@ -88,16 +88,18 @@ describe("shared parse CAS v1", fn():
 
     it("keeps one immutable winner under competing publishers and reparses corruption", fn():
         val prior_root = env_get_opt("SIMPLE_SHARED_PARSE_CAS_ROOT") ?? ""
+        val prior_source = env_get_opt("SIMPLE_SHARED_PARSE_SOURCE_ROOT") ?? ""
         val prior_parser = env_get_opt("SIMPLE_SHARED_PARSE_CAS_PARSER_IDENTITY") ?? ""
         val prior_bootstrap = env_get_opt("SIMPLE_BOOTSTRAP") ?? ""
         val prior_enabled = env_get_opt("SIMPLE_FRONTEND_CACHE") ?? ""
         val _root = dir_create_all(ROOT)
         val _env_root = env_set("SIMPLE_SHARED_PARSE_CAS_ROOT", ROOT)
+        val _env_source = env_set("SIMPLE_SHARED_PARSE_SOURCE_ROOT", "C:/private")
         val _env_parser = env_set("SIMPLE_SHARED_PARSE_CAS_PARSER_IDENTITY", PARSER_ID)
         val _env_bootstrap = env_set("SIMPLE_BOOTSTRAP", "0")
         val _env_enabled = env_set("SIMPLE_FRONTEND_CACHE", "1")
-        val path = "src/competing-publishers.spl"
-        val key = key_for(TARGET_ID, path)
+        val path = "C:/private/src/competing-publishers.spl"
+        val key = key_for(TARGET_ID, "src/competing-publishers.spl")
         val cell_path = ROOT + "/parse-v1/" + key + ".spc"
         val _clean_old = file_delete(cell_path)
         assert_true(frontend_shared_parse_store_v1(SOURCE_SHA, PARSE_SOURCE,
@@ -109,21 +111,28 @@ describe("shared parse CAS v1", fn():
         assert_equal(frontend_shared_parse_load_v1(SOURCE_SHA, PARSE_SOURCE,
             TARGET_ID, "C:/private/src/competing-publishers.spl"), BLOB_A,
             "Windows private source path hydrates the shared winner")
+        val _wsl_source = env_set("SIMPLE_SHARED_PARSE_SOURCE_ROOT", "/mnt/d/private")
         assert_equal(frontend_shared_parse_load_v1(SOURCE_SHA, PARSE_SOURCE,
             TARGET_ID, "/mnt/d/private/src/competing-publishers.spl"), BLOB_A,
             "WSL private source path hydrates the same shared winner")
         assert_equal(frontend_shared_parse_load_v1(SOURCE_SHA, PARSE_SOURCE,
-            sha256_text("windows target cfg"), path), "",
+            TARGET_ID, "C:/private/src/competing-publishers.spl"), "",
+            "a path outside the current admitted source root is refused")
+        assert_equal(frontend_shared_parse_load_v1(SOURCE_SHA, PARSE_SOURCE,
+            sha256_text("windows target cfg"),
+            "/mnt/d/private/src/competing-publishers.spl"), "",
             "another target cannot reuse the winner")
         assert_false(frontend_shared_parse_store_v1(SOURCE_SHA, PARSE_SOURCE,
-            TARGET_ID, "C:/private/src/host-payload.spl",
-            "spl-flatpool-v2\nC:/private/src/host-payload.spl\n"),
+            TARGET_ID, "/mnt/d/private/src/host-payload.spl",
+            "spl-flatpool-v2\n/mnt/d/private/src/host-payload.spl\n"),
             "serialized producer private path is refused")
         val _corrupt = file_write_exact(cell_path, "broken-cell")
         assert_equal(frontend_shared_parse_load_v1(SOURCE_SHA, PARSE_SOURCE,
-            TARGET_ID, path), "", "corrupt winner is a reparse miss")
+            TARGET_ID, "/mnt/d/private/src/competing-publishers.spl"), "",
+            "corrupt winner is a reparse miss")
         val _clean = file_delete(cell_path)
         val _unset_root = env_set("SIMPLE_SHARED_PARSE_CAS_ROOT", prior_root)
+        val _unset_source = env_set("SIMPLE_SHARED_PARSE_SOURCE_ROOT", prior_source)
         val _unset_parser = env_set("SIMPLE_SHARED_PARSE_CAS_PARSER_IDENTITY", prior_parser)
         val _restore_bootstrap = env_set("SIMPLE_BOOTSTRAP", prior_bootstrap)
         val _restore_enabled = env_set("SIMPLE_FRONTEND_CACHE", prior_enabled)
