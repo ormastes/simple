@@ -1,0 +1,68 @@
+# Linux composition of the portable grouped-native manager and cgroup broker.
+use app.io.args_ops.{get_args}
+use std.common.build_manager.grouped_native_contract.{NativeGroupRunV1, native_group_run_decode_v1}
+use app.bootstrap_builder.grouped_native_run.{NativeGroupedCapacityV1, native_group_run_v1, native_group_verify_v1}
+use app.bootstrap_builder.native_group_prepare.{native_group_prepare_v1}
+use app.bootstrap_builder.native_group_linux_launcher.{native_linux_group_broker_launch_v1}
+use std.nogc_sync_mut.io.linux_process_owner.{linux_available_capacity_v1}
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded, file_is_regular_no_follow, file_hash_sha256}
+use std.nogc_sync_mut.io.group_process_owner.{group_process_set_launcher_v1}
+
+fn native_linux_group_read_input_v1(path: text,
+        state: text) -> Result<NativeGroupRunV1, text>:
+    if not path.starts_with("/") or not state.starts_with("/") or
+            path.contains("\0") or state.contains("\0"):
+        return Err("Linux manifest and state paths must be absolute")
+    val payload = file_read_regular_no_follow_bounded(path, 16777216)?
+    val run = native_group_run_decode_v1(payload)?
+    if run.state_root != state: return Err("state path differs from native group manifest")
+    if run.resources.len() != 0 or run.results.len() != 0:
+        return Err("input manifest must contain no execution evidence")
+    for manifest in run.manifests:
+        if manifest.attempt != 1: return Err("input manifest must contain only initial groups")
+    Ok(run)
+
+fn native_group_linux_main_v1() -> i64:
+    val args = get_args()
+    if args.len() == 6 and args[1] == "native-groups-prepare" and
+            args[2] == "--config" and args[4] == "--manifest":
+        match native_group_prepare_v1(args[3], args[5]):
+            Ok(run):
+                print "native groups prepared: modules={run.inventory_count} groups={run.manifests.len()}"
+                return 0
+            Err(reason):
+                print "native groups prepare: {reason}"
+                return 2
+    if args.len() != 6 or (args[1] != "native-groups-run" and
+            args[1] != "native-groups-verify") or args[2] != "--manifest" or
+            args[4] != "--state":
+        print "usage: grouped-native-linux native-groups-prepare --config ABS --manifest ABS"
+        print "       grouped-native-linux native-groups-run --manifest ABS --state ABS"
+        print "       grouped-native-linux native-groups-verify --manifest ABS --state ABS"
+        return 2
+    val run = match native_linux_group_read_input_v1(args[3], args[5]):
+        Ok(value): value
+        Err(reason):
+            print "native groups: {reason}"
+            return 2
+    if not file_is_regular_no_follow(run.manager_program) or
+            file_hash_sha256(run.manager_program) != run.manager_digest or
+            file_hash_sha256("/proc/self/exe") != run.manager_digest:
+        print "native groups: running Linux manager image differs from admitted digest"
+        return 2
+    if not group_process_set_launcher_v1(native_linux_group_broker_launch_v1):
+        print "native groups: process launcher already configured"
+        return 2
+    if args[1] == "native-groups-verify":
+        val outcome = native_group_verify_v1(run)
+        print "native groups verify: expected={outcome.expected_count} accounted={outcome.accounted_count} status={outcome.exit_code} reason={outcome.reason}"
+        return outcome.exit_code
+    val outcome = native_group_run_v1(run,
+        NativeGroupedCapacityV1(linux_available_capacity_v1))
+    print "native groups: expected={outcome.expected_count} accounted={outcome.accounted_count} status={outcome.exit_code} reason={outcome.reason}"
+    outcome.exit_code
+
+fn main() -> i64:
+    native_group_linux_main_v1()
+
+export native_group_linux_main_v1

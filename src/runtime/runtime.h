@@ -1306,6 +1306,27 @@ SplArray* rt_process_inspection_v1_start_pinned_value(
               SplArray* expected_input_digest);
 SplArray* rt_process_inspection_v1_input_receipt_value(SplArray* ticket);
 
+/* Broker-only Linux cgroup-v2/pidfd owner. The start result is [token,error];
+ * poll/collect return [error,terminal,leader_reaped,tree_empty,active,
+ * exit_code,timed_out,cancelled,memory_peak]. Unsupported hosts fail closed. */
+#ifdef __linux__
+SplArray* rt_linux_group_launch_broker_v1(const char* program,
+    uint64_t program_len, const char* digest, uint64_t digest_len,
+    SplArray* args);
+SplArray* rt_linux_group_start_v1(const char* program, uint64_t program_len,
+    const char* digest, uint64_t digest_len, SplArray* args,
+    SplArray* environment, const char* directory, uint64_t directory_len,
+    const char* root, uint64_t root_len,
+    const char* identity, uint64_t identity_len,
+    int64_t memory_limit, int64_t timeout_ms,
+    const char* stdout_path, uint64_t stdout_len,
+    const char* stderr_path, uint64_t stderr_len);
+SplArray* rt_linux_group_poll_v1(int64_t token);
+int64_t rt_linux_group_cancel_v1(int64_t token);
+SplArray* rt_linux_group_collect_v1(int64_t token);
+SplArray* rt_linux_group_available_capacity_v1(const char* path, uint64_t path_len);
+#endif
+
 /* ===== Process Piped (editor LSP transport) ===== */
 
 int64_t     rt_process_spawn_piped(const char* cmd, SplArray* args);
