@@ -7,14 +7,13 @@ use std.io_runtime.{time_now_monotonic_ms}
 use std.common.build_manager.group_process_protocol.{GroupProcessLaunchV1, GroupProcessPollV1, group_process_launch_decode_v1, group_process_identity_v1, group_process_observation_encode_v1}
 use std.common.build_manager.grouped_native_charge_evidence.{NativeGroupChargeSampleV1, NativeGroupChargeTraceV1, native_group_charge_trace_encode_v1}
 use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
-use std.nogc_sync_mut.io.windows_process_owner.{WindowsProcessInputV1, WindowsProcessRequestV1, WindowsProcessLeaseV1, WindowsProcessPollV1, windows_process_start_with_memory_v1, windows_process_peak_memory_v1, windows_process_memory_charge_v1, windows_process_poll_v1, windows_process_cancel_v1, windows_process_collect_v1, windows_process_path_valid_v1, windows_process_file_digest_v1}
+use std.nogc_sync_mut.io.windows_process_owner.{WindowsProcessInputV1, WindowsProcessRequestV1, WindowsProcessLeaseV1, WindowsProcessPollV1, windows_process_start_with_memory_v1, windows_process_peak_memory_v1, windows_process_poll_v1, windows_process_cancel_v1, windows_process_collect_v1, windows_process_path_valid_v1, windows_process_file_digest_v1}
 
 fn _group_broker_observation_v1(observed: WindowsProcessPollV1,
-        peak: i64, current: i64) -> GroupProcessPollV1:
-    val active_charge = if observed.terminal: 0 else: current
+        peak: i64) -> GroupProcessPollV1:
     GroupProcessPollV1(observed.terminal, observed.leader_reaped, observed.tree_empty,
         observed.active_processes, observed.exit_code, observed.timed_out,
-        observed.cancelled, peak, active_charge)
+        observed.cancelled, peak, 0, false)
 
 fn _group_broker_control_v1(root: text, identity: text) -> text:
     val request = match file_read_regular_no_follow_bounded(root + "/broker.control.request", 4096):
@@ -47,7 +46,7 @@ fn _group_broker_finish_v1(root: text, identity: text, lease: WindowsProcessLeas
     if evidence != "" and not file_atomic_write(root + "/broker-charge.sdn", evidence):
         print "group broker charge evidence unavailable reason=write-failed"
     val payload = group_process_observation_encode_v1(identity,
-        _group_broker_observation_v1(receipt, peak, 0))
+        _group_broker_observation_v1(receipt, peak))
     # Atomic publication follows native collect; per-action success never enters
     # this path. A crash in this gap remains unknown and cannot authorize retry.
     if not file_atomic_write(root + "/broker.tree.sdn", payload): return Err("cannot persist group tree cleanup receipt")
@@ -78,8 +77,8 @@ fn _group_broker_run_v1(launch: GroupProcessLaunchV1, identity: text) -> Result<
     val lease = windows_process_start_with_memory_v1(native, launch.memory_limit_bytes)?
     var last_control = ""
     var error = ""
-    var charge_samples: [NativeGroupChargeSampleV1] = []
-    var charge_complete = true
+    # The Win64 extended-limit row has PeakProcessMemoryUsed at offset 128,
+    # not current Job charge. No sampled current metric is claimed here.
     while error == "":
         val control = _group_broker_control_v1(launch.root, identity)
         if control != "" and control != last_control:
@@ -89,34 +88,23 @@ fn _group_broker_run_v1(launch: GroupProcessLaunchV1, identity: text) -> Result<
                     Err(message):
                         error = message
                         break
-        val sample_before = time_now_monotonic_ms()
         val observed = match windows_process_poll_v1(lease):
             Ok(value): value
             Err(message):
                 error = message
                 break
-        val charge = match windows_process_memory_charge_v1(lease):
+        val peak = match windows_process_peak_memory_v1(lease):
             Ok(value): value
             Err(message):
                 error = message
                 break
-        val (current, peak) = charge
-        val sample_after = time_now_monotonic_ms()
-        if not observed.terminal:
-            if sample_before < 0 or sample_after < sample_before or
-                    charge_samples.len() >= 32767:
-                charge_complete = false
-            elif charge_complete:
-                charge_samples = charge_samples.push(NativeGroupChargeSampleV1(
-                    sample_before, sample_after, current, peak,
-                    observed.active_processes, false))
         if observed.terminal:
             return _group_broker_finish_v1(launch.root, identity, lease, peak,
                 launch.snapshot_digest, launch.memory_limit_bytes,
-                charge_samples, charge_complete)
+                [], false)
         if control != "" and control != last_control:
             val payload = group_process_observation_encode_v1(identity,
-                _group_broker_observation_v1(observed, peak, current))
+                _group_broker_observation_v1(observed, peak))
             if not file_atomic_write(launch.root + "/broker.control.response", control + "\n" + payload):
                 error = "cannot publish fresh broker observation"
                 break

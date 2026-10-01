@@ -37,9 +37,9 @@ The attempt root and environment are pinned in the broker request. The profile
 file is diagnostic evidence, while the typed module result and tree reap remain
 the authority for completion.
 
-Windows records parent working-set peak and sampled child-tree working set as
-resident observations, JobObject peak committed bytes and enforced job limit
-as commitment observations, plus physical availability and commit headroom
+Windows records parent self-process working-set peak as a resident observation,
+JobObject **lifetime peak** committed bytes and the enforced job limit as
+commitment observations, plus physical availability and commit headroom
 before staging and immediately before each spawn. Linux records parent/child
 RSS and cgroup current/peak/limit when available. Under WSL, record host VMMEM
 resident use and its possible further growth separately; host available
@@ -57,11 +57,12 @@ commit limit minus committed total if that value is needed for admission.
 ## Admission decision
 
 Derive active process count from CPU allowance and *current* host capacity.
-The process-tree owner enforces each group's hard cap. Windows JobObject
-current charge is committed bytes, not resident bytes, so use
-`hard cap - current charge` only for the system commit-headroom check. For
-physical/host memory, reserve each active group's full hard cap until a
-tree-wide resident sample exists. Host available physical memory already
+The process-tree owner enforces each group's hard cap. The public Win64
+`JOBOBJECT_EXTENDED_LIMIT_INFORMATION` has `PeakProcessMemoryUsed` at offset
+128 and `PeakJobMemoryUsed` at 136; it has **no current JobMemoryUsed field**.
+The broker therefore marks Windows current charge unavailable and reserves
+each active group's full hard cap for both system commit and physical/host
+headroom. Host available physical memory already
 accounts for WSL's current resident allocation; do not subtract it separately.
 The full-cap physical reservation can double-count active resident pages and
 therefore suppress otherwise-safe overlap; it is a conservative temporary
@@ -76,6 +77,24 @@ limiting quantity, chosen counts, and refusal or clamp reason. Keep pending
 groups bounded and commit results in manifest order after complete tree reap.
 Effective inner threads remain one until comparable codegen-specific memory
 evidence and native backend overlap/parity qualify.
+
+The persistent Linux broker retains up to 32,768 monotonic-bracketed cgroup
+current-charge and lifetime-peak samples in `broker-charge.sdn`, bound to the
+manifest digest and published after tree collection. Windows currently records
+an incomplete trace because only the JobObject lifetime peak is available.
+An incomplete or overflowed trace is explicitly marked incomplete. Linux
+samples are useful phase correlation evidence,
+but it is **not yet a per-thread memory measurement**: a Linux poll just before
+`codegen:start` can see 100 bytes of cgroup charge, the worker can release
+80 unseen bytes, and codegen can then add 130 bytes to reach a 150-byte peak.
+The same two broker samples would misleadingly suggest a 50-byte increment.
+Compiler self RSS/HWM cannot repair that ambiguity because Windows Job charge
+is committed bytes and Linux cgroup charge is a different tree-wide metric.
+Automatic `measured_thread_bytes` and `thread_reserve_bytes` therefore remain
+zero. The next instrumentation step must sample the same Job/cgroup charge at
+the codegen boundary under an exclusive serial calibration lease and retain a
+phase-scoped peak or allocator attribution; a comparable backend, target,
+producer, source/policy key and reaped successful result must gate reuse.
 
 The first implementation gate is a focused policy test using measured fixture
 values, including a post-staging capacity drop, unavailable commit headroom,

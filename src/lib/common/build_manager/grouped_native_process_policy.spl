@@ -1,7 +1,7 @@
-# One process is bounded by its enforced JobObject/cgroup limit. JobObject
-# current charge is committed bytes, not resident bytes. Use growth-only
-# reservation for Windows commit; conservatively reserve the full hard cap
-# for physical/host memory until tree-wide resident evidence is available.
+# One process is bounded by its enforced JobObject/cgroup limit. The public
+# Win64 extended-limit row has a lifetime job peak but no current job charge.
+# Reserve every active process's full hard cap for both physical and system
+# commit headroom until a true current aggregate charge probe is available.
 struct NativeGroupActiveChargeV1:
     memory_limit_bytes: i64
     memory_current_bytes: i64
@@ -32,7 +32,6 @@ fn native_group_process_budget_v1(cpu_count: i64, candidate_threads: i64,
         return Err("invalid native group process budget input")
     var active_threads: i64 = 0
     var active_host_cap: i64 = 0
-    var future_commit_growth: i64 = 0
     for charge in active:
         if charge.memory_limit_bytes < 1 or
                 charge.memory_limit_bytes > 1125899906842624 or
@@ -42,10 +41,8 @@ fn native_group_process_budget_v1(cpu_count: i64, candidate_threads: i64,
             return Err("invalid active native group charge")
         active_threads = active_threads + charge.effective_threads
         active_host_cap = active_host_cap + charge.memory_limit_bytes
-        future_commit_growth = future_commit_growth +
-            charge.memory_limit_bytes - charge.memory_current_bytes
     val required_host = active_host_cap + candidate_limit_bytes + host_reserve_bytes
-    val required_commit = future_commit_growth + candidate_limit_bytes + host_reserve_bytes
+    val required_commit = active_host_cap + candidate_limit_bytes + host_reserve_bytes
     if active_threads + candidate_threads > cpu_count:
         return Ok(NativeGroupProcessBudgetV1(false, "CPU threads exhausted",
             available_memory_bytes, available_commit_bytes, required_host,

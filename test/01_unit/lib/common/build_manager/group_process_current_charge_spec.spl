@@ -8,24 +8,25 @@ describe "Group broker current memory charge":
     it "round trips a live charge separately from lifetime peak":
         val identity = digest("a")
         val live = GroupProcessPollV1(false, false, false, 1, -1,
-            false, false, 134217728, 67108864)
+            false, false, 134217728, 67108864, true)
         match group_process_observation_decode_v1(identity,
                 group_process_observation_encode_v1(identity, live)):
             case Ok(observed):
                 expect(observed.memory_peak_bytes).to_equal(134217728)
                 expect(observed.memory_current_bytes).to_equal(67108864)
+                expect(observed.memory_current_measured).to_equal(true)
             case Err(reason): fail(reason)
 
     it "requires zero current charge after a proven tree reap":
         val identity = digest("b")
         val complete = GroupProcessPollV1(true, true, true, 0, 0,
-            false, false, 134217728, 0)
+            false, false, 134217728, 0, false)
         match group_process_observation_decode_v1(identity,
                 group_process_observation_encode_v1(identity, complete)):
             case Ok(observed): expect(observed.memory_current_bytes).to_equal(0)
             case Err(reason): fail(reason)
         val stale = GroupProcessPollV1(true, true, true, 0, 0,
-            false, false, 134217728, 1)
+            false, false, 134217728, 1, false)
         match group_process_observation_decode_v1(identity,
                 group_process_observation_encode_v1(identity, stale)):
             case Ok(_): fail("reaped group retained a live charge")
@@ -34,8 +35,23 @@ describe "Group broker current memory charge":
     it "rejects a current charge larger than its observed peak":
         val identity = digest("c")
         val invalid = GroupProcessPollV1(false, false, false, 1, -1,
-            false, false, 100, 101)
+            false, false, 100, 101, true)
         match group_process_observation_decode_v1(identity,
                 group_process_observation_encode_v1(identity, invalid)):
             case Ok(_): fail("current charge exceeded lifetime peak")
             case Err(reason): expect(reason).to_equal("inconsistent current group memory charge")
+
+    it "marks Windows current charge unavailable without fabricating a value":
+        val identity = digest("d")
+        val unknown = GroupProcessPollV1(false, false, false, 2, -1,
+            false, false, 134217728, 0, false)
+        match group_process_observation_decode_v1(identity,
+                group_process_observation_encode_v1(identity, unknown)):
+            case Ok(observed):
+                expect(observed.memory_current_bytes).to_equal(0)
+                expect(observed.memory_current_measured).to_equal(false)
+            case Err(reason): fail(reason)
+        val fabricated = GroupProcessPollV1(false, false, false, 2, -1,
+            false, false, 134217728, 1, false)
+        expect(group_process_observation_decode_v1(identity,
+            group_process_observation_encode_v1(identity, fabricated)).is_err()).to_equal(true)
