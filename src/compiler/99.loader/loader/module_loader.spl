@@ -272,6 +272,41 @@ fn moduleloader_load(self: LazyModuleLoader, path: text) -> LoadResult:
             self.global_symbol_addresses[smf_sym.name] = loaded_sym.address
             lifecycle_on_symbol_mapped(lifecycle, path, smf_sym.name)
 
+        # Native group SMFs retain local function symbols for relocations.
+        # Keep their executable mappings in the module's address table, but
+        # give the mapper path-private keys and never publish them globally.
+        if module_bytes_result.is_ok():
+            val ordered_reader_result = SmfReaderMemory.from_data(
+                module_bytes_result.unwrap())
+            if ordered_reader_result.is_err():
+                return LoadResult.Error(message: ordered_reader_result.unwrap_err())
+            val ordered_result = ordered_reader_result.unwrap().symbols_in_table_order()
+            if ordered_result.is_err():
+                return LoadResult.Error(message: ordered_result.unwrap_err())
+            for smf_sym in ordered_result.unwrap():
+                if smf_sym.binding != SymbolBinding.Local or
+                        smf_sym.section_index != 0 or
+                        smf_sym.ty != SymbolType.Function or smf_sym.size <= 0:
+                    continue
+                if smf_sym.name == "" or symbols.has(smf_sym.name):
+                    return LoadResult.Error(message:
+                        "Native SMF local symbol name is empty or duplicated")
+                val code_result = reader.read_code(smf_sym)
+                if code_result.is_err():
+                    return LoadResult.Error(message: code_result.unwrap_err())
+                val local_key = "{path}#local:{smf_sym.name}"
+                val local_addr = moduleloader_allocate_exec_module(self,
+                    owner_id: path, symbol: local_key, code: code_result.unwrap(),
+                    allow_replace: false)
+                if local_addr == 0:
+                    return LoadResult.Error(message:
+                        "Failed to allocate local code for {smf_sym.name}")
+                symbols[smf_sym.name] = LoadedSymbol(
+                    name: smf_sym.name, address: local_addr,
+                    size: smf_sym.size, ty: smf_sym.ty, is_jit: false,
+                    file_offset: smf_sym.offset as i64)
+                lifecycle_on_symbol_mapped(lifecycle, path, local_key)
+
         val module = LoadedModule(
             path: path,
             reader: reader,
@@ -400,8 +435,12 @@ fn moduleloader_apply_relocations(self: LazyModuleLoader, path: text, smf_data: 
             # (Fable review of lane A4b commit 939c924dc16).
             val got = apply_result.unwrap()
             if got.base != 0:
-                val exec_key = key_prefix + sym_name
-                val attached = moduleloader_ensure_jit(self).exec_mapper.set_got(exec_key, addr, got.base, got.size)
+            var exec_key = key_prefix + sym_name
+            val table_symbol = mem_reader.lookup_symbol(sym_name)
+            if table_symbol.is_ok() and
+                    table_symbol.unwrap().binding == SymbolBinding.Local:
+                exec_key = key_prefix + path + "#local:" + sym_name
+            val attached = moduleloader_ensure_jit(self).exec_mapper.set_got(exec_key, addr, got.base, got.size)
                 if not attached:
                     _ = native_free_exec_memory(got.base, got.size)
                     return Err("Failed to attach GOT for {sym_name} (exec_key={exec_key})")
@@ -434,6 +473,12 @@ fn moduleloader_replace_live(self: LazyModuleLoader, path: text) -> LoadResult:
             return moduleloader_load(self, path)
 
         val old_module = self.modules[path]
+        for sym_name in old_module.symbols.keys():
+            val old_symbol = old_module.reader.lookup_symbol(sym_name)
+            if old_symbol.is_ok() and
+                    old_symbol.unwrap().binding == SymbolBinding.Local:
+                return LoadResult.Error(message:
+                    "Hot reload of native SMF private code symbols is unsupported")
         val next_version = old_module.version + 1
         val candidate_prefix = "{path}#gen{next_version}:"
 
