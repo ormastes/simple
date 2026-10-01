@@ -4650,7 +4650,17 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     "--estimated-group-disk-bytes=${SIMPLE_BOOTSTRAP_MANAGED_ESTIMATED_GROUP_DISK_BYTES}" \
     "--minimum-free-disk-bytes=${SIMPLE_BOOTSTRAP_MANAGED_MINIMUM_FREE_DISK_BYTES}" \
     || { echo "error: managed Phase 3/4 handoff failed; receipts retained" >&2; exit 1; }
-  bootstrap_verdict "ADMITTED: stage=phase4 exit=0 signal=none reason=managed-phase2-producer-completion"
+  managed_completion="${managed_phase_root}/completion.env"
+  [ -f "${managed_completion}" ] && [ ! -L "${managed_completion}" ] || {
+    echo "error: managed Phase 3/4 completion receipt missing" >&2; exit 1;
+  }
+  [ "$(bootstrap_stage3_manifest_value format "${managed_completion}")" = SIMPLE-PHASE4-MANAGED-COMPLETION-1 ] &&
+    [ "$(bootstrap_stage3_manifest_value status "${managed_completion}")" = PASS ] &&
+    [ "$(bootstrap_stage3_manifest_value phase3_status "${managed_completion}")" = PASS ] &&
+    [ "$(bootstrap_stage3_manifest_value phase4_status "${managed_completion}")" = PASS ] || {
+    echo "error: managed Phase 3 and Phase 4 did not both complete" >&2; exit 1;
+  }
+  bootstrap_verdict "ADMITTED: stage=phase3+phase4 exit=0 signal=none reason=managed-phase2-producer-completion"
   exit 0
 
   # Stage 3: stage2 recompiles bootstrap_main.spl (self-host verification)
