@@ -1,0 +1,158 @@
+# Frozen full-inventory source selection for cold package-index construction.
+# SCV and its typed source inventory select every module exactly once. The
+# driver opens each selected source once and verifies the returned digest.
+
+use compiler.common.cache.canonical_identity.{canonical_identity_sort_texts}
+use std.common.build_manager.contracts.{builder_digest_valid_v1}
+use std.common.crypto.sha256.{sha256_text}
+use std.scv.compile_snapshot.{scv_compile_snapshot_open_v1}
+use std.scv.compile_source_inventory.{
+    compile_source_inventory_read_current_v1,
+    compile_source_inventory_snapshot_cache_root_v1,
+    compile_source_inventory_plain_checkout_v1
+}
+use std.scv.compile_source_inventory_core.{
+    CompileSourceInventoryV1, compile_source_inventory_path_valid_v1,
+    compile_source_inventory_digest_v1
+}
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded}
+
+val NATIVE_FULL_INVENTORY_MAX_SOURCES_V1: i64 = 20000
+
+struct NativeFullInventorySourcesV1:
+    source_paths: [text]
+    source_identities: [text]
+    source_digests: [text]
+    source_byte_counts: [i64]
+    source_count: i64
+    snapshot_inventory_digest: text
+    source_inventory_digest: text
+    scv_receipt_digest: text
+
+# Pure join seam for focused coverage. Every indexed .spl must occur in the
+# admitted SCV compile inventory with the same SHA and byte count; no source
+# root search or path-exclusion policy participates in this selection.
+fn native_full_inventory_select_v1(
+    snapshot_root: text,
+    snapshot_inventory: text,
+    inventory: CompileSourceInventoryV1,
+    snapshot_inventory_digest: text,
+    source_inventory_digest: text,
+    scv_receipt_digest: text,
+    expected_spl_count: i64
+) -> Result<NativeFullInventorySourcesV1, text>:
+    if (snapshot_root == "" or
+            expected_spl_count < 1 or
+            expected_spl_count > NATIVE_FULL_INVENTORY_MAX_SOURCES_V1 or
+            not builder_digest_valid_v1(snapshot_inventory_digest) or
+            not builder_digest_valid_v1(source_inventory_digest) or
+            not builder_digest_valid_v1(scv_receipt_digest) or
+            sha256_text(snapshot_inventory) != snapshot_inventory_digest or
+            compile_source_inventory_digest_v1(inventory) !=
+                source_inventory_digest):
+        return Err("full-inventory-authority-invalid")
+    var indexed: Dict<text, i64> = {}
+    var indexed_folded: Dict<text, bool> = {}
+    var spl_count = 0
+    var os_source_count = 0
+    var index = 0
+    for entry in inventory.entries:
+        if not compile_source_inventory_path_valid_v1(entry.source_identity) or
+                indexed.has(entry.source_identity) or
+                indexed_folded.has(entry.source_identity.lower()):
+            return Err("full-inventory-source-identity-invalid")
+        indexed[entry.source_identity] = index
+        indexed_folded[entry.source_identity.lower()] = true
+        if entry.source_identity.ends_with(".spl"):
+            spl_count = spl_count + 1
+            if entry.source_identity.starts_with("src/os/"):
+                os_source_count = os_source_count + 1
+        index = index + 1
+    if spl_count != expected_spl_count:
+        return Err("full-inventory-source-count-mismatch")
+    if os_source_count == 0:
+        return Err("full-inventory-os-source-absent")
+    var selected: Dict<text, bool> = {}
+    var selected_folded: Dict<text, bool> = {}
+    var identities: [text] = []
+    for row in snapshot_inventory.split("\n"):
+        val fields = row.split("|")
+        if fields.len() != 3 or
+                not compile_source_inventory_path_valid_v1(fields[0]) or
+                not indexed.has(fields[0]) or selected.has(fields[0]) or
+                selected_folded.has(fields[0].lower()):
+            return Err("full-inventory-snapshot-row-invalid")
+        selected[fields[0]] = true
+        selected_folded[fields[0].lower()] = true
+        val entry = inventory.entries[indexed[fields[0]]]
+        if fields[1] != "sha256_{entry.content_digest}" or
+                fields[2] != str(entry.byte_count):
+            return Err("full-inventory-snapshot-source-mismatch:{fields[0]}")
+        if fields[0].ends_with(".spl"):
+            identities = identities.push(fields[0])
+    if identities.len() != expected_spl_count:
+        return Err("full-inventory-snapshot-count-mismatch")
+    var paths: [text] = []
+    var digests: [text] = []
+    var counts: [i64] = []
+    var ordered: [text] = []
+    for identity in canonical_identity_sort_texts(identities):
+        val entry = inventory.entries[indexed[identity]]
+        if not builder_digest_valid_v1(entry.content_digest) or
+                entry.byte_count < 0:
+            return Err("full-inventory-source-record-invalid:{identity}")
+        ordered = ordered.push(identity)
+        paths = paths.push("{snapshot_root}/{identity}")
+        digests = digests.push(entry.content_digest)
+        counts = counts.push(entry.byte_count)
+    Ok(NativeFullInventorySourcesV1(
+        paths, ordered, digests, counts, expected_spl_count,
+        snapshot_inventory_digest, source_inventory_digest,
+        scv_receipt_digest))
+
+fn native_full_inventory_source_paths_v1(
+    source_root: text,
+    snapshot_root: text,
+    revision_id: text,
+    commit_id: text,
+    tree_id: text,
+    snapshot_inventory_digest: text,
+    source_inventory_digest: text,
+    scv_receipt_digest: text,
+    expected_spl_count: i64
+) -> Result<NativeFullInventorySourcesV1, text>:
+    val root = compile_source_inventory_plain_checkout_v1(source_root)
+    val frozen = compile_source_inventory_plain_checkout_v1(snapshot_root)
+    if root == "" or frozen == "":
+        return Err("full-inventory-root-invalid")
+    val snapshot = scv_compile_snapshot_open_v1(
+        root, frozen, revision_id, commit_id, tree_id,
+        snapshot_inventory_digest)
+    if not snapshot.valid:
+        return Err("full-inventory-scv-{snapshot.reason}")
+    val receipt = file_read_regular_no_follow_bounded(
+        snapshot.receipt_path, 4096)
+    if val Err(_) = receipt:
+        return Err("full-inventory-receipt-unreadable")
+    if sha256_text(receipt.unwrap()) != scv_receipt_digest:
+        return Err("full-inventory-receipt-digest-mismatch")
+    val cache_root = compile_source_inventory_snapshot_cache_root_v1(
+        root, frozen, revision_id)
+    if cache_root == "":
+        return Err("full-inventory-inventory-owner-invalid")
+    val admitted = compile_source_inventory_read_current_v1(cache_root)
+    if not admitted.valid or admitted.inventory == nil or
+            admitted.digest != source_inventory_digest:
+        return Err("full-inventory-source-inventory-mismatch")
+    val rows = file_read_regular_no_follow_bounded(
+        "{frozen}/SCV_COMPILE_INVENTORY", 256 * 1024 * 1024)
+    if val Err(_) = rows:
+        return Err("full-inventory-snapshot-unreadable")
+    native_full_inventory_select_v1(
+        frozen, rows.unwrap(), admitted.inventory!,
+        snapshot_inventory_digest, source_inventory_digest,
+        scv_receipt_digest, expected_spl_count)
+
+export NATIVE_FULL_INVENTORY_MAX_SOURCES_V1
+export NativeFullInventorySourcesV1
+export native_full_inventory_select_v1, native_full_inventory_source_paths_v1

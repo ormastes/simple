@@ -18,7 +18,9 @@ use compiler.driver.driver_source_loading.{
     _driver_resolve_entry_import,
     _driver_collect_entry_import_source,
     _driver_collect_explicit_compiler_source,
+    _driver_collect_frozen_compiler_source_v1,
     _driver_physical_source_key,
+    _driver_physical_source_key_strict_v1,
     _driver_cached_entry_source_scan,
     driver_entry_scan_cache_release,
     _driver_module_name_collision,
@@ -30,6 +32,8 @@ use compiler.driver.driver_build.native_group_request.{native_group_request_path
     native_group_request_v1, native_group_source_paths_v1}
 use compiler.driver.driver_build.native_group_warm_route.{
     native_group_warm_route_read_v1, native_group_warm_route_index_route_v1}
+use compiler.driver.driver_build.native_full_inventory_sources.{
+    native_full_inventory_source_paths_v1}
 use compiler.driver.driver_log_helpers.{log_phase, log_build_progress}
 use compiler.common.driver_core_modes.{CompileMode}
 use compiler.common.attributes.{parse_function_attrs}
@@ -194,6 +198,13 @@ impl CompilerDriver:
         else:
             driver_inputs = self.ctx.options.input_files
         val closure_source_roots = driver_inputs
+        val full_inventory_marker =
+            sosix_env_get_nullable("SIMPLE_PACKAGE_INDEX_FULL_INVENTORY") ?? ""
+        if full_inventory_marker != "" and full_inventory_marker != "1":
+            self.ctx.add_error("full inventory mode marker invalid")
+            driver_entry_scan_cache_release()
+            return (self.ctx, false)
+        val full_inventory_mode = full_inventory_marker == "1"
         val explicit_entry_input = driver_explicit_source_entry(self.ctx)
         # In-process `run <file.spl>` (CompileMode.Interpret, one .spl input,
         # no explicit/native entry) must load the file's import closure too.
@@ -227,11 +238,16 @@ impl CompilerDriver:
                     self.ctx.add_error("native group request rejected: {reason}")
                     driver_entry_scan_cache_release()
                     return (self.ctx, false)
+        if full_inventory_mode and
+                (requested_entry_input != "" or native_group_inputs.len() > 0):
+            self.ctx.add_error("full inventory mode cannot use an entry or native group request")
+            driver_entry_scan_cache_release()
+            return (self.ctx, false)
         val native_entry_closure_pre = (sosix_env_get_nullable("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
         val explicit_entry_closure = explicit_entry_input != ""
-        val entry_closure_walk = explicit_entry_closure or (
+        val entry_closure_walk = not full_inventory_mode and (explicit_entry_closure or (
             native_entry_input != "" and not native_entry_closure_pre) or
-            native_group_inputs.len() > 0
+            native_group_inputs.len() > 0)
         # The persistent package index route (package_index_route_current_v1)
         # needs a producer/root-generation/variant-digest compatibility
         # marker to admit the warm path. Entrypoint admission publishes the
@@ -243,7 +259,7 @@ impl CompilerDriver:
             (sosix_env_get_nullable("SIMPLE_PACKAGE_INDEX_PRODUCER_DIGEST") ?? "") != "" and
             (sosix_env_get_nullable("SIMPLE_PACKAGE_INDEX_ROOT_GENERATION") ?? "") != "" and
             (sosix_env_get_nullable("SIMPLE_PACKAGE_INDEX_VARIANT_DIGEST") ?? "") != ""
-        val package_index_cold_init = if native_group_inputs.len() > 0:
+        val package_index_cold_init = if full_inventory_mode or native_group_inputs.len() > 0:
             false
         else:
             (sosix_env_get_nullable("SIMPLE_PACKAGE_INDEX_COLD_INIT") ?? "") == "1" or
@@ -563,7 +579,42 @@ impl CompilerDriver:
                 driver_entry_scan_cache_release()
                 return (self.ctx, false)
             self.ctx.demand_mir_admission = Some(demand_admission.unwrap())
-        if entry_closure_walk:
+        var full_source_digests: [text] = []
+        var full_source_byte_counts: [i64] = []
+        var full_source_root = ""
+        var full_expected_count = 0
+        if full_inventory_mode:
+            val expected_count_text =
+                sosix_env_get_nullable("SIMPLE_PACKAGE_INDEX_EXPECTED_SOURCE_COUNT") ?? ""
+            full_expected_count = expected_count_text.to_i64() ?? -1
+            val admitted = native_full_inventory_source_paths_v1(
+                sosix_env_get_nullable("SIMPLE_PACKAGE_INDEX_SOURCE_ROOT") ?? "",
+                sosix_env_get_nullable("SIMPLE_SCV_SNAPSHOT_ROOT") ?? "",
+                sosix_env_get_nullable("SIMPLE_SCV_REVISION_ID") ?? "",
+                sosix_env_get_nullable("SIMPLE_SCV_COMMIT_ID") ?? "",
+                sosix_env_get_nullable("SIMPLE_SCV_TREE_ID") ?? "",
+                sosix_env_get_nullable("SIMPLE_SCV_INVENTORY_DIGEST") ?? "",
+                sosix_env_get_nullable("SIMPLE_SCV_SOURCE_INVENTORY_DIGEST") ?? "",
+                sosix_env_get_nullable("SIMPLE_SCV_RECEIPT_DIGEST") ?? "",
+                full_expected_count)
+            if admitted.is_err():
+                self.ctx.add_error(
+                    "frozen full inventory rejected: {admitted.unwrap_err()}")
+                driver_entry_scan_cache_release()
+                return (self.ctx, false)
+            val frozen = admitted.unwrap()
+            driver_inputs = frozen.source_paths
+            full_source_digests = frozen.source_digests
+            full_source_byte_counts = frozen.source_byte_counts
+            full_source_root = _driver_physical_source_key_strict_v1(
+                sosix_env_get_nullable("SIMPLE_SCV_SNAPSHOT_ROOT") ?? "").lower()
+            if full_source_root == "" or not rt_env_set(
+                    "SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "1") or
+                    not rt_env_set("SIMPLE_PACKAGE_INDEX_COLD_INIT", "1"):
+                self.ctx.add_error("frozen full inventory parser mode unavailable")
+                driver_entry_scan_cache_release()
+                return (self.ctx, false)
+        elif entry_closure_walk:
             if not package_index_routed:
                 driver_inputs = if native_group_inputs.len() > 0:
                     native_group_inputs
@@ -573,6 +624,7 @@ impl CompilerDriver:
             if requested_entry_input != "":
                 driver_inputs = [requested_entry_input]
         val input_len = driver_inputs.len()
+        var full_physical_seen: Dict<text, bool> = {}
         val source_trace = (sosix_env_get_nullable("SIMPLE_COMPILER_TRACE") ?? "") == "1" or (sosix_env_get_nullable("SIMPLE_INTERP_TRACE") ?? "") == "1"
         if source_trace:
             print "[load_sources] inputs {input_len}"
@@ -635,7 +687,26 @@ impl CompilerDriver:
             # then works only by evading the substring filter. Native-build
             # imports retain packaging exclusions; the compiler-owned explicit
             # API admits the exact authored source graph without those filters.
-            val loaded = if package_index_routed:
+            val loaded = if full_inventory_mode:
+                val physical = _driver_physical_source_key_strict_v1(input_path).lower()
+                if physical == "" or
+                        not physical.starts_with(full_source_root + "/") or
+                        full_physical_seen.has(physical):
+                    self.ctx.add_error(
+                        "frozen full inventory physical source invalid: {input_path}")
+                    driver_entry_scan_cache_release()
+                    return (self.ctx, false)
+                full_physical_seen[physical] = true
+                match _driver_collect_frozen_compiler_source_v1(
+                        input_path, full_source_digests[i],
+                        full_source_byte_counts[i]):
+                    case Ok(sources): sources
+                    case Err(reason):
+                        self.ctx.add_error(
+                            "frozen full inventory source rejected: {input_path}: {reason}")
+                        driver_entry_scan_cache_release()
+                        return (self.ctx, false)
+            elif package_index_routed:
                 _driver_collect_explicit_compiler_source(input_path)
             elif entry_closure_walk and (input_path == requested_entry_input or
                     native_group_inputs.contains(input_path)):
@@ -650,6 +721,11 @@ impl CompilerDriver:
                 demand_compile_source_open_v1(&mut open_execution)
                 self.ctx.demand_compile_execution = Some(open_execution)
             for s in loaded:
+                if full_inventory_mode and s.path != input_path:
+                    self.ctx.add_error(
+                        "frozen full inventory source alias changed path: {input_path}")
+                    driver_entry_scan_cache_release()
+                    return (self.ctx, false)
                 val source_key = s.path + "::" + s.module_name
                 if not seen_sources.contains_key(source_key):
                     seen_sources[source_key] = true
@@ -695,6 +771,12 @@ impl CompilerDriver:
             i = i + 1
         log_phase(
             "phase1:load_sources:seeded inputs={input_len} total={all_sources.len()}")
+        if full_inventory_mode and
+                (input_len != full_expected_count or
+                    full_physical_seen.len() != full_expected_count):
+            self.ctx.add_error("frozen full inventory source count changed")
+            driver_entry_scan_cache_release()
+            return (self.ctx, false)
 
         # FAIL-CLOSED on an empty seed set. An explicit native-build entry that
         # collects zero source files used to fall through silently: the closure
@@ -901,7 +983,8 @@ impl CompilerDriver:
         val compile_mode = self.ctx.options.mode
         val needs_bulk_project_sources = compile_mode != CompileMode.Check and compile_mode != CompileMode.Interpret
         if (has_project_source and needs_bulk_project_sources and
-                not nb_entry_closure and not package_index_routed):
+                not nb_entry_closure and not package_index_routed and
+                not full_inventory_mode):
             val paths = ["src/app", "src/lib", "src/compiler", "src/runtime"]
             val bulk_loaded = _driver_collect_sources_via_find(paths)
             if bulk_loaded.len() > 0:

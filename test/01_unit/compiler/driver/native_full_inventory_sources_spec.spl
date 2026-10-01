@@ -1,0 +1,75 @@
+use std.spec.{describe, it, expect}
+use std.common.crypto.sha256.{sha256_text}
+use std.scv.compile_source_inventory_core.{
+    CompileSourceInventoryEntryV1, CompileSourceInventoryV1,
+    compile_source_inventory_digest_v1
+}
+use compiler.driver.driver_build.native_full_inventory_sources.{
+    NativeFullInventorySourcesV1, native_full_inventory_select_v1
+}
+
+fn full_source_entry(path: text) -> CompileSourceInventoryEntryV1:
+    val digest = sha256_text(path)
+    CompileSourceInventoryEntryV1(
+        path, digest, digest, digest, digest, digest, 8)
+
+fn full_source_inventory() -> CompileSourceInventoryV1:
+    CompileSourceInventoryV1(1, 3, [
+        full_source_entry("src/compiler/10.frontend/treesitter/parser.spl"),
+        full_source_entry("src/os/boot.spl"),
+        full_source_entry("src/runtime/runtime.spl")])
+
+fn full_snapshot_rows() -> text:
+    var rows: [text] = []
+    val inventory = full_source_inventory()
+    for entry in inventory.entries:
+        rows = rows.push(
+            "{entry.source_identity}|sha256_{entry.content_digest}|{entry.byte_count}")
+    rows.join("\n")
+
+fn full_select(rows: text, count: i64) -> Result<NativeFullInventorySourcesV1, text>:
+    native_full_inventory_select_v1(
+        "D:/frozen/build/scv/snapshots/revision", rows,
+        full_source_inventory(), sha256_text(rows),
+        compile_source_inventory_digest_v1(full_source_inventory()),
+        sha256_text("scv-receipt"), count)
+
+describe "frozen full-inventory source selection":
+    it "keeps treesitter and OS modules as exact frozen inputs":
+        val selected = full_select(full_snapshot_rows(), 3)
+        expect(selected.is_ok()).to_equal(true)
+        val sources = selected.unwrap()
+        expect(sources.source_count).to_equal(3)
+        expect(sources.source_identities[0]).to_equal(
+            "src/compiler/10.frontend/treesitter/parser.spl")
+        expect(sources.source_identities[1]).to_equal("src/os/boot.spl")
+        expect(sources.source_paths[1]).to_equal(
+            "D:/frozen/build/scv/snapshots/revision/src/os/boot.spl")
+
+    it "rejects any omitted frozen source or claimed count drift":
+        val rows = full_snapshot_rows().split("\n")
+        val missing = rows[0] + "\n" + rows[2]
+        expect(full_select(missing, 3).is_err()).to_equal(true)
+        expect(full_select(full_snapshot_rows(), 2).is_err()).to_equal(true)
+
+    it "rejects a duplicate or changed snapshot identity":
+        val repeated = full_snapshot_rows() + "\n" +
+            full_snapshot_rows().split("\n")[1]
+        expect(full_select(repeated, 3).is_err()).to_equal(true)
+        val changed = full_snapshot_rows().replace(
+            "src/os/boot.spl", "src/os/BOOT.spl")
+        expect(full_select(changed, 3).is_err()).to_equal(true)
+
+    it "refuses a source authority with no frozen OS module":
+        val entries = [
+            full_source_entry("src/compiler/10.frontend/treesitter/parser.spl"),
+            full_source_entry("src/runtime/runtime.spl")]
+        val inventory = CompileSourceInventoryV1(1, 2, entries)
+        val rows = "{entries[0].source_identity}|sha256_{entries[0].content_digest}|8\n" +
+            "{entries[1].source_identity}|sha256_{entries[1].content_digest}|8"
+        val selected = native_full_inventory_select_v1(
+            "D:/frozen/build/scv/snapshots/revision", rows,
+            inventory, sha256_text(rows),
+            compile_source_inventory_digest_v1(inventory),
+            sha256_text("scv-receipt"), 2)
+        expect(selected.unwrap_err()).to_equal("full-inventory-os-source-absent")
