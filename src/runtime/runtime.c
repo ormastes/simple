@@ -1983,6 +1983,24 @@ int         rt_dir_exists(const uint8_t* path_ptr, uint64_t path_len) {
     if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return 0;
     return rt_is_dir(path) ? 1 : 0;
 }
+/* Inspect the directory entry itself. In particular, a Windows junction or
+ * directory symlink must not pass an ancestor check by resolving its target. */
+int rt_dir_is_real_no_follow(const uint8_t* path_ptr, uint64_t path_len) {
+    char path[RT_TEXT_PATH_MAX];
+    if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path)) || !path[0]) return 0;
+#if defined(_WIN32)
+    wchar_t* wide_path = rt_win_long_path_widen(path);
+    if (!wide_path) return 0;
+    DWORD attributes = GetFileAttributesW(wide_path);
+    free(wide_path);
+    return attributes != INVALID_FILE_ATTRIBUTES &&
+        (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0 &&
+        (attributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0;
+#else
+    struct stat st;
+    return lstat(path, &st) == 0 && S_ISDIR(st.st_mode);
+#endif
+}
 int         rt_file_write(const char* path, const char* content) {
     if (!path) return 0;
 #if defined(_WIN32)

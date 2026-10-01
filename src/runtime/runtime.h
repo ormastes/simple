@@ -1502,6 +1502,7 @@ int64_t     rt_file_exists_probe_test_seed_counters(int64_t total, int64_t faile
 int         rt_file_is_regular_no_follow(const uint8_t* path_ptr, uint64_t path_len);
 int         rt_file_is_char_device(const uint8_t* path_ptr, uint64_t path_len);
 int         rt_dir_exists(const uint8_t* path_ptr, uint64_t path_len);
+int         rt_dir_is_real_no_follow(const uint8_t* path_ptr, uint64_t path_len);
 int         rt_file_write(const char* path, const char* content);
 int64_t     rt_file_atomic_write(int64_t path_value, int64_t content_value);
 int         rt_file_write_text(const uint8_t* path, uint64_t path_len, const uint8_t* content, uint64_t content_len);
