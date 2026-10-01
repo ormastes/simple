@@ -33,6 +33,8 @@ def main():
     paths = {
         "core": "src/lib/scv/compile_source_inventory_core.spl",
         "publisher": "src/app/compiler_entrypoint/admission.spl",
+        "authority": "src/app/compiler_entrypoint/source_authority.spl",
+        "native_closure": "src/app/io/_CliCompile/native_build_closure.spl",
         "hir": "src/compiler/80.driver/driver_hir_pipeline_lowering.spl",
         "snapshot": "src/lib/scv/compile_snapshot.spl",
         "runtime": "src/lib/nogc_sync_mut/io_runtime.spl",
@@ -45,10 +47,16 @@ def main():
     assert "compile_source_inventory_read_current_v1(machine_cache_root())" not in code["hir"]
     assert "inventory_binding, admitted.digest" in code["hir"]
     assert "source_root, inventory_binding.source_inventory_digest, inventory" in code["hir"]
-    assert 'source_inventory_digest: refresh.inventory_digest' in code["publisher"]
-    assert '"SIMPLE_SCV_SOURCE_INVENTORY_DIGEST", inventory_binding.source_inventory_digest' in code["publisher"]
-    assert '"SIMPLE_SCV_INVENTORY_DIGEST", inventory_binding.snapshot_manifest_digest' in code["publisher"]
-    assert code["publisher"].index("val snapshot = scv_compile_snapshot_acquire_v1(") < code["publisher"].index("val source_inventory = compile_source_inventory_read_current_v1(cache_root)") < code["publisher"].index('env_set("SIMPLE_SCV_SOURCE_INVENTORY_DIGEST"')
+    assert "compiler_source_authority_acquire_v1(" in code["publisher"]
+    assert "compiler_source_authority_publish_v1(authority)" in code["publisher"]
+    assert "compiler_source_authority_acquire_v1(" in code["native_closure"]
+    assert "compiler_source_authority_publish_v1(authority)" in code["native_closure"]
+    assert "val snapshot = scv_compile_snapshot_acquire_v1(root, cache_root, source_roots)" in code["authority"]
+    assert "compile_source_inventory_read_current_v1(cache_root)" in code["authority"]
+    assert "refresh.inventory_digest, refresh.inventory_generation, false" in code["authority"]
+    assert 'env_set("SIMPLE_SCV_SOURCE_INVENTORY_DIGEST", authority.source_inventory_digest)' in code["authority"]
+    assert 'env_set("SIMPLE_SCV_INVENTORY_DIGEST", snapshot.inventory_digest)' in code["authority"]
+    assert code["authority"].index('env_set("SIMPLE_SCV_SOURCE_INVENTORY_DIGEST"') < code["authority"].index('env_set("SIMPLE_SCV_SNAPSHOT_ROOT"')
     assert "sosix_cwd(), source_root" in code["hir"]
     assert "cwd_process as sosix_cwd" in code["sosix"]
     assert "compile_source_inventory_snapshot_cache_root_v1(" in code["snapshot"]
