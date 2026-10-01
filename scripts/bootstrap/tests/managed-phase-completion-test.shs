@@ -9,6 +9,10 @@ source_root="$tmp/source"
 mkdir -p "$source_root"
 inventory="$tmp/module.inventory"
 printf 'src/example.spl\n' >"$inventory"
+excluded_inventory="$tmp/excluded.inventory"
+printf 'src/test/fixture/broken.spl\tfixture\n' >"$excluded_inventory"
+module_role_policy="$tmp/module-role-policy.sdn"
+printf 'policy-v3\n' >"$module_role_policy"
 producer_sha=$(printf 'producer' | sha256sum | cut -d ' ' -f 1)
 binary_sha=$(printf 'binary' | sha256sum | cut -d ' ' -f 1)
 builder_program="$tmp/builder.sh"
@@ -44,12 +48,15 @@ printf 'builder_program=%s\nbuilder_sha256=%s\ngroup_program=%s\ngroup_sha256=%s
   >"$image_receipt"
 receipt="$root/completion.env"
 {
-  printf '%s\n' 'format=SIMPLE-PHASE3-PHASE4-MANAGED-COMPLETION-2' \
+  printf '%s\n' 'format=SIMPLE-PHASE3-PHASE4-MANAGED-COMPLETION-3' \
     'status=PASS' 'phase3_status=PASS' 'phase4_status=PASS' \
     "producer_sha256=$producer_sha" \
     "module_inventory_sha256=$(sha256sum "$inventory" | cut -d ' ' -f 1)" \
     'module_inventory_count=1' 'phase3_module_inventory_count=1' \
-    'phase4_module_inventory_count=1'
+    'phase4_module_inventory_count=1' \
+    "excluded_inventory_sha256=$(sha256sum "$excluded_inventory" | cut -d ' ' -f 1)" \
+    'excluded_inventory_count=1' \
+    "module_role_policy_sha256=$(sha256sum "$module_role_policy" | cut -d ' ' -f 1)"
   case "$(uname -s 2>/dev/null)" in MINGW*|MSYS*|CYGWIN*) exe_suffix=.exe ;; *) exe_suffix= ;; esac
   for binary in bootstrap full-cli mcp lsp test-runner phase3-bootstrap; do
     case "$binary" in
@@ -98,12 +105,23 @@ receipt="$root/completion.env"
 verify() {
   sh "$script_root/verify-managed-phase-completion.shs" \
     --receipt="$receipt" --root="$root" --inventory="$inventory" \
+    --excluded-inventory="$excluded_inventory" --module-role-policy="$module_role_policy" \
     --producer-sha="$producer_sha" --source-root="$source_root" \
     --image-receipt="$image_receipt" --builder-program="$builder_program" \
     --group-program="$group_program"
 }
 verify >/dev/null || { echo 'FAIL: complete fixture rejected' >&2; exit 1; }
 cp "$receipt" "$tmp/good"
+mv "$excluded_inventory" "$tmp/excluded.saved"
+if verify >/dev/null 2>&1; then
+  echo 'FAIL: missing excluded module ledger admitted' >&2; exit 1
+fi
+mv "$tmp/excluded.saved" "$excluded_inventory"
+printf 'changed\n' >"$module_role_policy"
+if verify >/dev/null 2>&1; then
+  echo 'FAIL: changed module role policy admitted' >&2; exit 1
+fi
+printf 'policy-v3\n' >"$module_role_policy"
 sed '/^phase3_llvm_index_receipt_sha256=/d' "$tmp/good" >"$receipt"
 if verify >/dev/null 2>&1; then
   echo 'FAIL: missing Phase 3 LLVM index proof admitted' >&2; exit 1

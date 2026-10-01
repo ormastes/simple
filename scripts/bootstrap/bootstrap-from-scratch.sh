@@ -4581,7 +4581,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
   # grouped runner publishes completion only after five binary receipts and
   # both backend module ledgers pass their compiled admission gates.
   managed_producer_sha=$(bootstrap_stage3_manifest_value candidate_sha256 "${stage2_admission_receipt_absolute}") || exit 1
-  managed_phase_root="$(absolute_path "${output_dir}/managed/task3-run4-phase3-full/${PLATFORM}/${managed_producer_sha}")"
+  managed_phase_root="$(absolute_path "${output_dir}/managed/task3-run4-phase3-roles-v3/${PLATFORM}/${managed_producer_sha}")"
   managed_runner="${repo_root}/scripts/bootstrap/bootstrap-phase4-grouped.shs"
   if [ ! -f "${managed_runner}" ]; then
     echo "error: tracked post-Stage-2 manager handoff is unavailable" >&2
@@ -4697,6 +4697,21 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
   managed_source_inventory=$(managed_authority_field full_source_inventory_path) || exit 1
   managed_source_links=$(managed_authority_field full_source_links_path) || exit 1
   managed_module_inventory=$(managed_authority_field module_inventory_path) || exit 1
+  managed_module_inventory_count=$(managed_authority_field module_inventory_count) || exit 1
+  managed_excluded_inventory=$(managed_authority_field excluded_inventory_path) || exit 1
+  managed_excluded_inventory_digest=$(managed_authority_field excluded_inventory_digest) || exit 1
+  managed_excluded_inventory_count=$(managed_authority_field excluded_inventory_count) || exit 1
+  managed_module_role_policy=$(managed_authority_field module_role_policy_path) || exit 1
+  managed_module_role_policy_digest=$(managed_authority_field module_role_policy_digest) || exit 1
+  [ -f "${managed_module_inventory}" ] && [ ! -L "${managed_module_inventory}" ] &&
+    [ -f "${managed_excluded_inventory}" ] && [ ! -L "${managed_excluded_inventory}" ] &&
+    [ -f "${managed_module_role_policy}" ] && [ ! -L "${managed_module_role_policy}" ] &&
+    [ "$(wc -l <"${managed_module_inventory}" | tr -d ' ')" = "${managed_module_inventory_count}" ] &&
+    [ "$(sha256sum "${managed_excluded_inventory}" | cut -d ' ' -f 1)" = "${managed_excluded_inventory_digest}" ] &&
+    [ "$(wc -l <"${managed_excluded_inventory}" | tr -d ' ')" = "${managed_excluded_inventory_count}" ] &&
+    [ "$(sha256sum "${managed_module_role_policy}" | cut -d ' ' -f 1)" = "${managed_module_role_policy_digest}" ] || {
+    echo "error: Phase 2 module role authority differs from compiled V3 receipt" >&2; exit 1;
+  }
   managed_llvm_index_config=$(managed_authority_field llvm_index_config_path) || exit 1
   managed_cranelift_index_config=$(managed_authority_field cranelift_index_config_path) || exit 1
   managed_phase3_llvm_index_config=$(managed_authority_field phase3_llvm_index_config_path) || exit 1
@@ -4713,6 +4728,11 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     "--source-inventory=${managed_source_inventory}" \
     "--source-links=${managed_source_links}" \
     "--module-inventory=${managed_module_inventory}" \
+    "--excluded-inventory=${managed_excluded_inventory}" \
+    "--excluded-inventory-digest=${managed_excluded_inventory_digest}" \
+    "--excluded-inventory-count=${managed_excluded_inventory_count}" \
+    "--module-role-policy=${managed_module_role_policy}" \
+    "--module-role-policy-digest=${managed_module_role_policy_digest}" \
     "--authority-program=${managed_authority_program}" \
     "--authority-receipt=${managed_authority_receipt}" \
     "--authority-digest=${managed_authority_digest}" \
@@ -4748,6 +4768,8 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
   sh "${managed_completion_verifier}" \
     "--receipt=${managed_completion}" "--root=${managed_phase_root}" \
     "--inventory=${managed_module_inventory}" "--producer-sha=${managed_producer_sha}" \
+    "--excluded-inventory=${managed_excluded_inventory}" \
+    "--module-role-policy=${managed_module_role_policy}" \
     "--source-root=${managed_source_root}" "--image-receipt=${managed_image_receipt}" \
     "--builder-program=${managed_builder_program}" "--group-program=${managed_group_program}" \
     || { echo "error: managed Phase 3/4 terminal proofs differ" >&2; exit 1; }
