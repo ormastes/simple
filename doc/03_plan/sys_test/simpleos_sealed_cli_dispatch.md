@@ -122,3 +122,38 @@ Additional resume commands (once only per unchanged acceptance criterion):
 Run rebuilt CLI inspection/run fixtures for the four supported shapes on
 qualified Linux/Windows hosts, retaining exact argv and process receipts.
 Host-process fixture execution remains distinct from guest boot evidence.
+
+## Real CLI route and compiler-selection acceptance
+
+`test/03_system/os/feature/qemu_sealed_cli_route_acceptance_spec.spl` now
+specifies actual full-CLI inspection and execution for the default x86_64
+route and all four represented named routes. It requires canonical full-CLI
+provenance, real kernels/media, production artifact admission and real QEMU
+host admission. Process results and guest serial checks remain distinct;
+missing prerequisites fail `MissingEvidence`. This closes the authored-test
+gap in AC-N3, not its runtime evidence gap. Existing host-fixture tests remain
+the separate ordered-child-argv observation.
+
+Writing this gate exposed a production seed-precedence bug at the OS compiler
+selector. The isolated fix reuses the existing compiler capability contract
+from clean C-tree commit `ca713ba9e0c7b5f5ee0858550a64d6c38244409a` and delegates
+provenance/discovery to canonical deployed-runtime and Stage4 owners. It
+preserves explicit `SIMPLE_BINARY`/`SIMPLE_BIN` precedence, refuses invalid
+explicit candidates and pins the native-build process. Installed seeds need
+not be removed. See
+`doc/08_tracking/bug/simpleos_explicit_compiler_seed_precedence_2026-10-01.md`.
+
+New focused selection tests were authored before the new admission facade.
+Existing backend canary unit scenarios preceded the restoration of their
+missing production helpers. All runtime RED/GREEN, host lanes and docgen
+remain **TEST_BLOCKED**; source inspection is not executed evidence.
+
+```text
+<runtime> test test/01_unit/os/qemu_compiler_selection_v1_spec.spl --mode=interpreter
+<runtime> test test/01_unit/os/simpleos_compiler_admission_spec.spl --mode=interpreter
+<runtime> test test/03_system/os/feature/qemu_sealed_cli_route_acceptance_spec.spl --mode=interpreter
+<runtime> spipe-docgen test/01_unit/os/qemu_compiler_selection_v1_spec.spl --output doc/06_spec --no-index
+<runtime> spipe-docgen test/03_system/os/feature/qemu_sealed_cli_route_acceptance_spec.spl --output doc/06_spec --no-index
+<runtime> sspec-maintain scan test/01_unit/os/qemu_compiler_selection_v1_spec.spl
+<runtime> sspec-maintain scan test/03_system/os/feature/qemu_sealed_cli_route_acceptance_spec.spl
+```

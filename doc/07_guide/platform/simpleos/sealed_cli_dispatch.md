@@ -42,3 +42,16 @@ Other named scenarios and GUI/debug launches retain their existing runner paths.
 Interactive shell and bootstrap remain unavailable for execution; their
 inspection surfaces are not guest execution evidence. No release promotion
 or whole-platform completion follows from this scoped cutover.
+
+OS builds now resolve explicit `SIMPLE_BINARY`, then its `SIMPLE_BIN` alias,
+through canonical pure-Simple provenance admission. Invalid explicit identity
+fails closed. With no override, canonical release-runtime discovery owns the
+choice; installed bootstrap seeds are not implicit tooling candidates. LLVM
+capability still requires the existing real compile-and-execute canary.
+
+The live CLI-route acceptance spec requires existing real kernels/media and
+QEMU plus `SIMPLE_QEMU_CLI_ACCEPTANCE_BIN` pointing to a canonical full Stage4
+candidate. It invokes the actual CLI and records host process results, then
+checks captured guest serial output separately. Its draft manual is
+`doc/06_spec/03_system/os/feature/qemu_sealed_cli_route_acceptance_spec.md`.
+Neither that spec nor its Linux/Windows lanes has executed yet.

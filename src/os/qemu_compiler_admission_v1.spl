@@ -1,0 +1,39 @@
+# OS build compiler selection delegates provenance and release discovery to
+# their existing canonical authorities. It never searches Rust seed paths.
+use app.io.mod.{file_exists, process_run_timeout}
+
+pub fn qemu_compiler_explicit_candidate_v1(primary: text, secondary: text) -> text:
+    """Preserve SIMPLE_BINARY precedence over SIMPLE_BIN without fallback."""
+    if primary != "": primary else: secondary
+
+pub fn qemu_compiler_select_v1(primary: text, secondary: text, root: text) -> text:
+    """Resolve one admitted pure-Simple compiler, or refuse with an empty path.
+
+An explicit candidate may carry canonical deployed-runtime or full-CLI Stage4
+provenance. Invalid explicit identity never selects a different binary.
+Without an override, the canonical deployed-runtime selector owns discovery.
+"""
+    val explicit = qemu_compiler_explicit_candidate_v1(primary, secondary)
+    val runtime_authority = root + "/scripts/lib/simple-runtime-provenance.shs"
+    if not file_exists(runtime_authority): return ""
+    if explicit != "" and not file_exists(explicit): return ""
+    # All paths remain positional data; no caller input becomes shell code.
+    val script = "set -eu; . \"$2/scripts/lib/simple-runtime-provenance.shs\"; " +
+        "if [ -n \"$1\" ]; then " +
+        "if simple_runtime_provenance_admits \"$1\" \"$2\"; then selected=$SIMPLE_RUNTIME_REAL; " +
+        "else BOOTSTRAP_STAGE3_FACADE_PATH=\"$2/scripts/check/lib/bootstrap-stage3-provenance.shs\"; " +
+        "STAGE4_PROVENANCE_HELPER_PATH=\"$2/scripts/check/lib/stage4-candidate-provenance.shs\"; " +
+        "export BOOTSTRAP_STAGE3_FACADE_PATH STAGE4_PROVENANCE_HELPER_PATH; " +
+        ". \"$BOOTSTRAP_STAGE3_FACADE_PATH\"; . \"$STAGE4_PROVENANCE_HELPER_PATH\"; " +
+        "stage4_verify_candidate_provenance \"$1.provenance.env\" \"$1\" \"$2\" || exit 1; " +
+        "selected=$(simple_runtime_real_path \"$1\"); fi; " +
+        "else selected=$(simple_runtime_select \"$2\") || exit 1; fi; " +
+        "case $(uname -s) in MINGW*|MSYS*|CYGWIN*) selected=$(cygpath -m \"$selected\") ;; esac; " +
+        "printf '%s\\n' \"$selected\""
+    val (stdout, _stderr, status) = process_run_timeout(
+        "sh", ["-c", script, "simpleos-compiler-admission",
+        explicit.replace("\\", "/"), root.replace("\\", "/")], 180000)
+    if status != 0: return ""
+    val selected = stdout.trim()
+    if selected == "" or selected.contains("\n") or not file_exists(selected): return ""
+    selected

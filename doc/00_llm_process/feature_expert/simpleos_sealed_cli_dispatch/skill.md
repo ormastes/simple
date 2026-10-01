@@ -31,3 +31,12 @@ The execution owner retains the plan until exact dispatch and preserves
 scenario timeout/exit semantics. Other named run/headless/test callers remain
 legacy. `qemu_named_dispatch_v1_spec.spl` covers the selection boundary and
 unsupported sealed-run refusal; executable evidence remains blocked.
+
+`os.qemu_compiler_admission_v1` delegates to canonical provenance/discovery;
+do not reintroduce implicit Rust seed candidates or fall back after an invalid
+explicit compiler. The OS build capability helpers adapt committed owner
+contract `ca713ba9e0c7b5f5ee0858550a64d6c38244409a`; backend unit shims are not
+provenance evidence. The live `qemu_sealed_cli_route_acceptance_spec.spl`
+requires actual Stage4/kernel/media/QEMU prerequisites and separately checks
+host CLI and guest serial evidence. It does not remove installed seeds or
+synthesize admission artifacts. Both host lanes remain TEST_BLOCKED.
