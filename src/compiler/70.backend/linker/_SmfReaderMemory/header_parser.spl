@@ -325,7 +325,9 @@ impl SmfReaderMemory:
 
     """Read relocations from the Reloc section (wire type 5).
 
-    Each entry is 24 bytes: offset(8) | sym_idx(4) | type(1) | pad(3) | addend(8).
+    Each entry is 24 bytes. v1.1 requires zero padding at bytes 13..15 and
+    implies Code section 0. v1.2 uses bytes 13..14 for the source section
+    index and byte 15 as the mandatory 0xA2 marker.
     Returns empty list for old SMF files without relocation sections.
 
     Parses the Simple-side SMF section table directly so relocation discovery
@@ -348,15 +350,48 @@ impl SmfReaderMemory:
                     val sec_size = bytes_to_u64(self.data, entry_off + 16) as i64
                     if sec_offset < 0 or sec_size < 0 or sec_offset + sec_size > self.data.len():
                         return Err("Reloc section extends beyond data")
+                    if sec_size % reloc_entry_size != 0:
+                        return Err("Reloc section has a partial entry")
+                    val (major, minor) = self.header.version
+                    if major != 1 or (minor != 1 and minor != 2):
+                        return Err("Reloc section has unsupported SMF version")
                     val entry_count = sec_size / reloc_entry_size
                     var j = 0
                     while j < entry_count:
                         val e_off = sec_offset + j * reloc_entry_size
+                        val source_low = self.data[e_off + 13] as i64
+                        val source_high = self.data[e_off + 14] as i64
+                        val marker = self.data[e_off + 15] as i64
+                        var source_section: i64 = 0
+                        if minor == 1:
+                            if source_low != 0 or source_high != 0 or marker != 0:
+                                return Err("v1.1 Reloc reserved bytes are nonzero")
+                        else:
+                            if marker != 0xA2:
+                                return Err("v1.2 Reloc source marker is invalid")
+                            source_section = source_low | (source_high << 8)
+                        if source_section >= section_count:
+                            return Err("Reloc source section index is invalid")
+                        val source_entry = self.sections_offset + source_section * section_entry_size
+                        if source_entry < 0 or source_entry + section_entry_size > self.data.len():
+                            return Err("Reloc source section table entry is out of bounds")
+                        val source_kind = self.data[source_entry] as i64
+                        if source_kind != 1 and source_kind != 2 and source_kind != 3:
+                            return Err("Reloc source is not Code/Data/RoData")
+                        val reloc_type = self.data[e_off + 12] as i64
+                        if reloc_type < 1 or reloc_type > 5:
+                            return Err("Reloc type is unsupported")
+                        val source_size = bytes_to_u64(self.data, source_entry + 16) as i64
+                        val offset = bytes_to_u64(self.data, e_off) as i64
+                        val width = if reloc_type == 1: 8 else: 4
+                        if source_size < width or offset < 0 or offset > source_size - width:
+                            return Err("Reloc patch exceeds source section")
                         relocs.push(SmfRelocEntry(
-                            offset: bytes_to_u64(self.data, e_off) as i64,
+                            offset: offset,
                             symbol_index: bytes_to_u32(self.data, e_off + 8) as i64,
-                            reloc_type: self.data[e_off + 12] as i32,
-                            addend: bytes_to_u64(self.data, e_off + 16) as i64
+                            reloc_type: reloc_type as i32,
+                            addend: bytes_to_u64(self.data, e_off + 16) as i64,
+                            source_section_index: source_section
                         ))
                         j = j + 1
                     return Ok(relocs)
@@ -373,6 +408,7 @@ struct SmfRelocEntry:
     symbol_index: i64
     reloc_type: i32        # Wire values: 1=Abs64, 2=Rel32, 3=PltRel32, 4=GotRel32, 5=Abs32
     addend: i64
+    source_section_index: i64 = 0
 
 # ============================================================================
 # Parsing Functions

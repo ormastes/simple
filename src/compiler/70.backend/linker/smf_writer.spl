@@ -192,6 +192,8 @@ struct SmfRelocation:
     symbol_index: i64
     reloc_type: RelocationType
     addend: i64
+    # v1.1 implies Code section 0. v1.2 records a real source section.
+    source_section_index: i64 = 0
 
 struct SmfSection:
     name: text
@@ -371,10 +373,27 @@ impl SmfWriter:
         # Linker-compatibility structural check: every relocation must reference
         # a symbol that actually exists in this builder's symbol table.
         var ri_check = 0
+        var source_section_relocations = false
         while ri_check < self.relocations.len():
             val reloc = self.relocations[ri_check]
             if reloc.symbol_index < 0 or reloc.symbol_index >= self.symbols.len():
                 return Err(SmfWriteError.InvalidData("relocation {ri_check} references out-of-range symbol_index {reloc.symbol_index} (symbol_count={self.symbols.len()})"))
+            if reloc.source_section_index < 0 or
+                    reloc.source_section_index >= self.sections.len() or
+                    reloc.source_section_index > 65534:
+                return Err(SmfWriteError.InvalidData("relocation {ri_check} source section index is invalid"))
+            val source_section = self.sections[reloc.source_section_index]
+            val source_type = source_section.section_type.to_wire_u8() as i64
+            if source_type != 1 and source_type != 2 and source_type != 3:
+                return Err(SmfWriteError.InvalidData("relocation {ri_check} source section is not Code/Data/RoData"))
+            val width: i64 = match reloc.reloc_type:
+                case RelocationType.Abs64: 8
+                case _: 4
+            if reloc.offset < 0 or reloc.offset > source_section.data.len() or
+                    width > source_section.data.len() - reloc.offset:
+                return Err(SmfWriteError.InvalidData("relocation {ri_check} patch exceeds source section"))
+            if reloc.source_section_index != 0 or source_type != 1:
+                source_section_relocations = true
             ri_check = ri_check + 1
 
         if self.explicit_symbol_sections:
@@ -395,7 +414,7 @@ impl SmfWriter:
         val has_reloc_section = self.relocations.len() > 0
         var reloc_bytes: [u8] = []
         if has_reloc_section:
-            reloc_bytes = self.serialize_relocations()
+            reloc_bytes = self.serialize_relocations(source_section_relocations)
 
         var section_count = self.sections.len()
         if has_reloc_section:
@@ -522,6 +541,8 @@ impl SmfWriter:
         # trailer lookup).
         var header: SmfHeader = SmfHeader.new_v1_1(
             self.target_platform, self.target_arch)
+        if source_section_relocations:
+            header.version_minor = 2 as u8
         var has_aspect_pack = false
         for written_section in self.sections:
             if written_section.section_type.to_wire_u8() as i64 == 16:
@@ -547,10 +568,10 @@ impl SmfWriter:
 
     """Serialize relocations to a byte array for the Reloc section.
 
-    Each entry is 24 bytes:
-      offset: u64 (8) | symbol_index: u32 (4) | reloc_type: u8 (1) | pad: 3 | addend: i64 (8)
+    Each entry is 24 bytes. v1.1 reserves bytes 13..15 as zero; v1.2 stores
+    source_section_index:u16 LE in bytes 13..14 and marker 0xA2 in byte 15.
     """
-    fn serialize_relocations() -> [u8]:
+    fn serialize_relocations(v1_2: bool) -> [u8]:
         var buf: [u8] = []
         for reloc in self.relocations:
             # offset (u64, 8 bytes)
@@ -561,10 +582,14 @@ impl SmfWriter:
                 buf.push(b)
             # reloc_type (u8, 1 byte)
             buf.push(reloc.reloc_type.to_wire_u8())
-            # padding (3 bytes)
-            buf.push(0)
-            buf.push(0)
-            buf.push(0)
+            if v1_2:
+                buf.push((reloc.source_section_index & 255) as u8)
+                buf.push(((reloc.source_section_index >> 8) & 255) as u8)
+                buf.push(0xA2)
+            else:
+                buf.push(0)
+                buf.push(0)
+                buf.push(0)
             # addend (i64, 8 bytes)
             for b in u64_to_bytes_u8(reloc.addend):
                 buf.push(b)

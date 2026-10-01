@@ -137,7 +137,7 @@ fn group_object_parse_elf(bytes: [u8]) -> Result<GroupObjectV1, text>:
                 kind = 1
                 code_count = code_count + 1
             elif (section.sh_flags & 1) != 0:
-                return Err("ELF writable data section is unsupported: {name}")
+                kind = 2
             else:
                 kind = 3
         var data: [u8] = []
@@ -183,6 +183,9 @@ fn group_object_parse_elf(bytes: [u8]) -> Result<GroupObjectV1, text>:
             return Err("ELF symbol has unsupported section index")
         elif sections[source_section].kind == 0:
             symbols.push(group_object_empty_symbol())
+        elif sections[source_section].kind == 1 and sym_kind == 3:
+            # Code is mapped per function; a section anchor has no one base.
+            symbols.push(group_object_empty_symbol())
         else:
             if sections[source_section].kind == 1 and
                     sym_kind != 2 and sym_kind != 3:
@@ -206,25 +209,21 @@ fn group_object_parse_elf(bytes: [u8]) -> Result<GroupObjectV1, text>:
             return Err("ELF relocation target section is invalid")
         if sections[source].kind == 0:
             continue
-        if sections[source].kind != 1:
-            return Err("ELF data relocation source is unsupported")
         if reloc.section_idx < 0 or reloc.section_idx >= object.sections.len()
                 or object.sections[reloc.section_idx].sh_type != 4:
-            return Err("ELF code relocation requires RELA")
+            return Err("ELF allocated relocation requires RELA")
         val sym_index = elf_reloc_sym(reloc)
         if sym_index < 0 or sym_index >= symbols.len() or
                 not symbols[sym_index].valid:
             return Err("ELF relocation symbol is missing")
-        if symbols[sym_index].kind == 3:
-            return Err("ELF section-anchor relocation is unsupported")
-        if symbols[sym_index].section >= 0 and
-                sections[symbols[sym_index].section].kind != 1:
-            return Err("ELF code relocation to data is unsupported")
+        if symbols[sym_index].kind == 3 and
+                sections[symbols[sym_index].section].kind == 1:
+            return Err("ELF code section-anchor relocation is unsupported")
         val kind = group_object_reloc_kind_elf(elf_reloc_type(reloc))?
         val width = if kind == 1: 8 else: 4
         if not group_object_in_bounds(sections[source].data,
                 reloc.r_offset, width):
-            return Err("ELF relocation patch extends beyond code")
+            return Err("ELF relocation patch extends beyond allocated section")
         relocations.push(GroupObjectRelocationV1(source, reloc.r_offset,
             sym_index, kind, reloc.r_addend))
     Ok(GroupObjectV1(sections, symbols, relocations))
@@ -311,8 +310,9 @@ fn group_object_parse_coff(bytes: [u8]) -> Result<GroupObjectV1, text>:
             code_count = code_count + 1
         elif initialized or uninitialized:
             if (characteristics & 0x80000000) != 0:
-                return Err("COFF writable data section is unsupported: {name}")
-            kind = 3
+                kind = 2
+            else:
+                kind = 3
         var data: [u8] = []
         if kind != 0:
             if name == "" or raw_size > 67108864:
@@ -377,6 +377,9 @@ fn group_object_parse_coff(bytes: [u8]) -> Result<GroupObjectV1, text>:
             return Err("COFF symbol section index is invalid")
         elif section > 0 and sections[section].kind == 0:
             symbols.push(group_object_empty_symbol())
+        elif section > 0 and sections[section].kind == 1 and sym_kind != 2:
+            # COFF labels/section anchors cannot become fake functions.
+            symbols.push(group_object_empty_symbol())
         elif name == "":
             symbols.push(group_object_empty_symbol())
         else:
@@ -412,24 +415,20 @@ fn group_object_parse_coff(bytes: [u8]) -> Result<GroupObjectV1, text>:
             val sym_index = group_object_u32(bytes, r_at + 4)
             val coff_type = group_object_u16(bytes, r_at + 8)
             if sections[source].kind != 0:
-                if sections[source].kind != 1:
-                    return Err("COFF data relocation source is unsupported")
                 if sym_index >= symbols.len() or not symbols[sym_index].valid:
                     return Err("COFF relocation symbol is missing")
-                if symbols[sym_index].kind == 3:
-                    return Err("COFF section-anchor relocation is unsupported")
+                if symbols[sym_index].kind == 3 and
+                        sections[symbols[sym_index].section].kind == 1:
+                    return Err("COFF code section-anchor relocation is unsupported")
                 if symbols[sym_index].section >= 0 and
                         sections[symbols[sym_index].section].kind == 1 and
-                        symbols[sym_index].kind != 2:
+                        symbols[sym_index].kind != 2 and symbols[sym_index].kind != 3:
                     return Err("COFF code-label relocation is unsupported")
-                if symbols[sym_index].section >= 0 and
-                        sections[symbols[sym_index].section].kind != 1:
-                    return Err("COFF code relocation to data is unsupported")
                 val kind = group_object_reloc_kind_coff(coff_type)?
                 val width = if kind == 1: 8 else: 4
                 if not group_object_in_bounds(sections[source].data,
                         patch, width):
-                    return Err("COFF relocation patch extends beyond code")
+                    return Err("COFF relocation patch extends beyond allocated section")
                 var addend = if width == 8:
                     group_object_u64(sections[source].data, patch)
                 else:
@@ -556,30 +555,36 @@ fn group_object_writer(image: GroupObjectV1,
         symbol_indices[symbol_indices.len() - 1] = writer_index
     if writer.symbols.len() == 0:
         return Err("object has no named symbols")
-    # Every relocation source must have one real function body that the loader
-    # maps. The SMF relocation wire carries a code offset but no source section.
+    # Code patches must have one mapped function owner. Data/RoData patches
+    # address their own SMF section; v1.2 records that source section index.
     for reloc in image.relocations:
         if reloc.section < 0 or reloc.section >= image.sections.len() or
-                image.sections[reloc.section].kind != 1:
-            return Err("object relocation source is not code")
+                image.sections[reloc.section].kind == 0:
+            return Err("object relocation source is not allocated")
         if reloc.symbol < 0 or reloc.symbol >= symbol_indices.len() or
                 symbol_indices[reloc.symbol] < 0:
             return Err("object relocation references an omitted symbol")
-        var owner_count = 0
-        for owner_index in 0..image.symbols.len():
-            val owner = image.symbols[owner_index]
-            if owner.valid and owner.section == reloc.section and
-                    owner.kind == 2 and
-                    reloc.offset >= owner.value and
-                    reloc.offset < owner.value + resolved_sizes[owner_index]:
-                owner_count = owner_count + 1
-        if owner_count != 1:
-            return Err("code relocation has {owner_count} function owners")
+        var patch_offset = reloc.offset
+        if image.sections[reloc.section].kind == 1:
+            var owner_count = 0
+            val width = if reloc.kind == 1: 8 else: 4
+            for owner_index in 0..image.symbols.len():
+                val owner = image.symbols[owner_index]
+                if owner.valid and owner.section == reloc.section and
+                        owner.kind == 2 and
+                        resolved_sizes[owner_index] >= width and
+                        reloc.offset >= owner.value and
+                        reloc.offset - owner.value <= resolved_sizes[owner_index] - width:
+                    owner_count = owner_count + 1
+            if owner_count != 1:
+                return Err("code relocation has {owner_count} function owners")
+            patch_offset = code_bases[reloc.section] + reloc.offset
         writer.add_relocation(SmfRelocation(
-            code_bases[reloc.section] + reloc.offset,
+            patch_offset,
             symbol_indices[reloc.symbol],
             group_object_reloc_type(reloc.kind),
-            reloc.addend))
+            reloc.addend,
+            section_indices[reloc.section]))
     Ok(writer)
 
 pub fn smf_group_object_from_bytes_v1(
