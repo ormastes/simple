@@ -22,7 +22,7 @@ use std.common.build_manager.codec.{builder_decode_task_v1, builder_encode_task_
 use std.common.crypto.sha256.{sha256_text}
 use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded, file_is_regular_no_follow,
     file_hash_sha256, file_atomic_write, file_exists}
-use std.nogc_sync_mut.io.dir_ops.{dir_create}
+use std.nogc_sync_mut.io.dir_ops.{dir_create, dir_is_real_no_follow}
 
 val NATIVE_PREPARE_CONFIG_MAX_V1: i64 = 16384
 val NATIVE_PREPARE_INVENTORY_MAX_V1: i64 = 8388608
@@ -278,6 +278,16 @@ fn native_group_prepare_v1(config_path: text, manifest_path: text) -> Result<Nat
             builder_paths_overlap_v1(fields["state_root"], fields["output_root"]):
         return Err("native group source, state, and output roots overlap")
     val shared_parse_cas_root = native_prepare_shared_parse_root_v1(fields)?
+    if not dir_is_real_no_follow(shared_parse_cas_root):
+        return Err("shared parse CAS root is not a real directory")
+    val canonical_shared_parse_cas_root = native_prepare_canonical_v1(shared_parse_cas_root)
+    if canonical_shared_parse_cas_root == "":
+        return Err("shared parse CAS root has no canonical identity")
+    for key in ["source_root", "index_read_root", "state_root", "output_root"]:
+        val canonical_other = native_prepare_canonical_v1(fields[key])
+        if canonical_other == "" or
+                builder_paths_overlap_v1(canonical_shared_parse_cas_root, canonical_other):
+            return Err("shared parse CAS root aliases native group authority: " + key)
     if not manifest_path.starts_with(fields["state_root"] + "/"):
         return Err("native group manifest must be within isolated state root")
     native_prepare_pin_v1(fields, "producer")?
