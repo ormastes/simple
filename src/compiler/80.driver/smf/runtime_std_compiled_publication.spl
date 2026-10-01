@@ -1,0 +1,345 @@
+# Admit actual compiled runtime/std section files before publishing the sealed
+# package pair. This owner never generates semantic section content.
+
+use compiler.driver.action_graph.build_action_v1.{
+    BuildActionResultV1, build_action_result_validate_v1
+}
+use compiler.driver.smf.runtime_std_package_set.{
+    RuntimeStdPackageAuthorityV1, RuntimeStdPackageInputV1,
+    RuntimeStdPackageSetV1, RuntimeStdSectionContentV1,
+    RUNTIME_PACKAGE_IDENTITY_V1, STD_PACKAGE_IDENTITY_V1,
+    runtime_std_build_action_v1, runtime_std_action_digest_v1,
+    runtime_std_publish_set_v1
+}
+use compiler.driver.smf.package_image_v1.{PackageSectionKindV1}
+use compiler.driver.cache.package_tldr_metadata.{
+    ConfigVariantKeyV1, config_variant_digest_v1
+}
+use std.common.build_manager.contracts.{builder_digest_valid_v1}
+use std.common.crypto.sha256.{sha256_text}
+use std.scv.compile_source_inventory_core.{
+    CompileSourceInventoryV1, compile_source_inventory_digest_v1,
+    compile_source_inventory_path_valid_v1
+}
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded}
+
+@unsafe(reason: "canonical physical path admission for compiler artifacts", capabilities: [ffi])
+extern fn rt_path_absolute(path: text) -> text
+
+val RUNTIME_STD_COMPILED_SECTION_MAX_BYTES_V1: i64 = 128 * 1024 * 1024
+val RUNTIME_STD_COMPILED_PACKAGE_MAX_BYTES_V1: i64 = 512 * 1024 * 1024
+
+struct RuntimeStdCompiledSectionReceiptV1:
+    kind: PackageSectionKindV1
+    member_name: text
+    path: text
+    digest: text
+    byte_count: i64
+
+struct RuntimeStdCompiledPackageReceiptV1:
+    package_identity: text
+    source_identities: [text]
+    source_digests: [text]
+    source_closure_digest: text
+    backend: text
+    target_triple: text
+    producer_digest: text
+    dependency_interface_digests: [text]
+    sections: [RuntimeStdCompiledSectionReceiptV1]
+    action_result: BuildActionResultV1
+    action_receipt_path: text
+    action_receipt_digest: text
+
+fn runtime_std_compiled_source_closure_digest_v1(
+    identities: [text], digests: [text]
+) -> text:
+    if identities.len() == 0 or identities.len() != digests.len() or
+            identities.len() > 20000:
+        return ""
+    var rows: [text] = []
+    var previous = ""
+    var index = 0
+    while index < identities.len():
+        val identity = identities[index]
+        if (not compile_source_inventory_path_valid_v1(identity) or
+                not identity.ends_with(".spl") or
+                not builder_digest_valid_v1(digests[index]) or
+                (previous != "" and identity <= previous)):
+            return ""
+        rows = rows.push("{identity}|{digests[index]}")
+        previous = identity
+        index = index + 1
+    sha256_text("simple/runtime-std-source-closure/v1\n" +
+        rows.join("\n") + "\n")
+
+fn _runtime_std_compiled_kind_name_v1(kind: PackageSectionKindV1) -> text:
+    match kind:
+        PackageSectionKindV1.debug: "debug.smf"
+        PackageSectionKindV1.exports: "exports.smf"
+        PackageSectionKindV1.generics: "generics.smf"
+        PackageSectionKindV1.hir_summaries: "hir-summaries.smf"
+        PackageSectionKindV1.imports: "imports.smf"
+        PackageSectionKindV1.initialization: "initialization.smf"
+        PackageSectionKindV1.mir: "mir.smf"
+        PackageSectionKindV1.objects: "objects.smf"
+        PackageSectionKindV1.receipts: "receipts.smf"
+        PackageSectionKindV1.types: "types.smf"
+
+fn runtime_std_compiled_receipts_section_v1(
+    authority: RuntimeStdPackageAuthorityV1,
+    receipt: RuntimeStdCompiledPackageReceiptV1,
+    source_inventory_digest: text
+) -> text:
+    val action_digest = runtime_std_action_digest_v1(
+        authority, receipt.package_identity)
+    if action_digest == "": return ""
+    ["simple-runtime-std-compiled-receipts-v1",
+     "package={receipt.package_identity}",
+     "source-closure={receipt.source_closure_digest}",
+     "source-inventory={source_inventory_digest}",
+     "backend={receipt.backend}",
+     "target={receipt.target_triple}",
+     "producer={receipt.producer_digest}",
+     "config={authority.config_digest}",
+     "action={action_digest}"].join("\n")
+
+fn runtime_std_compiled_action_receipt_v1(
+    authority: RuntimeStdPackageAuthorityV1,
+    receipt: RuntimeStdCompiledPackageReceiptV1
+) -> text:
+    val action_digest = runtime_std_action_digest_v1(
+        authority, receipt.package_identity)
+    if action_digest == "" or receipt.sections.len() != 10:
+        return ""
+    val success = if receipt.action_result.success: "1" else: "0"
+    val cancelled = if receipt.action_result.cancelled: "1" else: "0"
+    val diagnostics_digest = sha256_text(
+        receipt.action_result.diagnostic_frames.join("\n"))
+    var lines = ["simple-runtime-std-native-action-v1",
+        "package={receipt.package_identity}",
+        "action={action_digest}",
+        "source-closure={receipt.source_closure_digest}",
+        "backend={receipt.backend}",
+        "target={receipt.target_triple}",
+        "producer={receipt.producer_digest}",
+        "revision={receipt.action_result.snapshot_revision}",
+        "success={success}",
+        "cancelled={cancelled}",
+        "output={receipt.action_result.output_identity}",
+        "restat={receipt.action_result.restat_identity}",
+        "memory={receipt.action_result.memory_peak_bytes}",
+        "diagnostics={diagnostics_digest}"]
+    for section in receipt.sections:
+        lines = lines.push(
+            "section={section.member_name}|{section.digest}|{section.byte_count}")
+    lines.join("\n")
+
+fn runtime_std_compiled_receipt_validate_v1(
+    authority: RuntimeStdPackageAuthorityV1,
+    variant: ConfigVariantKeyV1,
+    inventory: CompileSourceInventoryV1,
+    expected_source_inventory_digest: text,
+    receipt: RuntimeStdCompiledPackageReceiptV1
+) -> text:
+    if receipt.package_identity != RUNTIME_PACKAGE_IDENTITY_V1 and
+            receipt.package_identity != STD_PACKAGE_IDENTITY_V1:
+        return "runtime-std-compiled-package-invalid"
+    if config_variant_digest_v1(variant) == "" or
+            config_variant_digest_v1(variant) != authority.config_digest or
+            variant.backend != receipt.backend or
+            variant.target_triple != receipt.target_triple or
+            authority.target_triple != receipt.target_triple or
+            authority.compiler_digest != receipt.producer_digest:
+        return "runtime-std-compiled-variant-or-producer-mismatch"
+    if compile_source_inventory_digest_v1(inventory) !=
+            expected_source_inventory_digest:
+        return "runtime-std-compiled-source-inventory-mismatch"
+    val closure = runtime_std_compiled_source_closure_digest_v1(
+        receipt.source_identities, receipt.source_digests)
+    if closure == "" or closure != receipt.source_closure_digest:
+        return "runtime-std-compiled-source-closure-mismatch"
+    var by_source: Dict<text, text> = {}
+    for source in inventory.entries:
+        if by_source.has(source.source_identity):
+            return "runtime-std-compiled-inventory-duplicate"
+        by_source[source.source_identity] = source.content_digest
+    var source_index = 0
+    while source_index < receipt.source_identities.len():
+        val identity = receipt.source_identities[source_index]
+        if not by_source.has(identity) or
+                by_source[identity] != receipt.source_digests[source_index]:
+            return "runtime-std-compiled-source-not-admitted"
+        source_index = source_index + 1
+    if receipt.sections.len() != 10:
+        return "runtime-std-compiled-section-count-invalid"
+    if receipt.action_receipt_path == "" or
+            not builder_digest_valid_v1(receipt.action_receipt_digest):
+        return "runtime-std-compiled-action-receipt-invalid"
+    val expected_names = ["debug.smf", "exports.smf", "generics.smf",
+        "hir-summaries.smf", "imports.smf", "initialization.smf",
+        "mir.smf", "objects.smf", "receipts.smf", "types.smf"]
+    var total_bytes = 0
+    var index = 0
+    while index < 10:
+        val section = receipt.sections[index]
+        if (section.member_name != expected_names[index] or
+                _runtime_std_compiled_kind_name_v1(section.kind) !=
+                    expected_names[index] or
+                section.path == "" or
+                not builder_digest_valid_v1(section.digest) or
+                section.byte_count < 1 or
+                section.byte_count > RUNTIME_STD_COMPILED_SECTION_MAX_BYTES_V1):
+            return "runtime-std-compiled-section-receipt-invalid"
+        total_bytes = total_bytes + section.byte_count
+        index = index + 1
+    if total_bytes > RUNTIME_STD_COMPILED_PACKAGE_MAX_BYTES_V1:
+        return "runtime-std-compiled-package-size-limit"
+    var previous_dependency = ""
+    for digest in receipt.dependency_interface_digests:
+        if not builder_digest_valid_v1(digest) or
+                (previous_dependency != "" and digest <= previous_dependency):
+            return "runtime-std-compiled-dependency-invalid"
+        previous_dependency = digest
+    val action = runtime_std_build_action_v1(
+        authority, receipt.package_identity)
+    if action == nil or
+            build_action_result_validate_v1(action!, receipt.action_result) != "ok" or
+            not receipt.action_result.success or
+            receipt.action_result.output_identity != action!.restat_identity:
+        return "runtime-std-compiled-action-invalid"
+    "ok"
+
+fn _runtime_std_compiled_physical_v1(path: text) -> text:
+    var raw = ""
+    unsafe(capabilities: [ffi]):
+        raw = rt_path_absolute(path) ?? ""
+    if raw == "": "" else: raw.replace("\\", "/").lower()
+
+fn _runtime_std_compiled_read_sections_v1(
+    artifact_root: text,
+    authority: RuntimeStdPackageAuthorityV1,
+    receipt: RuntimeStdCompiledPackageReceiptV1,
+    source_inventory_digest: text
+) -> Result<[RuntimeStdSectionContentV1], text>:
+    val physical_root = _runtime_std_compiled_physical_v1(artifact_root)
+    if physical_root == "":
+        return Err("runtime-std-compiled-artifact-root-invalid")
+    var sections: [RuntimeStdSectionContentV1] = []
+    var seen_paths: Dict<text, bool> = {}
+    for section in receipt.sections:
+        val physical = _runtime_std_compiled_physical_v1(section.path)
+        if physical == "" or
+                not physical.starts_with(physical_root + "/") or
+                seen_paths.has(physical):
+            return Err("runtime-std-compiled-section-path-invalid")
+        seen_paths[physical] = true
+        val loaded = file_read_regular_no_follow_bounded(
+            section.path, RUNTIME_STD_COMPILED_SECTION_MAX_BYTES_V1)
+        if val Err(_) = loaded:
+            return Err("runtime-std-compiled-section-unreadable")
+        val content = loaded.unwrap()
+        val lowered = content.trim().lower()
+        if content.bytes().len() != section.byte_count or
+                sha256_text(content) != section.digest or
+                lowered == "placeholder" or lowered == "todo" or
+                lowered == "dummy" or lowered == "pending":
+            return Err("runtime-std-compiled-section-content-mismatch")
+        if section.member_name == "receipts.smf" and
+                content != runtime_std_compiled_receipts_section_v1(
+                    authority, receipt, source_inventory_digest):
+            return Err("runtime-std-compiled-source-receipt-mismatch")
+        sections = sections.push(RuntimeStdSectionContentV1(
+            section.kind, section.member_name, content))
+    Ok(sections)
+
+fn _runtime_std_compiled_read_action_receipt_v1(
+    artifact_root: text,
+    authority: RuntimeStdPackageAuthorityV1,
+    receipt: RuntimeStdCompiledPackageReceiptV1
+) -> text:
+    val physical_root = _runtime_std_compiled_physical_v1(artifact_root)
+    val physical = _runtime_std_compiled_physical_v1(
+        receipt.action_receipt_path)
+    if physical_root == "" or physical == "" or
+            not physical.starts_with(physical_root + "/"):
+        return "runtime-std-compiled-action-receipt-path-invalid"
+    for section in receipt.sections:
+        if _runtime_std_compiled_physical_v1(section.path) == physical:
+            return "runtime-std-compiled-action-receipt-overlap"
+    val read = file_read_regular_no_follow_bounded(
+        receipt.action_receipt_path, 4096)
+    if val Err(_) = read:
+        return "runtime-std-compiled-action-receipt-unreadable"
+    val content = read.unwrap()
+    if sha256_text(content) != receipt.action_receipt_digest or
+            content != runtime_std_compiled_action_receipt_v1(
+                authority, receipt):
+        return "runtime-std-compiled-action-receipt-mismatch"
+    "ok"
+
+fn runtime_std_compiled_package_admit_v1(
+    artifact_root: text,
+    authority: RuntimeStdPackageAuthorityV1,
+    expected_variant: ConfigVariantKeyV1,
+    source_inventory: CompileSourceInventoryV1,
+    expected_source_inventory_digest: text,
+    receipt: RuntimeStdCompiledPackageReceiptV1
+) -> Result<[RuntimeStdSectionContentV1], text>:
+    val reason = runtime_std_compiled_receipt_validate_v1(
+        authority, expected_variant, source_inventory,
+        expected_source_inventory_digest, receipt)
+    if reason != "ok": return Err(reason)
+    val sections = _runtime_std_compiled_read_sections_v1(
+        artifact_root, authority, receipt,
+        expected_source_inventory_digest)
+    if sections.is_err(): return Err(sections.unwrap_err())
+    val action_reason = _runtime_std_compiled_read_action_receipt_v1(
+        artifact_root, authority, receipt)
+    if action_reason != "ok": return Err(action_reason)
+    sections
+
+fn runtime_std_compiled_publish_v1(
+    cache_root: text,
+    artifact_root: text,
+    authority: RuntimeStdPackageAuthorityV1,
+    expected_variant: ConfigVariantKeyV1,
+    source_inventory: CompileSourceInventoryV1,
+    expected_source_inventory_digest: text,
+    runtime_receipt: RuntimeStdCompiledPackageReceiptV1,
+    std_receipt: RuntimeStdCompiledPackageReceiptV1
+) -> Result<RuntimeStdPackageSetV1, text>:
+    if cache_root == "" or
+            runtime_receipt.package_identity != RUNTIME_PACKAGE_IDENTITY_V1 or
+            std_receipt.package_identity != STD_PACKAGE_IDENTITY_V1:
+        return Err("runtime-std-compiled-set-invalid")
+    val runtime_sections = runtime_std_compiled_package_admit_v1(
+        artifact_root, authority, expected_variant, source_inventory,
+        expected_source_inventory_digest, runtime_receipt)
+    if runtime_sections.is_err(): return Err(runtime_sections.unwrap_err())
+    val std_sections = runtime_std_compiled_package_admit_v1(
+        artifact_root, authority, expected_variant, source_inventory,
+        expected_source_inventory_digest, std_receipt)
+    if std_sections.is_err(): return Err(std_sections.unwrap_err())
+    val runtime_input = RuntimeStdPackageInputV1(
+        RUNTIME_PACKAGE_IDENTITY_V1, authority.runtime_abi_digest,
+        runtime_receipt.dependency_interface_digests,
+        runtime_sections.unwrap())
+    val std_input = RuntimeStdPackageInputV1(
+        STD_PACKAGE_IDENTITY_V1, authority.std_abi_digest,
+        std_receipt.dependency_interface_digests,
+        std_sections.unwrap())
+    val published = runtime_std_publish_set_v1(
+        cache_root, authority, runtime_input, std_input,
+        runtime_receipt.action_result, std_receipt.action_result)
+    if not published.valid:
+        return Err("runtime-std-compiled-publication-{published.reason}")
+    Ok(published)
+
+export RUNTIME_STD_COMPILED_SECTION_MAX_BYTES_V1
+export RUNTIME_STD_COMPILED_PACKAGE_MAX_BYTES_V1
+export RuntimeStdCompiledSectionReceiptV1, RuntimeStdCompiledPackageReceiptV1
+export runtime_std_compiled_source_closure_digest_v1
+export runtime_std_compiled_receipts_section_v1
+export runtime_std_compiled_action_receipt_v1
+export runtime_std_compiled_receipt_validate_v1
+export runtime_std_compiled_package_admit_v1, runtime_std_compiled_publish_v1
