@@ -1,0 +1,83 @@
+# @req REQ-RUNTIME-STD-NATIVE-TARGET-OUTCOMES
+
+use std.spec.{describe, it, expect}
+use std.spec.step
+use std.common.crypto.sha256.{sha256_text}
+use compiler.driver.smf.runtime_std_native_outcomes_v2.{
+    RuntimeStdNativeOutcomeKindV2, RuntimeStdNativeOutcomeReceiptV2,
+    runtime_std_native_semantic_action_key_v2,
+    runtime_std_native_outcomes_section_v2,
+    runtime_std_native_outcomes_decode_v2}
+use compiler.driver.smf.runtime_std_native_action_budget_v2.{
+    RuntimeStdNativeActionBudgetV2,
+    runtime_std_native_action_budget_valid_v2,
+    runtime_std_native_action_peak_admitted_v2}
+
+fn _native_outcome_fixture_v2(
+    kind: RuntimeStdNativeOutcomeKindV2, source: text,
+    object_digest: text, object_bytes: i64, capsule_digest: text
+) -> RuntimeStdNativeOutcomeReceiptV2:
+    val source_digest = sha256_text("source:" + source)
+    val hir_digest = sha256_text("hir:" + source)
+    val mir_digest = sha256_text("mir:" + source)
+    val cfg_digest = sha256_text("cfg:" + source)
+    val target = "x86_64-unknown-linux-gnu"
+    val key = runtime_std_native_semantic_action_key_v2(kind, source,
+        source_digest, target, "llvm", hir_digest, mir_digest, cfg_digest)
+    RuntimeStdNativeOutcomeReceiptV2(kind, source, source_digest,
+        target, hir_digest, mir_digest, cfg_digest, key,
+        object_digest, object_bytes, capsule_digest)
+
+describe "runtime/std native source outcomes v2", tag: ["only-compiled"]:
+    it "roundtrips all dispositions with exact selected source closure":
+        step("Frame code, active objectless, and cfg inactive rows canonically")
+        val code = _native_outcome_fixture_v2(
+            RuntimeStdNativeOutcomeKindV2.code_object,
+            "src/runtime/a.spl", sha256_text("object-a"), 42,
+            sha256_text("capsule-a"))
+        val objectless = _native_outcome_fixture_v2(
+            RuntimeStdNativeOutcomeKindV2.active_objectless,
+            "src/runtime/b.spl", "", 0, "")
+        val inactive = _native_outcome_fixture_v2(
+            RuntimeStdNativeOutcomeKindV2.cfg_inactive,
+            "src/runtime/c.spl", "", 0, "")
+        val rows = [code, objectless, inactive]
+        val ids = [code.source_identity, objectless.source_identity,
+            inactive.source_identity]
+        val digests = [code.source_digest, objectless.source_digest,
+            inactive.source_digest]
+        val encoded = runtime_std_native_outcomes_section_v2(rows,
+            "llvm", code.target_triple, ids, digests)
+        expect(encoded.is_ok()).to_equal(true)
+        val decoded = runtime_std_native_outcomes_decode_v2(encoded.unwrap(),
+            "llvm", code.target_triple, ids, digests)
+        expect(decoded.is_ok()).to_equal(true)
+        expect(decoded.unwrap().len()).to_equal(3)
+        expect(decoded.unwrap()[1].kind).to_equal(
+            RuntimeStdNativeOutcomeKindV2.active_objectless)
+
+        step("Reject a source omission, reordered source, or target delimiter")
+        expect(runtime_std_native_outcomes_section_v2(
+            [code, inactive], "llvm", code.target_triple, ids,
+            digests).is_err()).to_equal(true)
+        expect(runtime_std_native_outcomes_section_v2(
+            [objectless, code, inactive], "llvm", code.target_triple,
+            ids, digests).is_err()).to_equal(true)
+        expect(runtime_std_native_outcomes_section_v2(rows, "llvm",
+            "bad\ntarget", ids, digests).is_err()).to_equal(true)
+        expect(runtime_std_native_outcomes_decode_v2(
+            encoded.unwrap() + "extra\n", "llvm", code.target_triple,
+            ids, digests).is_err()).to_equal(true)
+
+    it "requires manager-bound whole-process memory evidence":
+        val budget = RuntimeStdNativeActionBudgetV2(
+            sha256_text("exact pinned request.sdn bytes"), 1024)
+        expect(runtime_std_native_action_budget_valid_v2(budget)).to_equal(true)
+        expect(runtime_std_native_action_peak_admitted_v2(
+            budget, 1024)).to_equal(true)
+        expect(runtime_std_native_action_peak_admitted_v2(
+            budget, 1025)).to_equal(false)
+        expect(runtime_std_native_action_peak_admitted_v2(
+            budget, 0)).to_equal(false)
+        expect(runtime_std_native_action_budget_valid_v2(
+            RuntimeStdNativeActionBudgetV2("", 1024))).to_equal(false)

@@ -1,0 +1,181 @@
+# Canonical per-source native disposition for a target-specific runtime/std
+# package. The compiler issues these rows from live HIR/MIR and cfg evidence;
+# a package loader checks the complete source closure before admission.
+
+use std.common.crypto.sha256.{sha256_text}
+use std.common.build_manager.contracts.{builder_digest_valid_v1}
+use std.scv.compile_source_inventory_core.{
+    compile_source_inventory_path_valid_v1}
+use std.common.encoding.utf8.{text_byte_len}
+
+val RUNTIME_STD_NATIVE_OUTCOMES_MAX_BYTES_V2: i64 = 128 * 1024 * 1024
+
+enum RuntimeStdNativeOutcomeKindV2:
+    code_object
+    active_objectless
+    cfg_inactive
+
+struct RuntimeStdNativeOutcomeReceiptV2:
+    kind: RuntimeStdNativeOutcomeKindV2
+    source_identity: text
+    source_digest: text
+    target_triple: text
+    hir_digest: text
+    mir_digest: text
+    cfg_decision_digest: text
+    semantic_action_key: text
+    object_digest: text
+    object_byte_count: i64
+    capsule_identity_digest: text
+
+fn runtime_std_native_outcome_kind_name_v2(
+    kind: RuntimeStdNativeOutcomeKindV2
+) -> text:
+    match kind:
+        case RuntimeStdNativeOutcomeKindV2.code_object: "code_object"
+        case RuntimeStdNativeOutcomeKindV2.active_objectless: "active_objectless"
+        case RuntimeStdNativeOutcomeKindV2.cfg_inactive: "cfg_inactive"
+
+fn runtime_std_native_outcome_kind_parse_v2(
+    value: text
+) -> RuntimeStdNativeOutcomeKindV2?:
+    match value:
+        case "code_object": Some(RuntimeStdNativeOutcomeKindV2.code_object)
+        case "active_objectless": Some(RuntimeStdNativeOutcomeKindV2.active_objectless)
+        case "cfg_inactive": Some(RuntimeStdNativeOutcomeKindV2.cfg_inactive)
+        case _: nil
+
+fn runtime_std_native_semantic_action_key_v2(
+    kind: RuntimeStdNativeOutcomeKindV2, source_identity: text,
+    source_digest: text, target_triple: text, backend: text,
+    hir_digest: text, mir_digest: text, cfg_decision_digest: text
+) -> text:
+    sha256_text("simple-runtime-std-native-source-action-v2\n" +
+        "kind={runtime_std_native_outcome_kind_name_v2(kind)}\n" +
+        "source={source_identity}\ndigest={source_digest}\n" +
+        "target={target_triple}\nbackend={backend}\n" +
+        "hir={hir_digest}\nmir={mir_digest}\n" +
+        "cfg={cfg_decision_digest}\n")
+
+fn runtime_std_native_outcome_valid_v2(
+    receipt: RuntimeStdNativeOutcomeReceiptV2, backend: text,
+    expected_target: text
+) -> bool:
+    if not compile_source_inventory_path_valid_v1(receipt.source_identity) or
+            not receipt.source_identity.ends_with(".spl") or
+            not builder_digest_valid_v1(receipt.source_digest) or
+            not builder_digest_valid_v1(receipt.hir_digest) or
+            not builder_digest_valid_v1(receipt.mir_digest) or
+            not builder_digest_valid_v1(receipt.cfg_decision_digest) or
+            (backend != "llvm" and backend != "cranelift") or
+            expected_target == "" or expected_target.contains("|") or
+            expected_target.contains("\n") or expected_target.contains("\r") or
+            receipt.source_identity.contains("|") or
+            receipt.source_identity.contains("\n") or
+            receipt.source_identity.contains("\r") or
+            receipt.target_triple != expected_target or
+            receipt.semantic_action_key != runtime_std_native_semantic_action_key_v2(
+                receipt.kind, receipt.source_identity,
+                receipt.source_digest, receipt.target_triple, backend,
+                receipt.hir_digest, receipt.mir_digest,
+                receipt.cfg_decision_digest):
+        return false
+    if receipt.kind == RuntimeStdNativeOutcomeKindV2.code_object:
+        return builder_digest_valid_v1(receipt.object_digest) and
+            receipt.object_byte_count >= 4 and
+            receipt.object_byte_count <= RUNTIME_STD_NATIVE_OUTCOMES_MAX_BYTES_V2 and
+            builder_digest_valid_v1(receipt.capsule_identity_digest)
+    receipt.object_digest == "" and receipt.object_byte_count == 0 and
+        receipt.capsule_identity_digest == ""
+
+fn runtime_std_native_outcome_row_v2(
+    receipt: RuntimeStdNativeOutcomeReceiptV2, backend: text,
+    expected_target: text
+) -> text:
+    if not runtime_std_native_outcome_valid_v2(
+            receipt, backend, expected_target):
+        return ""
+    [runtime_std_native_outcome_kind_name_v2(receipt.kind),
+        receipt.source_identity, receipt.source_digest,
+        receipt.target_triple, receipt.hir_digest, receipt.mir_digest,
+        receipt.cfg_decision_digest, receipt.semantic_action_key,
+        receipt.object_digest, receipt.object_byte_count.to_text(),
+        receipt.capsule_identity_digest].join("|")
+
+fn runtime_std_native_outcomes_section_v2(
+    receipts: [RuntimeStdNativeOutcomeReceiptV2],
+    backend: text, target_triple: text,
+    source_identities: [text], source_digests: [text]
+) -> Result<text, text>:
+    if receipts.len() == 0 or receipts.len() != source_identities.len() or
+            receipts.len() != source_digests.len() or
+            target_triple == "" or target_triple.contains("|") or
+            target_triple.contains("\n") or target_triple.contains("\r") or
+            (backend != "llvm" and backend != "cranelift"):
+        return Err("runtime-std-native-v2-source-closure-invalid")
+    var rows: [text] = ["simple-runtime-std-native-outcomes-v2",
+        "backend={backend}", "target={target_triple}",
+        "count={receipts.len()}"]
+    var prior = ""
+    var index = 0
+    while index < receipts.len():
+        val receipt = receipts[index]
+        if receipt.source_identity != source_identities[index] or
+                receipt.source_digest != source_digests[index] or
+                (prior != "" and prior >= receipt.source_identity):
+            return Err("runtime-std-native-v2-source-order-invalid")
+        val row = runtime_std_native_outcome_row_v2(
+            receipt, backend, target_triple)
+        if row == "": return Err("runtime-std-native-v2-row-invalid")
+        rows.push(row)
+        prior = receipt.source_identity
+        index = index + 1
+    val content = rows.join("\n") + "\n"
+    if text_byte_len(content) > RUNTIME_STD_NATIVE_OUTCOMES_MAX_BYTES_V2:
+        return Err("runtime-std-native-v2-section-too-large")
+    Ok(content)
+
+fn runtime_std_native_outcomes_decode_v2(
+    content: text, backend: text, target_triple: text,
+    source_identities: [text], source_digests: [text]
+) -> Result<[RuntimeStdNativeOutcomeReceiptV2], text>:
+    if content == "" or
+            text_byte_len(content) > RUNTIME_STD_NATIVE_OUTCOMES_MAX_BYTES_V2 or
+            not content.ends_with("\n"):
+        return Err("runtime-std-native-v2-section-bound-invalid")
+    val lines = content.split("\n")
+    if lines.len() != source_identities.len() + 5 or
+            lines[0] != "simple-runtime-std-native-outcomes-v2" or
+            lines[1] != "backend={backend}" or
+            lines[2] != "target={target_triple}" or
+            lines[3] != "count={source_identities.len()}" or
+            lines[lines.len() - 1] != "":
+        return Err("runtime-std-native-v2-header-invalid")
+    var receipts: [RuntimeStdNativeOutcomeReceiptV2] = []
+    var index = 0
+    while index < source_identities.len():
+        val fields = lines[index + 4].split("|")
+        if fields.len() != 11:
+            return Err("runtime-std-native-v2-row-shape-invalid")
+        val kind = runtime_std_native_outcome_kind_parse_v2(fields[0])
+        if kind == nil:
+            return Err("runtime-std-native-v2-kind-invalid")
+        val byte_count = fields[9].to_i64() ?? -1
+        receipts.push(RuntimeStdNativeOutcomeReceiptV2(kind!, fields[1],
+            fields[2], fields[3], fields[4], fields[5], fields[6],
+            fields[7], fields[8], byte_count, fields[10]))
+        index = index + 1
+    val encoded = runtime_std_native_outcomes_section_v2(
+        receipts, backend, target_triple,
+        source_identities, source_digests)
+    if encoded.is_err() or encoded.unwrap() != content:
+        return Err("runtime-std-native-v2-canonical-readback-differs")
+    Ok(receipts)
+
+export RUNTIME_STD_NATIVE_OUTCOMES_MAX_BYTES_V2
+export RuntimeStdNativeOutcomeKindV2, RuntimeStdNativeOutcomeReceiptV2
+export runtime_std_native_outcome_kind_name_v2
+export runtime_std_native_semantic_action_key_v2
+export runtime_std_native_outcome_valid_v2
+export runtime_std_native_outcomes_section_v2
+export runtime_std_native_outcomes_decode_v2
