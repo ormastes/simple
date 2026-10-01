@@ -33,7 +33,8 @@ use compiler.driver.driver_build.native_group_request.{native_group_request_path
 use compiler.driver.driver_build.native_group_warm_route.{
     native_group_warm_route_read_v1, native_group_warm_route_index_route_v1}
 use compiler.driver.driver_build.native_full_inventory_sources.{
-    native_full_inventory_source_paths_v1}
+    native_full_inventory_source_paths_v1,
+    native_full_inventory_requires_cold_index_v1}
 use compiler.driver.driver_log_helpers.{log_phase, log_build_progress}
 use compiler.common.driver_core_modes.{CompileMode}
 use compiler.common.attributes.{parse_function_attrs}
@@ -259,11 +260,10 @@ impl CompilerDriver:
             (sosix_env_get_nullable("SIMPLE_PACKAGE_INDEX_PRODUCER_DIGEST") ?? "") != "" and
             (sosix_env_get_nullable("SIMPLE_PACKAGE_INDEX_ROOT_GENERATION") ?? "") != "" and
             (sosix_env_get_nullable("SIMPLE_PACKAGE_INDEX_VARIANT_DIGEST") ?? "") != ""
-        val package_index_cold_init = if full_inventory_mode or native_group_inputs.len() > 0:
-            false
-        else:
-            (sosix_env_get_nullable("SIMPLE_PACKAGE_INDEX_COLD_INIT") ?? "") == "1" or
-                not package_index_compat_markers_present
+        val package_index_cold_init = native_full_inventory_requires_cold_index_v1(
+            full_inventory_mode, native_group_inputs.len(),
+            (sosix_env_get_nullable("SIMPLE_PACKAGE_INDEX_COLD_INIT") ?? "") == "1",
+            package_index_compat_markers_present)
         var package_index_routed = false
         var package_read_root = machine_cache_root()
         if not package_index_cold_init:
@@ -579,6 +579,10 @@ impl CompilerDriver:
                 driver_entry_scan_cache_release()
                 return (self.ctx, false)
             self.ctx.demand_mir_admission = Some(demand_admission.unwrap())
+        if full_inventory_mode and package_index_routed:
+            self.ctx.add_error("frozen full inventory cannot use a warm package route")
+            driver_entry_scan_cache_release()
+            return (self.ctx, false)
         var full_source_digests: [text] = []
         var full_source_byte_counts: [i64] = []
         var full_source_root = ""
