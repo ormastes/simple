@@ -2902,6 +2902,7 @@ fn _compile_frozen_module_capsule(
         return _aot_compile_failure(name, "capsule-identity-mismatch")
     if capsule.storage_snapshot.registry_identity != batch.registry_identity:
         return _aot_compile_failure(name, "capsule-registry-mismatch")
+    var group_member_id = ""
     if native_group_request_path_v1() != "":
         val manifest = match native_group_request_v1():
             case Ok(value): value
@@ -2937,6 +2938,7 @@ fn _compile_frozen_module_capsule(
                 not rename(marker_tmp, marker):
             return _aot_compile_failure(name,
                 "native group start marker write failed")
+        group_member_id = member_id
     val trace = (env_get_nullable("SIMPLE_COMPILER_TRACE") ?? "") == "1"
     if trace:
         print "[NATIVE] compiling module: {name}"
@@ -2945,12 +2947,19 @@ fn _compile_frozen_module_capsule(
     # Returning the already-consumed composite `result` forwarded only its tag
     # through an early self-hosted bootstrap ABI, so the next caller observed
     # `Err("")` even though the object-path driver had read the llc diagnostic.
+    if group_member_id != "":
+        log_phase("native_group:codegen:start member={group_member_id} backend={backend_name}")
     match _compile_selected_module(backend_name, is_release, opt_level,
         capsule.output_base,
         name, capsule.mir_module, capsule.storage_snapshot,
         capsule.target_cpu, backend_session):
-        case Err(error): return Err(error)
+        case Err(error):
+            if group_member_id != "":
+                log_phase("native_group:codegen:error member={group_member_id} backend={backend_name}")
+            return Err(error)
         case Ok(object_path):
+            if group_member_id != "":
+                log_phase("native_group:codegen:done member={group_member_id} backend={backend_name}")
             if not capsule.identity_valid():
                 return _aot_compile_failure(name, "capsule-mir-lease-violated")
             if object_path != capsule.object_path:
