@@ -1,0 +1,80 @@
+use std.spec.{describe, it, expect, fail}
+use app.bootstrap_builder.native_group_index_contract.{NativeGroupIndexConfigV1}
+use app.bootstrap_builder.native_group_index_variant.{native_group_index_variant_profile_v1,
+    native_group_index_variant_admit_v1}
+use compiler.driver.cache.package_tldr_metadata.{ConfigVariantKeyV1,
+    config_variant_digest_v1}
+
+fn index_variant_config_v1(variant: ConfigVariantKeyV1) -> NativeGroupIndexConfigV1:
+    NativeGroupIndexConfigV1("phase4", variant.backend, variant.target_triple,
+        "D:/phase2/simple.exe", "a".repeat(64), "D:/frozen",
+        "D:/frozen/build/scv/snapshots/rev", "rev", "commit", "tree",
+        "D:/frozen/build/scv/receipts/rev.receipt", "b".repeat(64),
+        "c".repeat(64), "d".repeat(64), 1, 15754,
+        "D:/frozen/source-inputs-before.txt", "e".repeat(64),
+        "@WORK@/.builder-cache/native-index", "@WORK@/index-output",
+        "NONE", variant, config_variant_digest_v1(variant))
+
+describe "native full-index variant to compiler options":
+    it "derives the exact release LLVM AOT key from actual options":
+        match native_group_index_variant_profile_v1("phase4", "llvm",
+                "x86_64-pc-windows-msvc", "release", "simple-v1"):
+            Ok(profile):
+                expect(profile.options.mode.to_text()).to_equal("aot")
+                expect(profile.options.backend).to_equal("llvm")
+                expect(profile.options.native_target).to_equal("x86_64-pc-windows-msvc")
+                expect(profile.options.release).to_equal(true)
+                expect(profile.options.opt_level ?? -1).to_equal(2)
+                expect(profile.variant.normalized_options).to_equal([
+                    "debug_info=0", "low_memory=1", "mode=aot",
+                    "opt_level=2", "output_format=native"])
+                expect(profile.digest).to_equal(config_variant_digest_v1(profile.variant))
+                match native_group_index_variant_admit_v1(
+                        index_variant_config_v1(profile.variant)):
+                    Ok(admitted): expect(admitted.digest).to_equal(profile.digest)
+                    Err(reason): fail(reason)
+            Err(reason): fail(reason)
+
+    it "derives debug Cranelift options and refuses unprojected knobs":
+        match native_group_index_variant_profile_v1("phase3", "cranelift",
+                "aarch64-unknown-linux-gnu", "debug", "simple-v1"):
+            Ok(profile):
+                expect(profile.options.release).to_equal(false)
+                expect(profile.options.opt_level ?? -1).to_equal(0)
+                expect(profile.variant.normalized_options).to_equal([
+                    "debug_info=1", "low_memory=1", "mode=aot",
+                    "opt_level=0", "output_format=native"])
+                var altered = profile.variant
+                altered.features = ["avx2"]
+                match native_group_index_variant_admit_v1(index_variant_config_v1(altered)):
+                    Ok(_): fail("unmapped CPU feature admitted")
+                    Err(reason): expect(reason).to_contain("does not match")
+                altered = profile.variant
+                altered.environment_inputs = ["TZ=UTC"]
+                match native_group_index_variant_admit_v1(index_variant_config_v1(altered)):
+                    Ok(_): fail("unmapped environment input admitted")
+                    Err(reason): expect(reason).to_contain("does not match")
+                altered = profile.variant
+                altered.normalized_options = ["opt=2"]
+                match native_group_index_variant_admit_v1(index_variant_config_v1(altered)):
+                    Ok(_): fail("unknown normalized option admitted")
+                    Err(reason): expect(reason).to_contain("does not match")
+            Err(reason): fail(reason)
+
+    it "rejects unsupported target, backend, build mode, and ABI":
+        match native_group_index_variant_profile_v1("phase4", "llvm",
+                "wasm32-unknown-unknown", "release", "simple-v1"):
+            Ok(_): fail("unsupported target admitted")
+            Err(reason): expect(reason).to_contain("target")
+        match native_group_index_variant_profile_v1("phase4", "wasm",
+                "x86_64-pc-windows-msvc", "release", "simple-v1"):
+            Ok(_): fail("unsupported backend admitted")
+            Err(reason): expect(reason).to_contain("backend")
+        match native_group_index_variant_profile_v1("phase4", "llvm",
+                "x86_64-pc-windows-msvc", "fast", "simple-v1"):
+            Ok(_): fail("unsupported build mode admitted")
+            Err(reason): expect(reason).to_contain("build mode")
+        match native_group_index_variant_profile_v1("phase4", "llvm",
+                "x86_64-pc-windows-msvc", "release", "abi-v1"):
+            Ok(_): fail("unsupported language ABI admitted")
+            Err(reason): expect(reason).to_contain("language ABI")
