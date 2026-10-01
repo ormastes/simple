@@ -1,0 +1,215 @@
+# Linux compiler worker. Its sealed image is selected by BuildHostV1; the
+# compiler and every descendant run inside one cgroup-v2 memory boundary.
+use app.io.args_ops.{get_args}
+use app.io.env_ops.{env_vars}
+use app.io.file_ops.{file_exists, file_hash_sha256, file_is_regular_no_follow, file_read_regular_no_follow_bounded, file_atomic_write}
+use app.io.time_ops.{sleep_ms}
+use app.bootstrap_builder.cli_args.{builder_cli_parse_v1}
+use app.bootstrap_builder.contracts.{BuildTaskV1, BuildInputV1, BuildResultV1, builder_validate_task_v1, builder_task_identity_v1, builder_identifier_valid_v1}
+use app.bootstrap_builder.codec.{builder_read_task_v1, builder_write_result_v1}
+use std.common.build_manager.no_child_started.{BuilderNoChildStartedV1, builder_no_child_started_encode_v1}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
+use std.nogc_sync_mut.io.linux_process_owner.{LinuxProcessInputV1, LinuxProcessRequestV1, LinuxProcessLeaseV1, LinuxProcessPollV1, linux_process_start_with_memory_v1, linux_process_poll_v1, linux_process_cancel_v1, linux_process_collect_v1, linux_available_capacity_v1}
+
+fn builder_linux_absolute_v1(path: text) -> bool:
+    path.starts_with("/") and not path.contains("\0") and
+        not path.contains("/../") and not path.ends_with("/..")
+
+fn builder_linux_reject_before_start_v1(task: BuildTaskV1, root: text,
+        host: text, reason: text) -> text:
+    val payload = builder_no_child_started_encode_v1(BuilderNoChildStartedV1(
+        builder_task_identity_v1(task), host, reason))
+    if payload == "" or not file_atomic_write(root + "/compiler.not-started.sdn", payload):
+        return reason + "; no-child-started receipt unavailable"
+    reason
+
+fn builder_linux_environment_v1(root: text) -> Result<[text], text>:
+    val snapshot = env_vars()
+    if snapshot == nil: return Err("Linux environment snapshot unavailable")
+    var result: [text] = []
+    var names: [text] = []
+    val replaced = ["SIMPLE_NATIVE_BUILD_CACHE_DIR", "SIMPLE_RT_OBJ_CACHE_DIR",
+        "SIMPLE_HIR_CACHE_DIR", "SIMPLE_FRONTEND_CACHE_DIR", "SIMPLE_NO_STUB_FALLBACK",
+        "TEMP", "TMP", "TMPDIR"]
+    for pair in snapshot ?? []:
+        if pair.0 != "" and not pair.0.contains("=") and not replaced.contains(pair.0) and
+                not names.contains(pair.0):
+            names = names.push(pair.0)
+            result = result.push(pair.0 + "=" + pair.1)
+    result = result.push("SIMPLE_NATIVE_BUILD_CACHE_DIR=" + root + "/work/.builder-cache/native")
+    result = result.push("SIMPLE_RT_OBJ_CACHE_DIR=" + root + "/work/.builder-cache/runtime")
+    result = result.push("SIMPLE_HIR_CACHE_DIR=" + root + "/work/.builder-cache/hir")
+    result = result.push("SIMPLE_FRONTEND_CACHE_DIR=" + root + "/work/.builder-cache/frontend")
+    result = result.push("SIMPLE_NO_STUB_FALLBACK=1")
+    result = result.push("TEMP=" + root + "/work/.builder-cache/temp")
+    result = result.push("TMP=" + root + "/work/.builder-cache/temp")
+    result = result.push("TMPDIR=" + root + "/work/.builder-cache/temp")
+    Ok(result)
+
+fn builder_linux_control_v1(root: text, identity: text, host: text) -> bool:
+    val request = match file_read_regular_no_follow_bounded(root + "/control.request", 4096):
+        Ok(value): value
+        Err(_): return false
+    val fields = request.split("\n")
+    if fields.len() != 4 or fields[0] != identity or fields[1] != host or
+            not builder_identifier_valid_v1(fields[2]) or
+            (fields[3] != "probe" and fields[3] != "cancel"):
+        return false
+    if not file_atomic_write(root + "/control.response", request): return false
+    fields[3] == "cancel"
+
+fn builder_linux_verify_inputs_v1(task: BuildTaskV1, root: text) -> text:
+    if not file_is_regular_no_follow(root + "/producer.exe") or
+            file_hash_sha256(root + "/producer.exe") != task.producer_digest:
+        return "staged producer digest mismatch"
+    for input in task.inputs:
+        val path = root + "/work/" + input.path
+        if not file_is_regular_no_follow(path) or file_hash_sha256(path) != input.digest:
+            return "staged input digest mismatch: " + input.path
+    ""
+
+fn builder_linux_outputs_v1(task: BuildTaskV1, root: text) -> Result<[BuildInputV1], text>:
+    var outputs: [BuildInputV1] = []
+    for relative in task.outputs:
+        val path = root + "/work/" + relative
+        if not file_is_regular_no_follow(path): return Err("missing regular output: " + relative)
+        val digest = file_hash_sha256(path)
+        if digest.len() != 64: return Err("cannot hash output: " + relative)
+        outputs = outputs.push(BuildInputV1(relative, digest))
+    Ok(outputs)
+
+fn builder_linux_drain_v1(lease: LinuxProcessLeaseV1, root: text,
+        identity: text, host: text) -> bool:
+    val _cancel = linux_process_cancel_v1(lease)
+    var polls = 0
+    while polls < 3000:
+        match linux_process_poll_v1(lease):
+            Ok(observed):
+                if observed.terminal:
+                    match linux_process_collect_v1(lease):
+                        Ok(receipt):
+                            if receipt.leader_reaped and receipt.tree_empty:
+                                return file_atomic_write(root + "/compiler.reaped",
+                                    identity + "\n" + host)
+                            return false
+                        Err(_): return false
+            Err(_): pass
+        sleep_ms(10)
+        polls = polls + 1
+    false
+
+pub fn builder_linux_terminal_outcome_v1(receipt: LinuxProcessPollV1,
+        cancelled: bool) -> Result<(text, i64), text>:
+    if not receipt.terminal or not receipt.leader_reaped or not receipt.tree_empty or
+            receipt.active_processes != 0:
+        return Err("Linux compiler tree cleanup unproven")
+    if receipt.timed_out: return Ok(("TIMEOUT", 124))
+    if cancelled or receipt.cancelled: return Ok(("ERROR", 125))
+    if receipt.exit_code == 0: return Ok(("OK", 0))
+    Ok(("ERROR", receipt.exit_code))
+
+fn builder_linux_run_v1(task: BuildTaskV1, root: text, host: text) -> Result<(text, i64), text>:
+    val identity = builder_task_identity_v1(task)
+    if file_exists(root + "/cancel.request") or builder_linux_control_v1(root, identity, host):
+        return Err(builder_linux_reject_before_start_v1(task, root, host, "cancelled before compiler launch"))
+    if task.timeout_ms < 1 or task.timeout_ms > 86400000:
+        return Err(builder_linux_reject_before_start_v1(task, root, host, "Linux compiler timeout outside owner bound"))
+    for kind in ["native", "runtime", "hir", "frontend", "temp"]:
+        if not dir_create_all(root + "/work/.builder-cache/" + kind):
+            return Err(builder_linux_reject_before_start_v1(task, root, host, "isolated cache unavailable"))
+    val environment = match builder_linux_environment_v1(root):
+        Ok(value): value
+        Err(message): return Err(builder_linux_reject_before_start_v1(task, root, host, message))
+    var inputs: [LinuxProcessInputV1] = []
+    for input in task.inputs:
+        inputs = inputs.push(LinuxProcessInputV1(root + "/work/" + input.path, input.digest))
+    val capacity = match linux_available_capacity_v1(root + "/work"):
+        Ok(value): value
+        Err(message): return Err(builder_linux_reject_before_start_v1(task, root, host, message))
+    if capacity.0 < task.memory_limit_bytes:
+        return Err(builder_linux_reject_before_start_v1(task, root, host, "Linux pre-spawn memory below task cap"))
+    if file_exists(root + "/cancel.request") or builder_linux_control_v1(root, identity, host):
+        return Err(builder_linux_reject_before_start_v1(task, root, host, "cancelled before compiler launch"))
+    val request = LinuxProcessRequestV1(root + "/producer.exe", task.producer_digest,
+        task.args, environment, root + "/work", inputs,
+        root + "/stdout.log", root + "/stderr.log", task.timeout_ms)
+    # Start errors can occur after clone3. They never certify no-child-started.
+    val lease = linux_process_start_with_memory_v1(request, task.memory_limit_bytes,
+        root, identity)?
+    var cancelled = false
+    while true:
+        if (file_exists(root + "/cancel.request") or builder_linux_control_v1(root, identity, host)) and not cancelled:
+            match linux_process_cancel_v1(lease):
+                Ok(_): cancelled = true
+                Err(message):
+                    val _drained = builder_linux_drain_v1(lease, root, identity, host)
+                    return Err(message)
+        val observation = match linux_process_poll_v1(lease):
+            Ok(value): value
+            Err(message):
+                val _drained = builder_linux_drain_v1(lease, root, identity, host)
+                return Err(message)
+        if observation.terminal:
+            val receipt = match linux_process_collect_v1(lease):
+                Ok(value): value
+                Err(message):
+                    val _drained = builder_linux_drain_v1(lease, root, identity, host)
+                    return Err(message)
+            val outcome = builder_linux_terminal_outcome_v1(receipt, cancelled)?
+            if not file_atomic_write(root + "/compiler.reaped", identity + "\n" + host):
+                return Err("cannot persist Linux compiler reap receipt")
+            return Ok(outcome)
+        sleep_ms(10)
+    Err("unreachable Linux owner loop")
+
+pub fn builder_linux_execute_v1(task_path: text, root: text, host: text) -> i64:
+    if not builder_linux_absolute_v1(root) or task_path != root + "/request.sdn" or
+            not builder_identifier_valid_v1(host): return 2
+    val task = match builder_read_task_v1(task_path):
+        Ok(value): value
+        Err(message):
+            val _error = file_atomic_write(root + "/worker.error", message)
+            return 2
+    var diagnostic = builder_validate_task_v1(task)
+    if diagnostic == "": diagnostic = builder_linux_verify_inputs_v1(task, root)
+    if diagnostic != "": diagnostic = builder_linux_reject_before_start_v1(task, root, host, diagnostic)
+    var status = "ERROR"
+    var exit_code: i64 = 2
+    var outputs: [BuildInputV1] = []
+    if diagnostic == "":
+        match builder_linux_run_v1(task, root, host):
+            Ok(outcome):
+                status = outcome.0
+                exit_code = outcome.1
+            Err(message): diagnostic = message
+    if diagnostic == "" and status == "OK":
+        diagnostic = builder_linux_verify_inputs_v1(task, root)
+        if diagnostic == "":
+            match builder_linux_outputs_v1(task, root):
+                Ok(value): outputs = value
+                Err(message): diagnostic = message
+    if diagnostic != "":
+        status = "ERROR"
+        exit_code = 2
+        outputs = []
+        val _error = file_atomic_write(root + "/worker.error", diagnostic)
+    val result = BuildResultV1(task.id, task.attempt, builder_task_identity_v1(task),
+        host, status, exit_code, outputs, -1, -1, -1)
+    if not builder_write_result_v1(root + "/result.sdn", result): return 3
+    exit_code
+
+fn main() -> i64:
+    val raw = get_args()
+    var args: [text] = []
+    for index in 1..raw.len(): args = args.push(raw[index])
+    val cli = builder_cli_parse_v1(args)
+    if cli.error != "":
+        print "linux worker: {cli.error}"
+        return 2
+    if cli.command == "--help" or cli.command == "-h":
+        print "bootstrap-builder-linux-worker worker --request FILE --attempt-root DIR --host ID"
+        return 0
+    if cli.command != "worker": return 2
+    builder_linux_execute_v1(cli.request, cli.attempt_root, cli.host)
+
+export builder_linux_execute_v1, builder_linux_terminal_outcome_v1

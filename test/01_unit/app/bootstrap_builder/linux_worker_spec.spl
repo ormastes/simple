@@ -1,0 +1,32 @@
+use std.spec.{describe, it, expect, fail}
+use app.bootstrap_builder.linux_worker.{builder_linux_terminal_outcome_v1}
+use std.nogc_sync_mut.io.linux_process_owner.{LinuxProcessPollV1}
+
+fn terminal_v1() -> LinuxProcessPollV1:
+    LinuxProcessPollV1(true, true, true, 0, 0, false, false, 67108864, 0)
+
+describe "Linux generic worker terminal admission":
+    it "accepts success only after exact leader and descendant reap":
+        match builder_linux_terminal_outcome_v1(terminal_v1(), false):
+            Ok(outcome): expect(outcome.0).to_equal("OK")
+            Err(message): fail(message)
+        var incomplete = terminal_v1()
+        incomplete.tree_empty = false
+        incomplete.active_processes = 1
+        match builder_linux_terminal_outcome_v1(incomplete, false):
+            Ok(_): fail("unreaped descendant admitted")
+            Err(message): expect(message).to_contain("unproven")
+
+    it "keeps timeout and cancellation out of successful results":
+        var timed = terminal_v1()
+        timed.timed_out = true
+        match builder_linux_terminal_outcome_v1(timed, false):
+            Ok(outcome):
+                expect(outcome.0).to_equal("TIMEOUT")
+                expect(outcome.1).to_equal(124)
+            Err(message): fail(message)
+        match builder_linux_terminal_outcome_v1(terminal_v1(), true):
+            Ok(outcome):
+                expect(outcome.0).to_equal("ERROR")
+                expect(outcome.1).to_equal(125)
+            Err(message): fail(message)
