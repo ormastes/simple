@@ -32,10 +32,10 @@ fn bootstrap_manifest_memory_limit_v2(value: text) -> Result<i64, text>:
         return Err("memory limit must be canonical decimal 1..2^50")
     var limit: i64 = 0
     for index in 0..value.len():
-        val digit_text = value[index:index + 1]
-        if digit_text < "0" or digit_text > "9":
+        val digit_byte = value.byte_at(index) as i64
+        if digit_byte < 48 or digit_byte > 57:
             return Err("memory limit must be canonical decimal 1..2^50")
-        val digit = digit_text.char_code_at(0) - 48
+        val digit = digit_byte - 48
         if limit > (BUILDER_MEMORY_LIMIT_MAX_V2 - digit) / 10:
             return Err("memory limit exceeds 2^50")
         limit = limit * 10 + digit
@@ -124,6 +124,18 @@ fn bootstrap_manifest_job_v1(args: [text]) -> Result<text, text>:
     if not builder_write_run_v1(root + "/manifest.sdn", run): return Err("job manifest rejected or unwritable")
     Ok(root + "/manifest.sdn")
 
+# Compare UTF-8 bytes, since native bootstrap text relational operators do not
+# provide lexical ordering for tagged text values.
+fn bootstrap_manifest_text_lt_v1(left: text, right: text) -> bool:
+    var index = 0
+    while index < left.len() and index < right.len():
+        val left_byte = left.byte_at(index) as i64
+        val right_byte = right.byte_at(index) as i64
+        if left_byte < right_byte: return true
+        if left_byte > right_byte: return false
+        index = index + 1
+    left.len() < right.len()
+
 # An inventory is a canonical LF-terminated list. The inventory itself uses
 # one input slot; the codec has a separate 16 MiB bound on the complete run.
 fn bootstrap_manifest_inventory_paths_v1(payload: text, inventory: text) -> Result<[text], text>:
@@ -139,7 +151,7 @@ fn bootstrap_manifest_inventory_paths_v1(payload: text, inventory: text) -> Resu
         val path = lines[index]
         if not builder_relative_path_valid_v1(path) or path.lower() == inventory.lower():
             return Err("inventory contains an invalid or self-referential path")
-        if previous != "" and path.lower() <= previous:
+        if previous != "" and not bootstrap_manifest_text_lt_v1(previous, path.lower()):
             return Err("inventory paths must be strictly ordered and unique")
         paths = paths.push(path)
         previous = path.lower()
@@ -152,14 +164,14 @@ fn bootstrap_manifest_lower_hex_text_v1(encoded: text) -> Result<text, text>:
     var bytes: [u8] = []
     var index = 0
     while index < encoded.len():
-        val high = encoded[index:index + 1]
-        val low = encoded[index + 1:index + 2]
+        val high = encoded.byte_at(index) as i64
+        val low = encoded.byte_at(index + 1) as i64
         var high_value: i64 = -1
         var low_value: i64 = -1
-        if high >= "0" and high <= "9": high_value = high.char_code_at(0) - 48
-        elif high >= "a" and high <= "f": high_value = high.char_code_at(0) - 87
-        if low >= "0" and low <= "9": low_value = low.char_code_at(0) - 48
-        elif low >= "a" and low <= "f": low_value = low.char_code_at(0) - 87
+        if high >= 48 and high <= 57: high_value = high - 48
+        elif high >= 97 and high <= 102: high_value = high - 87
+        if low >= 48 and low <= 57: low_value = low - 48
+        elif low >= 97 and low <= 102: low_value = low - 87
         if high_value < 0 or low_value < 0: return Err("noncanonical link hex field")
         bytes.push((high_value * 16 + low_value).to_u8())
         index = index + 2
@@ -178,7 +190,8 @@ fn bootstrap_manifest_link_rows_v1(payload: text) -> Result<[BuildLinkV1], text>
     var previous = ""
     for index in 0..rows.len() - 1:
         val row = rows[index]
-        if row == "" or (previous != "" and row <= previous):
+        if row == "" or (previous != "" and
+                not bootstrap_manifest_text_lt_v1(previous, row)):
             return Err("link rows must be strictly ordered and unique")
         val fields = row.split(":")
         var kind = ""
