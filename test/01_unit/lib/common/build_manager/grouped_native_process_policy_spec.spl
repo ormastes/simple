@@ -2,21 +2,22 @@ use std.spec
 use std.common.build_manager.grouped_native_process_policy.{
     NativeGroupActiveChargeV1, native_group_process_budget_v1}
 
-describe "Grouped process admission counts only future active growth":
-    it "admits a second group when measured headroom covers the remaining cap":
+describe "Grouped process admission separates physical and commit headroom":
+    it "admits a second group when both conservative host and measured commit fit":
         val active = [NativeGroupActiveChargeV1(1073741824, 805306368, 1)]
         match native_group_process_budget_v1(4, 1, 1073741824, 268435456,
-                1879048192, 2147483648, true, active):
+                3221225472, 2147483648, true, active):
             case Ok(budget):
                 expect(budget.admitted).to_equal(true)
-                expect(budget.required_growth_bytes).to_equal(1610612736)
+                expect(budget.required_host_bytes).to_equal(2415919104)
+                expect(budget.required_commit_bytes).to_equal(1610612736)
                 expect(budget.active_threads).to_equal(1)
             case Err(reason): fail(reason)
 
     it "refuses Windows commit exhaustion even when physical memory fits":
         val active = [NativeGroupActiveChargeV1(1073741824, 805306368, 1)]
         match native_group_process_budget_v1(4, 1, 1073741824, 268435456,
-                1879048192, 1342177280, true, active):
+                3221225472, 1342177280, true, active):
             case Ok(budget):
                 expect(budget.admitted).to_equal(false)
                 expect(budget.reason).to_equal("Windows system commit headroom exhausted")
@@ -40,3 +41,10 @@ describe "Grouped process admission counts only future active growth":
                 2147483648, 1, false, []):
             case Ok(_): fail("unmeasured commit bytes were admitted")
             case Err(reason): expect(reason).to_equal("invalid native group process budget input")
+
+    it "rejects an active charge beyond its enforced group cap":
+        val active = [NativeGroupActiveChargeV1(1024, 1025, 1)]
+        match native_group_process_budget_v1(2, 1, 1024, 1,
+                4096, 0, false, active):
+            case Ok(_): fail("over-limit live group was treated as spare capacity")
+            case Err(reason): expect(reason).to_equal("invalid active native group charge")
