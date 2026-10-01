@@ -12,6 +12,7 @@ use compiler.driver.cache.package_config_variant_receipt.{package_config_variant
     package_config_variant_receipt_path_v1}
 use compiler.driver.cache.runtime_std_authority_admission.{runtime_std_authority_admit_v2}
 use compiler.driver.cache.package_module_index.{PACKAGE_MODULE_INDEX_SCHEMA_V2}
+use compiler.common.cache.canonical_identity.{canonical_identity_text_lt}
 use app.bootstrap_builder.native_group_index_handoff.{native_group_index_handoff_read_v1,
     native_group_index_handoff_encode_v1}
 use app.bootstrap_builder.native_group_index_verify.{native_group_index_verify_v1,
@@ -31,9 +32,9 @@ fn native_prepare_absolute_v1(path: text) -> bool:
             path.contains("\n") or path.contains("\t") or path.contains(".."):
         return false
     if path.starts_with("/"): return true
-    path.len() >= 4 and path[1:3] == ":/" and
-        ((path[0:1] >= "A" and path[0:1] <= "Z") or
-         (path[0:1] >= "a" and path[0:1] <= "z"))
+    if path.len() < 4 or path[1:3] != ":/": return false
+    val drive = path.byte_at(0) as i64
+    (drive >= 65 and drive <= 90) or (drive >= 97 and drive <= 122)
 
 fn native_prepare_parent_v1(path: text) -> text:
     val parts = path.replace("\\", "/").split("/")
@@ -85,13 +86,11 @@ fn native_prepare_number_v1(value: text, minimum: i64, maximum: i64) -> Result<i
         return Err("invalid native group decimal")
     var number: i64 = 0
     for index in 0..value.len():
-        val digit = value[index:index + 1]
-        if digit < "0" or digit > "9": return Err("nondigit native group decimal")
-        val digits = "0123456789"
-        var selected: i64 = -1
-        for probe in 0..10:
-            if digit == digits[probe:probe + 1]: selected = probe
-        if selected < 0 or number > (maximum - selected) / 10:
+        val code = value.byte_at(index) as i64
+        if code < 48 or code > 57:
+            return Err("nondigit native group decimal")
+        val selected = code - 48
+        if number > (maximum - selected) / 10:
             return Err("native group decimal exceeds bound")
         number = number * 10 + selected
     if number < minimum: return Err("native group decimal below bound")
@@ -124,7 +123,8 @@ fn native_prepare_inventory_v1(fields: {text: text}) -> Result<[text], text>:
     for index in 0..lines.len() - 1:
         val path = lines[index]
         if not builder_relative_path_valid_v1(path) or not path.ends_with(".spl") or
-                (previous != "" and path <= previous) or seen.contains_key(path.lower()):
+                (previous != "" and not canonical_identity_text_lt(previous, path)) or
+                seen.contains_key(path.lower()):
             return Err("native group inventory is not a unique ordered module list")
         paths = paths.push(path)
         seen[path.lower()] = true
@@ -403,4 +403,4 @@ fn native_group_prepare_v1(config_path: text, manifest_path: text) -> Result<Nat
 
 export native_group_prepare_v1, native_prepare_config_v1, native_prepare_inventory_v1,
     native_prepare_policy_v1, native_prepare_scc_conflicts_v1,
-    native_prepare_group_boundary_v1
+    native_prepare_group_boundary_v1, native_prepare_absolute_v1
