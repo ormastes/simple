@@ -79,6 +79,30 @@ pub fn llvm_translate_module_direct_ir(options: BackendCompileOptions, module: M
     llvm_translate_module_direct_ir_for(
         options, module, bare_metal, retained_config)
 
+# The grouped compiler gives each worker its own frozen MIR module and target
+# config. This path never reads or resets the legacy process-global bootstrap
+# string accumulator or the ambient SimpleOS header flag.
+pub fn llvm_group_translate_module_ir_v1(
+    options: BackendCompileOptions, module: MirModule,
+    config: LlvmTargetConfig, is_entry: bool, bootstrap_mode: bool
+) -> text:
+    val bare_metal = config.triple.os == "none" or config.triple.os == "simpleos"
+    var target_env = ""
+    var target_has_env = false
+    match config.triple.env:
+        Some(value):
+            target_env = value
+            target_has_env = value != ""
+        nil: ()
+    var translator = MirToLlvm.create_explicit_target(
+        module.name, options.target,
+        config.triple.arch, config.triple.vendor, config.triple.os,
+        target_env, target_has_env, config.triple.datalayout(), bare_metal)
+    translator.set_group_bootstrap_mode(bootstrap_mode)
+    if options.debug_info:
+        translator.enable_debug_info()
+    translator.translate_module_with_entry(module, is_entry)
+
 pub fn llvm_compile_module_direct(options: BackendCompileOptions, module: MirModule,
     retained_config: LlvmTargetConfig? = nil) -> Result<CodegenOutput, CompileError>:
     val trace_enabled = llvm_codegen_trace_enabled()

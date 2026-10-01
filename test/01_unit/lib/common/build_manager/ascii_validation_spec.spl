@@ -1,0 +1,69 @@
+use std.spec.{describe, it, expect}
+use std.common.build_manager.contracts.{
+    BuildHostV1, BuildTaskV1, builder_identifier_valid_v1,
+    builder_digest_valid_v1, builder_validate_host_v1
+}
+use std.common.build_manager.codec.{
+    builder_encode_task_v1, builder_decode_task_v1
+}
+use std.common.build_manager.grouped_native_contract.{
+    native_group_absolute_path_valid_v1
+}
+
+fn ascii_builder_task_v1() -> BuildTaskV1:
+    val digest = "0123456789abcdef".repeat(4)
+    BuildTaskV1(id: "module_1", attempt: 9, phase: "native",
+        producer_digest: digest, source_digest: digest,
+        toolchain_digest: digest, dependencies: [], program: "producer",
+        args: [], inputs: [], outputs: ["module.o"], cache_key: digest,
+        timeout_ms: 0, memory_limit_bytes: 1073741824, links: [])
+
+describe "native-stable build manager ASCII validation":
+    it "accepts only numeric ASCII identifier and lowercase digest bytes":
+        expect(builder_identifier_valid_v1("Az_09-")).to_equal(true)
+        expect(builder_identifier_valid_v1("name!")).to_equal(false)
+        expect(builder_identifier_valid_v1("nameé")).to_equal(false)
+        expect(builder_identifier_valid_v1("name[")).to_equal(false)
+        expect(builder_digest_valid_v1(
+            "0123456789abcdef".repeat(4))).to_equal(true)
+        expect(builder_digest_valid_v1("g".repeat(64))).to_equal(false)
+        expect(builder_digest_valid_v1("A".repeat(64))).to_equal(false)
+        expect(builder_digest_valid_v1("é".repeat(64))).to_equal(false)
+
+    it "checks SSH endpoint alphabet by byte rather than tagged text order":
+        val digest = "a".repeat(64)
+        var host = BuildHostV1(id: "remote_1", transport: "ssh",
+            endpoint: "User_1@example.test", workspace: "/work",
+            worker_program: "/bin/worker", worker_digest: digest, slots: 1)
+        expect(builder_validate_host_v1(host)).to_equal("")
+        host.endpoint = "name!example.test"
+        expect(builder_validate_host_v1(host)).to_equal(
+            "invalid configured SSH endpoint")
+        host.endpoint = "nameé@example.test"
+        expect(builder_validate_host_v1(host)).to_equal(
+            "invalid configured SSH endpoint")
+
+    it "rejects nondecimal wire integers and round trips a valid digit":
+        val encoded = builder_encode_task_v1(ascii_builder_task_v1())
+        expect(encoded != "").to_equal(true)
+        expect(builder_decode_task_v1(encoded).is_ok()).to_equal(true)
+        expect(builder_decode_task_v1(encoded.replace(
+            "module_1\n9\n", "module_1\nx\n")).unwrap_err()
+        ).to_equal("nondigit wire integer")
+        expect(builder_decode_task_v1(encoded.replace(
+            "module_1\n9\n", "module_1\n/\n")).unwrap_err()
+        ).to_equal("nondigit wire integer")
+
+    it "accepts alphabetic Windows drives and rejects digits or UTF-8 drives":
+        expect(native_group_absolute_path_valid_v1(
+            "C:/state/group.sdn")).to_equal(true)
+        expect(native_group_absolute_path_valid_v1(
+            "z:\\state\\group.sdn")).to_equal(true)
+        expect(native_group_absolute_path_valid_v1(
+            "/state/group.sdn")).to_equal(true)
+        expect(native_group_absolute_path_valid_v1(
+            "1:/state/group.sdn")).to_equal(false)
+        expect(native_group_absolute_path_valid_v1(
+            "é:/state/group.sdn")).to_equal(false)
+        expect(native_group_absolute_path_valid_v1(
+            "C:/state/../group.sdn")).to_equal(false)

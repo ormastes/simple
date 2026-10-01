@@ -1,0 +1,44 @@
+#!/bin/sh
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/simple-stage3-full-src.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+fixture="$tmp/repo"
+for leaf in src/compiler src/app src/lib src/os src/runtime \
+    src/package_ownership src/plugins src/compositions src/type src/tooling \
+    src/unit src/compiler_rust/vendor src/compiler_rust/target examples/10_tooling; do
+  mkdir -p "$fixture/$leaf"
+done
+for leaf in src/compiler src/os src/type src/tooling src/unit src/compiler_rust; do
+  printf '%s\n' "$leaf" >"$fixture/$leaf/marker.spl"
+done
+printf 'vendor\n' >"$fixture/src/compiler_rust/vendor/skip.spl"
+printf 'target\n' >"$fixture/src/compiler_rust/target/skip.spl"
+BOOTSTRAP_STAGE3_FACADE_PATH="$root/scripts/check/lib/bootstrap-stage3-provenance.shs"
+export BOOTSTRAP_STAGE3_FACADE_PATH
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+bootstrap_stage3_source_snapshot "$tmp/snapshot" "$fixture"
+(CDPATH= cd -- "$fixture" && rg --files src -g '*.spl') | tr '\\' '/' |
+  awk '$0 !~ /^src\/compiler_rust\/(vendor|target)\//' | LC_ALL=C sort >"$tmp/expected"
+perl -e '
+  use strict; use warnings;
+  open my $input, "<:raw", $ARGV[0] or die "open snapshot\n";
+  while (my $row = <$input>) {
+    next unless $row =~ /^file-hex:([0-9]+):([0-9a-f]+):[01]:[0-9a-f]{64}\n$/;
+    my $path = pack("H*", $2);
+    length($path) == $1 or die "path length differs\n";
+    print "$path\n" if $path =~ m{^src/.*[.]spl$};
+  }
+' "$tmp/snapshot" | LC_ALL=C sort >"$tmp/actual"
+cmp -s "$tmp/expected" "$tmp/actual" || {
+  diff -u "$tmp/expected" "$tmp/actual" >&2 || true
+  echo 'FAIL: Stage 2 source authority omits or adds an eligible src .spl file' >&2
+  exit 1
+}
+printf 'changed\n' >"$fixture/src/type/marker.spl"
+bootstrap_stage3_source_snapshot "$tmp/changed" "$fixture"
+! cmp -s "$tmp/snapshot" "$tmp/changed" || {
+  echo 'FAIL: previously uncovered src/type mutation did not change authority' >&2
+  exit 1
+}
+echo 'PASS: complete eligible src .spl membership and mutation authority'

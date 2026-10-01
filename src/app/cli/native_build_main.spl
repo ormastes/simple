@@ -944,6 +944,30 @@ pub fn run_native_build_worker(args: [text]) -> i64:
         # Preserve every public argument byte and its order. Only the worker
         # removes the one internal handoff argument before cli_native_build.
         worker_args = worker_args.push(arg)
+    # A grouped request has one private result file owned by the compiler
+    # child. It must never enter the ordinary warm-artifact or parse/HIR shard
+    # paths: those paths assume one linked binary and can restore a stale one.
+    val grouped_result = env_get("SIMPLE_NATIVE_GROUP_RESULT") ?? ""
+    if grouped_result != "":
+        if file_exists(grouped_result) and not file_delete(grouped_result):
+            eprint "error: grouped native result path is not fresh"
+            return 1
+        val prior_worker = env_get("SIMPLE_NATIVE_BUILD_WORKER") ?? ""
+        env_set("SIMPLE_BINARY", simple_bin)
+        env_set("SIMPLE_NATIVE_BUILD_WORKER", "1")
+        val (group_stdout, group_stderr, group_code) =
+            process_run_timeout_live(simple_bin, worker_args,
+                native_build_timeout_ms(args))
+        env_set("SIMPLE_NATIVE_BUILD_WORKER", prior_worker)
+        if group_code != 0:
+            eprint "error: grouped native child exited {group_code}"
+            eprint_bounded(group_stderr)
+            if group_stdout.trim() != "": eprint_bounded(group_stdout)
+            return 1
+        if not file_exists(grouped_result):
+            eprint "error: grouped native child returned without a fresh result"
+            return 1
+        return 0
     val requested_output = output_path_arg(args)
     # Propagate the resolved absolute/validated binary so the worker (and any
     # child it spawns) inherit a runnable SIMPLE_BINARY instead of re-deriving
@@ -1180,8 +1204,48 @@ fn native_build_has_entry(args: [text]) -> bool:
 fn cli_native_build_is_entry_arg_stub(arg: text) -> bool:
     arg == "--entry" or arg.starts_with("--entry=")
 
-fn main() -> i64:
-    val args = native_build_entry_args()
+pub fn run_native_build_entry_v1(raw_args: [text]) -> i64:
+    var args: [text] = []
+    var group_manifest = ""
+    var group_result = ""
+    var group_source_root = ""
+    var group_index = 0
+    while group_index < raw_args.len():
+        val arg = raw_args[group_index]
+        if arg == "--group-manifest" or arg == "--group-result" or
+                arg == "--source-root":
+            if group_index + 1 >= raw_args.len():
+                eprint "error: {arg} requires an absolute path"
+                return 2
+            val value = raw_args[group_index + 1]
+            val drive_rooted = is_drive_absolute(value) and value.len() >= 3 and
+                (value[2:3] == "/" or value[2:3] == "\\")
+            if value == "" or not (value.starts_with("/") or drive_rooted) or
+                    value.contains("\0") or value.contains("\n"):
+                eprint "error: {arg} requires an absolute path"
+                return 2
+            if arg == "--group-manifest":
+                if group_manifest != "": return 2
+                group_manifest = value
+            elif arg == "--group-result":
+                if group_result != "": return 2
+                group_result = value
+            else:
+                if group_source_root != "": return 2
+                group_source_root = value
+            group_index = group_index + 2
+            continue
+        args = args.push(arg)
+        group_index = group_index + 1
+    if group_manifest != "" or group_result != "" or group_source_root != "":
+        if group_manifest == "" or group_result == "" or group_source_root == "":
+            eprint "error: grouped native request requires manifest, result, and source root"
+            return 2
+        if not env_set("SIMPLE_NATIVE_GROUP_MANIFEST", group_manifest) or
+                not env_set("SIMPLE_NATIVE_GROUP_RESULT", group_result) or
+                not env_set("SIMPLE_NATIVE_GROUP_SOURCE_ROOT", group_source_root):
+            eprint "error: grouped native request environment handoff failed"
+            return 2
     if args.len() == 0:
         print_help()
         return 0
@@ -1194,3 +1258,6 @@ fn main() -> i64:
         return 1
 
     run_native_build_worker(args)
+
+fn main() -> i64:
+    run_native_build_entry_v1(native_build_entry_args())

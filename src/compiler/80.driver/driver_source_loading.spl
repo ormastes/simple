@@ -17,6 +17,8 @@ use compiler.core.interpreter.hashmap.{hm_hash_text}
 use compiler.traits.trait_coherence.{CoherenceError}
 use compiler.traits.trait_validation.{TraitError}
 use std.nogc_sync_mut.io.process_ops.{eprint}
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded}
+use std.common.crypto.sha256.{sha256_text}
 
 @unsafe(reason: "raw source-path probe; false includes absent, inaccessible, or provider failure", capabilities: [ffi])
 extern fn rt_file_exists(path: text) -> bool
@@ -245,6 +247,14 @@ pub fn _driver_physical_source_key(path: text) -> text:
     unsafe(capabilities: [ffi]):
         physical = rt_path_absolute(path) ?? ""
     _driver_canonical_source_path(if physical != "": physical else: path)
+
+pub fn _driver_physical_source_key_strict_v1(path: text) -> text:
+    # Full-inventory authority must not fall back to a lexical spelling when
+    # the host cannot resolve a reparse/symlink path.
+    var physical = ""
+    unsafe(capabilities: [ffi]):
+        physical = rt_path_absolute(path) ?? ""
+    if physical == "": "" else: _driver_canonical_source_path(physical)
 
 pub fn _driver_text_bucket_index(key: text, bucket_count: i64) -> i64:
     val raw = hm_hash_text(key) % bucket_count
@@ -1333,6 +1343,28 @@ pub fn _driver_collect_explicit_compiler_source(p: text) -> [SourceFile]:
         return []
     _driver_module_aliases_with_closure(
         p, content, _driver_module_name_from_path(p), true)
+
+pub fn _driver_collect_frozen_compiler_source_v1(
+    path: text, expected_digest: text, expected_bytes: i64
+) -> Result<[SourceFile], text>:
+    # The full-inventory cold route cannot use the scanner's following read:
+    # it must prove the exact no-follow frozen bytes selected by SCV.
+    if not path.ends_with(".spl") or expected_digest.len() != 64 or
+            expected_bytes < 0 or expected_bytes > 64 * 1024 * 1024:
+        return Err("frozen-source-input-invalid")
+    val loaded = file_read_regular_no_follow_bounded(
+        path, 64 * 1024 * 1024)
+    if val Err(_) = loaded:
+        return Err("frozen-source-unreadable")
+    val content = loaded.unwrap()
+    if content.len() != expected_bytes or
+            sha256_text(content) != expected_digest:
+        return Err("frozen-source-content-mismatch")
+    val sources = _driver_module_aliases_with_closure(
+        path, content, _driver_module_name_from_path(path), true)
+    if sources.len() == 0:
+        return Err("frozen-source-module-unavailable")
+    Ok(sources)
 
 fn _driver_collect_entry_import_source_with_policy(
     p: text,

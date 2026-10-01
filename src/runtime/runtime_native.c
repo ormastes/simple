@@ -14581,6 +14581,24 @@ int rt_dir_exists(const uint8_t* path_ptr, uint64_t path_len) {
     return rt_is_dir(path) ? 1 : 0;
 }
 
+/* Core-C native binaries link this translation unit without runtime.c. */
+int rt_dir_is_real_no_follow(const uint8_t* path_ptr, uint64_t path_len) {
+    char path[RT_TEXT_PATH_MAX];
+    if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path)) || !path[0]) return 0;
+#if defined(_WIN32)
+    wchar_t* wide = rt_widen_long_path_rc(path);
+    if (!wide) return 0;
+    DWORD attrs = GetFileAttributesW(wide);
+    free(wide);
+    return attrs != INVALID_FILE_ATTRIBUTES &&
+        (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0 &&
+        (attrs & FILE_ATTRIBUTE_REPARSE_POINT) == 0;
+#else
+    struct stat st;
+    return lstat(path, &st) == 0 && S_ISDIR(st.st_mode);
+#endif
+}
+
 /* ----------------------------------------------------------------
  * std.io_runtime fs/shell externs that the core-C archive never defined.
  *

@@ -1310,6 +1310,29 @@ SplArray* rt_process_inspection_v1_start_pinned_value(
               SplArray* expected_input_digest);
 SplArray* rt_process_inspection_v1_input_receipt_value(SplArray* ticket);
 
+/* Broker-only Linux cgroup-v2/pidfd owner. The start result is [token,error];
+ * poll/collect return [error,terminal,leader_reaped,tree_empty,active,
+ * exit_code,timed_out,cancelled,memory_peak,memory_current]. The latter is
+ * cgroup memory.current while live and zero after the tree is reaped.
+ * Unsupported hosts fail closed. */
+#ifdef __linux__
+SplArray* rt_linux_group_launch_broker_v1(const char* program,
+    uint64_t program_len, const char* digest, uint64_t digest_len,
+    SplArray* args);
+SplArray* rt_linux_group_start_v1(const char* program, uint64_t program_len,
+    const char* digest, uint64_t digest_len, SplArray* args,
+    SplArray* environment, const char* directory, uint64_t directory_len,
+    const char* root, uint64_t root_len,
+    const char* identity, uint64_t identity_len,
+    int64_t memory_limit, int64_t timeout_ms,
+    const char* stdout_path, uint64_t stdout_len,
+    const char* stderr_path, uint64_t stderr_len);
+SplArray* rt_linux_group_poll_v1(int64_t token);
+int64_t rt_linux_group_cancel_v1(int64_t token);
+SplArray* rt_linux_group_collect_v1(int64_t token);
+SplArray* rt_linux_group_available_capacity_v1(const char* path, uint64_t path_len);
+#endif
+
 /* ===== Process Piped (editor LSP transport) ===== */
 
 int64_t     rt_process_spawn_piped(const char* cmd, SplArray* args);
@@ -1483,6 +1506,7 @@ int64_t     rt_file_exists_probe_test_seed_counters(int64_t total, int64_t faile
 int         rt_file_is_regular_no_follow(const uint8_t* path_ptr, uint64_t path_len);
 int         rt_file_is_char_device(const uint8_t* path_ptr, uint64_t path_len);
 int         rt_dir_exists(const uint8_t* path_ptr, uint64_t path_len);
+int         rt_dir_is_real_no_follow(const uint8_t* path_ptr, uint64_t path_len);
 int         rt_file_write(const char* path, const char* content);
 int64_t     rt_file_atomic_write(int64_t path_value, int64_t content_value);
 int         rt_file_write_text(const uint8_t* path, uint64_t path_len, const uint8_t* content, uint64_t content_len);

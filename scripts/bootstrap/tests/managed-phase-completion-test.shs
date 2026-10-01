@@ -1,0 +1,217 @@
+#!/bin/sh
+set -eu
+script_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/simple-managed-completion.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+root="$tmp/run"
+mkdir -p "$root"
+source_root="$tmp/source"
+mkdir -p "$source_root"
+inventory="$tmp/module.inventory"
+printf 'src/example.spl\n' >"$inventory"
+excluded_inventory="$tmp/excluded.inventory"
+printf 'src/test/fixture/broken.spl\tfixture\n' >"$excluded_inventory"
+module_role_policy="$tmp/module-role-policy.sdn"
+printf 'policy-v3\n' >"$module_role_policy"
+producer_sha=$(printf 'producer' | sha256sum | cut -d ' ' -f 1)
+binary_sha=$(printf 'binary' | sha256sum | cut -d ' ' -f 1)
+builder_program="$tmp/builder.sh"
+group_program="$tmp/group.sh"
+index_program="$tmp/index.sh"
+cat >"$builder_program" <<'SH'
+#!/bin/sh
+[ "$1" = verify ] || exit 2
+shift
+manifest= state= source= output=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --manifest) manifest=$2 ;;
+    --state) state=$2 ;;
+    --source-root) source=$2 ;;
+    --output-root) output=$2 ;;
+    *) exit 2 ;;
+  esac
+  shift 2
+done
+[ -f "$manifest" ] && [ -d "$state" ] && [ -d "$source" ] && [ -d "$output" ]
+SH
+cat >"$group_program" <<'SH'
+#!/bin/sh
+[ "$1" = native-groups-verify ] || exit 2
+[ "$2" = --manifest ] && [ -f "$3" ] && [ "$4" = --state ] || exit 2
+[ -f "$5/ledger.sdn" ] && [ "$(cat "$5/completion.json")" = '{"status":"PASS"}' ]
+SH
+chmod +x "$builder_program" "$group_program"
+cat >"$index_program" <<'SH'
+#!/bin/sh
+[ "$1" = native-groups-index-verify ] && [ "$2" = --config ] && [ -f "$3" ] &&
+  [ "$4" = --receipt ] && [ -f "$5" ] && [ "$6" = --handoff ] && [ -f "$7" ]
+SH
+chmod +x "$index_program"
+image_receipt="$tmp/manager-images.env"
+printf 'format=SIMPLE-PHASE2-MANAGER-IMAGES-1\nbuilder_program=%s\nbuilder_sha256=%s\ngroup_program=%s\ngroup_sha256=%s\nindex_program=%s\nindex_sha256=%s\n' \
+  "$builder_program" "$(sha256sum "$builder_program" | cut -d ' ' -f 1)" \
+  "$group_program" "$(sha256sum "$group_program" | cut -d ' ' -f 1)" \
+  "$index_program" "$(sha256sum "$index_program" | cut -d ' ' -f 1)" \
+  >"$image_receipt"
+receipt="$root/completion.env"
+{
+  printf '%s\n' 'format=SIMPLE-PHASE3-PHASE4-MANAGED-COMPLETION-4' \
+    'status=PASS' 'phase3_status=PASS' 'phase4_status=PASS' \
+    "producer_sha256=$producer_sha" \
+    "module_inventory_sha256=$(sha256sum "$inventory" | cut -d ' ' -f 1)" \
+    'module_inventory_count=1' 'phase3_module_inventory_count=1' \
+    'phase4_module_inventory_count=1' \
+    "excluded_inventory_sha256=$(sha256sum "$excluded_inventory" | cut -d ' ' -f 1)" \
+    'excluded_inventory_count=1' \
+    "module_role_policy_sha256=$(sha256sum "$module_role_policy" | cut -d ' ' -f 1)"
+  case "$(uname -s 2>/dev/null)" in MINGW*|MSYS*|CYGWIN*) exe_suffix=.exe ;; *) exe_suffix= ;; esac
+  for backend in llvm cranelift; do
+    for binary in bootstrap full-cli mcp lsp test-runner phase3-bootstrap; do
+      case "$binary" in
+        bootstrap) phase=phase4; output="bin/simple_bootstrap$exe_suffix" ;;
+        full-cli) phase=phase4; output="bin/simple$exe_suffix" ;;
+        mcp) phase=phase4; output="bin/simple_mcp_server$exe_suffix" ;;
+        lsp) phase=phase4; output="bin/simple_lsp_mcp_server$exe_suffix" ;;
+        test-runner) phase=phase4; output="bin/simple_test_runner$exe_suffix" ;;
+        phase3-bootstrap) phase=phase3; output="bin/simple$exe_suffix" ;;
+      esac
+      job="$root/$phase/binaries/$backend/$binary"
+      mkdir -p "$job/$(dirname -- "$output")" "$job/state/receipts"
+      printf 'binary' >"$job/$output"
+      printf 'manifest\n' >"$job/manifest.sdn"
+      printf 'terminal\n' >"$job/state/receipts/$binary-$backend.sdn"
+      printf '%s=%s\n' "${phase}_${backend}_${binary}" "$binary_sha"
+      printf '%s=%s\n' "${phase}_${backend}_${binary}_manager_receipt_sha256" \
+        "$(sha256sum "$job/state/receipts/$binary-$backend.sdn" | cut -d ' ' -f 1)"
+    done
+  done
+  for phase in phase3 phase4; do
+    for backend in llvm cranelift; do
+      index_receipt="$root/$phase/index/$backend/output/index-output/receipt.sdn"
+      index_handoff="$root/$phase/index/$backend/handoff.sdn"
+      index_manager_receipt="$root/$phase/index/$backend/state/receipts/index-$phase-$backend.sdn"
+      group_manifest="$root/$phase/modules/$backend/state/manifest.sdn"
+      group_ledger="$root/$phase/modules/$backend/state/ledger.sdn"
+      group_completion="$root/$phase/modules/$backend/state/completion.json"
+      for proof in index_receipt index_handoff index_manager_receipt group_manifest group_ledger group_completion; do
+        case "$proof" in
+          index_receipt) path=$index_receipt ;;
+          index_handoff) path=$index_handoff ;;
+          index_manager_receipt) path=$index_manager_receipt ;;
+          group_manifest) path=$group_manifest ;;
+          group_ledger) path=$group_ledger ;;
+          group_completion) path=$group_completion ;;
+        esac
+        mkdir -p "$(dirname -- "$path")"
+        case "$proof" in
+          group_completion) printf '{"status":"PASS"}\n' >"$path" ;;
+          *) printf '%s/%s/%s\n' "$phase" "$backend" "$proof" >"$path" ;;
+        esac
+        printf '%s=%s\n' "${phase}_${backend}_${proof}_sha256" \
+          "$(sha256sum "$path" | cut -d ' ' -f 1)"
+      done
+      index_job="$root/$phase/index/$backend"
+      mkdir -p "$index_job/inputs" "$index_job/output" "$index_job/state"
+      printf 'index.config\n' >"$index_job/inputs/index.config"
+      printf 'manifest\n' >"$index_job/manifest.sdn"
+    done
+  done
+} >"$receipt"
+verify() {
+  sh "$script_root/verify-managed-phase-completion.shs" \
+    --receipt="$receipt" --root="$root" --inventory="$inventory" \
+    --excluded-inventory="$excluded_inventory" --module-role-policy="$module_role_policy" \
+    --producer-sha="$producer_sha" --source-root="$source_root" \
+    --image-receipt="$image_receipt" --builder-program="$builder_program" \
+    --group-program="$group_program" --index-program="$index_program"
+}
+verify >/dev/null || { echo 'FAIL: complete fixture rejected' >&2; exit 1; }
+cp "$image_receipt" "$tmp/canonical-images"
+sed 's/^format=SIMPLE-PHASE2-MANAGER-IMAGES-1$/format=SIMPLE-PROVISIONAL-IMAGES-1/' \
+  "$tmp/canonical-images" >"$image_receipt"
+if verify >/dev/null 2>&1; then
+  echo 'FAIL: copied provisional image receipt admitted as canonical' >&2; exit 1
+fi
+cp "$tmp/canonical-images" "$image_receipt"
+cp "$receipt" "$tmp/good"
+mv "$excluded_inventory" "$tmp/excluded.saved"
+if verify >/dev/null 2>&1; then
+  echo 'FAIL: missing excluded module ledger admitted' >&2; exit 1
+fi
+mv "$tmp/excluded.saved" "$excluded_inventory"
+printf 'changed\n' >"$module_role_policy"
+if verify >/dev/null 2>&1; then
+  echo 'FAIL: changed module role policy admitted' >&2; exit 1
+fi
+printf 'policy-v3\n' >"$module_role_policy"
+sed '/^phase3_llvm_index_receipt_sha256=/d' "$tmp/good" >"$receipt"
+if verify >/dev/null 2>&1; then
+  echo 'FAIL: missing Phase 3 LLVM index proof admitted' >&2; exit 1
+fi
+cp "$tmp/good" "$receipt"
+phase3_group="$root/phase3/modules/cranelift/state/manifest.sdn"
+mv "$phase3_group" "$tmp/phase3-group"
+if verify >/dev/null 2>&1; then
+  echo 'FAIL: missing Phase 3 Cranelift group proof admitted' >&2; exit 1
+fi
+mv "$tmp/phase3-group" "$phase3_group"
+index_manager_receipt="$root/phase3/index/llvm/state/receipts/index-phase3-llvm.sdn"
+mv "$index_manager_receipt" "$tmp/index-manager-receipt"
+if verify >/dev/null 2>&1; then
+  echo 'FAIL: missing Phase 3 index manager receipt admitted' >&2; exit 1
+fi
+mv "$tmp/index-manager-receipt" "$index_manager_receipt"
+sed 's/^phase4_status=PASS$/phase4_status=FAIL/' "$tmp/good" >"$receipt"
+if verify >/dev/null 2>&1; then
+  echo 'FAIL: Phase 4 failure suppressed by Phase 3 proof' >&2; exit 1
+fi
+sed 's/^phase3_status=PASS$/phase3_status=FAIL/' "$tmp/good" >"$receipt"
+if verify >/dev/null 2>&1; then
+  echo 'FAIL: Phase 3 failure suppressed by Phase 4 proof' >&2; exit 1
+fi
+cp "$tmp/good" "$receipt"
+binary_output="$root/phase4/binaries/cranelift/full-cli/bin/simple$exe_suffix"
+mv "$binary_output" "$tmp/full-cli"
+if verify >/dev/null 2>&1; then
+  echo 'FAIL: missing published full CLI admitted' >&2; exit 1
+fi
+mv "$tmp/full-cli" "$binary_output"
+printf 'tampered' >"$binary_output"
+if verify >/dev/null 2>&1; then
+  echo 'FAIL: changed published full CLI admitted' >&2; exit 1
+fi
+printf 'binary' >"$binary_output"
+cranelift_receipt="$root/phase3/binaries/cranelift/phase3-bootstrap/state/receipts/phase3-bootstrap-cranelift.sdn"
+mv "$cranelift_receipt" "$tmp/cranelift-receipt"
+if verify >/dev/null 2>&1; then
+  echo 'FAIL: missing Phase 3 Cranelift binary manager receipt admitted' >&2; exit 1
+fi
+mv "$tmp/cranelift-receipt" "$cranelift_receipt"
+phase3_ledger="$root/phase3/modules/llvm/state/ledger.sdn"
+mv "$phase3_ledger" "$tmp/phase3-ledger"
+if verify >/dev/null 2>&1; then
+  echo 'FAIL: missing Phase 3 ledger admitted' >&2; exit 1
+fi
+mv "$tmp/phase3-ledger" "$phase3_ledger"
+phase4_completion="$root/phase4/modules/llvm/state/completion.json"
+printf '{"status":"RUNNING"}\n' >"$phase4_completion"
+new_sha=$(sha256sum "$phase4_completion" | cut -d ' ' -f 1)
+sed "s/^phase4_llvm_group_completion_sha256=.*/phase4_llvm_group_completion_sha256=$new_sha/" \
+  "$tmp/good" >"$receipt"
+if verify >/dev/null 2>&1; then
+  echo 'FAIL: nonterminal Phase 4 ledger admitted with matching file hash' >&2; exit 1
+fi
+cat >"$tmp/provisional.run" <<EOF
+format=SIMPLE-PROVISIONAL-RUN-1
+diagnostic_only=1
+authority_digest=$producer_sha
+status=PASS
+phase3_status=PASS
+phase4_status=PASS
+EOF
+cp "$tmp/provisional.run" "$receipt"
+if verify >/dev/null 2>&1; then
+  echo 'FAIL: copied provisional final receipt admitted as canonical completion' >&2; exit 1
+fi
+echo 'PASS: independent Phase 3/4 index, group, and status proofs required'

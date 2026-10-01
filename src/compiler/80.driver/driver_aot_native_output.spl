@@ -10,8 +10,10 @@ use std.io_runtime.{dir_create, dir_list, file_copy, file_exists, hash_text,
     file_size_raw, file_delete, getpid,
     file_write_exact, file_read_nullable}
 use std.nogc_sync_mut.io.file_ops.{file_is_regular_no_follow,
-    file_read_regular_no_follow_bounded, secure_temp_dir_raw}
-use std.nogc_sync_mut.io.dir_ops.{dir_remove}
+    file_read_regular_no_follow_bounded,
+    file_read_regular_no_follow_bounded_bytes, file_write_bytes,
+    secure_temp_dir_raw}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove, dir_create_all}
 use std.nogc_sync_mut.path.{dirname}
 # NOT `std.file_system` -- that module is a MOCK ("Mock implementations for
 # pure Simple demonstration"): its `file_write_text` writes nothing and returns
@@ -29,7 +31,7 @@ use compiler.backend.backend.backend_helpers.{compile_module_with_backend,
 use compiler.backend.backend.backend_types.{CompiledModule, CompileError}
 use compiler.backend.llvm_backend_tools.{llvm_bootstrap_last_object_path}
 use compiler.backend.backend.llvm_capability.{find_archive_portable}
-use std.platform.{get_host_os}
+use std.platform.{get_host_os, get_host_arch}
 use compiler.driver.driver_log_helpers.{log_phase, log_error}
 use compiler.backend.backend_plugin.session_authority_v2.{BackendSessionOwnedLeaseV2, BackendSessionAuthorityErrorV2}
 use compiler.driver.driver_backend_plugin_selection.{
@@ -42,6 +44,43 @@ use compiler.backend.linker.linker_wrapper.{
 }
 use compiler.backend.backend.llvm_native_link.{link_llvm_native, NativeLinkOptions}
 use compiler.driver.smf_writer.{Target}
+use compiler.driver.smf_group_object_adapter.{smf_group_object_from_bytes_v1}
+use compiler.driver.smf.runtime_std_package_membership_v1.{
+    RuntimeStdPackageMemberV1, runtime_std_package_members_v1,
+    runtime_std_package_membership_encode_v1}
+use compiler.driver.cache.runtime_std_membership_policy_v1.{
+    RuntimeStdMembershipPolicyOutputV1}
+use compiler.driver.driver_build.native_full_inventory_sources.{
+    NativeFullInventorySourcesV1}
+use std.scv.compile_source_inventory_core.{
+    compile_source_inventory_identity_cmp_v1}
+use compiler.driver.smf.runtime_std_native_sections_v1.{
+    RuntimeStdNativeMemberV1, runtime_std_mir_body_payload_v1,
+    runtime_std_native_directory_chain_real_v1,
+    runtime_std_native_observed_output_digest_v1,
+    RuntimeStdNativeMemberV2,
+    runtime_std_native_observed_output_digest_v2}
+use compiler.driver.smf.runtime_std_package_set.{
+    RuntimeStdPackageAuthorityV1, runtime_std_build_action_v1,
+    runtime_std_build_action_v2}
+use compiler.driver.smf.runtime_std_native_action_budget_v2.{
+    RuntimeStdNativeActionBudgetV2,
+    runtime_std_native_action_peak_admitted_v2}
+use compiler.driver.smf.runtime_std_native_outcomes_v2.{
+    RuntimeStdNativeOutcomeKindV2, RuntimeStdNativeOutcomeReceiptV2,
+    runtime_std_native_semantic_action_key_v2}
+use compiler.frontend.frontend_target_cfg_receipt_v1.{
+    frontend_cfg_receipt_valid_v1,
+    frontend_cfg_excluded_emit_count_v1}
+use compiler.driver.smf.runtime_std_native_emit_witness_v1.{
+    runtime_std_native_emit_witness_valid_v1}
+use compiler.driver.action_graph.build_action_v1.{BuildActionResultV1}
+use compiler.driver.action_graph.persisted_graph.{
+    PersistedBuildGraphV1, persisted_graph_digest_v1,
+    persisted_graph_validate_v1}
+use compiler.driver.action_graph.coordinator.{BuildPoolBudgetV1,
+    coordinator_new_v1, coordinator_claim_v1, coordinator_complete_v1}
+use std.nogc_sync_mut.io.sysinfo_ops.{process_peak_rss_kb}
 use compiler.driver.smf_binary_helpers.{smf_u64_to_bytes}
 use driver_types.{CompileResult, CompileContext, FrozenStorageModuleSnapshotV1,
     FrozenNativeModuleCapsuleV1, FrozenNativeModuleCapsuleBatchV1,
@@ -103,6 +142,7 @@ use compiler.common.cache.phase_compatibility_path_io.{
 }
 use compiler.mir.mir_data.{MirModule}
 use compiler.mir_opt.mir_opt.storage_projection_lowering.{MirStorageViewSiteBindingV1}
+use compiler.mir_opt.mir_opt.mod.{TargetOptContext, target_opt_context_default}
 
 fn driver_publish_demand_scc_outputs_v1(ctx: CompileContext) -> bool:
     if ctx.demand_scc_publication == nil:
@@ -163,14 +203,24 @@ use compiler.driver.cache.native_module_witness_facts.{
     native_external_layout_facts_from_mir_v1,
     native_module_cache_fact_set_merge_v1}
 use compiler.driver.driver_build.parallel.{ParallelBuilder, ParallelBuildConfig, BuildResult, parallel_unstable_enabled}
+use compiler.driver.driver_build.group_native_compile_pairs.{
+    group_native_options_for_capsule_v1, group_native_compile_pairs_v1}
 use compiler.driver.driver_build.build_outcome.{BuildOutcomeKind, BuildUnitOutcome, BuildOutcomeSet,
     build_outcome_retain_diagnostics, build_outcome_count_diagnostic_lines,
     build_outcome_retained_diagnostic_count}
 use compiler.driver.driver_log_helpers.{log_build_progress}
-use std.common.crypto.sha256.{sha256_text}
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
 use compiler.driver.cache.native_build_environment_identity.{native_build_environment_fingerprint_v1}
 use std.nogc_sync_mut.io_runtime.{env_get_nullable, env_set, process_run}
+use std.nogc_sync_mut.io.sysinfo_ops.{cpu_count_checked}
 use std.nogc_sync_mut.sffi.fs.{file_create_excl}
+use compiler.driver.driver_build.native_group_request.{native_group_request_path_v1,
+    native_group_request_v1}
+use std.common.build_manager.grouped_native_contract.{NativeGroupManifestV1,
+    NativeModuleResultV1, NativeGroupResultV1, native_group_manifest_identity_v1,
+    native_group_result_encode_v1, native_module_result_encode_v1,
+    native_group_result_validate_against_manifest_v1}
+use std.nogc_sync_mut.shell.file.{rename}
 
 @unsafe(reason: "raw recursive directory-remove ABI", capabilities: [ffi])
 extern fn rt_dir_remove_all(path: text) -> bool
@@ -1787,7 +1837,42 @@ impl CompilerDriver:
         # reasoning (bootstrap_stage4_selfhost_parse_memory_blowup_2026-07-20,
         # hazard 3).
         val low_memory = driver_mir_eviction_enabled(ctx.options.low_memory, ctx.options.output_format)
-        val module_names = ctx.mir_modules.keys()
+        val all_module_names = ctx.mir_modules.keys()
+        var module_names = all_module_names
+        var native_group: NativeGroupManifestV1? = nil
+        var group_name_by_source: {text: text} = {}
+        if native_group_request_path_v1() != "":
+            val admitted_group = match native_group_request_v1():
+                case Ok(value): value
+                case Err(reason):
+                    return CompileResult.CodegenError(
+                        "native group manifest rejected: {reason}")
+            if admitted_group.backend != effective_backend or
+                    admitted_group.target != native_target:
+                return CompileResult.CodegenError(
+                    "native group backend or target mismatch")
+            native_group = Some(admitted_group)
+            module_names = []
+            for member in admitted_group.members:
+                var matched = ""
+                for candidate in all_module_names:
+                    val candidate_source = driver_native_module_cache_source(ctx,
+                        candidate).replace("\\", "/")
+                    if candidate_source == member.source_path or
+                            candidate_source.ends_with("/" + member.source_path):
+                        if matched != "":
+                            return CompileResult.CodegenError(
+                                "native group member has multiple logical modules: {member.source_path}")
+                        matched = candidate
+                if matched == "" or module_names.contains(matched):
+                    return CompileResult.CodegenError(
+                        "native group member source has no unique MIR module: {member.source_path}")
+                val observed_source = driver_native_module_cache_source(ctx, matched)
+                if driver_native_disk_source_identity(observed_source) != member.source_digest:
+                    return CompileResult.CodegenError(
+                        "native group member source changed: {member.source_path}")
+                group_name_by_source[member.source_path] = matched
+                module_names = module_names.push(matched)
         val total_modules = module_names.len()
         if trace:
             print "[NATIVE] compiling {total_modules} modules..."
@@ -1813,6 +1898,7 @@ impl CompilerDriver:
         # are whole-BUILD guards, not per-module failures, and stay immediate.
         # See doc/02_requirements/compiler/supervised_builder.md R2/R3/R4.
         var module_outcomes = BuildOutcomeSet.empty()
+        var group_object_paths: {text: text} = {}
         # Stable within one build; lets the attribution line name a unit even
         # when its path is ambiguous.
         var module_unit_id: i64 = 0
@@ -1934,6 +2020,8 @@ impl CompilerDriver:
                             BuildUnitOutcome.ok(module_unit_id, name, 0, 0))
                         for obj in scoped_outputs:
                             object_files = object_files.push(obj)
+                        if native_group.? and scoped_outputs.len() == 1:
+                            group_object_paths[name] = scoped_outputs[0]
                         if low_memory:
                             ctx.evict_mir_module(name)
                         used_cache = true
@@ -2011,6 +2099,17 @@ impl CompilerDriver:
             # per occurrence with nothing naming the real invariant. See
             # doc/08_tracking/bug/stage2_receiver_probe_module_path_naming_not_run_2026-09-14.md
             var module_units_attempted = 0
+            var group_pair_eligible = false
+            if val group_manifest = native_group:
+                var pair_probe = 0
+                while pair_probe + 1 < uncached_names.len():
+                    if _driver_group_pair_eligible_v1(
+                            capsules, uncached_names[pair_probe],
+                            uncached_names[pair_probe + 1], group_manifest,
+                            native_target, backend_session.?,
+                            ctx.options.backend_plugin_path):
+                        group_pair_eligible = true
+                    pair_probe = pair_probe + 2
             if uncached_names.len() == 1:
                 val name = uncached_names[0]
                 val direct_result = _compile_frozen_module_capsule(capsules,
@@ -2038,6 +2137,54 @@ impl CompilerDriver:
                             module_unit_id, name,
                             driver_native_nonempty_failure_detail(e))
                         cache_miss_count = cache_miss_count + 1
+            elif group_pair_eligible:
+                # Pair windows follow the frozen module order. An ineligible
+                # window (and an odd tail) uses the same serial capsule path;
+                # a started pair never retries over partial worker objects.
+                val group_manifest = native_group.unwrap()
+                var pair_start = 0
+                while pair_start < uncached_names.len():
+                    val name_a = uncached_names[pair_start]
+                    var window = [name_a]
+                    if pair_start + 1 < uncached_names.len():
+                        window = window.push(uncached_names[pair_start + 1])
+                    var run_pair = false
+                    if window.len() == 2:
+                        run_pair = _driver_group_pair_eligible_v1(
+                            capsules, window[0], window[1], group_manifest,
+                            native_target, backend_session.?,
+                            ctx.options.backend_plugin_path)
+                    if run_pair:
+                        val failures = _driver_group_pair_execute_v1(
+                            capsules, group_manifest, window[0], window[1],
+                            native_target, ctx.options.target_opt_ctx,
+                            build_cache, module_outcomes, module_unit_id,
+                            pair_start / 2 + 1)
+                        module_unit_id = module_unit_id + failures
+                    else:
+                        for name in window:
+                            val direct_result = _compile_frozen_module_capsule(
+                                capsules, effective_backend, native_target,
+                                is_release, driver_opt_level,
+                                provider_receipt_hash, backend_session, name)
+                            match direct_result:
+                                case Ok(obj_path):
+                                    val collect_error = driver_native_collect_capsule_result_v1(
+                                        capsules, build_cache, name, obj_path)
+                                    if collect_error != "":
+                                        module_unit_id = module_unit_id + 1
+                                        driver_native_record_module_failure(module_outcomes,
+                                            module_unit_id, name,
+                                            driver_native_nonempty_failure_detail(
+                                                collect_error))
+                                case Err(error):
+                                    module_unit_id = module_unit_id + 1
+                                    driver_native_record_module_failure(module_outcomes,
+                                        module_unit_id, name,
+                                        driver_native_nonempty_failure_detail(error))
+                    module_units_attempted = module_units_attempted + window.len()
+                    cache_miss_count = cache_miss_count + window.len()
+                    pair_start = pair_start + window.len()
             else:
                 # `unstable` and `unit_timeout_ms` were omitted here. Partial
                 # struct literals are legal, so this compiled while silently
@@ -2139,13 +2286,15 @@ impl CompilerDriver:
                     driver_native_capsule_result_reason_v1(capsule)
                 else:
                     capsule.reason
-                if capsule.ok and capsule_reason == "":
+                if capsule.ok and capsule_reason == "" and
+                        not module_outcomes.has_path(name):
                     val handoff_reason = driver_cold_hir_record_verified_object_v1(
                         ctx, name, obj_path, capsule.capsule_identity)
                     if handoff_reason != "":
                         return CompileResult.CodegenError(handoff_reason)
                     reconstructed_outputs = reconstructed_outputs.push(obj_path)
                     object_files = object_files.push(obj_path)
+                    if native_group.?: group_object_paths[name] = obj_path
                     if ctx.demand_scc_publication != nil:
                         var publication = ctx.demand_scc_publication!
                         if not scc_publication_complete_object_v1(
@@ -2230,6 +2379,142 @@ impl CompilerDriver:
             if manifest_reason != "ok":
                 return CompileResult.CodegenError(
                     "Phase 2 compatibility manifest failed: {manifest_reason}")
+
+        # Group mode is a compiler child, not a linker invocation. The parent
+        # admits only exact per-module receipts after it reaps this process
+        # tree. Emit a result for EVERY requested member, including failures.
+        # A failed SCC is entirely non-OK so retry never splits its ownership.
+        if val manifest = native_group:
+            val host_os = get_host_os()
+            val host_arch = get_host_arch()
+            if not manifest.target.contains(host_os) or
+                    not manifest.target.starts_with(host_arch + "-"):
+                return CompileResult.CodegenError(
+                    "native group target differs from compiler host")
+            val group_result_path = env_get_nullable("SIMPLE_NATIVE_GROUP_RESULT") ?? ""
+            if group_result_path == "" or not _sffi_dir_create(
+                    dirname(group_result_path), true):
+                return CompileResult.CodegenError(
+                    "native group result path unavailable")
+            val group_result_root = dirname(group_result_path)
+            val group_output_root = _sffi_path_join(group_result_root, "outputs")
+            val group_progress_root = _sffi_path_join(group_result_root, "progress")
+            if not _sffi_dir_create(group_output_root, true) or
+                    not _sffi_dir_create(group_progress_root, true):
+                return CompileResult.CodegenError(
+                    "native group private output directory unavailable")
+            var failed_sccs: {text: bool} = {}
+            for member in manifest.members:
+                val name = group_name_by_source[member.source_path]
+                if (member.output_kind != "OBJECT" and
+                        member.output_kind != "SMF") or
+                        not group_object_paths.contains_key(name) or
+                        not _sffi_file_exists(group_object_paths[name]):
+                    failed_sccs[member.scc_id] = true
+            var group_results: [NativeModuleResultV1] = []
+            var group_failed = false
+            for member in manifest.members:
+                val name = group_name_by_source[member.source_path]
+                var result = NativeModuleResultV1(member.module_id, "ERROR", 1,
+                    member.output_kind, "", "", false,
+                    sha256_text("native-group-scc-failed|" + member.scc_id))
+                if not failed_sccs.contains_key(member.scc_id):
+                    val object_path = group_object_paths[name]
+                    val private_output = _sffi_path_join(group_output_root,
+                        member.output_path)
+                    var wrote_output = false
+                    if _sffi_dir_create(dirname(private_output), true):
+                        if member.output_kind == "OBJECT":
+                            wrote_output = _sffi_file_copy(object_path,
+                                private_output)
+                        else:
+                            match file_read_regular_no_follow_bounded_bytes(
+                                    object_path, 134217728):
+                                Ok(object_bytes):
+                                    match smf_group_object_from_bytes_v1(
+                                            object_bytes, host_os, host_arch):
+                                        Ok(smf_bytes):
+                                            wrote_output = file_write_bytes(
+                                                private_output, smf_bytes)
+                                        Err(reason):
+                                            log_error(log,
+                                                "native group SMF rejected {member.module_id}: {reason}")
+                                Err(reason):
+                                    log_error(log,
+                                        "native group object read rejected {member.module_id}: {reason}")
+                    if not wrote_output:
+                        failed_sccs[member.scc_id] = true
+                    else:
+                        val digest = rt_file_hash_sha256(private_output)
+                        if digest.len() != 64:
+                            failed_sccs[member.scc_id] = true
+                        else:
+                            result = NativeModuleResultV1(member.module_id,
+                                "OK", 0, member.output_kind, member.output_path,
+                                digest, false, "")
+                if failed_sccs.contains_key(member.scc_id):
+                    group_failed = true
+                group_results = group_results.push(result)
+            # A late copy/hash failure must also invalidate earlier outputs in
+            # that SCC. The files remain private diagnostics, never admitted.
+            var normalized_results: [NativeModuleResultV1] = []
+            for index in 0..manifest.members.len():
+                val member = manifest.members[index]
+                if failed_sccs.contains_key(member.scc_id):
+                    val name = group_name_by_source[member.source_path]
+                    var observed = "NOT_RUN"
+                    for outcome in module_outcomes.records:
+                        if outcome.source_path == name:
+                            observed = outcome.label()
+                    val blocked_status = if observed == "OK":
+                        "BLOCKED"
+                    elif observed == "ERROR" or observed == "CRASHED" or
+                            observed == "TERMINATED" or observed == "TIMEOUT" or
+                            observed == "NOT_RUN":
+                        observed
+                    else:
+                        "BLOCKED"
+                    val blocked_exit = if blocked_status == "ERROR" or
+                            blocked_status == "CRASHED": 1 else: 0
+                    normalized_results = normalized_results.push(
+                        NativeModuleResultV1(member.module_id, blocked_status,
+                            blocked_exit,
+                            member.output_kind, "", "", false,
+                            sha256_text("native-group-scc-failed|" + member.scc_id)))
+                else:
+                    normalized_results = normalized_results.push(group_results[index])
+            val group_result = NativeGroupResultV1(
+                native_group_manifest_identity_v1(manifest), manifest.group_id,
+                manifest.generation, manifest.attempt, normalized_results, 0, 0)
+            val validation = native_group_result_validate_against_manifest_v1(
+                manifest, group_result)
+            if validation != "":
+                return CompileResult.CodegenError(
+                    "native group result rejected: {validation}")
+            for item in normalized_results:
+                val progress_path = _sffi_path_join(group_progress_root,
+                    sha256_text(item.module_id) + ".sdn")
+                val progress_tmp = progress_path + ".tmp-{getpid()}"
+                val progress_text = native_module_result_encode_v1(item)
+                if progress_text == "" or not _sffi_file_write_text(
+                        progress_tmp, progress_text) or
+                        not rename(progress_tmp, progress_path):
+                    return CompileResult.CodegenError(
+                        "native group progress receipt write failed")
+            val result_text = native_group_result_encode_v1(group_result)
+            val result_tmp = group_result_path + ".tmp-{getpid()}"
+            if result_text == "" or not _sffi_file_write_text(result_tmp,
+                    result_text) or not rename(result_tmp, group_result_path):
+                return CompileResult.CodegenError(
+                    "native group result write failed")
+            if group_failed:
+                val diagnostics = driver_native_report_module_outcomes_v1(
+                    module_outcomes)
+                return CompileResult.CodegenError(if diagnostics != "":
+                    diagnostics
+                else:
+                    "native group has failed or unqualified SCCs")
+            return CompileResult.Success(group_result_path)
 
         # Fail closed at the boundary, not early (R4). Every module has now been
         # attempted and the summary names them all; only now do we refuse to link.
@@ -2452,6 +2737,190 @@ fn _aot_compile_failure(name: text, detail: text) -> Result<text, text>:
     _sffi_stdout_flush()
     Err("AOT compile error in {name}: {detail}")
 
+fn _driver_group_pair_mark_started_v1(
+    capsule: FrozenNativeModuleCapsuleV1,
+    manifest: NativeGroupManifestV1,
+    result_path: text
+) -> text:
+    if result_path == "": return "native group start result path absent"
+    var member_id = ""
+    val frozen_source = capsule.cache_source.replace("\\", "/")
+    for member in manifest.members:
+        if frozen_source == member.source_path or
+                frozen_source.ends_with("/" + member.source_path):
+            if member_id != "": return "native group start source ambiguous"
+            member_id = member.module_id
+    if member_id == "": return "native group start source not scheduled"
+    val progress_root = _sffi_path_join(dirname(result_path), "progress")
+    if not _sffi_dir_create(progress_root, true):
+        return "native group progress directory unavailable"
+    val marker = _sffi_path_join(progress_root,
+        sha256_text(member_id) + ".started")
+    val marker_tmp = marker + ".tmp-{getpid()}"
+    val marker_body = "SIMPLE-NATIVE-MODULE-STARTED-1\n" +
+        native_group_manifest_identity_v1(manifest) + "\n" + member_id + "\n"
+    if not _sffi_file_write_text(marker_tmp, marker_body) or
+            not rename(marker_tmp, marker):
+        return "native group start marker write failed"
+    ""
+
+fn _driver_group_pair_finalize_receipt_v1(
+    capsule: FrozenNativeModuleCapsuleV1, object_path: text
+) -> text:
+    if not capsule.identity_valid(): return "capsule-mir-lease-violated"
+    if object_path != capsule.object_path:
+        return "capsule-object-path-mismatch"
+    val object_fp = FileFingerprint.from_file(object_path)
+    if not object_fp.?: return "capsule-object-fingerprint-failed"
+    val object_size = file_size_raw(object_path)
+    if object_size < 0: return "capsule-object-size-unreadable:{object_path}"
+    val size_reason = driver_native_capsule_receipt_size_reason_v1(object_size)
+    if size_reason != "": return "capsule-{size_reason}:{object_path}"
+    var receipt = ""
+    var size_canary = ""
+    if val fp = object_fp:
+        size_canary = driver_native_capsule_receipt_size_canary_v1(
+            fp.size, object_size)
+        receipt = "native-capsule-result-v1\n{capsule.capsule_identity}\n{capsule.object_path}\n{object_size}\n{fp.content_hash}\n"
+    if size_canary != "":
+        print "[receipt-size-canary] optional-bound scalar field read miscompiled: {size_canary} path={object_path}"
+        _sffi_stdout_flush()
+    val receipt_path = object_path + ".capsule-receipt"
+    if not _sffi_file_write_text(receipt_path, receipt):
+        return "capsule-receipt-write-failed"
+    if (_sffi_file_read_text(receipt_path) ?? "") != receipt:
+        return "capsule-receipt-write-unverified"
+    driver_native_capsule_result_reason_v1(capsule)
+
+fn _driver_group_pair_execute_v1(
+    batch: FrozenNativeModuleCapsuleBatchV1,
+    manifest: NativeGroupManifestV1,
+    name_a: text, name_b: text,
+    native_target: text,
+    target_opt_ctx: TargetOptContext,
+    build_cache: BuildCache,
+    outcomes: BuildOutcomeSet,
+    first_unit_id: i64,
+    pair_generation: i64
+) -> i64:
+    val capsule_a = frozen_native_capsule_batch_find_v1(batch, name_a)
+    val capsule_b = frozen_native_capsule_batch_find_v1(batch, name_b)
+    val result_path = env_get_nullable("SIMPLE_NATIVE_GROUP_RESULT") ?? ""
+    val started_a = _driver_group_pair_mark_started_v1(
+        capsule_a, manifest, result_path)
+    val started_b = _driver_group_pair_mark_started_v1(
+        capsule_b, manifest, result_path)
+    if started_a != "" or started_b != "":
+        val failure = if started_a != "": started_a else: started_b
+        for index in 0..2:
+            val name = if index == 0: name_a else: name_b
+            driver_native_record_module_failure(outcomes, first_unit_id + index + 1,
+                name, driver_native_nonempty_failure_detail(failure))
+        return 2
+    val policy = group_native_options_for_capsule_v1(
+        capsule_a, native_target, target_opt_ctx)
+    if policy.is_err():
+        for index in 0..2:
+            val name = if index == 0: name_a else: name_b
+            driver_native_record_module_failure(outcomes, first_unit_id + index + 1,
+                name, "builtin LLVM pair policy changed after admission")
+        return 2
+    val (pair_options, pair_target) = policy.unwrap()
+    val measured = (env_get_nullable(
+        "SIMPLE_NATIVE_GROUP_MEASURED_THREAD_BYTES") ?? "").parse_int() ?? 0
+    val reserve = (env_get_nullable(
+        "SIMPLE_NATIVE_GROUP_MEMORY_RESERVE_BYTES") ?? "").parse_int() ?? 0
+    val host_cpus = match cpu_count_checked():
+        case Ok(count): count
+        case Err(_): 0
+    val paired = group_native_compile_pairs_v1(
+        batch, name_a, name_b, pair_options, pair_target,
+        pair_generation, native_group_manifest_identity_v1(manifest),
+        dirname(result_path), host_cpus,
+        manifest.memory_limit_bytes, reserve, measured)
+    var pair_verified = false
+    if paired.accepted and paired.effective_threads == 2 and
+            paired.qualification.? and paired.execution.? and
+            paired.units.len() == 2:
+        pair_verified = paired.units[0].module_name == name_a and
+            paired.units[1].module_name == name_b and
+            paired.units[0].object_path == capsule_a.object_path and
+            paired.units[1].object_path == capsule_b.object_path and
+            paired.units[0].status == 0 and paired.units[1].status == 0
+    if not pair_verified:
+        val reason = driver_native_nonempty_failure_detail(paired.reason)
+        for index in 0..2:
+            val name = if index == 0: name_a else: name_b
+            driver_native_record_module_failure(outcomes, first_unit_id + index + 1,
+                name, reason)
+        return 2
+    print "[NATIVE] codegen: qualified LLVM pair concurrency=2 "
+        + "(group calibration and per-pair native overlap)"
+    _sffi_stdout_flush()
+    var failed = 0
+    for name in [name_a, name_b]:
+        val capsule = frozen_native_capsule_batch_find_v1(batch, name)
+        val finish_reason = _driver_group_pair_finalize_receipt_v1(
+            capsule, capsule.object_path)
+        if finish_reason != "":
+            failed = failed + 1
+            driver_native_record_module_failure(outcomes, first_unit_id + failed,
+                name, driver_native_nonempty_failure_detail(finish_reason))
+        else:
+            val collect_reason = driver_native_collect_capsule_result_v1(
+                batch, build_cache, name, capsule.object_path)
+            if collect_reason != "":
+                failed = failed + 1
+                driver_native_record_module_failure(outcomes, first_unit_id + failed,
+                    name, driver_native_nonempty_failure_detail(collect_reason))
+    failed
+
+fn _driver_group_pair_eligible_v1(
+    batch: FrozenNativeModuleCapsuleBatchV1,
+    name_a: text, name_b: text,
+    manifest: NativeGroupManifestV1,
+    native_target: text,
+    backend_session_present: bool,
+    plugin_path: text
+) -> bool:
+    if not backend_session_present or plugin_path != "" or
+            manifest.backend != "llvm" or manifest.target != native_target or
+            manifest.max_threads < 2 or name_a == name_b or
+            (env_get_nullable("SIMPLE_BOOTSTRAP_EMPTY_NATIVE_OBJ") ?? "") == "1" or
+            (env_get_nullable("SIMPLE_BOOTSTRAP_DEBUG") ?? "") == "1" or
+            (env_get_nullable("SIMPLE_NATIVE_BUILD_NO_MANGLE") ?? "") == "1" or
+            (env_get_nullable("SIMPLE_NATIVE_GROUP_RESULT") ?? "") == "":
+        return false
+    # These are manager-pinned measurements and reserves, not inferred from
+    # the requested thread count or the group limit. Missing pins keep the
+    # existing serial ParallelBuilder route in control.
+    val measured = (env_get_nullable(
+        "SIMPLE_NATIVE_GROUP_MEASURED_THREAD_BYTES") ?? "").parse_int() ?? 0
+    val reserve = (env_get_nullable(
+        "SIMPLE_NATIVE_GROUP_MEMORY_RESERVE_BYTES") ?? "").parse_int() ?? 0
+    if measured <= 0 or reserve <= 0 or
+            manifest.memory_limit_bytes <= reserve or
+            (manifest.memory_limit_bytes - reserve) / measured < 2:
+        return false
+    val host_cpus = match cpu_count_checked():
+        case Ok(count): count
+        case Err(_): 0
+    if host_cpus < 2: return false
+    val a = frozen_native_capsule_batch_find_v1(batch, name_a)
+    val b = frozen_native_capsule_batch_find_v1(batch, name_b)
+    if not a.ok or not b.ok: return false
+    if a.cache_source == "" or b.cache_source == "" or
+            a.cache_source == b.cache_source:
+        return false
+    if _sffi_file_exists(a.object_path) or _sffi_file_exists(b.object_path):
+        return false
+    if group_native_options_for_capsule_v1(
+            a, native_target, target_opt_context_default()).is_err() or
+            group_native_options_for_capsule_v1(
+                b, native_target, target_opt_context_default()).is_err():
+        return false
+    true
+
 fn _compile_frozen_module_capsule(
     batch: FrozenNativeModuleCapsuleBatchV1, backend_name: text, target: text,
     is_release: bool, opt_level: i64, provider_receipt_hash: text,
@@ -2469,6 +2938,43 @@ fn _compile_frozen_module_capsule(
         return _aot_compile_failure(name, "capsule-identity-mismatch")
     if capsule.storage_snapshot.registry_identity != batch.registry_identity:
         return _aot_compile_failure(name, "capsule-registry-mismatch")
+    var group_member_id = ""
+    if native_group_request_path_v1() != "":
+        val manifest = match native_group_request_v1():
+            case Ok(value): value
+            case Err(reason):
+                return _aot_compile_failure(name,
+                    "native group start manifest invalid: {reason}")
+        val result_path = env_get_nullable("SIMPLE_NATIVE_GROUP_RESULT") ?? ""
+        if result_path == "":
+            return _aot_compile_failure(name,
+                "native group start result path absent")
+        var member_id = ""
+        val frozen_source = capsule.cache_source.replace("\\", "/")
+        for member in manifest.members:
+            if frozen_source == member.source_path or
+                    frozen_source.ends_with("/" + member.source_path):
+                if member_id != "":
+                    return _aot_compile_failure(name,
+                        "native group start source ambiguous")
+                member_id = member.module_id
+        if member_id == "":
+            return _aot_compile_failure(name,
+                "native group start source not scheduled")
+        val progress_root = _sffi_path_join(dirname(result_path), "progress")
+        if not _sffi_dir_create(progress_root, true):
+            return _aot_compile_failure(name,
+                "native group progress directory unavailable")
+        val marker = _sffi_path_join(progress_root,
+            sha256_text(member_id) + ".started")
+        val marker_tmp = marker + ".tmp-{getpid()}"
+        val marker_body = "SIMPLE-NATIVE-MODULE-STARTED-1\n" +
+            native_group_manifest_identity_v1(manifest) + "\n" + member_id + "\n"
+        if not _sffi_file_write_text(marker_tmp, marker_body) or
+                not rename(marker_tmp, marker):
+            return _aot_compile_failure(name,
+                "native group start marker write failed")
+        group_member_id = member_id
     val trace = (env_get_nullable("SIMPLE_COMPILER_TRACE") ?? "") == "1"
     if trace:
         print "[NATIVE] compiling module: {name}"
@@ -2477,12 +2983,19 @@ fn _compile_frozen_module_capsule(
     # Returning the already-consumed composite `result` forwarded only its tag
     # through an early self-hosted bootstrap ABI, so the next caller observed
     # `Err("")` even though the object-path driver had read the llc diagnostic.
+    if group_member_id != "":
+        log_phase("native_group:codegen:start member={group_member_id} backend={backend_name}")
     match _compile_selected_module(backend_name, is_release, opt_level,
         capsule.output_base,
         name, capsule.mir_module, capsule.storage_snapshot,
         capsule.target_cpu, backend_session):
-        case Err(error): return Err(error)
+        case Err(error):
+            if group_member_id != "":
+                log_phase("native_group:codegen:error member={group_member_id} backend={backend_name}")
+            return Err(error)
         case Ok(object_path):
+            if group_member_id != "":
+                log_phase("native_group:codegen:done member={group_member_id} backend={backend_name}")
             if not capsule.identity_valid():
                 return _aot_compile_failure(name, "capsule-mir-lease-violated")
             if object_path != capsule.object_path:
@@ -2539,6 +3052,535 @@ fn _compile_frozen_module_capsule(
                 return _aot_compile_failure(name, "capsule-receipt-write-unverified")
             Ok(object_path)
 
+fn _runtime_std_compile_members_with_session_v1(
+    ctx: CompileContext, selected: [RuntimeStdPackageMemberV1],
+    artifact_root: text, target_cpu: text,
+    session: BackendSessionOwnedLeaseV2, allow_static_only: bool
+) -> Result<[RuntimeStdNativeMemberV1], text>:
+    val selection = ctx.runtime_std_full_inventory_selection!
+    var module_names: [text] = []
+    var prior_source = ""
+    var receipt_indices: Dict<text, i64> = {}
+    var receipt_index = 0
+    while receipt_index < ctx.cold_hir_typed_receipts.len():
+        val source_identity =
+            ctx.cold_hir_typed_receipts[receipt_index].seed.source_identity
+        if source_identity == "" or receipt_indices.has(source_identity):
+            return Err("runtime/std native duplicate SCV source receipt")
+        receipt_indices[source_identity] = receipt_index
+        receipt_index = receipt_index + 1
+    for member in selected:
+        if (prior_source != "" and
+                compile_source_inventory_identity_cmp_v1(
+                    member.source_identity, prior_source) <= 0) or
+                member.source_digest == "" or
+                member.package_identity != selected[0].package_identity or
+                not ctx.runtime_std_hir_emissions.has(member.source_identity) or
+                not ctx.runtime_std_mir_emissions.has(member.source_identity):
+            return Err("runtime/std native selected source lacks typed ownership")
+        prior_source = member.source_identity
+        if not receipt_indices.has(member.source_identity):
+            return Err("runtime/std native selected source absent from SCV")
+        val matched = receipt_indices[member.source_identity]
+        val seed = ctx.cold_hir_typed_receipts[matched].seed
+        if seed.source_digest != member.source_digest or
+                seed.inventory_digest != selection.source_inventory_digest:
+            return Err("runtime/std native selected source differs from SCV")
+        val name = ctx.cold_hir_typed_receipts[matched].seed.module_identity
+        if name == "" or name.contains("/") or name.contains("\\") or
+                name.contains("..") or module_names.contains(name) or
+                not ctx.mir_modules.has(name):
+            return Err("runtime/std native module ownership invalid")
+        if ctx.runtime_std_hir_emissions[member.source_identity].module_identity != name or
+                ctx.runtime_std_hir_emissions[member.source_identity].source_digest != member.source_digest or
+                ctx.runtime_std_mir_emissions[member.source_identity].module_identity != name or
+                ctx.runtime_std_mir_emissions[member.source_identity].source_digest != member.source_digest:
+            return Err("runtime/std native HIR/MIR module ownership differs")
+        if ctx.mir_modules[name].functions.len() == 0 and
+                (not allow_static_only or
+                    ctx.mir_modules[name].statics.len() == 0):
+            return Err("runtime/std native source needs typed objectless or target outcome: " + member.source_identity)
+        if ctx.modules.has(name) and
+                driver_native_module_is_export_facade(ctx.mir_modules[name],
+                    ctx.modules[name]):
+            return Err("runtime/std native export facade needs typed objectless outcome: " + member.source_identity)
+        module_names.push(name)
+    if ctx.freeze_storage_registry() == "invalid":
+        return Err("runtime/std native storage registry could not freeze")
+    val object_root = "{artifact_root}/runtime-std-native-objects"
+    if not dir_create_all(object_root) or
+            not runtime_std_native_directory_chain_real_v1(object_root):
+        return Err("runtime/std native private object directory is not real")
+    val object_base = "{object_root}/{selected[0].package_identity}"
+    val is_release = ctx.options.release
+    val opt_level = driver_effective_native_opt_level(ctx, is_release)
+    val batch = ctx.freeze_native_module_capsules_v1(module_names,
+        object_base, session.backend_name, ctx.native_target, target_cpu,
+        opt_level, is_release, session.receipt_hash)
+    if not batch.ok:
+        return Err("runtime/std native capsule freeze failed: " + batch.reason)
+    var emitted: [RuntimeStdNativeMemberV1] = []
+    var index = 0
+    while index < selected.len():
+        val member = selected[index]
+        val name = module_names[index]
+        val capsule = frozen_native_capsule_batch_find_v1(batch, name)
+        if not capsule.ok or capsule.source_identity != member.source_digest or
+                file_exists(capsule.object_path) or
+                file_exists(capsule.object_path + ".capsule-receipt"):
+            return Err("runtime/std native capsule source or output differs: " + name)
+        val body = runtime_std_mir_body_payload_v1(capsule.mir_module,
+            member.source_identity, member.source_digest)
+        if body.is_err():
+            return Err("runtime/std native MIR body unsupported: " + body.unwrap_err())
+        val compiled = _compile_frozen_module_capsule(batch,
+            session.backend_name, ctx.native_target, is_release, opt_level,
+            session.receipt_hash, Some(session), name)
+        if compiled.is_err():
+            return Err("runtime/std native object emission failed: " + compiled.unwrap_err())
+        if compiled.unwrap() != capsule.object_path or
+                driver_native_capsule_result_reason_v1(capsule) != "":
+            return Err("runtime/std native object receipt failed: " + name)
+        emitted.push(RuntimeStdNativeMemberV1(member.source_identity,
+            member.source_digest, body.unwrap(), capsule))
+        index = index + 1
+    Ok(emitted)
+
+# Real, source-owned object producer for a package whose every selected source
+# has code-bearing MIR. Other source outcomes require their own typed contract.
+pub fn driver_runtime_std_compile_native_members_v1(
+    ctx: CompileContext, policy: RuntimeStdMembershipPolicyOutputV1,
+    sources: NativeFullInventorySourcesV1, package_identity: text,
+    expected_index_digest: text, artifact_root: text,
+    target_cpu: text, expected_target: text
+) -> Result<[RuntimeStdNativeMemberV1], text>:
+    if ctx.runtime_std_full_inventory_selection == nil or
+            artifact_root !=
+                ctx.runtime_std_full_inventory_selection!.artifact_root or
+            (package_identity != "simple.runtime" and
+                package_identity != "simple.std") or
+            policy.index_digest != expected_index_digest or
+            policy.membership.source_inventory_digest !=
+                ctx.runtime_std_full_inventory_selection!.source_inventory_digest or
+            runtime_std_package_membership_encode_v1(
+                policy.membership, sources) != policy.membership_content or
+            sha256_text(policy.membership_content) != policy.membership_digest or
+            policy.policy_digest == "" or
+            expected_target == "" or expected_target != ctx.native_target or
+            not runtime_std_native_directory_chain_real_v1(artifact_root) or
+            ctx.options.backend_plugin_path != "" or
+            not driver_aot_uses_versioned_backend(ctx.options.backend) or
+            (env_get_nullable("SIMPLE_BOOTSTRAP_EMPTY_NATIVE_OBJ") ?? "") == "1" or
+            native_group_request_path_v1() != "":
+        return Err("runtime/std native producer authority or mode unsupported")
+    val selected_result = runtime_std_package_members_v1(
+        policy.membership, sources, package_identity)
+    if selected_result.is_err():
+        return Err("runtime/std native package selection rejected: " +
+            selected_result.unwrap_err())
+    val selected = selected_result.unwrap()
+    if selected.len() == 0:
+        return Err("runtime/std native package has no source members")
+    val opt_level = driver_effective_native_opt_level(ctx,
+        ctx.options.release)
+    val request = driver_aot_backend_plugin_request_v1(
+        ctx.options.backend, expected_target, target_cpu, opt_level,
+        ctx.options.backend_plugin_path)
+    match BackendSessionOwnedLeaseV2.open(request):
+        case Err(_):
+            Err("runtime/std native backend session unavailable")
+        case Ok(opened):
+            var session = opened
+            if (session.backend_name != "llvm" and
+                    session.backend_name != "cranelift") or
+                    session.receipt_hash == "":
+                val _closed = session.close()
+                return Err("runtime/std native object provider receipt unavailable")
+            val result = _runtime_std_compile_members_with_session_v1(
+                ctx, selected, artifact_root, target_cpu, session, false)
+            if not session.close():
+                return Err("runtime/std native backend session close failed")
+            result
+
+struct RuntimeStdNativeActionEmissionV1:
+    members: [RuntimeStdNativeMemberV1]
+    observed_output_digest: text
+    action_result: BuildActionResultV1
+
+# Claim the versioned package action before codegen and commit it only after
+# every object and capsule receipt has been read back and CAS-pinned.
+pub fn driver_runtime_std_compile_native_action_v1(
+    ctx: CompileContext, policy: RuntimeStdMembershipPolicyOutputV1,
+    sources: NativeFullInventorySourcesV1, package_identity: text,
+    expected_index_digest: text, artifact_root: text,
+    object_store_root: text, target_cpu: text, expected_target: text,
+    authority: RuntimeStdPackageAuthorityV1
+) -> Result<RuntimeStdNativeActionEmissionV1, text>:
+    val expected_policy_digest = sha256_text(
+        "simple/runtime-std-membership-policy/v1\n" +
+        "index={expected_index_digest}\n" +
+        "producer={authority.compiler_digest}\n" +
+        "variant={authority.config_digest}\n" +
+        "snapshot={sources.snapshot_inventory_digest}\n" +
+        "source-inventory={sources.source_inventory_digest}\n" +
+        "membership={policy.membership_digest}")
+    if authority.target_triple != expected_target or
+            policy.policy_digest != expected_policy_digest or
+            not runtime_std_native_directory_chain_real_v1(object_store_root):
+        return Err("runtime/std native action target or object store invalid")
+    val action = runtime_std_build_action_v1(authority, package_identity)
+    if action == nil:
+        return Err("runtime/std native package action unavailable")
+    var graph = PersistedBuildGraphV1("pending", "",
+        action!.snapshot_revision, [action!])
+    val generation = persisted_graph_digest_v1(graph)
+    if generation == "":
+        return Err("runtime/std native action graph digest unavailable")
+    graph.generation = generation
+    if persisted_graph_validate_v1(graph) != "ok":
+        return Err("runtime/std native action graph invalid")
+    val budget = BuildPoolBudgetV1(action!.pool, 1,
+        action!.memory_budget_bytes)
+    val owner_token = sha256_text("runtime-std-native-action-owner-v1|" +
+        package_identity + "|" + generation + "|" +
+        getpid().to_text() + "|" + artifact_root)
+    val claim = coordinator_claim_v1(
+        coordinator_new_v1(graph, [budget]), action!.action_id,
+        owner_token)
+    if not claim.claim.valid:
+        return Err("runtime/std native action claim failed: " +
+            claim.claim.reason)
+    val compiled = driver_runtime_std_compile_native_members_v1(
+        ctx, policy, sources, package_identity, expected_index_digest,
+        artifact_root, target_cpu, expected_target)
+    if compiled.is_err(): return Err(compiled.unwrap_err())
+    val members = compiled.unwrap()
+    val observed = runtime_std_native_observed_output_digest_v1(
+        members, object_store_root)
+    if observed.is_err(): return Err(observed.unwrap_err())
+    val peak_kb = process_peak_rss_kb()
+    if peak_kb <= 0 or
+            peak_kb > action!.memory_budget_bytes / 1024:
+        return Err("runtime/std native measured action memory unavailable or over budget")
+    val output_digest = observed.unwrap()
+    val complete = coordinator_complete_v1(claim.coordinator,
+        action!.action_id, owner_token, true, false,
+        action!.restat_identity,
+        ["verified-object-output-digest=" + output_digest],
+        peak_kb * 1024)
+    if not complete.commit.accepted or
+            complete.coordinator.runtime.len() != 1 or
+            complete.coordinator.runtime[0].result == nil:
+        return Err("runtime/std native action completion rejected")
+    val result = complete.coordinator.runtime[0].result!
+    if not result.success or result.cancelled:
+        return Err("runtime/std native action was not successful")
+    Ok(RuntimeStdNativeActionEmissionV1(members, output_digest, result))
+
+struct RuntimeStdNativeActionEmissionV2:
+    members: [RuntimeStdNativeMemberV2]
+    observed_output_digest: text
+    action_result: BuildActionResultV1
+
+fn _runtime_std_hir_emission_digest_v2(
+    ctx: CompileContext, source_identity: text,
+    source_digest: text, module_identity: text
+) -> text:
+    if not ctx.runtime_std_hir_emissions.has(source_identity): return ""
+    val emission = ctx.runtime_std_hir_emissions[source_identity]
+    if emission.source_identity != source_identity or
+            emission.source_digest != source_digest or
+            emission.module_identity != module_identity or
+            emission.semantic_payloads.len() != 7:
+        return ""
+    val names = ["debug.smf", "exports.smf", "generics.smf",
+        "hir-summaries.smf", "imports.smf", "initialization.smf",
+        "types.smf"]
+    var rows: [text] = ["simple-runtime-std-live-hir/v2",
+        "source={source_identity}", "digest={source_digest}",
+        "module={module_identity}"]
+    var index = 0
+    while index < 7:
+        val payload = emission.semantic_payloads[index]
+        if payload.member_name != names[index] or payload.content == "":
+            return ""
+        rows.push("{payload.member_name}|{sha256_text(payload.content)}")
+        index = index + 1
+    sha256_text(rows.join("\n") + "\n")
+
+fn _runtime_std_compile_native_members_v2(
+    ctx: CompileContext, policy: RuntimeStdMembershipPolicyOutputV1,
+    sources: NativeFullInventorySourcesV1, package_identity: text,
+    expected_index_digest: text, artifact_root: text,
+    target_cpu: text, expected_target: text
+) -> Result<[RuntimeStdNativeMemberV2], text>:
+    if ctx.runtime_std_full_inventory_selection == nil or
+            artifact_root !=
+                ctx.runtime_std_full_inventory_selection!.artifact_root or
+            (package_identity != "simple.runtime" and
+                package_identity != "simple.std") or
+            policy.index_digest != expected_index_digest or
+            policy.membership.source_inventory_digest !=
+                ctx.runtime_std_full_inventory_selection!.source_inventory_digest or
+            runtime_std_package_membership_encode_v1(
+                policy.membership, sources) != policy.membership_content or
+            sha256_text(policy.membership_content) != policy.membership_digest or
+            policy.policy_digest == "" or
+            expected_target == "" or expected_target != ctx.native_target or
+            not runtime_std_native_directory_chain_real_v1(artifact_root) or
+            ctx.options.backend_plugin_path != "" or
+            not driver_aot_uses_versioned_backend(ctx.options.backend) or
+            (env_get_nullable("SIMPLE_BOOTSTRAP_EMPTY_NATIVE_OBJ") ?? "") == "1" or
+            native_group_request_path_v1() != "":
+        return Err("runtime/std native v2 producer authority or mode unsupported")
+    val selected_result = runtime_std_package_members_v1(
+        policy.membership, sources, package_identity)
+    if selected_result.is_err(): return Err(selected_result.unwrap_err())
+    val selected = selected_result.unwrap()
+    if selected.len() == 0:
+        return Err("runtime/std native v2 package has no source members")
+    val backend_name = get_effective_backend_name(
+        ctx.options.backend, ctx.options.release)
+    if backend_name != "llvm" and backend_name != "cranelift":
+        return Err("runtime/std native v2 backend unsupported")
+    var names: [text] = []
+    var kinds: [RuntimeStdNativeOutcomeKindV2] = []
+    var hir_digests: [text] = []
+    var cfg_digests: [text] = []
+    var code_selected: [RuntimeStdPackageMemberV1] = []
+    var prior_source = ""
+    var receipt_indices: Dict<text, i64> = {}
+    var receipt_index = 0
+    while receipt_index < ctx.cold_hir_typed_receipts.len():
+        val source_identity =
+            ctx.cold_hir_typed_receipts[receipt_index].seed.source_identity
+        if source_identity == "" or receipt_indices.has(source_identity):
+            return Err("runtime/std native v2 duplicate SCV source receipt")
+        receipt_indices[source_identity] = receipt_index
+        receipt_index = receipt_index + 1
+    for member in selected:
+        if (prior_source != "" and
+                compile_source_inventory_identity_cmp_v1(
+                    member.source_identity, prior_source) <= 0) or
+                member.source_digest == "" or
+                not ctx.runtime_std_hir_emissions.has(member.source_identity) or
+                not ctx.runtime_std_mir_emissions.has(member.source_identity) or
+                not ctx.runtime_std_cfg_decisions.has(member.source_identity):
+            return Err("runtime/std native v2 selected source lacks live evidence")
+        prior_source = member.source_identity
+        if not receipt_indices.has(member.source_identity):
+            return Err("runtime/std native v2 source absent from SCV")
+        val matched = receipt_indices[member.source_identity]
+        val seed = ctx.cold_hir_typed_receipts[matched].seed
+        if seed.source_digest != member.source_digest or
+                seed.inventory_digest !=
+                    ctx.runtime_std_full_inventory_selection!.source_inventory_digest:
+            return Err("runtime/std native v2 source differs from SCV")
+        val name = ctx.cold_hir_typed_receipts[matched].seed.module_identity
+        if name == "" or name.contains("/") or name.contains("\\") or
+                name.contains("..") or names.contains(name) or
+                not ctx.mir_modules.has(name):
+            return Err("runtime/std native v2 module ownership invalid")
+        val hir_emission = ctx.runtime_std_hir_emissions[member.source_identity]
+        val mir_emission = ctx.runtime_std_mir_emissions[member.source_identity]
+        if hir_emission.module_identity != name or
+                hir_emission.source_digest != member.source_digest or
+                mir_emission.module_identity != name or
+                mir_emission.source_digest != member.source_digest:
+            return Err("runtime/std native v2 HIR/MIR ownership differs")
+        val cfg = ctx.runtime_std_cfg_decisions[member.source_identity]
+        if not frontend_cfg_receipt_valid_v1(cfg,
+                member.source_identity, member.source_digest,
+                expected_target):
+            return Err("runtime/std native v2 target cfg receipt invalid")
+        val hir_digest = _runtime_std_hir_emission_digest_v2(ctx,
+            member.source_identity, member.source_digest, name)
+        if hir_digest == "" or hir_emission.native_emit_witness == nil or
+                not runtime_std_native_emit_witness_valid_v1(
+                    hir_emission.native_emit_witness!,
+                    member.source_identity, member.source_digest, name,
+                    expected_target, backend_name, hir_digest):
+            return Err("runtime/std native v2 live HIR witness invalid")
+        val witness = hir_emission.native_emit_witness!
+        val mir = ctx.mir_modules[name]
+        var kind = RuntimeStdNativeOutcomeKindV2.code_object
+        if mir.functions.len() > 0 or mir.statics.len() > 0:
+            if witness.active_function_count == 0 and
+                    witness.active_data_count == 0 and
+                    witness.active_runtime_init_count == 0:
+                return Err("runtime/std native v2 MIR code lacks HIR witness")
+            code_selected.push(member)
+        else:
+            if mir.statics.len() > 0 or witness.active_function_count != 0 or
+                    witness.active_data_count != 0 or
+                    witness.active_runtime_init_count != 0:
+                return Err("runtime/std native v2 active source needs object codegen")
+            kind = if frontend_cfg_excluded_emit_count_v1(cfg) > 0:
+                RuntimeStdNativeOutcomeKindV2.cfg_inactive
+            else: RuntimeStdNativeOutcomeKindV2.active_objectless
+        names.push(name)
+        kinds.push(kind)
+        hir_digests.push(hir_digest)
+        cfg_digests.push(cfg.decision_digest)
+    if code_selected.len() == 0:
+        return Err("runtime/std native v2 package has no code objects")
+    val opt_level = driver_effective_native_opt_level(ctx,
+        ctx.options.release)
+    val request = driver_aot_backend_plugin_request_v1(
+        ctx.options.backend, expected_target, target_cpu, opt_level,
+        ctx.options.backend_plugin_path)
+    val code_result = match BackendSessionOwnedLeaseV2.open(request):
+        case Err(_):
+            return Err("runtime/std native v2 backend session unavailable")
+        case Ok(opened):
+            var session = opened
+            if session.backend_name != backend_name or
+                    session.receipt_hash == "":
+                val _closed = session.close()
+                return Err("runtime/std native v2 provider receipt unavailable")
+            val result = _runtime_std_compile_members_with_session_v1(
+                ctx, code_selected, artifact_root, target_cpu, session, true)
+            if not session.close():
+                return Err("runtime/std native v2 backend session close failed")
+            result
+    if code_result.is_err(): return Err(code_result.unwrap_err())
+    val compiled_code = code_result.unwrap()
+    if compiled_code.len() != code_selected.len():
+        return Err("runtime/std native v2 code member count differs")
+    var members: [RuntimeStdNativeMemberV2] = []
+    var code_index = 0
+    var index = 0
+    while index < selected.len():
+        val selected_member = selected[index]
+        val kind = kinds[index]
+        var body = runtime_std_mir_body_payload_v1(
+            ctx.mir_modules[names[index]], selected_member.source_identity,
+            selected_member.source_digest)
+        if body.is_err(): return Err(body.unwrap_err())
+        var object_digest = ""
+        var object_bytes = 0
+        var capsule_digest = ""
+        var capsule: FrozenNativeModuleCapsuleV1? = nil
+        if kind == RuntimeStdNativeOutcomeKindV2.code_object:
+            if code_index >= compiled_code.len() or
+                    compiled_code[code_index].source_identity !=
+                        selected_member.source_identity or
+                    compiled_code[code_index].source_digest !=
+                        selected_member.source_digest:
+                return Err("runtime/std native v2 code source order differs")
+            val compiled_member = compiled_code[code_index]
+            body = Ok(compiled_member.mir_body)
+            capsule = Some(compiled_member.capsule)
+            val bytes = file_read_regular_no_follow_bounded_bytes(
+                compiled_member.capsule.object_path, 128 * 1024 * 1024)
+            if bytes.is_err() or bytes.unwrap().len() < 4:
+                return Err("runtime/std native v2 object readback unavailable")
+            object_digest = sha256_u8_hex(bytes.unwrap())
+            object_bytes = bytes.unwrap().len()
+            capsule_digest = sha256_text(
+                compiled_member.capsule.capsule_identity)
+            code_index = code_index + 1
+        val key = runtime_std_native_semantic_action_key_v2(
+            kind, selected_member.source_identity,
+            selected_member.source_digest, expected_target,
+            backend_name, hir_digests[index], body.unwrap().digest,
+            cfg_digests[index])
+        val outcome = RuntimeStdNativeOutcomeReceiptV2(
+            kind, selected_member.source_identity,
+            selected_member.source_digest, expected_target,
+            hir_digests[index], body.unwrap().digest,
+            cfg_digests[index], key, object_digest, object_bytes,
+            capsule_digest)
+        members.push(RuntimeStdNativeMemberV2(outcome,
+            body.unwrap(), capsule))
+        index = index + 1
+    if code_index != compiled_code.len():
+        return Err("runtime/std native v2 unconsumed code member")
+    Ok(members)
+
+# V2 claims the manager-budgeted action. Code objects and proven objectless
+# sources retain distinct per-source outcomes under one observed action.
+pub fn driver_runtime_std_compile_native_action_v2(
+    ctx: CompileContext, policy: RuntimeStdMembershipPolicyOutputV1,
+    sources: NativeFullInventorySourcesV1, package_identity: text,
+    expected_index_digest: text, artifact_root: text,
+    object_store_root: text, target_cpu: text, expected_target: text,
+    authority: RuntimeStdPackageAuthorityV1,
+    budget: RuntimeStdNativeActionBudgetV2
+) -> Result<RuntimeStdNativeActionEmissionV2, text>:
+    val expected_policy_digest = sha256_text(
+        "simple/runtime-std-membership-policy/v1\n" +
+        "index={expected_index_digest}\n" +
+        "producer={authority.compiler_digest}\n" +
+        "variant={authority.config_digest}\n" +
+        "snapshot={sources.snapshot_inventory_digest}\n" +
+        "source-inventory={sources.source_inventory_digest}\n" +
+        "membership={policy.membership_digest}")
+    if authority.target_triple != expected_target or
+            policy.policy_digest != expected_policy_digest or
+            not runtime_std_native_directory_chain_real_v1(object_store_root):
+        return Err("runtime/std native v2 target or object store invalid")
+    val action = runtime_std_build_action_v2(
+        authority, package_identity, budget)
+    if action == nil:
+        return Err("runtime/std native v2 package action unavailable")
+    var graph = PersistedBuildGraphV1("pending", "",
+        action!.snapshot_revision, [action!])
+    val generation = persisted_graph_digest_v1(graph)
+    if generation == "":
+        return Err("runtime/std native v2 action graph digest unavailable")
+    graph.generation = generation
+    if persisted_graph_validate_v1(graph) != "ok":
+        return Err("runtime/std native v2 action graph invalid")
+    val pool_budget = BuildPoolBudgetV1(action!.pool, 1,
+        action!.memory_budget_bytes)
+    val owner_token = sha256_text("runtime-std-native-action-owner-v2|" +
+        package_identity + "|" + generation + "|" +
+        getpid().to_text() + "|" + artifact_root)
+    val claim = coordinator_claim_v1(
+        coordinator_new_v1(graph, [pool_budget]), action!.action_id,
+        owner_token)
+    if not claim.claim.valid:
+        return Err("runtime/std native v2 action claim failed: " +
+            claim.claim.reason)
+    val compiled = _runtime_std_compile_native_members_v2(
+        ctx, policy, sources, package_identity, expected_index_digest,
+        artifact_root, target_cpu, expected_target)
+    if compiled.is_err(): return Err(compiled.unwrap_err())
+    if compiled.unwrap().len() == 0:
+        return Err("runtime/std native v2 package has no source members")
+    val members = compiled.unwrap()
+    var source_identities: [text] = []
+    var source_digests: [text] = []
+    for member in members:
+        source_identities.push(member.outcome.source_identity)
+        source_digests.push(member.outcome.source_digest)
+    val observed = runtime_std_native_observed_output_digest_v2(
+        members, get_effective_backend_name(
+            ctx.options.backend, ctx.options.release),
+        expected_target, source_identities, source_digests,
+        object_store_root)
+    if observed.is_err(): return Err(observed.unwrap_err())
+    val peak_kb = process_peak_rss_kb()
+    if peak_kb <= 0 or peak_kb > 9223372036854775 or
+            not runtime_std_native_action_peak_admitted_v2(
+                budget, peak_kb * 1024):
+        return Err("runtime/std native v2 measured memory unavailable or over budget")
+    val output_digest = observed.unwrap()
+    val complete = coordinator_complete_v1(claim.coordinator,
+        action!.action_id, owner_token, true, false,
+        action!.restat_identity,
+        ["verified-native-outcomes-digest=" + output_digest],
+        peak_kb * 1024)
+    if not complete.commit.accepted or
+            complete.coordinator.runtime.len() != 1 or
+            complete.coordinator.runtime[0].result == nil:
+        return Err("runtime/std native v2 action completion rejected")
+    val result = complete.coordinator.runtime[0].result!
+    if not result.success or result.cancelled:
+        return Err("runtime/std native v2 action was not successful")
+    Ok(RuntimeStdNativeActionEmissionV2(members, output_digest, result))
+
 fn _compile_selected_module(backend_name: text, is_release: bool, opt_level: i64,
                             output_base: text, name: text, mir_module: MirModule,
                             storage_snapshot: FrozenStorageModuleSnapshotV1,
@@ -2548,8 +3590,10 @@ fn _compile_selected_module(backend_name: text, is_release: bool, opt_level: i64
         return _aot_compile_failure(name, "storage-snapshot-module-mismatch")
     if (env_get_nullable("SIMPLE_COMPILER_TRACE") ?? "") == "1":
         print "[NATIVE] select module:done"
-    if mir_module.functions.keys().len() == 0:
-        return _aot_compile_failure(name, "MIR module has no functions")
+    if mir_module.functions.keys().len() == 0 and
+            mir_module.statics.keys().len() == 0:
+        return _aot_compile_failure(name,
+            "MIR module has no functions or static data")
     val empty_native_obj = env_get_nullable("SIMPLE_BOOTSTRAP_EMPTY_NATIVE_OBJ") ?? ""
     if empty_native_obj == "1":
         val c_path = "{output_base}.{name}.bootstrap_empty.c"
@@ -2705,3 +3749,9 @@ fn _finish_selected_module_compile(
                 _aot_compile_failure(name, "backend produced no object code")
         case _:
             _aot_compile_failure(name, "backend result not Ok")
+
+export RuntimeStdNativeActionEmissionV1
+export RuntimeStdNativeActionEmissionV2
+export driver_runtime_std_compile_native_members_v1
+export driver_runtime_std_compile_native_action_v1
+export driver_runtime_std_compile_native_action_v2

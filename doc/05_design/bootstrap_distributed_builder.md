@@ -4,16 +4,18 @@ Status: shared protocol implemented; native qualification pending.
 
 ## Shared interface
 
-`std.common.build_manager.contracts` exports `BuildInputV1`, `BuildTaskV1`,
+`std.common.build_manager.contracts` exports `BuildInputV1`, `BuildLinkV1`, `BuildTaskV1`,
 `BuildHostV1`, `BuildResultV1`, `BuildRunV1`. Schema fields are defined once in
 that source. Validators return an empty error string on success:
 `builder_validate_task_v1`, `builder_validate_host_v1`,
 `builder_validate_run_v1`, `builder_validate_result_shape_v1`, and
 `builder_validate_result_v1(task, result)`.
 
-`builder_task_identity_v1` hashes unambiguous length-delimited scalar fields,
-counts and ordered lists, including task attempt, all three input identities,
-program/argv, cache key and timeout. Invalid tasks have no identity. Full-run
+`builder_task_identity_v1` uses the `simple-build-task-identity-v3` domain and
+hashes unambiguous length-delimited scalar fields, counts and ordered lists,
+including task attempt, all three input identities, program/argv, cache key,
+timeout, the required `memory_limit_bytes` cap, and ordered typed links.
+Invalid tasks have no identity. Full-run
 journal identity is SHA256 of `builder_encode_run_v1`, binding host configuration
 and scheduling policy as well as tasks.
 
@@ -26,8 +28,9 @@ atomic file-write facades. Parent directories must already exist.
 
 ## Wire format
 
-The first newline-terminated scalar is `SIMPLE-BUILD-TASK-1`,
-`SIMPLE-BUILD-RUN-2` or `SIMPLE-BUILD-RESULT-1`. Ordered scalar fields follow;
+The first newline-terminated scalar is `SIMPLE-BUILD-TASK-3`,
+`SIMPLE-BUILD-RUN-4` or `SIMPLE-BUILD-RESULT-1`. Earlier task/run headers
+reject rather than receiving an inferred memory cap or link list. Ordered scalar fields follow;
 arrays have an explicit canonical decimal count. Percent, tab, CR and LF encode
 as `%25`, `%09`, `%0D`, `%0A`. Decode once. Unknown escapes, leading-zero
 integers, negative zero, trailing fields, absent final newline, excess bounds
@@ -35,8 +38,11 @@ and truncated records reject. Arguments stay opaque data, never executable
 shell fragments. Codec and identity framing are separate deliberate formats.
 
 Task body order: id, attempt, phase, producer/source/toolchain digests, program,
-cache key, timeout, dependency count and IDs, argc and arguments, input count
-and path/digest pairs, output count and paths. Run prefix: keep-going 0/1,
+cache key, timeout, memory limit in bytes, dependency count and IDs, argc and arguments, input count
+and path/digest pairs, link count and kind/path/raw target/resolved path/target digest
+records, then output count and paths. Directory links have an empty target digest;
+file links require the exact SHA256 of a separately declared regular target.
+Run prefix: keep-going 0/1,
 max-attempts, host count, each host's id/transport/endpoint/workspace/worker-program/
 worker-digest/slots, then task count and task bodies. Result: task id, attempt, identity,
 host id, status, exit, cache hits/misses/stores, output count and path/digest pairs.
@@ -47,13 +53,32 @@ contain Unicode; field lengths follow the language text length semantics. File
 payload admission is separately bounded in bytes by the app reader. SHA256
 identities are 64 lowercase hex characters.
 
-Run wire version 2 requires `BuildHostV1.worker_digest`, the SHA256 of that
-host's compiled worker executable. Empty/malformed digests reject at admission;
+Run wire version 4 requires `BuildHostV1.worker_digest`, the SHA256 of that
+host's compiled worker executable, and every task's explicit memory cap in
+the inclusive range 1..1125899906842624 bytes. Empty/malformed digests and
+missing or out-of-range caps reject at admission;
 transport must compare actual executable bytes before executing. Task producer
 identity and worker identity are separate. Every host constructor must supply
 the worker digest; the stable source API names ending in `_v1` do not imply
-acceptance of the obsolete run wire format. Run version 1 is deliberately
+acceptance of obsolete wire formats. Run versions 1 through 3 are deliberately
 rejected, never silently upgraded or filled from the local manager image.
+
+The compiled emitter requires a canonical decimal cap with
+`--template WORKER WORKSPACE OUTPUT SLOTS --memory-limit-bytes N`,
+`--job TEMPLATE PROGRAM ROOT ID PHASE OUTPUT --memory-limit-bytes N --inputs FILE... -- ARGS...`,
+or `--job-from-inventory TEMPLATE PROGRAM ROOT ID PHASE OUTPUT INVENTORY --memory-limit-bytes N --links-inventory REL [--manifest ABS] -- ARGS...`.
+The link inventory is required even when empty. It is an exact sorted list of
+Stage 2 `link-dir-hex` and `link-hex` rows and is SHA-pinned alongside the
+regular inventory. The manager stages only declared regular files, creates
+confined links after their targets, and checks exact link text and target kind
+before worker launch and before admitting a successful result. Run, restore, resume and
+verify also check the immutable source links. A typed Phase 2 authority receipt
+and compiled pre/post authority verification establish that the target subtree
+inventory is complete; a path list alone cannot prove that completeness.
+The positional Stage 2 bootstrap emission inherits the template's explicit
+cap. The one-task job modes set a 24-hour task timeout. The cap and timeout
+are protocol admission values; native enforcement requires separate worker
+qualification.
 
 The current user ordering uses the permitted genuine Phase 1 seed to build
 the native manager, then retains that qualified manager through Phase 4.
@@ -70,7 +95,8 @@ allow `-1` for unobserved compiler telemetry; counts of stored files are not hit
 ## Validation and tests
 
 `test/01_unit/app/bootstrap_builder/contracts_codec_spec.spl` checks opaque argv,
-literal percent escaping, invalid/truncated records, integer overflow, portable
+literal percent escaping, invalid/truncated records, integer overflow, cap bounds
+and identity binding, portable
 paths, overlap, missing/cyclic dependencies, changed attempts, output completeness,
 and unknown telemetry. It supplies protocol evidence only after execution.
 

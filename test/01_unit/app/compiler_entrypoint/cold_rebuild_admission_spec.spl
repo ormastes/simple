@@ -38,7 +38,8 @@ fn snapshot_for_cold_rebuild(
     ScvCompileSnapshotV1(
         valid: true, reason: "ok", revision_id: revision,
         commit_id: graph.scv_commit_id, tree_id: graph.scv_tree_id,
-        inventory_digest: graph.inventory_digest, inventory_count: 1,
+        # Snapshot rows and source-inventory generations hash different bytes.
+        inventory_digest: sha256_text("snapshot-manifest-rows"), inventory_count: 1,
         snapshot_root: "/tmp/frozen", provenance_path: "/tmp/provenance",
         receipt_path: "/tmp/receipt", source_drifted: false)
 
@@ -54,12 +55,15 @@ describe "Target 6 cold graph rebuild admission":
         expect(old.generation!.entries.len()).to_equal(1)
         val changed = snapshot_for_cold_rebuild(graph, "revision-b")
         expect(compiler_entrypoint_index_transition_v1(
-            old, changed, false)).to_equal("stale-graph-rebuild-required")
+            old, changed, graph.inventory_digest, false)).to_equal("stale-graph-rebuild-required")
         expect(compiler_entrypoint_index_transition_v1(
-            old, changed, true)).to_equal("cold-rebuild-pending")
+            old, changed, graph.inventory_digest, true)).to_equal("cold-rebuild-pending")
         expect(package_module_index_read_current_v1(cache_root).digest).to_equal(
             old.digest)
         val unchanged = snapshot_for_cold_rebuild(graph, "revision-a")
         expect(compiler_entrypoint_index_transition_v1(
-            old, unchanged, false)).to_equal("bound")
+            old, unchanged, graph.inventory_digest, false)).to_equal("bound")
+        expect(compiler_entrypoint_index_transition_v1(
+            old, unchanged, sha256_text("wrong-source-inventory"),
+            false)).to_equal("stale-graph-rebuild-required")
         dir_remove(cache_root, true)

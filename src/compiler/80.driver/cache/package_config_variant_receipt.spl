@@ -1,0 +1,201 @@
+# Immutable compiler-authored variant receipt, bound to one published package
+# index generation. The grouped native preparer reads this exact typed key;
+# it must not reconstruct a variant from target/backend labels alone.
+
+use compiler.common.cache.canonical_identity.{canonical_identity_sort_texts}
+use compiler.driver.cache.package_module_index.{
+    PackageModuleIndexGenerationV1, package_module_index_digest_v1
+}
+use compiler.driver.cache.package_tldr_metadata.{
+    ConfigVariantKeyV1, config_variant_digest_v1
+}
+use std.common.build_manager.contracts.{builder_digest_valid_v1}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io.file_ops.{
+    file_create_exclusive, file_read_regular_no_follow_bounded
+}
+
+extern fn rt_dir_create_all(path: text) -> bool
+
+val PACKAGE_CONFIG_VARIANT_RECEIPT_MAX_BYTES_V1: i64 = 1024 * 1024
+
+struct PackageConfigVariantReceiptV1:
+    index_digest: text
+    producer_digest: text
+    variant_digest: text
+    variant: ConfigVariantKeyV1
+
+fn _package_variant_sorted_unique_v1(values: [text]) -> [text]:
+    val sorted = canonical_identity_sort_texts(values)
+    var result: [text] = []
+    for value in sorted:
+        if result.len() == 0 or result[result.len() - 1] != value:
+            result = result.push(value)
+    result
+
+fn _package_variant_canonical_v1(variant: ConfigVariantKeyV1) -> ConfigVariantKeyV1:
+    ConfigVariantKeyV1(
+        variant.target_triple, variant.backend,
+        _package_variant_sorted_unique_v1(variant.features),
+        variant.build_mode, variant.language_abi,
+        _package_variant_sorted_unique_v1(variant.normalized_options),
+        _package_variant_sorted_unique_v1(variant.environment_inputs))
+
+fn package_config_variant_receipt_path_v1(
+    cache_root: text, index_digest: text
+) -> text:
+    if cache_root == "" or not builder_digest_valid_v1(index_digest):
+        return ""
+    "{cache_root}/package-module-index-v1/{index_digest}.variant"
+
+fn package_config_variant_receipt_encode_v1(
+    value: PackageConfigVariantReceiptV1
+) -> text:
+    if not builder_digest_valid_v1(value.index_digest) or
+            not builder_digest_valid_v1(value.producer_digest):
+        return ""
+    val variant = _package_variant_canonical_v1(value.variant)
+    val digest = config_variant_digest_v1(variant)
+    if digest == "" or digest != value.variant_digest:
+        return ""
+    var lines: [text] = [
+        "simple-package-config-variant-receipt-v1",
+        "index={value.index_digest}",
+        "producer={value.producer_digest}",
+        "variant={digest}",
+        "target={variant.target_triple}",
+        "backend={variant.backend}",
+        "build_mode={variant.build_mode}",
+        "language_abi={variant.language_abi}",
+        "features={variant.features.len()}"
+    ]
+    for feature in variant.features:
+        lines = lines.push("feature={feature}")
+    lines = lines.push("options={variant.normalized_options.len()}")
+    for option in variant.normalized_options:
+        lines = lines.push("option={option}")
+    lines = lines.push("environment={variant.environment_inputs.len()}")
+    for input in variant.environment_inputs:
+        lines = lines.push("input={input}")
+    val encoded = lines.join("\n")
+    if encoded.len() > PACKAGE_CONFIG_VARIANT_RECEIPT_MAX_BYTES_V1:
+        return ""
+    encoded
+
+fn package_config_variant_receipt_decode_v1(
+    content: text
+) -> Result<PackageConfigVariantReceiptV1, text>:
+    if content == "" or content.len() > PACKAGE_CONFIG_VARIANT_RECEIPT_MAX_BYTES_V1:
+        return Err("variant-receipt-size-invalid")
+    val lines = content.split("\n")
+    if lines.len() < 11:
+        return Err("variant-receipt-format-invalid")
+    if lines[0] != "simple-package-config-variant-receipt-v1" or
+            not lines[1].starts_with("index=") or
+            not lines[2].starts_with("producer=") or
+            not lines[3].starts_with("variant=") or
+            not lines[4].starts_with("target=") or
+            not lines[5].starts_with("backend=") or
+            not lines[6].starts_with("build_mode=") or
+            not lines[7].starts_with("language_abi=") or
+            not lines[8].starts_with("features="):
+        return Err("variant-receipt-format-invalid")
+    val index_digest = lines[1].substring(6)
+    val producer_digest = lines[2].substring(9)
+    val variant_digest = lines[3].substring(8)
+    val feature_count = lines[8].substring(9).to_i64() ?? -1
+    if feature_count < 0 or feature_count > 4096:
+        return Err("variant-receipt-feature-count-invalid")
+    var cursor = 9
+    var features: [text] = []
+    var index = 0
+    while index < feature_count:
+        if cursor >= lines.len() or not lines[cursor].starts_with("feature="):
+            return Err("variant-receipt-feature-invalid")
+        features = features.push(lines[cursor].substring(8))
+        cursor = cursor + 1
+        index = index + 1
+    if cursor >= lines.len() or not lines[cursor].starts_with("options="):
+        return Err("variant-receipt-options-missing")
+    val option_count = lines[cursor].substring(8).to_i64() ?? -1
+    if option_count < 0 or option_count > 4096:
+        return Err("variant-receipt-option-count-invalid")
+    cursor = cursor + 1
+    var options: [text] = []
+    index = 0
+    while index < option_count:
+        if cursor >= lines.len() or not lines[cursor].starts_with("option="):
+            return Err("variant-receipt-option-invalid")
+        options = options.push(lines[cursor].substring(7))
+        cursor = cursor + 1
+        index = index + 1
+    if cursor >= lines.len() or not lines[cursor].starts_with("environment="):
+        return Err("variant-receipt-environment-missing")
+    val environment_count = lines[cursor].substring(12).to_i64() ?? -1
+    if environment_count < 0 or environment_count > 4096:
+        return Err("variant-receipt-environment-count-invalid")
+    cursor = cursor + 1
+    var environment: [text] = []
+    index = 0
+    while index < environment_count:
+        if cursor >= lines.len() or not lines[cursor].starts_with("input="):
+            return Err("variant-receipt-input-invalid")
+        environment = environment.push(lines[cursor].substring(6))
+        cursor = cursor + 1
+        index = index + 1
+    if cursor != lines.len():
+        return Err("variant-receipt-trailing-fields")
+    val variant = ConfigVariantKeyV1(
+        lines[4].substring(7), lines[5].substring(8), features,
+        lines[6].substring(11), lines[7].substring(13), options, environment)
+    val receipt = PackageConfigVariantReceiptV1(
+        index_digest, producer_digest, variant_digest, variant)
+    if package_config_variant_receipt_encode_v1(receipt) != content:
+        return Err("variant-receipt-noncanonical")
+    Ok(receipt)
+
+fn package_config_variant_receipt_read_v1(
+    path: text, expected_digest: text
+) -> Result<PackageConfigVariantReceiptV1, text>:
+    if path == "" or not builder_digest_valid_v1(expected_digest):
+        return Err("variant-receipt-read-authority-invalid")
+    val read = file_read_regular_no_follow_bounded(
+        path, PACKAGE_CONFIG_VARIANT_RECEIPT_MAX_BYTES_V1)
+    if val Err(_) = read:
+        return Err("variant-receipt-unreadable")
+    val content = read.unwrap()
+    if sha256_text(content) != expected_digest:
+        return Err("variant-receipt-digest-mismatch")
+    package_config_variant_receipt_decode_v1(content)
+
+fn package_config_variant_receipt_publish_v1(
+    cache_root: text, generation: PackageModuleIndexGenerationV1,
+    variant: ConfigVariantKeyV1
+) -> Result<text, text>:
+    val index_digest = package_module_index_digest_v1(generation)
+    val path = package_config_variant_receipt_path_v1(cache_root, index_digest)
+    val receipt = PackageConfigVariantReceiptV1(
+        index_digest, generation.producer_digest,
+        generation.variant_digest, variant)
+    val encoded = package_config_variant_receipt_encode_v1(receipt)
+    if path == "" or encoded == "":
+        return Err("variant-receipt-publish-authority-invalid")
+    if not rt_dir_create_all("{cache_root}/package-module-index-v1"):
+        return Err("variant-receipt-directory-unavailable")
+    if not file_create_exclusive(path, encoded):
+        val existing = file_read_regular_no_follow_bounded(
+            path, PACKAGE_CONFIG_VARIANT_RECEIPT_MAX_BYTES_V1)
+        if val Err(_) = existing:
+            return Err("variant-receipt-publish-conflict")
+        if existing.unwrap() != encoded:
+            return Err("variant-receipt-publish-conflict")
+    val digest = sha256_text(encoded)
+    val admitted = package_config_variant_receipt_read_v1(path, digest)
+    if admitted.is_err():
+        return Err("variant-receipt-publish-readback-invalid")
+    Ok(digest)
+
+export PackageConfigVariantReceiptV1
+export package_config_variant_receipt_path_v1
+export package_config_variant_receipt_encode_v1, package_config_variant_receipt_decode_v1
+export package_config_variant_receipt_read_v1, package_config_variant_receipt_publish_v1

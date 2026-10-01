@@ -6,6 +6,12 @@ use std.nogc_async_mut.sosix.environment.{sosix_env_get_nullable, sosix_cwd}
 use compiler.driver.cache.cold_hir_semantic_seed_v1.{
     cold_hir_typed_receipts_from_lowered_sources_v1
 }
+use compiler.driver.smf.runtime_std_hir_emission_v1.{
+    RuntimeStdHirModuleEmissionV1, runtime_std_hir_emit_module_v1
+}
+use compiler.driver.smf.runtime_std_native_emit_witness_v1.{
+    runtime_std_native_emit_witness_from_live_hir_v1}
+use compiler.backend.backend.backend_helpers.{get_effective_backend_name}
 use std.scv.compile_source_inventory.{compile_source_inventory_read_current_v1,
     CompileSourceInventoryBindingV1, compile_source_inventory_binding_reason_v1,
     compile_source_inventory_snapshot_cache_root_v1}
@@ -24,6 +30,7 @@ use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module, hirlow
 use compiler.hir.hir_lowering.context_helpers.*
 use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName, module_surfaces_from_modules}
 use compiler.frontend.frontend.{parse_full_frontend, parse_full_frontend_in_borrowed_scope}
+use compiler.frontend.frontend_target_cfg_receipt_v1.{frontend_cfg_receipt_valid_v1}
 use compiler.frontend.core.lexer.{lexer_release_parse_source_globals}
 use compiler.core.ast.{ast_reset}
 use compiler.core.parser.{par_had_error_get}
@@ -143,23 +150,42 @@ impl CompilerDriver:
     # later MIR path evicts HIR. Warm routes never read the inventory here.
     me capture_cold_hir_typed_receipts_v1() -> bool:
         self.ctx.cold_hir_typed_receipts = []
+        self.ctx.runtime_std_hir_emissions = {}
         self.ctx.cold_hir_native_object_paths = {}
         self.ctx.cold_hir_native_capsule_identities = {}
         self.ctx.cold_hir_objectless_modules = {}
         self.ctx.cold_hir_native_object_artifacts = []
+        val full_inventory_cold =
+            (sosix_env_get_nullable("SIMPLE_PACKAGE_INDEX_FULL_INVENTORY") ?? "") == "1"
         val compatibility_markers_present =
             (sosix_env_get_nullable("SIMPLE_PACKAGE_INDEX_PRODUCER_DIGEST") ?? "") != "" and
             (sosix_env_get_nullable("SIMPLE_PACKAGE_INDEX_ROOT_GENERATION") ?? "") != "" and
             (sosix_env_get_nullable("SIMPLE_PACKAGE_INDEX_VARIANT_DIGEST") ?? "") != ""
-        val cold_init = (sosix_env_get_nullable("SIMPLE_PACKAGE_INDEX_COLD_INIT") ?? "") == "1" or
+        val cold_init = full_inventory_cold or
+            (sosix_env_get_nullable("SIMPLE_PACKAGE_INDEX_COLD_INIT") ?? "") == "1" or
             not compatibility_markers_present
         if not cold_init:
             return true
+        if full_inventory_cold and self.ctx.runtime_std_full_inventory_selection == nil:
+            self.ctx.add_error("full inventory typed HIR selection missing")
+            return false
         val source_root = sosix_env_get_nullable("SIMPLE_SCV_SNAPSHOT_ROOT") ?? ""
         val inventory_binding = CompileSourceInventoryBindingV1(
             snapshot_manifest_digest: sosix_env_get_nullable("SIMPLE_SCV_INVENTORY_DIGEST") ?? "",
             source_inventory_digest: sosix_env_get_nullable("SIMPLE_SCV_SOURCE_INVENTORY_DIGEST") ?? "")
+        var typed_hir_artifact_root = ""
+        if full_inventory_cold:
+            val selection = self.ctx.runtime_std_full_inventory_selection!
+            typed_hir_artifact_root = selection.artifact_root
+            if typed_hir_artifact_root == "" or
+                    selection.snapshot_manifest_digest != inventory_binding.snapshot_manifest_digest or
+                    selection.source_inventory_digest != inventory_binding.source_inventory_digest:
+                self.ctx.add_error("full inventory typed HIR selection differs from SCV binding")
+                return false
         if source_root == "" and inventory_binding.snapshot_manifest_digest == "" and inventory_binding.source_inventory_digest == "":
+            if full_inventory_cold:
+                self.ctx.add_error("full inventory cold HIR authority missing")
+                return false
             return true
         if source_root == "" or inventory_binding.snapshot_manifest_digest == "" or inventory_binding.source_inventory_digest == "":
             self.ctx.add_error("cold HIR receipt authority incomplete")
@@ -213,6 +239,57 @@ impl CompilerDriver:
                         self.ctx.add_error("cold HIR receipt capture failed: {reason}")
                         return false
                     case Ok(receipts):
+                        if full_inventory_cold:
+                            val expected_count = (
+                                sosix_env_get_nullable(
+                                    "SIMPLE_PACKAGE_INDEX_EXPECTED_SOURCE_COUNT") ??
+                                "").to_i64() ?? -1
+                            if expected_count < 1 or
+                                    self.ctx.source_paths_owner.len() !=
+                                        expected_count or
+                                    receipts.len() != expected_count:
+                                self.ctx.add_error(
+                                    "full inventory cold HIR receipt count mismatch: expected={expected_count} sources={self.ctx.source_paths_owner.len()} receipts={receipts.len()}")
+                                return false
+                            var emitted: Dict<text, RuntimeStdHirModuleEmissionV1> = {}
+                            for receipt in receipts:
+                                val seed = receipt.seed
+                                if not self.ctx.runtime_std_cfg_decisions.has(seed.source_identity) or
+                                        not frontend_cfg_receipt_valid_v1(
+                                            self.ctx.runtime_std_cfg_decisions[seed.source_identity],
+                                            seed.source_identity, seed.source_digest,
+                                            self.ctx.native_target):
+                                    self.ctx.add_error("full inventory target cfg HIR source receipt mismatch: {seed.source_identity}")
+                                    return false
+                                if emitted.contains_key(seed.source_identity) or
+                                        not self.ctx.hir_modules.contains_key(seed.module_identity):
+                                    self.ctx.add_error("full inventory typed HIR emission owner mismatch: {seed.source_identity}")
+                                    return false
+                                match runtime_std_hir_emit_module_v1(
+                                        self.ctx.hir_modules[seed.module_identity],
+                                        seed.source_identity, seed.source_digest,
+                                        typed_hir_artifact_root):
+                                    case Err(reason):
+                                        self.ctx.add_error("full inventory typed HIR emission failed: {reason}")
+                                        return false
+                                    case Ok(value):
+                                        if value.module_identity != seed.module_identity:
+                                            self.ctx.add_error("full inventory typed HIR module identity changed: {seed.source_identity}")
+                                            return false
+                                        val backend = get_effective_backend_name(
+                                            self.ctx.options.backend, self.ctx.options.release)
+                                        val witness = runtime_std_native_emit_witness_from_live_hir_v1(
+                                            self.ctx.hir_modules[seed.module_identity],
+                                            value.semantic_payloads, seed.source_identity,
+                                            seed.source_digest, seed.module_identity,
+                                            self.ctx.native_target, backend)
+                                        if witness.is_err():
+                                            self.ctx.add_error("full inventory live HIR native emit witness failed: {witness.unwrap_err()}")
+                                            return false
+                                        var witnessed = value
+                                        witnessed.native_emit_witness = witness.unwrap()
+                                        emitted[seed.source_identity] = witnessed
+                            self.ctx.runtime_std_hir_emissions = emitted
                         self.ctx.cold_hir_typed_receipts = receipts
                         log_phase("phase3:cold-hir-receipts:done count={receipts.len()}")
                         return true
@@ -270,7 +347,16 @@ impl CompilerDriver:
     me lower_streaming_surface_source(lowering: HirLowering, source: SourceFile, is_entry: bool) -> Result<HirModule, text>:
         if not rt_transient_array_scope_begin():
             return Err("transient parser scope unavailable for {source.path}")
-        val module = parse_full_frontend_in_borrowed_scope(source.content, source.path, source.module_name, self.ctx.logger)
+        val module = if self.ctx.runtime_std_full_inventory_selection != nil:
+            val selected = self.parse_full_frontend_in_borrowed_scope_selected_v1(
+                source.content, source.path, source.module_name)
+            if selected.is_err():
+                val _ended = driver_end_transient_parse_scope()
+                return Err(selected.unwrap_err())
+            selected.unwrap()
+        else:
+            parse_full_frontend_in_borrowed_scope(
+                source.content, source.path, source.module_name, self.ctx.logger)
         driver_register_parser_module_source_aliases_v1(module, source.path)
         if par_had_error_get():
             return Err(driver_finish_failed_parse_scope(source.path))

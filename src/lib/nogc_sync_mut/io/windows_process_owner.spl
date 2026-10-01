@@ -566,9 +566,10 @@ export windows_process_file_digest_v1
 export _windows_process_wide_v1, _windows_process_pin_v1
 
 # Microsoft JOBOBJECT_EXTENDED_LIMIT_INFORMATION Win64 layout: 144 bytes,
-# JobMemoryLimit at120, PeakJobMemoryUsed at136. This measures aggregate committed
-# memory, not resident working-set bytes. Query while the native owner is live.
-@unsafe(reason: "queries actual retained JobObject aggregate memory accounting", capabilities: [ffi, raw_ptr])
+# JobMemoryLimit at120, PeakProcessMemoryUsed at128, PeakJobMemoryUsed at136.
+# This API has NO current aggregate JobMemoryUsed field. Only the lifetime
+# peak may be reported from this row.
+@unsafe(reason: "queries retained JobObject lifetime peak memory accounting", capabilities: [ffi, raw_ptr])
 fn windows_process_peak_memory_v1(lease: WindowsProcessLeaseV1) -> Result<i64, text>:
     if lease.slot < 0 or lease.slot >= _windows_process_slots_v1.len(): return Err("invalid Windows owner slot")
     val state = _windows_process_slots_v1[lease.slot]
@@ -578,7 +579,8 @@ fn windows_process_peak_memory_v1(lease: WindowsProcessLeaseV1) -> Result<i64, t
     val queried = QueryInformationJobObject(state.job, 9, information, 144u32, 0)
     val peak = if queried != 0: volatile_read_u64(information + 136) else: -1
     val released = HeapFree(state.heap, 0u32, information)
-    if queried == 0 or released == 0 or peak < 0: return Err("job memory accounting unavailable")
+    if queried == 0 or released == 0 or peak < 0:
+        return Err("job memory accounting unavailable")
     Ok(peak)
 
 export windows_process_start_with_memory_v1, windows_process_peak_memory_v1

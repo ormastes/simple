@@ -17,7 +17,8 @@ fn protocol_native_task() -> BuildTaskV1:
         source_digest: digest, toolchain_digest: digest, dependencies: [],
         program: "bin/llc", args: ["", "a b", "$(never-execute)", "%0A", "x\ty\nz"],
         inputs: [BuildInputV1(path: "input.ll", digest: digest)],
-        outputs: ["output.o"], cache_key: digest, timeout_ms: 0)
+        outputs: ["output.o"], cache_key: digest, timeout_ms: 0,
+        memory_limit_bytes: 1073741824, links: [])
 
 fn protocol_native_check(condition: bool, label: text) -> i64:
     if condition: return 0
@@ -28,7 +29,7 @@ fn main() -> i64:
     var failures: i64 = 0
     val task = protocol_native_task()
     val encoded = builder_encode_task_v1(task)
-    failures = failures + protocol_native_check(encoded.starts_with("SIMPLE-BUILD-TASK-1\n"), "versioned task wire")
+    failures = failures + protocol_native_check(encoded.starts_with("SIMPLE-BUILD-TASK-3\n"), "versioned task wire")
     match builder_decode_task_v1(encoded):
         case Ok(decoded):
             failures = failures + protocol_native_check(decoded.args.len() == 5, "argument count")
@@ -41,7 +42,7 @@ fn main() -> i64:
     match builder_decode_task_v1(encoded + "extra\n"):
         case Ok(decoded): failures = failures + protocol_native_check(false, "trailing fields accepted")
         case Err(reason): failures = failures + protocol_native_check(reason == "trailing wire fields", "trailing diagnostic")
-    match builder_decode_task_v1("SIMPLE-BUILD-TASK-1\nmodule_a\n"):
+    match builder_decode_task_v1("SIMPLE-BUILD-TASK-3\nmodule_a\n"):
         case Ok(decoded): failures = failures + protocol_native_check(false, "truncated input accepted")
         case Err(reason): failures = failures + protocol_native_check(reason == "truncated wire record", "truncation diagnostic")
     match builder_decode_task_v1(encoded.replace("module_a\n1\n", "module_a\n99999999999999999\n")):
@@ -60,10 +61,10 @@ fn main() -> i64:
     missing_digest_host.worker_digest = ""
     val missing_digest_run = BuildRunV1(tasks: [task], hosts: [missing_digest_host], keep_going: true, max_attempts: 2)
     failures = failures + protocol_native_check(builder_validate_run_v1(missing_digest_run) == "missing or invalid compiled worker digest", "required worker digest")
-    val legacy = builder_encode_run_v1(run).replace("SIMPLE-BUILD-RUN-2", "SIMPLE-BUILD-RUN-1")
+    val legacy = builder_encode_run_v1(run).replace("SIMPLE-BUILD-RUN-4", "SIMPLE-BUILD-RUN-3")
     match builder_decode_run_v1(legacy):
         case Ok(decoded): failures = failures + protocol_native_check(false, "legacy run wire accepted")
-        case Err(reason): failures = failures + protocol_native_check(reason == "invalid run wire header (compiled worker digest required)", "legacy wire rejection")
+        case Err(reason): failures = failures + protocol_native_check(reason == "invalid run wire header (typed links required)", "legacy wire rejection")
     var alias = protocol_native_task()
     alias.id = "MODULE_A"
     alias.outputs = ["alias.o"]

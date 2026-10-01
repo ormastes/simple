@@ -1,0 +1,45 @@
+"""Relocations in a merged SMF Code section belong to one mapped function."""
+# @req: REQ-COMPILER-LINKER-001
+
+use compiler.loader.loader.smf_reloc_partition.{smf_partition_code_relocations_v1}
+use compiler.backend.linker.obj_taker.{SmfSymbol, SymbolType, SymbolBinding}
+use compiler.backend.linker.smf_reader_memory.{SmfRelocEntry}
+
+fn code_symbol(name: text, offset: i64, size: i64) -> SmfSymbol:
+    SmfSymbol(name: name, section_index: 0, offset: offset, size: size,
+        ty: SymbolType.Function, binding: SymbolBinding.Global,
+        is_generic_template: false, template_param_count: 0,
+        template_offset: 0)
+
+fn code_reloc(offset: i64, ty: i32) -> SmfRelocEntry:
+    SmfRelocEntry(offset: offset, symbol_index: 0, reloc_type: ty, addend: 3)
+
+describe "SMF code relocation ownership":
+    it "partitions two functions and rebases each patch offset":
+        val result = smf_partition_code_relocations_v1(
+            [code_reloc(4, 2), code_reloc(20, 1)],
+            [code_symbol("first", 0, 12), code_symbol("second", 16, 16)])
+        expect(result.is_ok()).to_equal(true)
+        val parts = result.unwrap()
+        expect(parts["first"].len()).to_equal(1)
+        expect(parts["second"].len()).to_equal(1)
+        expect(parts["first"][0].offset).to_equal(4)
+        expect(parts["second"][0].offset).to_equal(4)
+        expect(parts["second"][0].symbol_index).to_equal(0)
+
+    it "rejects a relocation that overruns its containing function":
+        val result = smf_partition_code_relocations_v1(
+            [code_reloc(9, 1)], [code_symbol("only", 0, 12)])
+        expect(result.is_err()).to_equal(true)
+
+    it "rejects overlapping owners instead of choosing one":
+        val result = smf_partition_code_relocations_v1(
+            [code_reloc(8, 2)],
+            [code_symbol("one", 0, 16), code_symbol("two", 8, 16)])
+        expect(result.is_err()).to_equal(true)
+
+    it "rejects unclaimed and unknown relocations":
+        expect(smf_partition_code_relocations_v1(
+            [code_reloc(64, 2)], [code_symbol("only", 0, 16)]).is_err()).to_equal(true)
+        expect(smf_partition_code_relocations_v1(
+            [code_reloc(0, 99)], [code_symbol("only", 0, 16)]).is_err()).to_equal(true)

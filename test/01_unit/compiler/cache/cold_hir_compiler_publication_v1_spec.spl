@@ -1,0 +1,91 @@
+use std.spec.{describe, it, expect}
+use std.common.crypto.sha256.{sha256_text}
+use std.scv.compile_snapshot.{ScvCompileSnapshotV1}
+use std.scv.compile_source_inventory_core.{CompileSourceInventoryV1}
+use compiler.driver.action_graph.build_action_v1.{BuildActionResultV1}
+use compiler.driver.driver_build.native_full_inventory_sources.{
+    NativeFullInventorySourcesV1
+}
+use compiler.driver.cache.cold_hir_compiler_publication_v1.{
+    ColdHirCompilerArchiveReceiptV1, ColdHirCompilerPublishInputV1,
+    cold_hir_compiler_archive_receipts_digest_v1,
+    cold_hir_compiler_publish_full_v2
+}
+use compiler.driver.cache.package_module_index_builder.{
+    PackageModuleIndexBuildAuthorityV1
+}
+use compiler.driver.cache.package_tldr_metadata.{ConfigVariantKeyV1}
+use compiler.driver.smf.runtime_std_compiled_publication.{
+    RuntimeStdCompiledPackageReceiptV1
+}
+use compiler.driver.smf.runtime_std_package_set.{
+    RuntimeStdPackageAuthorityV1
+}
+
+describe "cold HIR compiler publication pins":
+    it "hashes unique sorted package receipt rows with the verifier wire":
+        val a = sha256_text("a-receipt")
+        val b = sha256_text("b-receipt")
+        val unsorted = [
+            ColdHirCompilerArchiveReceiptV1("simple.std", b),
+            ColdHirCompilerArchiveReceiptV1("simple.runtime", a)]
+        val digest = cold_hir_compiler_archive_receipts_digest_v1(unsorted)
+        expect(digest.is_ok()).to_equal(true)
+        expect(digest.unwrap()).to_equal(sha256_text(
+            "simple.runtime {a}\nsimple.std {b}\n"))
+        val sorted = [unsorted[1], unsorted[0]]
+        expect(cold_hir_compiler_archive_receipts_digest_v1(
+            sorted).unwrap()).to_equal(digest.unwrap())
+
+    it "rejects ambiguous, duplicate, and unpinned archive rows":
+        val good = ColdHirCompilerArchiveReceiptV1(
+            "simple.runtime", sha256_text("receipt"))
+        expect(cold_hir_compiler_archive_receipts_digest_v1(
+            []).is_err()).to_equal(true)
+        expect(cold_hir_compiler_archive_receipts_digest_v1(
+            [good, good]).is_err()).to_equal(true)
+        expect(cold_hir_compiler_archive_receipts_digest_v1(
+            [ColdHirCompilerArchiveReceiptV1(
+                "simple std", good.receipt_digest)]).is_err()).to_equal(true)
+        expect(cold_hir_compiler_archive_receipts_digest_v1(
+            [ColdHirCompilerArchiveReceiptV1(
+                "simple.std", good.receipt_digest.upper())]).is_err()).to_equal(true)
+
+    it "refuses publication without exact full-inventory compiler outputs":
+        val source_digest = sha256_text("source")
+        val inventory = CompileSourceInventoryV1(1, 1, [])
+        val authority = PackageModuleIndexBuildAuthorityV1(
+            sha256_text("producer"), "root", "revision", "commit", "tree",
+            sha256_text("inventory"), ConfigVariantKeyV1(
+                "x86_64-unknown-linux-gnu", "llvm", [], "debug",
+                "abi-v1", [], []))
+        val sources = NativeFullInventorySourcesV1(
+            ["/frozen/a.spl"], ["a.spl"], [source_digest], [6], 1,
+            sha256_text("snapshot"), authority.inventory_digest,
+            sha256_text("receipt"))
+        val snapshot = ScvCompileSnapshotV1(
+            true, "ok", "revision", "commit", "tree",
+            sources.snapshot_inventory_digest, 1, "/frozen",
+            "/frozen/SCV_COMPILE_SNAPSHOT",
+            "/frozen/SCV_COMPILE_RECEIPT", false)
+        val runtime_authority = RuntimeStdPackageAuthorityV1(
+            authority.producer_digest, sha256_text("action"),
+            sha256_text("runtime"), sha256_text("std"),
+            sha256_text("variant"), authority.variant.target_triple,
+            "revision")
+        val action = BuildActionResultV1(
+            "", "", false, false, "", "", [], 0)
+        val runtime_receipt = RuntimeStdCompiledPackageReceiptV1(
+            "simple.runtime", [], [], "", "", "",
+            authority.producer_digest, [], [], action, "", "")
+        val std_receipt = RuntimeStdCompiledPackageReceiptV1(
+            "simple.std", [], [], "", "", "",
+            authority.producer_digest, [], [], action, "", "")
+        val input = ColdHirCompilerPublishInputV1(
+            "/private/cache", "/private/artifacts", "", inventory,
+            sources, snapshot, authority, [], [], [], runtime_authority,
+            runtime_receipt, std_receipt)
+        val result = cold_hir_compiler_publish_full_v2(input)
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_equal(
+            "cold-compiler-full-inventory-incomplete")

@@ -1,0 +1,167 @@
+#!/bin/sh
+# Diagnostic hello proof created by an actual bounded compiler and executable run.
+set -eu
+die() { echo "provisional-hello: $*" >&2; exit 1; }
+regular() { [ -f "$1" ] && [ ! -L "$1" ]; }
+absolute() { case "$1" in /*|[A-Za-z]:/*) return 0 ;; *) return 1 ;; esac; }
+digest() { [ "${#1}" -eq 64 ] && case "$1" in *[!0-9a-f]*) return 1 ;; *) return 0 ;; esac; }
+positive() { case "$1" in ''|0|0*|*[!0-9]*) return 1 ;; *) [ "$1" -gt 0 ] 2>/dev/null ;; esac; }
+hash_file() { sha256sum "$1" | cut -d ' ' -f 1; }
+producer= producer_digest= source_checkout= source_snapshot= source_snapshot_digest=
+hello_source= hello_source_digest= output_root= target= memory_bytes= reserve_bytes=
+for arg in "$@"; do
+  case "$arg" in
+    --producer=*) producer=${arg#*=} ;;
+    --producer-digest=*) producer_digest=${arg#*=} ;;
+    --source-checkout=*) source_checkout=${arg#*=} ;;
+    --source-snapshot=*) source_snapshot=${arg#*=} ;;
+    --source-snapshot-digest=*) source_snapshot_digest=${arg#*=} ;;
+    --hello-source=*) hello_source=${arg#*=} ;;
+    --hello-source-digest=*) hello_source_digest=${arg#*=} ;;
+    --output-root=*) output_root=${arg#*=} ;;
+    --target=*) target=${arg#*=} ;;
+    --memory-bytes=*) memory_bytes=${arg#*=} ;;
+    --reserve-bytes=*) reserve_bytes=${arg#*=} ;;
+    *) die "unknown option: $arg" ;;
+  esac
+done
+for path in "$producer" "$source_checkout" "$source_snapshot" "$hello_source" "$output_root"; do
+  [ -n "$path" ] && absolute "$path" || die "absolute path required: $path"
+  case "$path" in *'
+'*|*'='*) die "path is unsafe for typed diagnostic receipt" ;; esac
+done
+for pin in "$producer:$producer_digest" "$source_snapshot:$source_snapshot_digest" \
+    "$hello_source:$hello_source_digest"; do
+  pin_path=${pin%:*} pin_sha=${pin##*:}
+  digest "$pin_sha" && regular "$pin_path" && [ "$(hash_file "$pin_path")" = "$pin_sha" ] \
+    || die "missing or changed hello input: $pin_path"
+done
+[ -d "$source_checkout" ] && [ ! -L "$source_checkout" ] || die "source checkout unavailable"
+source_checkout=$(CDPATH= cd -- "$source_checkout" && pwd -P) || die "source checkout unavailable"
+[ "$hello_source" = "$source_checkout/test/04_smoke/windows_native_hello.spl" ] ||
+  die "hello source must be exact pinned smoke fixture"
+[ -d "$source_checkout/src/runtime" ] && [ ! -L "$source_checkout/src" ] &&
+  [ ! -L "$source_checkout/src/runtime" ] || die "runtime source unavailable or linked"
+case "$target" in x86_64-pc-windows-msvc) suffix=.exe ;;
+  x86_64-unknown-linux-gnu|aarch64-unknown-linux-gnu) suffix= ;;
+  *) die "unsupported target" ;; esac
+for number in "$memory_bytes" "$reserve_bytes"; do positive "$number" || die "positive memory cap and reserve required"; done
+output_parent=$(CDPATH= cd -- "$(dirname -- "$output_root")" && pwd -P) ||
+  die "output parent must already exist"
+output_leaf=$(basename -- "$output_root")
+case "$output_leaf" in ''|.|..) die "invalid output leaf" ;; esac
+output_root="$output_parent/$output_leaf"
+case "$output_root/" in "$source_checkout/"*) die "output overlaps source" ;; esac
+case "$source_checkout/" in "$output_root/"*) die "source overlaps output" ;; esac
+[ ! -e "$output_root" ] || die "existing hello root must be preserved; use a new root"
+mkdir -p "$output_root/cache/hello" "$output_root/tmp" || die "hello root unavailable"
+output_root=$(CDPATH= cd -- "$output_root" && pwd -P) || die "hello root unavailable"
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P) || die "repository unavailable"
+BOOTSTRAP_STAGE3_FACADE_PATH="$repo_root/scripts/check/lib/bootstrap-stage3-provenance.shs"
+export BOOTSTRAP_STAGE3_FACADE_PATH
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+watchdog="$repo_root/scripts/bootstrap/run-process-group-timeout.shs"
+regular "$watchdog" || die "process tree watchdog unavailable"
+verify_inputs() {
+  regular "$producer" && [ "$(hash_file "$producer")" = "$producer_digest" ] &&
+    regular "$source_snapshot" && [ "$(hash_file "$source_snapshot")" = "$source_snapshot_digest" ] &&
+    regular "$hello_source" && [ "$(hash_file "$hello_source")" = "$hello_source_digest" ] \
+    || die "producer, source authority or hello source changed"
+  observed="$output_root/source-verify.$$.txt"
+  bootstrap_stage3_source_snapshot "$observed" "$source_checkout" || die "source snapshot failed"
+  cmp -s "$observed" "$source_snapshot" || die "source differs from pinned diagnostic snapshot: $observed"
+  rm -f "$observed"
+}
+available_memory() {
+  case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*) powershell.exe -NoProfile -Command '[int64](Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory*1024' | tr -d '\r[:space:]' ;;
+    Linux*) awk '$1=="MemAvailable:" { printf "%.0f\n", $2*1024; found=1 } END { if (!found) exit 1 }' /proc/meminfo ;;
+    *) die "unsupported memory probe" ;;
+  esac
+}
+verify_inputs
+available=$(available_memory) || die "host memory probe failed"
+case "$available" in ''|*[!0-9]*) die "host memory probe invalid" ;; esac
+[ "$available" -ge "$((memory_bytes + reserve_bytes))" ] || die "host memory below cap plus reserve"
+available_disk=$(df -Pk "$output_root" | awk 'NR==2 { printf "%.0f\n", $4*1024 }') \
+  || die "host disk probe failed"
+case "$available_disk" in ''|*[!0-9]*) die "host disk probe invalid" ;; esac
+[ "$available_disk" -ge 35433480192 ] ||
+  die "host disk below 8 GiB hello estimate plus 25 GiB retained reserve"
+cap_kib=$((memory_bytes / 1024))
+positive "$cap_kib" || die "process tree cap invalid"
+hello_executable="$output_root/hello$suffix"
+cache_root="$output_root/cache/hello"
+runtime_root="$source_checkout/src/runtime"
+compile_log="$output_root/compile.log"
+compile_command="$output_root/compile.argv"
+run_stdout="$output_root/run.stdout"
+run_stderr="$output_root/run.stderr"
+if (CDPATH= cd -- "$source_checkout" && \
+  env -u SIMPLE_BOOTSTRAP_SESSION_ID -u SIMPLE_BOOTSTRAP_SESSION_EXEC \
+    TMPDIR="$output_root/tmp" SIMPLE_NO_STUB_FALLBACK=1 \
+    SIMPLE_BOOTSTRAP_RSS_CAP_MODE=enforce \
+    SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB="$cap_kib" \
+    "$watchdog" 600 5 "$producer" native-build --target "$target" --backend llvm \
+      --source src/compiler --source src/app --source src/lib --entry-closure \
+      --threads 1 --cache-dir "$cache_root" --mode one-binary \
+      --entry test/04_smoke/windows_native_hello.spl \
+      --runtime-bundle core-c-bootstrap --runtime-path "$runtime_root" \
+      -o "$hello_executable") >"$compile_log" 2>&1; then
+  :
+else
+  verify_inputs
+  die "hello native-build failed; compile log retained"
+fi
+verify_inputs
+regular "$hello_executable" || die "hello compiler produced no regular executable"
+if env -u SIMPLE_BOOTSTRAP_SESSION_ID -u SIMPLE_BOOTSTRAP_SESSION_EXEC \
+  TMPDIR="$output_root/tmp" SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB="$cap_kib" \
+  SIMPLE_BOOTSTRAP_RSS_CAP_MODE=enforce \
+  "$watchdog" 30 5 "$hello_executable" >"$run_stdout" 2>"$run_stderr"; then
+  :
+else
+  verify_inputs
+  die "hello executable failed; run logs retained"
+fi
+verify_inputs
+[ ! -s "$run_stderr" ] || die "hello executable wrote stderr"
+printf 'windows native hello\n' >"$output_root/expected.lf"
+printf 'windows native hello\r\n' >"$output_root/expected.crlf"
+cmp -s "$run_stdout" "$output_root/expected.lf" ||
+  cmp -s "$run_stdout" "$output_root/expected.crlf" || die "hello stdout differs"
+{
+  printf '%s\n' 'SIMPLE-PROVISIONAL-HELLO-COMMAND-1' \
+    "producer_path=$producer" "producer_digest=$producer_digest" \
+    "hello_source_path=$hello_source" "hello_source_digest=$hello_source_digest" \
+    "hello_executable_path=$hello_executable" "cache_root=$cache_root" \
+    "runtime_root=$runtime_root" "target=$target" 'backend=llvm' \
+    'compile_exit=0' 'run_exit=0' 'arg_count=27'
+  arg_number=0
+  for value in "$producer" native-build --target "$target" --backend llvm \
+      --source src/compiler --source src/app --source src/lib --entry-closure \
+      --threads 1 --cache-dir "$cache_root" --mode one-binary \
+      --entry test/04_smoke/windows_native_hello.spl \
+      --runtime-bundle core-c-bootstrap --runtime-path "$runtime_root" \
+      -o "$hello_executable"; do
+    printf 'arg_%s=%s\n' "$arg_number" "$value"
+    arg_number=$((arg_number + 1))
+  done
+  [ "$arg_number" -eq 27 ] || die "hello command transcript argument count differs"
+} >"$compile_command" || die "hello command transcript write failed"
+receipt="$output_root/hello.receipt"
+{
+  printf '%s\n' 'format=SIMPLE-PROVISIONAL-HELLO-1' \
+    "producer_path=$producer" "producer_digest=$producer_digest" \
+    "hello_source_path=$hello_source" "hello_source_digest=$hello_source_digest" \
+    "hello_executable_path=$hello_executable" \
+    "hello_executable_digest=$(hash_file "$hello_executable")" \
+    'compile_exit=0' 'run_exit=0' \
+    "stdout_path=$run_stdout" "stdout_digest=$(hash_file "$run_stdout")" \
+    "stderr_path=$run_stderr" "stderr_digest=$(hash_file "$run_stderr")" \
+    "source_snapshot_digest=$source_snapshot_digest" \
+    "compile_command_path=$compile_command" "compile_command_digest=$(hash_file "$compile_command")" \
+    "compile_log_path=$compile_log" "compile_log_digest=$(hash_file "$compile_log")" \
+    'launcher_relation=executed_by_provisional_runner'
+} >"$receipt" || die "hello receipt write failed"
+printf '%s %s\n' "$receipt" "$(hash_file "$receipt")"

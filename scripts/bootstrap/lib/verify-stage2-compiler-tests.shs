@@ -1,0 +1,54 @@
+#!/bin/sh
+# Re-admit the mandatory post-admission compiler-test matrix before manager work.
+set -eu
+die() { echo "stage2-tests-resume: $*" >&2; exit 1; }
+[ "$#" -eq 4 ] || die "output, platform, candidate and expected SHA required"
+output=$1 platform=$2 candidate=$3 expected_sha=$4
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P) || die "repository root unavailable"
+BOOTSTRAP_STAGE3_FACADE_PATH="$root/scripts/check/lib/bootstrap-stage3-provenance.shs"
+export BOOTSTRAP_STAGE3_FACADE_PATH
+. "$BOOTSTRAP_STAGE3_FACADE_PATH" || die "manifest reader unavailable"
+field() { bootstrap_stage3_manifest_value "$1" "$2"; }
+hash_file() { sha256sum "$1" | cut -d ' ' -f 1; }
+tests_root="$output/stage2-compiler-tests/$platform"
+receipt="$tests_root/stage2-compiler-tests.env"
+rejection="$tests_root/rejection.env"
+[ ! -e "$rejection" ] || die "retained compiler-test rejection blocks managed resume"
+[ -f "$receipt" ] && [ ! -L "$receipt" ] || die "compiler-test PASS receipt unavailable"
+[ "$(field schema "$receipt")" = simple-bootstrap-stage2-compiler-tests-v1 ] &&
+  [ "$(field status "$receipt")" = pass ] &&
+  [ "$(field candidate "$receipt")" = "$candidate" ] &&
+  [ "$(field candidate_sha256 "$receipt")" = "$expected_sha" ] &&
+  [ "$(hash_file "$candidate")" = "$expected_sha" ] ||
+  die "compiler-test receipt differs from admitted Stage 2 candidate"
+summary=$(field verification_summary "$receipt") || die "compiler-test summary absent"
+case "$summary" in "$tests_root"/*) ;; *) die "compiler-test summary outside selected run" ;; esac
+[ -f "$summary" ] && [ ! -L "$summary" ] &&
+  [ "$(hash_file "$summary")" = "$(field verification_summary_sha256 "$receipt")" ] ||
+  die "compiler-test summary bytes differ"
+execution=$(awk -F'[=|]' -v sha="$expected_sha" '
+  $1 == "phase" { phases++; if ($2 != "stage2") bad = 1 }
+  $1 == "hash_policy" { policies++; if ($2 != "canonical") bad = 1 }
+  $1 == "expected_compiler_sha256" { expected++; if ($2 != sha) bad = 1 }
+  $1 == "actual_compiler_sha256" { actual++; if ($2 != sha) bad = 1 }
+  $1 == "terminal_failures" { failures++; if ($2 != 0) bad = 1 }
+  $1 == "overall" { outcomes++; if ($2 != "PASS") bad = 1 }
+  $1 == "test_execution" { executions++; if ($2 != "delegated-seed" && $2 != "in-process") bad = 1; execution = $2 }
+  $1 == "task" {
+    if ($3 != "result" || $4 != "PASS") bad = 1
+    if ($2 == "compiler_cli_build") cli++
+    if ($2 == "test_runner_build") runner++
+    if ($2 == "compiler_bootstrap_tests") bootstrap_tests++
+    if ($2 == "interpreter_interpreter_tests") interpreter_tests++
+    if ($2 == "loader_interpreter_tests") loader_tests++
+  }
+  END {
+    if (bad || phases != 1 || policies != 1 || expected != 1 || actual != 1 ||
+        failures != 1 || outcomes != 1 || executions != 1 || cli != 1 ||
+        runner != 1 || bootstrap_tests != 1 || interpreter_tests != 1 || loader_tests != 1) exit 1
+    print execution
+  }
+' "$summary") || die "compiler-test matrix not terminal PASS"
+[ "$(field test_execution "$receipt")" = "$execution" ] ||
+  die "compiler-test execution mode differs from summary"
+printf '%s\n' "$execution"

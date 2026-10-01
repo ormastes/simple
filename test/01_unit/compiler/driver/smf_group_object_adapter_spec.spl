@@ -1,0 +1,346 @@
+# Grouped object packaging must retain object code, symbol names, and relocation indices.
+# @cover src/compiler/80.driver/smf_group_object_adapter.spl
+
+use compiler.driver.smf_group_object_adapter.{smf_group_object_from_bytes_v1}
+use compiler.backend.linker.elf_writer.{
+    ElfWriterSection, ElfWriterSymbol, ElfWriterReloc,
+    elf_write_object, elf_writer_config_x86_64
+}
+use compiler.backend.linker.smf_reader_memory.{SmfReaderMemory}
+use compiler.backend.linker.obj_taker.{SymbolType}
+
+fn group_test_u16(bytes: [u8], value: i64) -> [u8]:
+    var out = bytes
+    out.push((value & 255) as u8)
+    out.push(((value >> 8) & 255) as u8)
+    out
+
+fn group_test_u32(bytes: [u8], value: i64) -> [u8]:
+    var out = bytes
+    out.push((value & 255) as u8)
+    out.push(((value >> 8) & 255) as u8)
+    out.push(((value >> 16) & 255) as u8)
+    out.push(((value >> 24) & 255) as u8)
+    out
+
+fn group_test_name8(bytes: [u8], name: [u8]) -> [u8]:
+    var out = bytes
+    for byte in name:
+        out.push(byte)
+    var count = name.len()
+    while count < 8:
+        out.push(0)
+        count = count + 1
+    out
+
+fn group_test_elf_object(with_data: bool = false,
+        data_reloc: bool = false,
+        local_target: bool = false) -> [u8]:
+    var sections: [ElfWriterSection] = [
+        ElfWriterSection(".text.a", 1, 6, [195], 0, 0),
+        ElfWriterSection(".text.b", 1, 6, [232, 0, 0, 0, 0, 195], 0, 0)
+    ]
+    if with_data:
+        sections.push(ElfWriterSection(".data", 1, 3, [7], 0, 0))
+    if data_reloc:
+        sections.push(ElfWriterSection(".rodata", 1, 2,
+            [0, 0, 0, 0, 0, 0, 0, 0], 0, 0))
+    val symbols: [ElfWriterSymbol] = [
+        ElfWriterSymbol("group_alpha", if local_target: 0x02 else: 0x12,
+            0, 1, 0, 1),
+        ElfWriterSymbol("group_beta", 0x12, 0, 2, 0, 6),
+        ElfWriterSymbol("group_ext", 0x10, 0, 0, 0, 0)
+    ]
+    val reloc_symbol = if local_target: 0 else: 2
+    var relocs: [ElfWriterReloc] = [
+        ElfWriterReloc(1, (reloc_symbol << 32) | 4,
+            -4, ".text.b")
+    ]
+    if data_reloc:
+        relocs.push(ElfWriterReloc(0, (2 << 32) | 1, 0, ".rodata"))
+    val raw = elf_write_object(elf_writer_config_x86_64(),
+        sections, symbols, relocs)
+    var bytes: [u8] = []
+    for byte in raw:
+        bytes.push(byte as u8)
+    bytes
+
+fn group_test_elf_code_to_data_object(section_anchor: bool = false) -> [u8]:
+    val sections: [ElfWriterSection] = [
+        ElfWriterSection(".text", 1, 6, [72, 141, 5, 0, 0, 0, 0, 195], 0, 0),
+        ElfWriterSection(".data", 1, 3, [7, 0, 0, 0, 0, 0, 0, 0], 0, 0)
+    ]
+    val symbols: [ElfWriterSymbol] = [
+        ElfWriterSymbol("group_fn", 0x12, 0, 1, 0, 8),
+        ElfWriterSymbol(if section_anchor: "" else: "group_data",
+            if section_anchor: 0x03 else: 0x11, 0, 2, 0,
+            if section_anchor: 0 else: 8)
+    ]
+    val relocs: [ElfWriterReloc] = [
+        ElfWriterReloc(3, (1 << 32) | 2, -4, ".text")
+    ]
+    val raw = elf_write_object(elf_writer_config_x86_64(),
+        sections, symbols, relocs)
+    var bytes: [u8] = []
+    for byte in raw:
+        bytes.push(byte as u8)
+    bytes
+
+fn group_test_coff_data_object(code_to_data: bool = false) -> [u8]:
+    # Header20 + sections80 + code5 + data8 + relocs20 + symbols54 + strings4.
+    var out: [u8] = []
+    out = group_test_u16(out, 0x8664)
+    out = group_test_u16(out, 2)
+    out = group_test_u32(out, 0)
+    out = group_test_u32(out, 133)
+    out = group_test_u32(out, 3)
+    out = group_test_u16(out, 0)
+    out = group_test_u16(out, 0)
+    out = group_test_name8(out, [46, 116, 101, 120, 116]) # .text
+    out = group_test_u32(out, 0)
+    out = group_test_u32(out, 0)
+    out = group_test_u32(out, 5)
+    out = group_test_u32(out, 100)
+    out = group_test_u32(out, 113)
+    out = group_test_u32(out, 0)
+    out = group_test_u16(out, 1)
+    out = group_test_u16(out, 0)
+    out = group_test_u32(out, 0x60000020)
+    out = group_test_name8(out, [46, 100, 97, 116, 97]) # .data
+    out = group_test_u32(out, 0)
+    out = group_test_u32(out, 0)
+    out = group_test_u32(out, 8)
+    out = group_test_u32(out, 105)
+    out = group_test_u32(out, 123)
+    out = group_test_u32(out, 0)
+    out = group_test_u16(out, 1)
+    out = group_test_u16(out, 0)
+    out = group_test_u32(out, 0xC0000040)
+    for byte in [232, 0, 0, 0, 0]: out.push(byte as u8)
+    for _ in 0..8: out.push(0)
+    out = group_test_u32(out, 1)
+    out = group_test_u32(out, if code_to_data: 1 else: 2)
+    out = group_test_u16(out, 4) # REL32
+    out = group_test_u32(out, 0)
+    out = group_test_u32(out, 2)
+    out = group_test_u16(out, 1) # ADDR64
+    out = group_test_name8(out, [103, 114, 111, 117, 112, 95, 99, 97]) # group_ca
+    out = group_test_u32(out, 0)
+    out = group_test_u16(out, 1)
+    out = group_test_u16(out, 0x20)
+    out.push(2)
+    out.push(0)
+    out = group_test_name8(out, [103, 114, 111, 117, 112, 95, 100, 97]) # group_da
+    out = group_test_u32(out, 0)
+    out = group_test_u16(out, 2)
+    out = group_test_u16(out, 0)
+    out.push(2)
+    out.push(0)
+    out = group_test_name8(out, [103, 114, 111, 117, 112, 95, 101, 120]) # group_ex
+    out = group_test_u32(out, 0)
+    out = group_test_u16(out, 0)
+    out = group_test_u16(out, 0)
+    out.push(2)
+    out.push(0)
+    group_test_u32(out, 4)
+
+fn group_test_coff_object(writable: bool = false) -> [u8]:
+    # One .text section; call group_ext from the defined group_call function.
+    # Offsets: header=0, section=20, code=60, relocation=65,
+    # symbol table=75, string table=111.
+    var out: [u8] = []
+    out = group_test_u16(out, 0x8664)
+    out = group_test_u16(out, 1)
+    out = group_test_u32(out, 0)
+    out = group_test_u32(out, 75)
+    out = group_test_u32(out, 2)
+    out = group_test_u16(out, 0)
+    out = group_test_u16(out, 0)
+    out = group_test_name8(out, [46, 116, 101, 120, 116]) # .text
+    out = group_test_u32(out, 0) # virtual size
+    out = group_test_u32(out, 0) # virtual address
+    out = group_test_u32(out, 5) # raw size
+    out = group_test_u32(out, 60) # raw pointer
+    out = group_test_u32(out, 65) # relocation pointer
+    out = group_test_u32(out, 0) # line-number pointer
+    out = group_test_u16(out, 1) # relocation count
+    out = group_test_u16(out, 0) # line-number count
+    val characteristics = if writable: 0xC0000040 else: 0x60000020
+    out = group_test_u32(out, characteristics)
+    for byte in [232, 0, 0, 0, 0]:
+        out.push(byte as u8)
+    out = group_test_u32(out, 1) # patch offset
+    out = group_test_u32(out, 1) # target symbol index
+    out = group_test_u16(out, 4) # IMAGE_REL_AMD64_REL32
+    out = group_test_name8(out, [103, 114, 111, 117, 112, 95, 99, 97]) # group_ca
+    out = group_test_u32(out, 0)
+    out = group_test_u16(out, 1)
+    out = group_test_u16(out, 0x20)
+    out.push(2)
+    out.push(0)
+    out = group_test_name8(out, [103, 114, 111, 117, 112, 95, 101, 120]) # group_ex
+    out = group_test_u32(out, 0)
+    out = group_test_u16(out, 0)
+    out = group_test_u16(out, 0)
+    out.push(2)
+    out.push(0)
+    group_test_u32(out, 4)
+
+describe "group object SMF adapter":
+    it "round-trips two ELF functions and a real external relocation":
+        step("Package the emitted ELF object and read its function extents and relocation")
+        val converted = smf_group_object_from_bytes_v1(
+            group_test_elf_object(), "linux", "x86_64")
+        expect(converted.is_ok()).to_equal(true)
+        val wire = converted.unwrap()
+        expect(wire[wire.len() - 128 + 6]).to_equal(1)
+        var reader = SmfReaderMemory.from_data(wire).unwrap()
+        val alpha = reader.lookup_symbol("group_alpha").unwrap()
+        val beta = reader.lookup_symbol("group_beta").unwrap()
+        val ext = reader.lookup_symbol("group_ext").unwrap()
+        expect(reader.lookup_symbol("main").is_err()).to_equal(true)
+        expect(alpha.section_index).to_equal(0)
+        expect(beta.section_index).to_equal(0)
+        expect(ext.section_index).to_equal(-1)
+        expect(alpha.offset).to_equal(0)
+        expect(beta.offset).to_equal(1)
+        expect(reader.read_code(alpha).unwrap()).to_equal([195])
+        expect(reader.read_code(beta).unwrap()).to_equal([232, 0, 0, 0, 0, 195])
+        val ordered = reader.symbols_in_table_order().unwrap()
+        val relocs = reader.read_relocations().unwrap()
+        expect(relocs.len()).to_equal(1)
+        expect(relocs[0].offset).to_equal(2)
+        expect(relocs[0].source_section_index).to_equal(0)
+        expect(ordered[relocs[0].symbol_index].name).to_equal("group_ext")
+        expect(relocs[0].reloc_type).to_equal(3)
+        expect(relocs[0].addend).to_equal(-4)
+
+    it "round-trips a COFF function and REL32 import relocation":
+        step("Package the COFF object and read its symbol and relocation")
+        val converted = smf_group_object_from_bytes_v1(
+            group_test_coff_object(), "windows", "x86_64")
+        expect(converted.is_ok()).to_equal(true)
+        val wire = converted.unwrap()
+        expect(wire[wire.len() - 128 + 6]).to_equal(2)
+        var reader = SmfReaderMemory.from_data(wire).unwrap()
+        val caller = reader.lookup_symbol("group_ca").unwrap()
+        val ext = reader.lookup_symbol("group_ex").unwrap()
+        expect(caller.section_index).to_equal(0)
+        expect(ext.section_index).to_equal(-1)
+        expect(reader.read_code(caller).unwrap()).to_equal([232, 0, 0, 0, 0])
+        val ordered = reader.symbols_in_table_order().unwrap()
+        val relocs = reader.read_relocations().unwrap()
+        expect(relocs.len()).to_equal(1)
+        expect(relocs[0].offset).to_equal(1)
+        expect(ordered[relocs[0].symbol_index].name).to_equal("group_ex")
+        expect(relocs[0].reloc_type).to_equal(2)
+        expect(relocs[0].addend).to_equal(-4)
+
+    it "keeps local function relocation targets private and index-addressable":
+        step("Package a local ELF function referenced by another code symbol")
+        val converted = smf_group_object_from_bytes_v1(
+            group_test_elf_object(false, false, true), "linux", "x86_64")
+        expect(converted.is_ok()).to_equal(true)
+        var reader = SmfReaderMemory.from_data(converted.unwrap()).unwrap()
+        val alpha = reader.lookup_symbol("group_alpha").unwrap()
+        expect(alpha.section_index).to_equal(0)
+        val ordered = reader.symbols_in_table_order().unwrap()
+        val relocs = reader.read_relocations().unwrap()
+        expect(relocs.len()).to_equal(1)
+        expect(ordered[relocs[0].symbol_index].name).to_equal("group_alpha")
+        expect(reader.exported_symbols().len()).to_equal(1)
+
+    it "preserves writable ELF data and uses v1.2 for RoData relocation sources":
+        val plain = smf_group_object_from_bytes_v1(
+            group_test_elf_object(true, false), "linux", "x86_64")
+        expect(plain.is_ok()).to_equal(true)
+        val plain_wire = plain.unwrap()
+        expect(plain_wire[plain_wire.len() - 128 + 5]).to_equal(1)
+        val converted = smf_group_object_from_bytes_v1(
+            group_test_elf_object(false, true), "linux", "x86_64")
+        expect(converted.is_ok()).to_equal(true)
+        val wire = converted.unwrap()
+        expect(wire[wire.len() - 128 + 5]).to_equal(2)
+        var reader = SmfReaderMemory.from_data(wire).unwrap()
+        val relocs = reader.read_relocations().unwrap()
+        expect(relocs.len()).to_equal(2)
+        expect(relocs[0].source_section_index).to_equal(0)
+        expect(relocs[1].source_section_index).to_equal(1)
+        expect(relocs[1].reloc_type).to_equal(1)
+
+    it "keeps ELF code-to-data targets and local data section anchors":
+        val converted = smf_group_object_from_bytes_v1(
+            group_test_elf_code_to_data_object(), "linux", "x86_64")
+        expect(converted.is_ok()).to_equal(true)
+        var reader = SmfReaderMemory.from_data(converted.unwrap()).unwrap()
+        val data = reader.lookup_symbol("group_data").unwrap()
+        expect(data.section_index).to_equal(1)
+        expect(data.offset).to_equal(0)
+        val relocs = reader.read_relocations().unwrap()
+        val symbols = reader.symbols_in_table_order().unwrap()
+        expect(relocs[0].source_section_index).to_equal(0)
+        expect(symbols[relocs[0].symbol_index].name).to_equal("group_data")
+        val anchored = smf_group_object_from_bytes_v1(
+            group_test_elf_code_to_data_object(true), "linux", "x86_64")
+        expect(anchored.is_ok()).to_equal(true)
+        var anchor_reader = SmfReaderMemory.from_data(anchored.unwrap()).unwrap()
+        val anchor_relocs = anchor_reader.read_relocations().unwrap()
+        val anchor_symbols = anchor_reader.symbols_in_table_order().unwrap()
+        expect(anchor_symbols[anchor_relocs[0].symbol_index].name).to_start_with("__smf_object_section_")
+        expect(anchor_symbols[anchor_relocs[0].symbol_index].section_index).to_equal(1)
+        expect(anchor_symbols[anchor_relocs[0].symbol_index].ty).to_equal(SymbolType.Type)
+
+    it "preserves COFF Data relocation sources and code-to-data targets":
+        val converted = smf_group_object_from_bytes_v1(
+            group_test_coff_data_object(true), "windows", "x86_64")
+        expect(converted.is_ok()).to_equal(true)
+        val wire = converted.unwrap()
+        expect(wire[wire.len() - 128 + 5]).to_equal(2)
+        var reader = SmfReaderMemory.from_data(wire).unwrap()
+        val data = reader.lookup_symbol("group_da").unwrap()
+        expect(data.section_index).to_equal(1)
+        val relocs = reader.read_relocations().unwrap()
+        expect(relocs.len()).to_equal(2)
+        expect(relocs[0].source_section_index).to_equal(0)
+        expect(relocs[1].source_section_index).to_equal(1)
+        val symbols = reader.symbols_in_table_order().unwrap()
+        expect(symbols[relocs[0].symbol_index].name).to_equal("group_da")
+        expect(symbols[relocs[1].symbol_index].name).to_equal("group_ex")
+
+    it "rejects corrupted v1.2 marker, legacy marker alias, and relocation bounds":
+        val converted = smf_group_object_from_bytes_v1(
+            group_test_elf_object(false, true), "linux", "x86_64")
+        expect(converted.is_ok()).to_equal(true)
+        val wire = converted.unwrap()
+        var reader = SmfReaderMemory.from_data(wire).unwrap()
+        val table = reader.header.section_table_offset as i64
+        val reloc_entry = table + (reader.header.section_count as i64 - 1) * 64
+        val reloc_at = (wire[reloc_entry + 8] as i64) |
+            ((wire[reloc_entry + 9] as i64) << 8) |
+            ((wire[reloc_entry + 10] as i64) << 16) |
+            ((wire[reloc_entry + 11] as i64) << 24)
+        var bad_marker = wire.copy()
+        bad_marker[reloc_at + 15] = 0 as u8
+        var bad_reader = SmfReaderMemory.from_data(bad_marker).unwrap()
+        expect(bad_reader.read_relocations().is_err()).to_equal(true)
+        var bad_version = wire.copy()
+        bad_version[bad_version.len() - 128 + 5] = 1 as u8
+        var legacy_reader = SmfReaderMemory.from_data(bad_version).unwrap()
+        expect(legacy_reader.read_relocations().is_err()).to_equal(true)
+        var bad_offset = wire.copy()
+        bad_offset[reloc_at] = 255 as u8
+        var offset_reader = SmfReaderMemory.from_data(bad_offset).unwrap()
+        expect(offset_reader.read_relocations().is_err()).to_equal(true)
+
+    it "rejects a COFF data-only object with no executable section":
+        expect(smf_group_object_from_bytes_v1(
+            group_test_coff_object(true), "windows", "x86_64").is_err()).to_equal(true)
+
+    it "rejects malformed or mismatched object formats":
+        step("Do not treat arbitrary code bytes as a valid object")
+        expect(smf_group_object_from_bytes_v1([195, 195, 195],
+            "linux", "x86_64").is_err()).to_equal(true)
+        expect(smf_group_object_from_bytes_v1(group_test_coff_object(),
+            "linux", "x86_64").is_err()).to_equal(true)
+        expect(smf_group_object_from_bytes_v1(group_test_elf_object(),
+            "windows", "x86_64").is_err()).to_equal(true)

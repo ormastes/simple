@@ -2,6 +2,8 @@
 # manager may publish a result into the shared cache or canonical output tree.
 use app.bootstrap_builder.contracts.{BuildTaskV1, BuildResultV1, BuildInputV1, builder_task_identity_v1, builder_validate_task_v1, builder_identifier_valid_v1}
 use app.bootstrap_builder.codec.{builder_read_task_v1, builder_write_result_v1}
+use app.bootstrap_builder.link_inputs.{builder_link_inputs_match_v1,
+    builder_regular_input_parents_safe_v1}
 use app.io.file_ops.{file_exists, file_hash_sha256, file_is_regular_no_follow, file_read_regular_no_follow_bounded, file_atomic_write, file_write_bytes}
 use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
 use app.io.env_ops.{env_vars}
@@ -10,12 +12,16 @@ use std.nogc_sync_mut.io.process_observation_v4.{OwnedExecutablePin, OwnedCwdPin
 use std.common.process.observation_v4.{ProcessObservationRequestV4, ProcessObservationEnvironmentV4, ProcessObservationPacketKindV4, ProcessObservationEnforcementKindV4, ProcessObservationDescendantPolicyV4, ProcessObservationFailureReasonV4, freeze_process_observation_receipt_v4, freeze_process_observation_cleanup_receipt_v4}
 
 pub fn builder_worker_verify_inputs_v1(task: BuildTaskV1, root: text) -> text:
+    if not builder_regular_input_parents_safe_v1(task, root + "/work"):
+        return "input parent is a symlink or reparse point"
     for item in task.inputs:
         val path = root + "/work/" + item.path
         if not file_is_regular_no_follow(path):
             return "input is not a regular file: " + item.path
         if file_hash_sha256(path) != item.digest:
             return "input digest mismatch: " + item.path
+    val link_error = builder_link_inputs_match_v1(task, root + "/work")
+    if link_error != "": return link_error
     if not file_is_regular_no_follow(root + "/producer.exe"):
         return "producer is not a regular file"
     if file_hash_sha256(root + "/producer.exe") != task.producer_digest:

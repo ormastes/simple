@@ -1,0 +1,141 @@
+use std.spec.{describe, it, expect}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_create_exclusive}
+use std.scv.compile_source_inventory_core.{
+    CompileSourceInventoryEntryV1, CompileSourceInventoryV1,
+    compile_source_inventory_digest_v1
+}
+use compiler.driver.action_graph.build_action_v1.{BuildActionResultV1}
+use compiler.driver.cache.package_tldr_metadata.{
+    ConfigVariantKeyV1, config_variant_digest_v1
+}
+use compiler.driver.smf.package_image_v1.{PackageSectionKindV1}
+use compiler.driver.smf.runtime_std_package_set.{
+    RuntimeStdPackageAuthorityV1, RUNTIME_PACKAGE_IDENTITY_V1,
+    runtime_std_build_action_v1
+}
+use compiler.driver.smf.runtime_std_compiled_publication.{
+    RuntimeStdCompiledPackageReceiptV1, RuntimeStdCompiledSectionReceiptV1,
+    runtime_std_compiled_source_closure_digest_v1,
+    runtime_std_compiled_receipts_section_v1,
+    runtime_std_compiled_action_receipt_v1,
+    runtime_std_compiled_receipt_validate_v1,
+    runtime_std_compiled_package_admit_v1
+}
+
+fn runtime_std_compiled_test_section(root: text, name: text,
+        kind: PackageSectionKindV1, content: text) -> RuntimeStdCompiledSectionReceiptV1:
+    val path = "{root}/{name}"
+    expect(file_create_exclusive(path, content)).to_equal(true)
+    RuntimeStdCompiledSectionReceiptV1(
+        kind, name, path, sha256_text(content), content.bytes().len())
+
+describe "compiled runtime/std publication authority":
+    it "binds sorted frozen source closure to exact typed inventory and native action":
+        val root = secure_temp_dir(".", "runtime-std-compiled-").unwrap()
+        val source_digest = sha256_text("source")
+        val entry = CompileSourceInventoryEntryV1(
+            "src/runtime/a.spl", source_digest, source_digest,
+            source_digest, source_digest, source_digest, 6)
+        val inventory = CompileSourceInventoryV1(1, 1, [entry])
+        val inventory_digest = compile_source_inventory_digest_v1(inventory)
+        val variant = ConfigVariantKeyV1(
+            "x86_64-unknown-linux-gnu", "llvm", [], "debug", "abi-v1", [], [])
+        val producer = sha256_text("compiler")
+        val authority = RuntimeStdPackageAuthorityV1(
+            producer, sha256_text("action-abi"), sha256_text("runtime-abi"),
+            sha256_text("std-abi"), config_variant_digest_v1(variant),
+            variant.target_triple, "revision")
+        val action = runtime_std_build_action_v1(
+            authority, RUNTIME_PACKAGE_IDENTITY_V1).unwrap()
+        val result = BuildActionResultV1(
+            action.action_id, action.snapshot_revision, true, false,
+            action.restat_identity, action.restat_identity, [], 1)
+        val closure = runtime_std_compiled_source_closure_digest_v1(
+            [entry.source_identity], [entry.content_digest])
+        var receipt = RuntimeStdCompiledPackageReceiptV1(
+            RUNTIME_PACKAGE_IDENTITY_V1, [entry.source_identity],
+            [entry.content_digest], closure, variant.backend,
+            variant.target_triple, producer, [], [], result,
+            "{root}/action.receipt", sha256_text("pending"))
+        val receipts_content = runtime_std_compiled_receipts_section_v1(
+            authority, receipt, inventory_digest)
+        receipt.sections = [
+            runtime_std_compiled_test_section(root, "debug.smf",
+                PackageSectionKindV1.debug, "debug-data"),
+            runtime_std_compiled_test_section(root, "exports.smf",
+                PackageSectionKindV1.exports, "exports-data"),
+            runtime_std_compiled_test_section(root, "generics.smf",
+                PackageSectionKindV1.generics, "generics-data"),
+            runtime_std_compiled_test_section(root, "hir-summaries.smf",
+                PackageSectionKindV1.hir_summaries, "hir-data"),
+            runtime_std_compiled_test_section(root, "imports.smf",
+                PackageSectionKindV1.imports, "imports-data"),
+            runtime_std_compiled_test_section(root, "initialization.smf",
+                PackageSectionKindV1.initialization, "initialization-data"),
+            runtime_std_compiled_test_section(root, "mir.smf",
+                PackageSectionKindV1.mir, "mir-data"),
+            runtime_std_compiled_test_section(root, "objects.smf",
+                PackageSectionKindV1.objects, "objects-data"),
+            runtime_std_compiled_test_section(root, "receipts.smf",
+                PackageSectionKindV1.receipts, receipts_content),
+            runtime_std_compiled_test_section(root, "types.smf",
+                PackageSectionKindV1.types, "types-data")]
+        val action_content = runtime_std_compiled_action_receipt_v1(
+            authority, receipt)
+        expect(file_create_exclusive(
+            receipt.action_receipt_path, action_content)).to_equal(true)
+        receipt.action_receipt_digest = sha256_text(action_content)
+        expect(runtime_std_compiled_receipt_validate_v1(
+            authority, variant, inventory, inventory_digest,
+            receipt)).to_equal("ok")
+        var ordered_dependencies = receipt
+        val low = "0000000000000000000000000000000000000000000000000000000000000000"
+        val high = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+        ordered_dependencies.dependency_interface_digests = [low, high]
+        expect(runtime_std_compiled_receipt_validate_v1(
+            authority, variant, inventory, inventory_digest,
+            ordered_dependencies)).to_equal("ok")
+        ordered_dependencies.dependency_interface_digests = [high, low]
+        expect(runtime_std_compiled_receipt_validate_v1(
+            authority, variant, inventory, inventory_digest,
+            ordered_dependencies)).to_equal("runtime-std-compiled-dependency-invalid")
+        val admitted = runtime_std_compiled_package_admit_v1(
+            root, authority, variant, inventory, inventory_digest, receipt)
+        expect(admitted.is_ok()).to_equal(true)
+        expect(admitted.unwrap().len()).to_equal(10)
+        var altered_digest = receipt
+        altered_digest.sections[0].digest = sha256_text("wrong")
+        expect(runtime_std_compiled_package_admit_v1(
+            root, authority, variant, inventory, inventory_digest,
+            altered_digest).unwrap_err()).to_equal(
+                "runtime-std-compiled-section-content-mismatch")
+        var altered_action = receipt
+        altered_action.action_receipt_digest = sha256_text("wrong")
+        expect(runtime_std_compiled_package_admit_v1(
+            root, authority, variant, inventory, inventory_digest,
+            altered_action).unwrap_err()).to_equal(
+                "runtime-std-compiled-action-receipt-mismatch")
+        var missing_source = receipt
+        missing_source.source_digests = [sha256_text("other")]
+        expect(runtime_std_compiled_receipt_validate_v1(
+            authority, variant, inventory, inventory_digest,
+            missing_source)).to_equal("runtime-std-compiled-source-closure-mismatch")
+        var incomplete = receipt
+        incomplete.sections = receipt.sections[0..9]
+        expect(runtime_std_compiled_receipt_validate_v1(
+            authority, variant, inventory, inventory_digest,
+            incomplete)).to_equal("runtime-std-compiled-section-count-invalid")
+
+    it "rejects unordered or duplicate source closure entries":
+        val digest = sha256_text("source")
+        expect(runtime_std_compiled_source_closure_digest_v1(
+            ["src/a.spl", "src/b.spl"], [digest, digest]) != "").to_equal(true)
+        expect(runtime_std_compiled_source_closure_digest_v1(
+            ["src/b.spl", "src/a.spl"], [digest, digest])).to_equal("")
+        expect(runtime_std_compiled_source_closure_digest_v1(
+            ["src/a.spl", "src/a.spl"], [digest, digest])).to_equal("")
+        expect(runtime_std_compiled_source_closure_digest_v1(
+            ["src/a.spl"], [digest])).to_equal(
+                sha256_text("simple/runtime-std-source-closure/v1\n" +
+                    "src/a.spl|{digest}\n"))

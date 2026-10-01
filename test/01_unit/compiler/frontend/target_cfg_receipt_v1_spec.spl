@@ -1,0 +1,102 @@
+# Target cfg decisions are bound to the exact bytes parsed in the full-index route.
+use std.spec
+use std.spec.step
+use std.common.crypto.sha256.sha256_text
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend_target_receipted_v1
+use compiler.frontend.frontend_target_cfg_receipt_v1.{
+    FrontendCfgDecisionV1, frontend_cfg_decision_digest_v1,
+    frontend_cfg_portable_parse_identity_v1,
+    frontend_cfg_receipt_valid_v1, frontend_cfg_excluded_emit_count_v1}
+use compiler.core.parser_preprocessor.{_pp_preprocess_conditionals_target_receipted_v1}
+
+describe "explicit target cfg decision receipt":
+    it "shares only equal target-preprocessed bytes and cfg decisions across hosts":
+        val plain = "fn plain() -> i64:\n    1\n"
+        val win_plain = _pp_preprocess_conditionals_target_receipted_v1(
+            plain, "windows", "x86_64")
+        val linux_plain = _pp_preprocess_conditionals_target_receipted_v1(
+            plain, "linux", "x86_64")
+        assert_true(win_plain.is_ok() and linux_plain.is_ok())
+        assert_equal(frontend_cfg_portable_parse_identity_v1(
+            win_plain.unwrap().source, win_plain.unwrap().decisions),
+            frontend_cfg_portable_parse_identity_v1(
+                linux_plain.unwrap().source, linux_plain.unwrap().decisions))
+
+        val same_directive = "@cfg(true)\nfn included() -> i64:\n    2\n"
+        val win_same = _pp_preprocess_conditionals_target_receipted_v1(
+            same_directive, "windows", "x86_64")
+        val linux_same = _pp_preprocess_conditionals_target_receipted_v1(
+            same_directive, "linux", "x86_64")
+        assert_true(win_same.is_ok() and linux_same.is_ok())
+        assert_equal(frontend_cfg_portable_parse_identity_v1(
+            win_same.unwrap().source, win_same.unwrap().decisions),
+            frontend_cfg_portable_parse_identity_v1(
+                linux_same.unwrap().source, linux_same.unwrap().decisions))
+
+        val selected = "@cfg(windows)\nfn selected() -> i64:\n    3\n"
+        val win_selected = _pp_preprocess_conditionals_target_receipted_v1(
+            selected, "windows", "x86_64")
+        val linux_selected = _pp_preprocess_conditionals_target_receipted_v1(
+            selected, "linux", "x86_64")
+        assert_true(win_selected.is_ok() and linux_selected.is_ok())
+        assert_false(frontend_cfg_portable_parse_identity_v1(
+            win_selected.unwrap().source, win_selected.unwrap().decisions) ==
+            frontend_cfg_portable_parse_identity_v1(
+                linux_selected.unwrap().source, linux_selected.unwrap().decisions))
+
+    it "binds stacked cfg exclusions and active declarations to a Linux x86_64 target":
+        step("binds stacked cfg exclusions and active declarations to a Linux x86_64 target")
+        val source = "@cfg(\"target_arch\", \"arm\")\n" +
+            "@cfg(\"target_arch\", \"thumbv7m\")\n" +
+            "fn excluded() -> i64:\n    1\n" +
+            "@when(linux)\n" +
+            "fn included() -> i64:\n    2\n" +
+            "@end\n"
+        val parsed = parse_full_frontend_target_receipted_v1(source,
+            "target_cfg_receipt.spl", "target_cfg_receipt", Logger(level: 0),
+            "scv:test:target_cfg_receipt", sha256_text(source),
+            "x86_64-unknown-linux-gnu")
+        assert_true(parsed.is_ok())
+        val receipt = parsed.unwrap()[1]
+        assert_true(frontend_cfg_receipt_valid_v1(receipt,
+            "scv:test:target_cfg_receipt", sha256_text(source),
+            "x86_64-unknown-linux-gnu"))
+        assert_equal(receipt.target_os, "linux")
+        assert_equal(receipt.target_arch, "x86_64")
+        assert_equal(frontend_cfg_excluded_emit_count_v1(receipt), 2)
+        assert_equal(receipt.decisions[0].excluded_declaration_kind, "code")
+        assert_equal(receipt.decisions[0].excluded_start_line, 3)
+
+    it "rejects an unknown condition key and a triple without an explicit OS":
+        step("rejects an unknown condition key and a triple without an explicit OS")
+        val source = "@cfg(unknown_feature)\nfn conditional() -> i64:\n    1\n"
+        val digest = sha256_text(source)
+        val unknown = parse_full_frontend_target_receipted_v1(source,
+            "unknown_cfg.spl", "unknown_cfg", Logger(level: 0),
+            "scv:test:unknown_cfg", digest, "x86_64-unknown-linux-gnu")
+        assert_true(unknown.is_err())
+        val unsupported = parse_full_frontend_target_receipted_v1(source,
+            "unknown_cfg.spl", "unknown_cfg", Logger(level: 0),
+            "scv:test:unknown_cfg", digest, "x86_64-unknown-gnu")
+        assert_true(unsupported.is_err())
+
+    it "rejects source digest drift before parsing":
+        step("rejects source digest drift before parsing")
+        val source = "fn value() -> i64:\n    1\n"
+        val parsed = parse_full_frontend_target_receipted_v1(source,
+            "drift.spl", "drift", Logger(level: 0),
+            "scv:test:drift", sha256_text("different"),
+            "x86_64-unknown-linux-gnu")
+        assert_true(parsed.is_err())
+
+    it "frames a multibyte condition by UTF-8 byte length":
+        step("frames a multibyte condition by UTF-8 byte length")
+        val decision = FrontendCfgDecisionV1(
+            line: 1, directive_kind: "cfg", condition: "é",
+            parent_active: true, condition_result: true,
+            effective_active: false, excluded_declaration_kind: "code",
+            excluded_start_line: 2, excluded_end_line: 3)
+        val expected = sha256_text("frontend-cfg-decisions-v1|1" +
+            "1:13:cfg2:é1:11:11:04:code1:21:3")
+        assert_equal(frontend_cfg_decision_digest_v1([decision]), expected)

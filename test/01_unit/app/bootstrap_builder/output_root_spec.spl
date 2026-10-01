@@ -1,0 +1,147 @@
+use std.spec.{describe, it, expect}
+use app.bootstrap_builder.cli_args.{builder_cli_parse_v1}
+use app.bootstrap_builder.main.{builder_cli_resolve_roots_v1, builder_cli_publish_v1,
+    builder_cli_verify_v1}
+use app.bootstrap_builder.manager.{builder_manager_start, builder_manager_encode_v1}
+use app.bootstrap_builder.codec.{builder_write_result_v1}
+use app.bootstrap_builder.process_port.{BuilderProcessPortV1, builder_process_portable_v1}
+use app.bootstrap_builder.transport.{BuilderAttemptV1,
+    builder_transport_prune_terminal_inputs_v1}
+use app.io.file_ops.{file_atomic_write, file_hash_sha256, file_exists, path_absolute}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_exists}
+use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
+use std.nogc_sync_mut.io_runtime.{time_now_unix_micros}
+use std.common.build_manager.contracts.{BuildInputV1, BuildTaskV1, BuildResultV1,
+    BuildHostV1, BuildRunV1,
+    builder_task_identity_v1}
+
+fn output_root_fixture_v1() -> text:
+    val absolute = path_absolute(".").replace("\\", "/")
+    val base = if absolute.starts_with("//?/"): absolute.substring(4) else: absolute
+    val root = base + "/build/builder-output-root-" +
+        str(getpid()) + "-" + str(time_now_unix_micros())
+    expect(dir_create_all(root + "/source")).to_equal(true)
+    expect(dir_create_all(root + "/output")).to_equal(true)
+    expect(dir_create_all(root + "/state")).to_equal(true)
+    root
+
+fn output_root_test_directory_v1(path: text) -> bool:
+    # These tests create their own fresh directories; reparse rejection is
+    # exercised by the Windows process owner rather than this output fixture.
+    dir_exists(path)
+
+fn output_root_test_process_v1() -> BuilderProcessPortV1:
+    val portable = builder_process_portable_v1()
+    BuilderProcessPortV1(spawn_operation: portable.spawn_operation,
+        wait_operation: portable.wait_operation,
+        terminate_operation: portable.terminate_operation,
+        directory_no_follow_operation: output_root_test_directory_v1)
+
+describe "bootstrap builder private output owner":
+    it "resolves distinct source output and state roots and rejects source writes":
+        val root = output_root_fixture_v1()
+        val parsed = builder_cli_parse_v1(["run", "--manifest", root + "/manifest.sdn",
+            "--state", root + "/state", "--source-root", root + "/source",
+            "--output-root", root + "/output"])
+        match builder_cli_resolve_roots_v1(parsed, output_root_test_process_v1()):
+            case Ok(resolved):
+                expect(resolved.source_root).to_equal(root + "/source")
+                expect(resolved.output_root).to_equal(root + "/output")
+            case Err(reason): fail(reason)
+        val bad = builder_cli_parse_v1(["run", "--manifest", root + "/manifest.sdn",
+            "--state", root + "/state", "--source-root", root + "/source",
+            "--output-root", root + "/source"])
+        match builder_cli_resolve_roots_v1(bad, output_root_test_process_v1()):
+            case Ok(_resolved): fail("source-owned output root accepted")
+            case Err(reason): expect(reason).to_contain("outside source root")
+
+    it "publishes the admitted artifact under the private output root":
+        val root = output_root_fixture_v1()
+        val attempt = root + "/attempt"
+        expect(dir_create_all(attempt + "/work")).to_equal(true)
+        expect(file_atomic_write(attempt + "/work/module.o", "artifact bytes\n")).to_equal(true)
+        val digest = file_hash_sha256(attempt + "/work/module.o")
+        val task = BuildTaskV1(id: "module", attempt: 1, phase: "native", producer_digest: digest,
+            source_digest: digest, toolchain_digest: digest, dependencies: [],
+            program: "producer", args: [], inputs: [], outputs: ["module.o"],
+            cache_key: digest, timeout_ms: 0, memory_limit_bytes: 1073741824, links: [])
+        val receipt = BuildResultV1(task_id: "module", attempt: 1,
+            identity_digest: builder_task_identity_v1(task), host_id: "local", status: "OK",
+            exit_code: 0, outputs: [BuildInputV1(path: "module.o", digest: digest)],
+            cache_hits: 0, cache_misses: 0, cache_stores: 0)
+        expect(builder_cli_publish_v1(task, receipt, attempt, root + "/output",
+            output_root_test_process_v1())).to_equal(true)
+        expect(file_hash_sha256(root + "/output/module.o")).to_equal(digest)
+        expect(file_exists(root + "/source/module.o")).to_equal(false)
+        expect(file_atomic_write(root + "/output/module.o", "damaged artifact\n")).to_equal(true)
+        expect(builder_cli_publish_v1(task, receipt, attempt, root + "/output",
+            output_root_test_process_v1())).to_equal(false)
+        expect(file_exists(root + "/source/module.o")).to_equal(false)
+
+    it "verifies terminal proof, retained result, pinned source, and private output":
+        val root = output_root_fixture_v1()
+        val producer = root + "/source/producer.exe"
+        expect(file_atomic_write(producer, "producer bytes\n")).to_equal(true)
+        expect(file_atomic_write(root + "/source/input.txt", "input bytes\n")).to_equal(true)
+        expect(file_atomic_write(root + "/output/module.o", "object bytes\n")).to_equal(true)
+        val producer_digest = file_hash_sha256(producer)
+        val input_digest = file_hash_sha256(root + "/source/input.txt")
+        val output_digest = file_hash_sha256(root + "/output/module.o")
+        val task = BuildTaskV1(id: "module", attempt: 1, phase: "native",
+            producer_digest: producer_digest, source_digest: input_digest,
+            toolchain_digest: producer_digest, dependencies: [], program: producer,
+            args: ["compile"], inputs: [BuildInputV1(path: "input.txt", digest: input_digest)],
+            outputs: ["module.o"], cache_key: input_digest, timeout_ms: 0,
+            memory_limit_bytes: 1073741824, links: [])
+        val host = BuildHostV1(id: "local", transport: "local", endpoint: "",
+            workspace: root + "/state", worker_program: producer,
+            worker_digest: producer_digest, slots: 1)
+        val run = BuildRunV1(tasks: [task], hosts: [host], keep_going: true, max_attempts: 2)
+        var state = builder_manager_start(run)
+        expect(state.error).to_equal("")
+        state.statuses[0] = "SUCCEEDED"
+        state.host_ids[0] = "local"
+        expect(file_atomic_write(root + "/state/journal.sdn", builder_manager_encode_v1(state))).to_equal(true)
+        val attempt = root + "/state/attempts/module/1/local"
+        expect(dir_create_all(attempt + "/work")).to_equal(true)
+        expect(dir_create_all(attempt + "/work/.builder-cache")).to_equal(true)
+        expect(dir_create_all(root + "/state/receipts")).to_equal(true)
+        expect(file_atomic_write(attempt + "/work/module.o", "object bytes\n")).to_equal(true)
+        expect(file_atomic_write(attempt + "/work/input.txt", "input bytes\n")).to_equal(true)
+        expect(file_atomic_write(attempt + "/work/.builder-cache/keep", "cache bytes\n")).to_equal(true)
+        val receipt = BuildResultV1(task_id: "module", attempt: 1,
+            identity_digest: builder_task_identity_v1(task), host_id: "local", status: "OK",
+            exit_code: 0, outputs: [BuildInputV1(path: "module.o", digest: output_digest)],
+            cache_hits: 0, cache_misses: 0, cache_stores: 0)
+        expect(builder_write_result_v1(attempt + "/result.sdn", receipt)).to_equal(true)
+        expect(builder_write_result_v1(root + "/state/receipts/module.sdn", receipt)).to_equal(true)
+        val owned = BuilderAttemptV1(task_id: "module", attempt: 1, host: host, pid: 0,
+            local_root: attempt, remote_root: "", error: "",
+            identity_digest: builder_task_identity_v1(task), process: builder_process_portable_v1())
+        match builder_transport_prune_terminal_inputs_v1(task, owned, receipt, root + "/output"):
+            case Ok(_deleted): fail("input pruned without terminal proof")
+            case Err(reason): expect(reason).to_contain("tree-reap")
+        expect(file_exists(attempt + "/work/input.txt")).to_equal(true)
+        expect(file_atomic_write(attempt + "/compiler.reaped",
+            builder_task_identity_v1(task) + "\nlocal")).to_equal(true)
+        val config = builder_cli_parse_v1(["verify", "--manifest", root + "/manifest.sdn",
+            "--state", root + "/state", "--source-root", root + "/source",
+            "--output-root", root + "/output"])
+        expect(builder_cli_verify_v1(run, config, output_root_test_process_v1())).to_equal(0)
+        expect(file_atomic_write(attempt + "/work/input.txt", "changed bytes\n")).to_equal(true)
+        match builder_transport_prune_terminal_inputs_v1(task, owned, receipt, root + "/output"):
+            case Ok(_deleted): fail("changed input copy was pruned")
+            case Err(reason): expect(reason).to_contain("copy differs")
+        expect(file_exists(attempt + "/work/input.txt")).to_equal(true)
+        expect(file_atomic_write(attempt + "/work/input.txt", "input bytes\n")).to_equal(true)
+        match builder_transport_prune_terminal_inputs_v1(task, owned, receipt, root + "/output"):
+            case Ok(deleted): expect(deleted).to_equal(1)
+            case Err(reason): fail(reason)
+        expect(file_exists(attempt + "/work/input.txt")).to_equal(false)
+        expect(file_exists(attempt + "/work/module.o")).to_equal(true)
+        expect(file_exists(attempt + "/work/.builder-cache/keep")).to_equal(false)
+        expect(file_exists(attempt + "/result.sdn")).to_equal(true)
+        expect(file_exists(attempt + "/compiler.reaped")).to_equal(true)
+        expect(builder_cli_verify_v1(run, config, output_root_test_process_v1())).to_equal(0)
+        expect(file_atomic_write(root + "/output/module.o", "damaged bytes\n")).to_equal(true)
+        expect(builder_cli_verify_v1(run, config, output_root_test_process_v1())).to_equal(1)

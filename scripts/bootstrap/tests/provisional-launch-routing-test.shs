@@ -1,0 +1,48 @@
+#!/bin/sh
+set -eu
+script_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/simple-provisional-route.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+mkdir -p "$tmp/source" "$tmp/parse-cas"
+cat >"$tmp/producer" <<'SH'
+#!/bin/sh
+: >"$PRODUCER_CALLED"
+exit 0
+SH
+chmod +x "$tmp/producer"
+printf 'declared compiler\n' >"$tmp/compiler-tool"
+printf 'declared linker\n' >"$tmp/linker-tool"
+chmod +x "$tmp/compiler-tool" "$tmp/linker-tool"
+export PRODUCER_CALLED="$tmp/producer.called"
+case "$(uname -s 2>/dev/null)" in
+  Linux*) wrong_target=x86_64-pc-windows-msvc; host_target=x86_64-unknown-linux-gnu ;;
+  MINGW*|MSYS*|CYGWIN*) wrong_target=x86_64-unknown-linux-gnu; host_target=x86_64-pc-windows-msvc ;;
+  *) echo 'SKIP: unsupported fixture host'; exit 0 ;;
+esac
+if sh "$script_root/run-provisional-phase3-phase4.shs" \
+  --producer="$tmp/producer" --source-checkout="$tmp/source" \
+  --output-root="$tmp/output" --target="$wrong_target" \
+  --shared-parse-cas-root="$tmp/parse-cas" \
+  --compiler-tool="$tmp/compiler-tool" --linker-tool="$tmp/linker-tool" \
+  >"$tmp/out" 2>&1; then
+  echo 'FAIL: cross-host diagnostic target admitted' >&2; exit 1
+fi
+[ ! -e "$PRODUCER_CALLED" ] && [ ! -e "$tmp/output" ] || {
+  echo 'FAIL: wrong-target launcher mutated output or started producer' >&2; exit 1
+}
+echo 'PASS: cross-host diagnostic target refuses before snapshot or child'
+if sh "$script_root/run-provisional-phase3-phase4.shs" \
+  --producer="$tmp/producer" --source-checkout="$tmp/source" \
+  --output-root="$tmp/output" --target="$host_target" \
+  --shared-parse-cas-root="$tmp/parse-cas" \
+  --compiler-tool="$tmp/compiler-tool" --linker-tool="$tmp/linker-tool" \
+  --memory-bytes=7000000000 >"$tmp/out" 2>&1; then
+  echo 'FAIL: image watchdog cannot admit oversized memory override' >&2; exit 1
+fi
+grep -Fq 'memory override exceeds image watchdog cap' "$tmp/out" || {
+  echo 'FAIL: oversized memory override failed for another reason' >&2; exit 1
+}
+[ ! -e "$PRODUCER_CALLED" ] && [ ! -e "$tmp/output" ] || {
+  echo 'FAIL: oversized memory override mutated output or started producer' >&2; exit 1
+}
+echo 'PASS: oversized image memory cap refuses before snapshot or child'

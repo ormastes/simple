@@ -1,0 +1,166 @@
+#!/bin/sh
+# Read-only diagnostic evidence gate. It never emits canonical completion.
+set -eu
+die() { echo "verify-provisional-run: $*" >&2; exit 1; }
+regular() { [ -f "$1" ] && [ ! -L "$1" ]; }
+digest() { [ "${#1}" -eq 64 ] && case "$1" in *[!0-9a-f]*) return 1 ;; *) return 0 ;; esac; }
+hash_file() { sha256sum "$1" | cut -d ' ' -f 1; }
+receipt= root= authority_program= authority_receipt= authority_digest= hello_receipt=
+original_source_snapshot= image_receipt= source_root= source_authority= runtime_snapshot= tool_intent= inventory=
+builder_program= group_program= index_program=
+for arg in "$@"; do
+  case "$arg" in
+    --receipt=*) receipt=${arg#*=} ;;
+    --root=*) root=${arg#*=} ;;
+    --authority-program=*) authority_program=${arg#*=} ;;
+    --authority-receipt=*) authority_receipt=${arg#*=} ;;
+    --authority-digest=*) authority_digest=${arg#*=} ;;
+    --hello-receipt=*) hello_receipt=${arg#*=} ;;
+    --original-source-snapshot=*) original_source_snapshot=${arg#*=} ;;
+    --image-receipt=*) image_receipt=${arg#*=} ;;
+    --source-root=*) source_root=${arg#*=} ;;
+    --source-authority=*) source_authority=${arg#*=} ;;
+    --runtime-snapshot=*) runtime_snapshot=${arg#*=} ;;
+    --tool-intent=*) tool_intent=${arg#*=} ;;
+    --inventory=*) inventory=${arg#*=} ;;
+    --builder-program=*) builder_program=${arg#*=} ;;
+    --group-program=*) group_program=${arg#*=} ;;
+    --index-program=*) index_program=${arg#*=} ;;
+    *) die "unknown option: $arg" ;;
+  esac
+done
+for path in "$receipt" "$authority_program" "$authority_receipt" "$hello_receipt" \
+    "$original_source_snapshot" "$image_receipt" "$source_authority" "$runtime_snapshot" \
+    "$tool_intent" "$inventory" "$builder_program" \
+    "$group_program" "$index_program"; do regular "$path" || die "required evidence missing: $path"; done
+[ -d "$root" ] && [ ! -L "$root" ] && [ -d "$source_root" ] && [ ! -L "$source_root" ] \
+  || die "private diagnostic roots unavailable"
+case "$root/" in */provisional-v1/*) ;; *) die "root is outside provisional-v1 namespace" ;; esac
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P) || die "repository unavailable"
+BOOTSTRAP_STAGE3_FACADE_PATH="$repo_root/scripts/check/lib/bootstrap-stage3-provenance.shs"
+export BOOTSTRAP_STAGE3_FACADE_PATH
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+field() { bootstrap_stage3_manifest_value "$1" "$receipt"; }
+image_field() { bootstrap_stage3_manifest_value "$1" "$image_receipt"; }
+[ "$(field format)" = SIMPLE-PROVISIONAL-RUN-1 ] &&
+  [ "$(field diagnostic_only)" = 1 ] &&
+  [ "$(field actual_invoked_tools)" = unproven ] &&
+  [ "$(field status)" = INCOMPLETE ] &&
+  [ "$(field phase3_status)" = INCOMPLETE ] &&
+  [ "$(field phase4_status)" = INCOMPLETE ] \
+  || die "receipt is not an incomplete diagnostic run"
+[ "$(image_field format)" = SIMPLE-PROVISIONAL-IMAGES-1 ] &&
+  [ "$(image_field stage)" = manager ] &&
+  [ "$(image_field diagnostic_only)" = 1 ] \
+  || die "image receipt is not private provisional evidence"
+for role in 'builder_program builder_sha256' 'group_program group_sha256' 'index_program index_sha256'; do
+  key=${role%% *} sha_key=${role#* }
+  case "$key" in builder_program) image=$builder_program ;; group_program) image=$group_program ;; index_program) image=$index_program ;; esac
+  [ "$(image_field "$key")" = "$image" ] &&
+    [ "$(image_field "$sha_key")" = "$(hash_file "$image")" ] \
+    || die "private manager image changed: $key"
+done
+digest "$authority_digest" && [ "$(hash_file "$authority_receipt")" = "$authority_digest" ] &&
+  [ "$(field authority_receipt_sha256)" = "$authority_digest" ] &&
+  [ "$(field hello_receipt_sha256)" = "$(hash_file "$hello_receipt")" ] &&
+  [ "$(field source_authority_sha256)" = "$(hash_file "$source_authority")" ] &&
+  [ "$(field runtime_snapshot_sha256)" = "$(hash_file "$runtime_snapshot")" ] &&
+  [ "$(field tool_intent_sha256)" = "$(hash_file "$tool_intent")" ] &&
+  [ "$(field manager_images_sha256)" = "$(hash_file "$image_receipt")" ] \
+  || die "provisional authority, hello or image pin changed"
+"$authority_program" native-groups-provisional-authority-verify \
+  --receipt "$authority_receipt" --digest "$authority_digest" \
+  --source-snapshot "$original_source_snapshot" --hello-receipt "$hello_receipt" >/dev/null \
+  || die "compiled provisional authority verification failed"
+inventory_count=$(wc -l <"$inventory" | tr -d ' ')
+[ "$(field module_inventory_count)" = "$inventory_count" ] &&
+  [ "$(field module_inventory_sha256)" = "$(hash_file "$inventory")" ] &&
+  [ "$(field phase3_module_inventory_count)" = "$inventory_count" ] &&
+  [ "$(field phase4_module_inventory_count)" = "$inventory_count" ] \
+  || die "diagnostic inventory count or hash differs"
+for evidence_name in task_status_log binary_hash_log; do
+  evidence_path=$(field "$evidence_name") || die "$evidence_name missing"
+  evidence_sha=$(field "${evidence_name}_sha256") || die "$evidence_name digest missing"
+  case "$evidence_path" in "$root"/*) ;; *) die "$evidence_name escapes private run root" ;; esac
+  regular "$evidence_path" && [ "$(hash_file "$evidence_path")" = "$evidence_sha" ] \
+    || die "$evidence_name retained attempt log changed"
+done
+case "$(uname -s 2>/dev/null)" in MINGW*|MSYS*|CYGWIN*) exe_suffix=.exe ;; *) exe_suffix= ;; esac
+for backend in llvm cranelift; do
+  for binary in bootstrap full-cli mcp lsp test-runner phase3-bootstrap; do
+    case "$binary" in
+      bootstrap) phase=phase4 output="bin/simple_bootstrap$exe_suffix" ;;
+      full-cli) phase=phase4 output="bin/simple$exe_suffix" ;;
+      mcp) phase=phase4 output="bin/simple_mcp_server$exe_suffix" ;;
+      lsp) phase=phase4 output="bin/simple_lsp_mcp_server$exe_suffix" ;;
+      test-runner) phase=phase4 output="bin/simple_test_runner$exe_suffix" ;;
+      phase3-bootstrap) phase=phase3 output="bin/simple$exe_suffix" ;;
+    esac
+    key="${phase}_${backend}_${binary}"
+    outcome=$(field "${key}_status") || die "$key outcome missing"
+    case "$outcome" in SUCCEEDED|FAILED|BLOCKED) ;; *) die "$key outcome invalid" ;; esac
+    [ "$(field "${key}_tool_evidence")" = unproven ] || die "$key tool evidence mislabeled"
+    if [ "$outcome" = SUCCEEDED ]; then
+      job="$root/$phase/binaries/$backend/$binary"
+      published="$job/$output"
+      manager_receipt="$job/state/receipts/$binary-$backend.sdn"
+      regular "$published" && regular "$manager_receipt" && regular "$job/manifest.sdn" &&
+        [ "$(field "$key")" = "$(hash_file "$published")" ] &&
+        [ "$(field "${key}_manager_receipt_sha256")" = "$(hash_file "$manager_receipt")" ] \
+        || die "$key terminal binary output or receipt changed"
+      "$builder_program" verify --manifest "$job/manifest.sdn" --state "$job/state" \
+        --source-root "$source_root" --output-root "$job" >/dev/null \
+        || die "$key compiled manager verification failed"
+    fi
+  done
+done
+for phase in phase3 phase4; do
+  for backend in llvm cranelift; do
+    key="${phase}_${backend}"
+    index_outcome=$(field "${key}_index_status") || die "$key index outcome missing"
+    group_outcome=$(field "${key}_group_status") || die "$key group outcome missing"
+    [ "$(field "${key}_index_tool_evidence")" = unproven ] &&
+      [ "$(field "${key}_group_tool_evidence")" = unproven ] \
+      || die "$key tool evidence mislabeled"
+    case "$index_outcome:$group_outcome" in
+      SUCCEEDED:SUCCEEDED|SUCCEEDED:FAILED|SUCCEEDED:BLOCKED|FAILED:BLOCKED|BLOCKED:BLOCKED) ;;
+      *) die "$key dependency outcomes invalid" ;;
+    esac
+    index_job="$root/$phase/index/$backend"
+    group_state="$root/$phase/modules/$backend/state"
+    for proof in index_receipt index_handoff index_manager_receipt group_manifest group_ledger group_completion; do
+      case "$proof" in
+        index_receipt) path="$index_job/output/index-output/receipt.sdn" ;;
+        index_handoff) path="$index_job/handoff.sdn" ;;
+        index_manager_receipt) path="$index_job/state/receipts/index-$backend.sdn" ;;
+        group_manifest) path="$group_state/manifest.sdn" ;;
+        group_ledger) path="$group_state/ledger.sdn" ;;
+        group_completion) path="$group_state/completion.json" ;;
+      esac
+      expected=$(field "${key}_${proof}_sha256") || die "$key $proof pin missing"
+      if [ "$expected" = MISSING ]; then
+        [ ! -e "$path" ] || die "$key $proof appeared after diagnostic receipt"
+      else
+        digest "$expected" && regular "$path" && [ "$(hash_file "$path")" = "$expected" ] \
+          || die "$key $proof changed"
+      fi
+    done
+    if [ "$index_outcome" = SUCCEEDED ]; then
+      "$builder_program" verify --manifest "$index_job/manifest.sdn" \
+        --state "$index_job/state" --source-root "$index_job/inputs" \
+        --output-root "$index_job/output" >/dev/null \
+        || die "$key compiled index manager verification failed"
+      "$index_program" native-groups-index-verify \
+        --config "$index_job/inputs/index.config" \
+        --receipt "$index_job/output/index-output/receipt.sdn" \
+        --handoff "$index_job/handoff.sdn" >/dev/null \
+        || die "$key typed index verification failed"
+    fi
+    if [ "$group_outcome" = SUCCEEDED ]; then
+      "$group_program" native-groups-verify --manifest "$group_state/manifest.sdn" \
+        --state "$group_state" >/dev/null \
+        || die "$key grouped ledger verification failed"
+    fi
+  done
+done
+printf '%s\n' "$receipt"

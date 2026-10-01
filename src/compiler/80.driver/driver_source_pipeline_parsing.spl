@@ -8,6 +8,9 @@ use compiler.driver.perf.compiler_work_counters.{compiler_work_parser_schedule_v
 use compiler.common.driver_core_types.{SourceFile}
 use compiler.common.driver_core_modes.{CompileMode}
 use compiler.frontend.frontend.{parse_full_frontend_with_advisory_policy_v1, parse_full_frontend_in_borrowed_scope_with_advisory_policy_v1}
+use compiler.frontend.frontend.{parse_full_frontend_target_receipted_v1,
+    parse_full_frontend_target_receipted_in_borrowed_scope_v1}
+use compiler.frontend.frontend_target_cfg_receipt_v1.{frontend_cfg_receipt_valid_v1}
 use compiler.frontend.core.lexer.{lexer_release_parse_source_globals}
 use compiler.frontend.core.lexer_struct.{core_token_text_intern_reset}
 use compiler.frontend.aspect_registry.{aspect_registry_promote_transient_owner}
@@ -18,7 +21,7 @@ use compiler.core.ast.{ast_reset}
 use std.string_core.{char_code}
 use compiler.frontend.flat_ast_bridge.{flat_parse_module_body_calls}
 use compiler.core.parser.{par_had_error_get}
-use compiler.driver.driver_build.incremental.{native_build_cache_scope_key, native_build_frontend_identity}
+use compiler.driver.driver_build.incremental.{native_build_cache_scope_key, native_build_frontend_identity, native_build_frontend_portable_source_digest_v1}
 use compiler.driver.cache.phase_compatibility_admission.{
     driver_import_phase2_frontend_v1
 }
@@ -71,6 +74,7 @@ extern fn rt_stdout_flush()
 extern fn rt_transient_array_scope_begin() -> bool
 @unsafe(reason: "raw transient-array scope pause ABI", capabilities: [ffi])
 extern fn rt_transient_array_scope_pause() -> bool
+extern fn rt_transient_heap_promote(value: Any) -> bool
 @unsafe(reason: "raw transient-array scope end ABI", capabilities: [ffi])
 extern fn rt_transient_array_scope_end() -> bool
 
@@ -245,6 +249,17 @@ fn _driver_parse_shard_owns(path: text) -> bool:
     _driver_parse_shard_claim(queue_dir, path)
 
 fn _driver_publish_frontend_cache_scope() -> bool:
+    # The shared parse store is opt-in and carries no caller-supplied parser
+    # identity. The manager seals the absolute Stage2 source root and its
+    # file-hex authority; verify the parser subset before publishing identity,
+    # even when the private frontend scope was already provided.
+    if (_sffi_env_get("SIMPLE_SHARED_PARSE_CAS_ROOT") ?? "") != "":
+        val parser_digest = native_build_frontend_portable_source_digest_v1(
+            _sffi_env_get("SIMPLE_SHARED_PARSE_SOURCE_ROOT") ?? "",
+            _sffi_env_get("SIMPLE_SHARED_PARSE_SOURCE_AUTHORITY_PATH") ?? "",
+            _sffi_env_get("SIMPLE_SHARED_PARSE_SOURCE_AUTHORITY_DIGEST") ?? "")
+        if not _sffi_env_set("SIMPLE_SHARED_PARSE_CAS_PARSER_IDENTITY", parser_digest):
+            return false
     if (_sffi_env_get("SIMPLE_FRONTEND_CACHE_SCOPE") ?? "") != "":
         return true
     val scope = native_build_cache_scope_key(nil, nil, [], 0, native_build_frontend_identity())
@@ -361,8 +376,53 @@ pub fn driver_end_transient_parse_scope() -> bool:
     ended
 
 impl CompilerDriver:
+    me promote_target_cfg_receipt_v1(source_path: text) -> bool:
+        if self.ctx.runtime_std_full_inventory_selection == nil:
+            return true
+        if not self.ctx.runtime_std_cfg_source_identity_by_path.has(source_path):
+            return false
+        val identity = self.ctx.runtime_std_cfg_source_identity_by_path[source_path]
+        if not self.ctx.runtime_std_cfg_decisions.has(identity):
+            return false
+        rt_transient_heap_promote(self.ctx.runtime_std_cfg_decisions[identity])
+
+    me parse_target_cfg_selected_v1(source_content: text, source_path: text,
+        source_module_name: text, borrowed_scope: bool) -> Result<ParserModule, text>:
+        if not self.ctx.runtime_std_cfg_source_identity_by_path.has(source_path) or
+                not self.ctx.runtime_std_cfg_source_digest_by_path.has(source_path):
+            return Err("full inventory target cfg source authority missing: {source_path}")
+        val identity = self.ctx.runtime_std_cfg_source_identity_by_path[source_path]
+        val source_digest = self.ctx.runtime_std_cfg_source_digest_by_path[source_path]
+        val parsed = if borrowed_scope:
+            parse_full_frontend_target_receipted_in_borrowed_scope_v1(
+                source_content, source_path, source_module_name, self.ctx.logger,
+                identity, source_digest, self.ctx.native_target)
+        else:
+            parse_full_frontend_target_receipted_v1(
+                source_content, source_path, source_module_name, self.ctx.logger,
+                identity, source_digest, self.ctx.native_target)
+        match parsed:
+            case Err(error): Err("full inventory target cfg rejected {identity}: {error}")
+            case Ok(value):
+                val module = value[0]
+                val receipt = value[1]
+                if not frontend_cfg_receipt_valid_v1(receipt, identity,
+                        source_digest, self.ctx.native_target):
+                    return Err("full inventory target cfg receipt invalid: {identity}")
+                if self.ctx.runtime_std_cfg_decisions.has(identity):
+                    val old = self.ctx.runtime_std_cfg_decisions[identity]
+                    if old.decision_digest != receipt.decision_digest or
+                            old.preprocessed_digest != receipt.preprocessed_digest:
+                        return Err("full inventory target cfg reparse changed: {identity}")
+                else:
+                    self.ctx.runtime_std_cfg_decisions[identity] = receipt
+                Ok(module)
+
     me parse_full_frontend_selected_v1(source_content: text, source_path: text,
         source_module_name: text) -> Result<ParserModule, text>:
+        if self.ctx.runtime_std_full_inventory_selection != nil:
+            return self.parse_target_cfg_selected_v1(source_content, source_path,
+                source_module_name, false)
         match parse_full_frontend_with_advisory_policy_v1(source_content,
                 source_path, source_module_name, self.ctx.logger,
                 self.ctx.frontend_advisory_policy,
@@ -376,6 +436,9 @@ impl CompilerDriver:
 
     me parse_full_frontend_in_borrowed_scope_selected_v1(source_content: text, source_path: text,
         source_module_name: text) -> Result<ParserModule, text>:
+        if self.ctx.runtime_std_full_inventory_selection != nil:
+            return self.parse_target_cfg_selected_v1(source_content, source_path,
+                source_module_name, true)
         match parse_full_frontend_in_borrowed_scope_with_advisory_policy_v1(source_content,
                 source_path, source_module_name, self.ctx.logger,
                 self.ctx.frontend_advisory_policy,
@@ -419,6 +482,9 @@ impl CompilerDriver:
             if not _sffi_transient_array_scope_pause():
                 val _ended = driver_end_transient_parse_scope()
                 return Err("transient parser scope pause failed after parse error for {source_path}")
+            if not self.promote_target_cfg_receipt_v1(source_path):
+                val _ended = driver_end_transient_parse_scope()
+                return Err("target cfg receipt promotion failed for {source_path}")
             if not driver_promote_frontend_registry_owners():
                 val _ended = driver_end_transient_parse_scope()
                 return Err("frontend registry promotion failed after parse error for {source_path}")
@@ -438,6 +504,9 @@ impl CompilerDriver:
             if not _sffi_transient_array_scope_pause():
                 val _ended = driver_end_transient_parse_scope()
                 return Err("transient parser scope pause failed after surface error for {source_path}")
+            if not self.promote_target_cfg_receipt_v1(source_path):
+                val _ended = driver_end_transient_parse_scope()
+                return Err("target cfg receipt promotion failed for {source_path}")
             if not driver_promote_frontend_registry_owners():
                 val _ended = driver_end_transient_parse_scope()
                 return Err("frontend registry promotion failed after surface error for {source_path}")
@@ -448,6 +517,9 @@ impl CompilerDriver:
         if not _sffi_transient_array_scope_pause():
             val _ended = driver_end_transient_parse_scope()
             return Err("transient parser scope pause failed for {source_path}")
+        if not self.promote_target_cfg_receipt_v1(source_path):
+            val _ended = driver_end_transient_parse_scope()
+            return Err("target cfg receipt promotion failed for {source_path}")
         if not driver_promote_frontend_registry_owners():
             val _ended = driver_end_transient_parse_scope()
             return Err("frontend registry promotion failed for {source_path}")

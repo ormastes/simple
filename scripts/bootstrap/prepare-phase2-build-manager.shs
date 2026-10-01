@@ -1,0 +1,193 @@
+#!/bin/sh
+# Direct Phase 2 builds stop here. After these exact images and the local host
+# template are sealed, every later compiler task is dispatched by the manager.
+set -eu
+die() { echo "phase2-build-manager: $*" >&2; exit 1; }
+regular() { [ -f "$1" ] && [ ! -L "$1" ]; }
+absolute() { case "$1" in /*|[A-Za-z]:/*) return 0 ;; *) return 1 ;; esac; }
+hash_file() { sha256sum "$1" | cut -d ' ' -f 1; }
+producer_receipt= source_root= output_root= target= runtime_bundle= memory_bytes= reserve_bytes=
+for arg in "$@"; do
+  case "$arg" in
+    --producer-receipt=*) producer_receipt=${arg#*=} ;;
+    --source-root=*) source_root=${arg#*=} ;;
+    --output-root=*) output_root=${arg#*=} ;;
+    --target=*) target=${arg#*=} ;;
+    --runtime-bundle=*) runtime_bundle=${arg#*=} ;;
+    --memory-bytes=*) memory_bytes=${arg#*=} ;;
+    --reserve-bytes=*) reserve_bytes=${arg#*=} ;;
+    *) die "unknown option: $arg" ;;
+  esac
+done
+for path in "$producer_receipt" "$source_root" "$output_root"; do
+  [ -n "$path" ] && absolute "$path" || die "absolute path required: $path"
+done
+regular "$producer_receipt" || die "admitted Phase 2 receipt missing"
+[ -d "$source_root" ] && [ ! -L "$source_root" ] || die "frozen source root missing"
+case "$output_root/" in "$source_root/"*) die "image output overlaps frozen source" ;; esac
+case "$source_root/" in "$output_root/"*) die "frozen source overlaps image output" ;; esac
+case "$target" in *windows*) host=windows; suffix=.exe ;; *linux*) host=linux; suffix= ;; *) die "unsupported image target" ;; esac
+case "$runtime_bundle" in core-c-bootstrap|hosted-c) ;; *) die "runtime bundle is not qualified for manager image build" ;; esac
+for number in "$memory_bytes" "$reserve_bytes"; do
+  case "$number" in ''|0|0*|*[!0-9]*) die "canonical positive resource policy required" ;; esac
+done
+[ "$memory_bytes" -le 1125899906842624 ] \
+  || die "memory cap exceeds manager task limit"
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P) || die "repository root unavailable"
+. "$repo_root/scripts/check/lib/bootstrap-stage3-provenance.shs"
+field() { bootstrap_stage3_manifest_value "$1" "$producer_receipt"; }
+producer=$(field candidate_path) || die "producer missing from admission"
+producer_sha=$(field candidate_sha256) || die "producer hash missing"
+source_authority=$(field source_snapshot_path) || die "source authority missing"
+source_authority_sha=$(field source_snapshot_sha256) || die "source authority digest missing"
+runtime_snapshot=$(field runtime_snapshot_path) || die "runtime snapshot missing"
+runtime_snapshot_sha=$(field runtime_snapshot_sha256) || die "runtime snapshot digest missing"
+runtime_path=$(field runtime_authority_path) || die "runtime path missing"
+tool_authority=$(field tool_authority_path) || die "tool authority missing"
+tool_authority_sha=$(field tool_authority_sha256) || die "tool authority digest missing"
+args_digest=$(field build_args_sha256) || die "build args missing"
+sanity=$(field sanity_evidence_path) || die "sanity receipt missing"
+receiver=$(field receiver_evidence_path) || die "receiver receipt missing"
+receiver_log=$(field receiver_log_path) || die "receiver log missing"
+bootstrap_stage3_verify_stage2_admission_receipt \
+  "$producer_receipt" "$producer_receipt" "$producer" "$producer" \
+  "$source_authority" "$source_authority" "$runtime_snapshot" "$runtime_snapshot" \
+  "$runtime_path" "$runtime_path" "$tool_authority" "$tool_authority" \
+  "$args_digest" "$sanity" "$sanity" "$(dirname -- "$sanity")" \
+  "$receiver" "$receiver" "$receiver_log" "$receiver_log" "$repo_root" \
+  || die "Phase 2 admission replay failed"
+regular "$producer" && [ "$(hash_file "$producer")" = "$producer_sha" ] || die "admitted producer changed"
+regular "$source_authority" || die "source authority missing"
+
+# Reuse the canonical snapshotter, which also validates the admitted source
+# symlink records and checks every file for mutation while it is read.
+verify_sources() {
+  for pin in "$source_authority:$source_authority_sha" \
+      "$runtime_snapshot:$runtime_snapshot_sha" "$tool_authority:$tool_authority_sha"; do
+    pin_path=${pin%:*} pin_sha=${pin##*:}
+    regular "$pin_path" && [ "$(hash_file "$pin_path")" = "$pin_sha" ] \
+      || die "admitted source/tool/runtime authority changed: $pin_path"
+  done
+  observed="$output_root/logs/source-verify.$$.txt"
+  bootstrap_stage3_source_snapshot "$observed" "$source_root" \
+    || die "canonical source snapshot failed"
+  cmp -s "$observed" "$source_authority" \
+    || die "frozen source differs from admitted Stage 2 source; snapshot retained: $observed"
+  rm -f "$observed"
+}
+mkdir -p "$output_root/images" "$output_root/cache" "$output_root/logs" "$output_root/template-workspace" \
+  || die "manager image directories unavailable"
+verify_sources
+receipt="$output_root/manager-images.env"
+if [ -e "$receipt" ]; then
+  regular "$receipt" || die "existing image receipt is not regular"
+fi
+case "$host" in
+  windows)
+    manager_entry=src/app/bootstrap_builder/windows_main.spl
+    worker_entry=src/app/bootstrap_builder/windows_worker.spl
+    group_manager_entry=src/app/bootstrap_builder/native_group_windows_main.spl
+    broker_entry=src/app/bootstrap_builder/windows_group_broker.spl ;;
+  linux)
+    manager_entry=src/app/bootstrap_builder/main.spl
+    worker_entry=src/app/bootstrap_builder/linux_worker.spl
+    group_manager_entry=src/app/bootstrap_builder/native_group_linux_main.spl
+    broker_entry=src/app/bootstrap_builder/native_group_linux_broker.spl ;;
+esac
+manifest_entry=src/app/bootstrap_builder/manifest_main.spl
+group_worker_entry=src/app/bootstrap_builder/grouped_native_worker.spl
+index_entry=src/app/bootstrap_builder/native_group_index_main.spl
+authority_entry=src/app/bootstrap_builder/native_group_phase2_main.spl
+for entry in "$manifest_entry" "$manager_entry" "$worker_entry" \
+    "$group_manager_entry" "$group_worker_entry" "$broker_entry" "$index_entry" "$authority_entry"; do
+  regular "$source_root/$entry" || die "manager image entry unavailable: $entry"
+done
+
+build_image() {
+  name=$1 entry=$2
+  image="$output_root/images/$name$suffix"
+  verify_sources
+  if [ -e "$receipt" ]; then
+    regular "$image" || die "sealed image missing: $name"
+    return
+  fi
+  [ ! -e "$image" ] || die "unsealed image exists; preserve evidence and use a new output root: $image"
+  case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*)
+      available_memory=$(powershell.exe -NoProfile -Command '[int64](Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory*1024' | tr -d '\r[:space:]') \
+        || die "Windows memory probe failed" ;;
+    Linux*)
+      available_memory=$(awk '$1=="MemAvailable:" { printf "%.0f\n", $2*1024; found=1 } END { if (!found) exit 1 }' /proc/meminfo) \
+        || die "Linux memory probe failed" ;;
+    *) die "unsupported host memory probe" ;;
+  esac
+  case "$available_memory" in ''|*[!0-9]*) die "host memory probe invalid" ;; esac
+  [ "$available_memory" -ge "$((memory_bytes + reserve_bytes))" ] \
+    || die "host memory below manager-image cap plus reserve"
+  (CDPATH= cd -- "$source_root" && SIMPLE_NO_STUB_FALLBACK=1 \
+    "$producer" native-build "$entry" --backend llvm --target "$target" \
+      --runtime-bundle "$runtime_bundle" --runtime-path "$runtime_path" \
+      --source src/compiler --source src/app --source src/lib \
+      --entry-closure --cache-dir "$output_root/cache/$name" \
+      --mode one-binary --output "$image") \
+      >"$output_root/logs/$name.stdout.log" 2>"$output_root/logs/$name.stderr.log" \
+      || die "$name image build failed; logs retained"
+  regular "$image" || die "$name image build produced no regular image"
+  verify_sources
+}
+build_image manifest "$manifest_entry"
+build_image builder "$manager_entry"
+if [ "$worker_entry" = "$manager_entry" ]; then
+  worker_image="$output_root/images/builder$suffix"
+else
+  build_image worker "$worker_entry"
+  worker_image="$output_root/images/worker$suffix"
+fi
+build_image group-manager "$group_manager_entry"
+build_image group-worker "$group_worker_entry"
+build_image group-broker "$broker_entry"
+build_image index-builder "$index_entry"
+build_image phase2-authority "$authority_entry"
+manifest_image="$output_root/images/manifest$suffix"
+builder_image="$output_root/images/builder$suffix"
+group_image="$output_root/images/group-manager$suffix"
+group_worker_image="$output_root/images/group-worker$suffix"
+broker_image="$output_root/images/group-broker$suffix"
+index_image="$output_root/images/index-builder$suffix"
+authority_image="$output_root/images/phase2-authority$suffix"
+template="$output_root/host-template.sdn"
+if [ ! -e "$template" ]; then
+  "$manifest_image" --template "$worker_image" "$output_root/template-workspace" "$template" 1 \
+    --memory-limit-bytes "$memory_bytes" \
+    || die "compiled manifest emitter rejected local host template"
+fi
+regular "$template" || die "host template missing"
+IFS= read -r template_header <"$template" || die "host template header unreadable"
+[ "$template_header" = SIMPLE-BUILD-RUN-4 ] \
+  || die "host template uses an obsolete manager wire; preserve it and use a new output root"
+verify_sources
+tmp="$receipt.tmp.$$"
+umask 077
+{
+  printf '%s\n' 'format=SIMPLE-PHASE2-MANAGER-IMAGES-1' "target=$target" \
+    "producer_path=$producer" "producer_sha256=$producer_sha" \
+    "memory_limit_bytes=$memory_bytes" "memory_reserve_bytes=$reserve_bytes" \
+    "source_authority_sha256=$(hash_file "$source_authority")" \
+    "manifest_program=$manifest_image" "manifest_sha256=$(hash_file "$manifest_image")" \
+    "builder_program=$builder_image" "builder_sha256=$(hash_file "$builder_image")" \
+    "worker_program=$worker_image" "worker_sha256=$(hash_file "$worker_image")" \
+    "group_program=$group_image" "group_sha256=$(hash_file "$group_image")" \
+    "group_worker=$group_worker_image" "group_worker_sha256=$(hash_file "$group_worker_image")" \
+    "group_broker=$broker_image" "group_broker_sha256=$(hash_file "$broker_image")" \
+    "index_program=$index_image" "index_sha256=$(hash_file "$index_image")" \
+    "authority_program=$authority_image" "authority_sha256=$(hash_file "$authority_image")" \
+    "template=$template" "template_sha256=$(hash_file "$template")"
+} >"$tmp" || die "image receipt write failed"
+if [ -e "$receipt" ]; then
+  cmp -s "$tmp" "$receipt" || die "manager image receipt differs on resume"
+  rm -f "$tmp"
+else
+  mv "$tmp" "$receipt" || die "manager image receipt publish failed"
+fi
+printf '%s\n' "$receipt"

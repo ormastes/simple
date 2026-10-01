@@ -5442,3 +5442,10 @@ SplArray* rt_process_observation_v4_ack_collect_value(SplArray* ticket, SplArray
 #endif
 
 #endif
+
+/* Linux grouped-native owner is an opt-in broker ABI. Keep it in the
+ * process-owned translation unit so every self-hosted runtime links the same
+ * cgroup/pidfd implementation as the existing owned-process ABI. */
+#if defined(__linux__) && !defined(RT_PROCESS_OWNED_CORE_ONLY)
+#include "runtime_linux_group_owner_impl.h"
+#endif

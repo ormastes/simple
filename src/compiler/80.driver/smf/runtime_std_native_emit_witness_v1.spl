@@ -1,0 +1,172 @@
+# Live typed-HIR evidence for an explicit full-inventory native member.
+use compiler.hir.hir_types.{HirModule, SymbolKind}
+use compiler.hir.hir_definitions.{HirVariantKind}
+use compiler.driver.smf.runtime_std_section_types_v1.{
+    RuntimeStdCompiledSectionPayloadV1}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.encoding.utf8.{text_byte_len}
+
+struct RuntimeStdNativeEmitWitnessV1:
+    source_identity: text
+    source_digest: text
+    module_identity: text
+    target_triple: text
+    backend: text
+    hir_semantic_digest: text
+    active_function_count: i64
+    active_data_count: i64
+    active_runtime_init_count: i64
+    witness_digest: text
+
+fn runtime_std_native_emit_frame_v1(value: text) -> text:
+    text_byte_len(value).to_text() + ":" + value
+
+fn runtime_std_native_emit_witness_digest_v1(
+    source_identity: text, source_digest: text, module_identity: text,
+    target_triple: text, backend: text, hir_semantic_digest: text,
+    active_function_count: i64, active_data_count: i64,
+    active_runtime_init_count: i64
+) -> text:
+    sha256_text("simple-runtime-std-native-emit-witness/v1|" +
+        runtime_std_native_emit_frame_v1(source_identity) +
+        runtime_std_native_emit_frame_v1(source_digest) +
+        runtime_std_native_emit_frame_v1(module_identity) +
+        runtime_std_native_emit_frame_v1(target_triple) +
+        runtime_std_native_emit_frame_v1(backend) +
+        runtime_std_native_emit_frame_v1(hir_semantic_digest) +
+        runtime_std_native_emit_frame_v1(active_function_count.to_text()) +
+        runtime_std_native_emit_frame_v1(active_data_count.to_text()) +
+        runtime_std_native_emit_frame_v1(active_runtime_init_count.to_text()))
+
+# Identical framing to the native V2 consumer's live-HIR semantic digest.
+fn runtime_std_live_hir_semantic_digest_v1(
+    payloads: [RuntimeStdCompiledSectionPayloadV1],
+    source_identity: text, source_digest: text, module_identity: text
+) -> text:
+    if source_identity == "" or source_digest == "" or module_identity == "" or
+            payloads.len() != 7:
+        return ""
+    val names = ["debug.smf", "exports.smf", "generics.smf",
+        "hir-summaries.smf", "imports.smf", "initialization.smf",
+        "types.smf"]
+    var rows: [text] = ["simple-runtime-std-live-hir/v2",
+        "source={source_identity}", "digest={source_digest}",
+        "module={module_identity}"]
+    var index = 0
+    while index < 7:
+        val payload = payloads[index]
+        if payload.member_name != names[index] or payload.content == "":
+            return ""
+        rows.push("{payload.member_name}|{sha256_text(payload.content)}")
+        index = index + 1
+    sha256_text(rows.join("\n") + "\n")
+
+fn runtime_std_native_emit_counts_v1(module: HirModule) -> (i64, i64, i64):
+    var functions = module.functions.len()
+    for item in module.classes.values():
+        functions = functions + item.methods.len()
+    for item in module.impls:
+        functions = functions + item.methods.len()
+    for item in module.traits.values():
+        functions = functions + item.methods.len()
+
+    # MIR lowering puts plain struct layouts in MirModule.types, enum
+    # variants in lookup maps, and bitfield fields in a lookup map. LLVM and
+    # Cranelift emit only MIR functions/statics as object members; the native
+    # V2 consumer independently requires both collections to be empty.
+    # Keep unknown/specialized/default-bearing forms conservatively active.
+    var data = module.constants.len() + module.classes.len() +
+        module.traits.len() + module.impls.len()
+    for item in module.structs.values():
+        var layout_only = item.type_params.len() == 0 and
+            not item.is_generic_template and not item.has_specialization_of and
+            not item.has_platform_attr
+        for field in item.fields:
+            if field.has_default or field.is_volatile or field.has_fixed_address:
+                layout_only = false
+        if not layout_only: data = data + 1
+    for item in module.enums.values():
+        var layout_only = item.type_params.len() == 0 and
+            not item.is_generic_template and not item.has_specialization_of and
+            item.attributes.len() == 0 and not item.complete_open and
+            not item.dyn_open
+        for variant in item.variants:
+            if variant.has_discriminant:
+                layout_only = false
+            match variant.kind:
+                case HirVariantKind.Struct(fields):
+                    for field in fields:
+                        if field.has_default or field.is_volatile or
+                                field.has_fixed_address:
+                            layout_only = false
+                case _: pass
+        if not layout_only: data = data + 1
+    # A HirBitfield has only a backing type, bit widths, and offsets. Its
+    # declaration alone is layout metadata; no initializer/body is stored.
+    for raw in module.symbols.root_scope_symbols.values():
+        if module.symbols.symbols.has(raw):
+            val symbol = module.symbols.symbols[raw]
+            match symbol.kind:
+                case SymbolKind.Variable: data = data + 1
+                case SymbolKind.Const: data = data + 1
+                case _: pass
+
+    # These HIR rows can run code, generate source, or alter initialization.
+    # Treat every such row as active even when its concrete backend effect is
+    # deferred to a later stage.
+    val runtime_init = module.static_asserts.len() +
+        module.domain_blocks.len() + module.aop_advices.len() +
+        module.di_bindings.len() + module.arch_rules.len() +
+        module.mock_decls.len() + module.extend_enums.len()
+    (functions, data, runtime_init)
+
+fn runtime_std_native_emit_witness_from_live_hir_v1(
+    module: HirModule, payloads: [RuntimeStdCompiledSectionPayloadV1],
+    source_identity: text, source_digest: text, module_identity: text,
+    target_triple: text, backend: text
+) -> Result<RuntimeStdNativeEmitWitnessV1, text>:
+    if source_identity == "" or source_digest == "" or module_identity == "" or
+            target_triple == "" or backend == "":
+        return Err("live HIR native emit witness identity is incomplete")
+    val hir_semantic_digest = runtime_std_live_hir_semantic_digest_v1(
+        payloads, source_identity, source_digest, module_identity)
+    if hir_semantic_digest == "":
+        return Err("live HIR native emit witness semantic digest unavailable")
+    val counts = runtime_std_native_emit_counts_v1(module)
+    val witness_digest = runtime_std_native_emit_witness_digest_v1(
+        source_identity, source_digest, module_identity, target_triple, backend,
+        hir_semantic_digest, counts.0, counts.1, counts.2)
+    Ok(RuntimeStdNativeEmitWitnessV1(
+        source_identity: source_identity, source_digest: source_digest,
+        module_identity: module_identity, target_triple: target_triple,
+        backend: backend, hir_semantic_digest: hir_semantic_digest,
+        active_function_count: counts.0, active_data_count: counts.1,
+        active_runtime_init_count: counts.2, witness_digest: witness_digest))
+
+fn runtime_std_native_emit_witness_valid_v1(
+    witness: RuntimeStdNativeEmitWitnessV1, source_identity: text,
+    source_digest: text, module_identity: text, target_triple: text,
+    backend: text, hir_semantic_digest: text
+) -> bool:
+    if source_identity == "" or source_digest == "" or module_identity == "" or
+            target_triple == "" or backend == "" or hir_semantic_digest == "" or
+            witness.source_identity != source_identity or
+            witness.source_digest != source_digest or
+            witness.module_identity != module_identity or
+            witness.target_triple != target_triple or witness.backend != backend or
+            witness.hir_semantic_digest != hir_semantic_digest or
+            witness.active_function_count < 0 or witness.active_data_count < 0 or
+            witness.active_runtime_init_count < 0:
+        return false
+    witness.witness_digest == runtime_std_native_emit_witness_digest_v1(
+        witness.source_identity, witness.source_digest, witness.module_identity,
+        witness.target_triple, witness.backend, witness.hir_semantic_digest,
+        witness.active_function_count, witness.active_data_count,
+        witness.active_runtime_init_count)
+
+export RuntimeStdNativeEmitWitnessV1
+export runtime_std_native_emit_witness_digest_v1
+export runtime_std_live_hir_semantic_digest_v1
+export runtime_std_native_emit_counts_v1
+export runtime_std_native_emit_witness_from_live_hir_v1
+export runtime_std_native_emit_witness_valid_v1

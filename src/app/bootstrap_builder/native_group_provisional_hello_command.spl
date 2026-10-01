@@ -1,0 +1,101 @@
+# Diagnostic launcher transcript. It records exact argv and admission pins;
+# it does not establish formal Stage2 producer/source provenance.
+use app.bootstrap_builder.native_group_index_contract.{
+    native_group_index_absolute_v1
+}
+
+val PROVISIONAL_HELLO_COMMAND_SCHEMA_V1 =
+    "SIMPLE-PROVISIONAL-HELLO-COMMAND-1"
+
+fn _provisional_hello_command_plain_absolute_v1(path: text) -> bool:
+    native_group_index_absolute_v1(path) and
+        not path.contains("\\") and not path.contains("//") and
+        not path.contains("/./") and not path.ends_with("/.") and
+        not path.contains("/../") and not path.ends_with("/..") and
+        not path.ends_with("/")
+
+fn _provisional_hello_parent_v1(path: text) -> text:
+    val parts = path.split("/")
+    var parent = parts[0]
+    for index in 1..parts.len() - 1:
+        parent = parent + "/" + parts[index]
+    if parent == "": "/" else: parent
+
+fn native_group_provisional_hello_command_decode_v1(
+    payload: text, hello: {text: text}, target: text
+) -> Result<text, text>:
+    if payload == "" or payload.len() > 16384 or
+            not payload.ends_with("\n") or payload.contains("\r") or
+            payload.contains("\0"):
+        return Err("provisional hello compile transcript framing invalid")
+    val keys = ["producer_path", "producer_digest",
+        "hello_source_path", "hello_source_digest",
+        "hello_executable_path", "cache_root", "runtime_root",
+        "target", "backend", "compile_exit", "run_exit", "arg_count"]
+    val rows = payload.split("\n")
+    if rows.len() != 1 + keys.len() + 27 + 1 or
+            rows[0] != PROVISIONAL_HELLO_COMMAND_SCHEMA_V1 or
+            rows[rows.len() - 1] != "":
+        return Err("provisional hello compile transcript row count invalid")
+    var fields: {text: text} = {}
+    for index in 0..keys.len():
+        val prefix = keys[index] + "="
+        if not rows[1 + index].starts_with(prefix):
+            return Err("provisional hello compile transcript row order invalid")
+        val value = rows[1 + index].substring(prefix.len())
+        if value == "" or value.len() > 4096:
+            return Err("provisional hello compile transcript field invalid")
+        fields[keys[index]] = value
+    var args: [text] = []
+    for index in 0..27:
+        val prefix = "arg_{index}="
+        if not rows[1 + keys.len() + index].starts_with(prefix):
+            return Err("provisional hello compile argv order invalid")
+        val value = rows[1 + keys.len() + index].substring(prefix.len())
+        if value == "" or value.len() > 4096:
+            return Err("provisional hello compile argv invalid")
+        args = args.push(value)
+    if fields["arg_count"] != "27" or
+            fields["backend"] != "llvm" or
+            fields["compile_exit"] != "0" or
+            fields["run_exit"] != "0" or
+            fields["target"] != target or
+            fields["producer_path"] != hello["producer_path"] or
+            fields["producer_digest"] != hello["producer_digest"] or
+            fields["hello_source_path"] != hello["hello_source_path"] or
+            fields["hello_source_digest"] != hello["hello_source_digest"] or
+            fields["hello_executable_path"] !=
+                hello["hello_executable_path"]:
+        return Err("provisional hello compile transcript pins differ")
+    val fixture = "/test/04_smoke/windows_native_hello.spl"
+    val source = hello["hello_source_path"]
+    if not source.ends_with(fixture):
+        return Err("provisional hello fixture path invalid")
+    val checkout = source.substring(0, source.len() - fixture.len())
+    val private_root = _provisional_hello_parent_v1(
+        hello["hello_executable_path"])
+    if not _provisional_hello_command_plain_absolute_v1(checkout) or
+            not _provisional_hello_command_plain_absolute_v1(private_root) or
+            fields["runtime_root"] != checkout + "/src/runtime" or
+            fields["cache_root"] != private_root + "/cache/hello" or
+            hello["compile_command_path"] !=
+                private_root + "/compile.argv" or
+            hello["compile_log_path"] !=
+                private_root + "/compile.log":
+        return Err("provisional hello compile root ownership differs")
+    val expected = [hello["producer_path"], "native-build",
+        "--target", target, "--backend", "llvm", "--source",
+        "src/compiler", "--source", "src/app", "--source", "src/lib",
+        "--entry-closure", "--threads", "1", "--cache-dir",
+        fields["cache_root"], "--mode", "one-binary", "--entry",
+        "test/04_smoke/windows_native_hello.spl",
+        "--runtime-bundle", "core-c-bootstrap", "--runtime-path",
+        fields["runtime_root"], "-o", hello["hello_executable_path"]]
+    for index in 0..27:
+        if args[index] != expected[index]:
+            return Err("provisional hello compile argv differs at " +
+                str(index))
+    Ok(fields["cache_root"])
+
+export PROVISIONAL_HELLO_COMMAND_SCHEMA_V1
+export native_group_provisional_hello_command_decode_v1

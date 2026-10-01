@@ -1,0 +1,34 @@
+use std.spec.{describe, it, expect}
+use std.common.crypto.sha256.{sha256_text}
+use compiler.driver.cache.cas_batch_transaction.{
+    CasBatchTransactionErrorV1, cas_batch_inherit_mappings_v1}
+
+fn mapping(package_key: text, action: text, receipt: text) -> text:
+    "{package_key}|{sha256_text(action)}|{sha256_text(receipt)}"
+
+describe "CAS batch publication retains distinct package actions":
+    it "keeps a runtime baseline when a graph publishes the same package":
+        val runtime = mapping("simple.runtime", "baseline", "baseline receipt")
+        val graph = mapping("simple.runtime", "graph", "graph receipt")
+        val std = mapping("simple.std", "baseline", "std receipt")
+        val inherited = cas_batch_inherit_mappings_v1(
+            [runtime, std], [graph])
+        expect(inherited.is_ok()).to_equal(true)
+        expect(inherited.unwrap()).to_equal([runtime, std])
+
+    it "replaces only an exact package and action pair":
+        val old = mapping("simple.runtime", "same action", "old receipt")
+        val newer = mapping("simple.runtime", "same action", "new receipt")
+        val other = mapping("simple.runtime", "different action", "other receipt")
+        val inherited = cas_batch_inherit_mappings_v1(
+            [old, other], [newer])
+        expect(inherited.is_ok()).to_equal(true)
+        expect(inherited.unwrap()).to_equal([other])
+
+    it "rejects a parent with duplicate package and action authority":
+        val row = mapping("simple.runtime", "same action", "first receipt")
+        val duplicate = mapping("simple.runtime", "same action", "second receipt")
+        val inherited = cas_batch_inherit_mappings_v1([row, duplicate], [])
+        expect(inherited.is_err()).to_equal(true)
+        expect(inherited.unwrap_err()).to_equal(
+            CasBatchTransactionErrorV1.generation_corrupt)

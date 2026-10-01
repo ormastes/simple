@@ -1,0 +1,110 @@
+# Source-scoped cold MIR artifact emitted while the lowered MirModule is live.
+# The caller supplies the SCV-verified typed HIR seed and an explicit private
+# artifact root. No ambient root or later native object is consulted.
+
+use compiler.mir.mir_instruction_graph.{MirModule}
+use compiler.driver.cache.cold_hir_semantic_seed_v1.{ColdHirTypedReceiptV1}
+use compiler.driver.smf.runtime_std_mir_emission_types_v1.{
+    RuntimeStdMirFileV1, RuntimeStdMirModuleEmissionV1}
+use compiler.driver.smf.runtime_std_native_sections_v1.{
+    RuntimeStdMirBodyPayloadV1, RUNTIME_STD_MIR_MODULE_MAX_BYTES_V1,
+    runtime_std_mir_body_payload_v1, runtime_std_mir_body_validate_v1,
+    runtime_std_mir_body_matches_module_v1}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.encoding.utf8.{text_byte_len}
+use std.nogc_sync_mut.io.file_ops.{file_create_exclusive,
+    file_read_regular_no_follow_bounded}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_is_real_no_follow}
+
+@unsafe(reason: "canonical physical containment for compiler artifacts", capabilities: [ffi])
+extern fn rt_path_absolute(path: text) -> text
+
+fn _runtime_std_mir_emission_physical_v1(path: text) -> text:
+    var raw = ""
+    unsafe(capabilities: [ffi]):
+        raw = rt_path_absolute(path) ?? ""
+    if raw == "": "" else: raw.replace("\\", "/").lower()
+
+fn _runtime_std_mir_emission_ancestors_real_v1(path: text) -> bool:
+    val normalized = path.replace("\\", "/")
+    if normalized == "" or normalized.contains("//"):
+        return false
+    val parts = normalized.split("/")
+    if parts.len() == 0: return false
+    var current = "."
+    var index = 0
+    if normalized.starts_with("/"):
+        current = "/"
+        index = 1
+    elif parts[0].len() == 2 and (parts[0].byte_at(1) as i64) == 58:
+        current = parts[0] + "/"
+        index = 1
+    elif parts[0] == ".":
+        index = 1
+    if not dir_is_real_no_follow(current): return false
+    while index < parts.len():
+        val part = parts[index]
+        if part == "" or part == "." or part == "..": return false
+        if current.ends_with("/"):
+            current = current + part
+        else:
+            current = current + "/" + part
+        if not dir_is_real_no_follow(current): return false
+        index = index + 1
+    true
+
+fn runtime_std_mir_emit_module_v1(
+    module: MirModule, receipt: ColdHirTypedReceiptV1,
+    artifact_root: text
+) -> Result<RuntimeStdMirModuleEmissionV1, text>:
+    val seed = receipt.seed
+    if artifact_root == "" or artifact_root.len() > 4096 or
+            artifact_root.contains("\n") or artifact_root.contains("\r") or
+            seed.module_identity == "" or seed.module_identity != module.name or
+            seed.source_identity == "" or seed.source_digest == "" or
+            not _runtime_std_mir_emission_ancestors_real_v1(artifact_root):
+        return Err("cold MIR source or private artifact root invalid")
+    val encoded = runtime_std_mir_body_payload_v1(
+        module, seed.source_identity, seed.source_digest)
+    if encoded.is_err(): return Err(encoded.unwrap_err())
+    val payload = encoded.unwrap()
+    if runtime_std_mir_body_matches_module_v1(
+            payload, module, seed.source_identity, seed.source_digest) != "ok":
+        return Err("cold MIR body changed during encoding")
+    val identity = sha256_text("simple/runtime-std-cold-mir/v1|" +
+        "{text_byte_len(seed.source_identity)}:{seed.source_identity}|" +
+        "{seed.source_digest}|{text_byte_len(module.name)}:{module.name}")
+    val mir_root = "{artifact_root}/mir"
+    val private_root = "{artifact_root}/mir/{identity}"
+    if not dir_create_all(mir_root) or
+            not _runtime_std_mir_emission_ancestors_real_v1(mir_root) or
+            not dir_create_all(private_root) or
+            not _runtime_std_mir_emission_ancestors_real_v1(private_root):
+        return Err("cold MIR artifact directory is not real")
+    val path = private_root + "/mir.body"
+    val physical_root = _runtime_std_mir_emission_physical_v1(private_root)
+    if physical_root == "" or not file_create_exclusive(path, payload.content):
+        return Err("cold MIR artifact write failed")
+    if _runtime_std_mir_emission_physical_v1(path) !=
+            physical_root + "/mir.body" or
+            not _runtime_std_mir_emission_ancestors_real_v1(private_root):
+        return Err("cold MIR artifact escaped private root")
+    val readback = file_read_regular_no_follow_bounded(
+        path, RUNTIME_STD_MIR_MODULE_MAX_BYTES_V1)
+    if readback.is_err() or readback.unwrap() != payload.content:
+        return Err("cold MIR artifact readback failed")
+    val admitted = RuntimeStdMirBodyPayloadV1(
+        module.name, seed.source_identity, seed.source_digest,
+        readback.unwrap(), sha256_text(readback.unwrap()),
+        text_byte_len(readback.unwrap()))
+    if runtime_std_mir_body_validate_v1(admitted, module.name,
+            seed.source_identity, seed.source_digest, payload.digest) != "ok" or
+            runtime_std_mir_body_matches_module_v1(admitted, module,
+                seed.source_identity, seed.source_digest) != "ok":
+        return Err("cold MIR artifact does not match live module")
+    Ok(RuntimeStdMirModuleEmissionV1(module.name, seed.source_identity,
+        seed.source_digest, private_root,
+        RuntimeStdMirFileV1(path: path, digest: payload.digest,
+            byte_count: payload.byte_count)))
+
+export runtime_std_mir_emit_module_v1

@@ -30,7 +30,20 @@ Set absolute paths in `SIMPLE_NATIVE_BUILD_MANAGER`,
 `SIMPLE_NATIVE_BUILD_MANAGER_SOURCE_IDENTITY`, `SIMPLE_NATIVE_BUILD_MANAGER_LLC`,
 and `SIMPLE_BUILDER_QUALIFICATION_ROOT`.
 The hosts file is a valid encoded `BuildRunV1` template using the required
-`SIMPLE-BUILD-RUN-2` wire format and each host's exact `worker_digest`.
+`SIMPLE-BUILD-RUN-4` wire format and each host's exact `worker_digest`.
+Its placeholder task carries an explicit `memory_limit_bytes` cap in the
+inclusive range 1..1125899906842624. The compiled manifest emitter creates
+that template with `--template WORKER WORKSPACE OUTPUT SLOTS --memory-limit-bytes N`;
+one-task `--job` and `--job-from-inventory` calls also require that flag.
+The inventory-backed call additionally requires `--links-inventory REL`, even
+for an empty link list. It pins the regular and link inventory files and
+declares each link's exact raw target and resolved in-root path. The typed
+Phase 2 authority receipt and compiled pre/post verification prove the full
+regular target set, including `examples/10_tooling/`; the generic task alone
+cannot prove completeness. Tasks use `SIMPLE-BUILD-TASK-3`, and prior task/run
+headers reject rather than inferring a cap or link list. The cap and links are
+bound to task identity and wire admission;
+this manual does not claim native memory enforcement or a completed run.
 By default each local host selects the manager image. To qualify a separate
 native worker, set both `SIMPLE_NATIVE_BUILD_MANAGER_WORKER` and
 `SIMPLE_NATIVE_BUILD_MANAGER_WORKER_SHA256`; every local host must select that

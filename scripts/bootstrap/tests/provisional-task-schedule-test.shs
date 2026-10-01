@@ -1,0 +1,53 @@
+#!/bin/sh
+set -eu
+script_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/simple-provisional-schedule.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+statuses="$tmp/statuses"
+events="$tmp/events"
+: >"$statuses"
+: >"$events"
+exe_suffix=
+llvm_index_config=phase4-llvm.config
+cranelift_index_config=phase4-cranelift.config
+phase3_llvm_index_config=phase3-llvm.config
+phase3_cranelift_index_config=phase3-cranelift.config
+build_binary() {
+  printf 'binary %s %s %s\n' "$4" "$5" "$1" >>"$events"
+  [ "$4:$5:$1" = phase4:llvm:bootstrap ] && exit 1
+  return 0
+}
+build_index() {
+  printf 'index %s %s\n' "$1" "$2" >>"$events"
+  [ "$1:$2" = phase4:llvm ] && exit 1
+  return 0
+}
+prepare_backend() { printf 'prepare %s %s\n' "$1" "$2" >>"$events"; }
+run_module_backend() { printf 'group %s %s\n' "$1" "$2" >>"$events"; }
+. "$script_root/lib/provisional-task-schedule.shs"
+provisional_dispatch_tasks
+[ "$(grep -c '^binary ' "$events")" -eq 12 ] || {
+  echo 'FAIL: not all twelve binary tasks attempted' >&2; exit 1
+}
+[ "$(grep -c '^index ' "$events")" -eq 4 ] || {
+  echo 'FAIL: not all four index tasks attempted' >&2; exit 1
+}
+[ "$(grep -c '^group ' "$events")" -eq 3 ] || {
+  echo 'FAIL: only the failed index should block its own group' >&2; exit 1
+}
+[ "$(wc -l <"$statuses" | tr -d ' ')" -eq 40 ] || {
+  echo 'FAIL: missing task outcome rows' >&2; exit 1
+}
+grep -qx 'phase4_llvm_bootstrap_status=FAILED' "$statuses" || exit 1
+grep -qx 'phase4_llvm_index_status=FAILED' "$statuses" || exit 1
+grep -qx 'phase4_llvm_group_status=BLOCKED' "$statuses" || exit 1
+grep -qx 'phase4_cranelift_group_status=SUCCEEDED' "$statuses" || exit 1
+grep -qx 'phase3_llvm_phase3-bootstrap_status=SUCCEEDED' "$statuses" || exit 1
+grep -qx 'phase3_cranelift_group_status=SUCCEEDED' "$statuses" || exit 1
+[ "$(grep -c '=unproven$' "$statuses")" -eq 20 ] || {
+  echo 'FAIL: per-task actual tool provenance was overstated' >&2; exit 1
+}
+if grep -q '^group phase4 llvm$' "$events"; then
+  echo 'FAIL: group launched after its failed index' >&2; exit 1
+fi
+echo 'PASS: failed Phase 4 task does not suppress independent binaries or groups'

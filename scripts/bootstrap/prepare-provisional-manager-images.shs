@@ -1,0 +1,302 @@
+#!/bin/sh
+# Private diagnostic images. A hello-qualified producer is not Stage 2 admitted.
+# Pre-ready image builds use sampled process-tree RSS enforcement, not a kernel memory cap.
+set -eu
+die() { echo "provisional-images: $*" >&2; exit 1; }
+regular() { [ -f "$1" ] && [ ! -L "$1" ]; }
+absolute() { case "$1" in /*|[A-Za-z]:/*) return 0 ;; *) return 1 ;; esac; }
+digest() { [ "${#1}" -eq 64 ] && case "$1" in *[!0-9a-f]*) return 1 ;; *) return 0 ;; esac; }
+positive() { case "$1" in ''|0|0*|*[!0-9]*) return 1 ;; *) [ "$1" -gt 0 ] 2>/dev/null ;; esac; }
+hash_file() { sha256sum "$1" | cut -d ' ' -f 1; }
+mode= producer= producer_digest= source_root= source_snapshot= source_snapshot_digest=
+hello_receipt= hello_receipt_digest= output_root= target= runtime_path=
+memory_bytes= reserve_bytes= authority_program= authority_receipt= authority_digest=
+authority_image_receipt=
+compiler_tool= compiler_tool_digest= linker_tool= linker_tool_digest=
+for arg in "$@"; do
+  case "$arg" in
+    --mode=*) mode=${arg#*=} ;;
+    --producer=*) producer=${arg#*=} ;;
+    --producer-digest=*) producer_digest=${arg#*=} ;;
+    --source-root=*) source_root=${arg#*=} ;;
+    --source-snapshot=*) source_snapshot=${arg#*=} ;;
+    --source-snapshot-digest=*) source_snapshot_digest=${arg#*=} ;;
+    --hello-receipt=*) hello_receipt=${arg#*=} ;;
+    --hello-receipt-digest=*) hello_receipt_digest=${arg#*=} ;;
+    --output-root=*) output_root=${arg#*=} ;;
+    --target=*) target=${arg#*=} ;;
+    --runtime-path=*) runtime_path=${arg#*=} ;;
+    --memory-bytes=*) memory_bytes=${arg#*=} ;;
+    --reserve-bytes=*) reserve_bytes=${arg#*=} ;;
+    --authority-program=*) authority_program=${arg#*=} ;;
+    --authority-receipt=*) authority_receipt=${arg#*=} ;;
+    --authority-digest=*) authority_digest=${arg#*=} ;;
+    --authority-image-receipt=*) authority_image_receipt=${arg#*=} ;;
+    --compiler-tool=*) compiler_tool=${arg#*=} ;;
+    --compiler-tool-digest=*) compiler_tool_digest=${arg#*=} ;;
+    --linker-tool=*) linker_tool=${arg#*=} ;;
+    --linker-tool-digest=*) linker_tool_digest=${arg#*=} ;;
+    *) die "unknown option: $arg" ;;
+  esac
+done
+case "$mode" in authority|remaining) ;; *) die "mode must be authority or remaining" ;; esac
+for path in "$producer" "$source_root" "$source_snapshot" "$hello_receipt" "$output_root" "$runtime_path"; do
+  [ -n "$path" ] && absolute "$path" || die "absolute path required: $path"
+done
+for pin in "$producer:$producer_digest" "$source_snapshot:$source_snapshot_digest" \
+    "$hello_receipt:$hello_receipt_digest" "$compiler_tool:$compiler_tool_digest" \
+    "$linker_tool:$linker_tool_digest"; do
+  pin_path=${pin%:*} pin_sha=${pin##*:}
+  absolute "$pin_path" || die "diagnostic pin path must be absolute: $pin_path"
+  digest "$pin_sha" && regular "$pin_path" && [ "$(hash_file "$pin_path")" = "$pin_sha" ] \
+    || die "missing or changed diagnostic pin: $pin_path"
+done
+[ -x "$compiler_tool" ] && [ -x "$linker_tool" ] ||
+  die "declared host compiler and linker must be executable"
+for number in "$memory_bytes" "$reserve_bytes"; do positive "$number" || die "positive canonical resource policy required"; done
+[ "$memory_bytes" -le 1125899906842624 ] || die "memory cap exceeds manager task limit"
+[ -d "$source_root" ] && [ ! -L "$source_root" ] || die "source root unavailable"
+source_root=$(CDPATH= cd -- "$source_root" && pwd -P) || die "source root unavailable"
+[ "$runtime_path" = "$source_root/src/runtime" ] ||
+  die "runtime path must be the exact pinned src/runtime path"
+[ -d "$runtime_path" ] && [ ! -L "$runtime_path" ] || die "runtime path unavailable"
+[ ! -L "$source_root/src" ] && [ ! -L "$source_root/src/runtime" ] ||
+  die "runtime path contains a symlink"
+runtime_physical=$(CDPATH= cd -- "$runtime_path" && pwd -P) || die "runtime path unavailable"
+[ "$runtime_physical" = "$source_root/src/runtime" ] ||
+  die "runtime path must resolve to pinned src/runtime"
+runtime_path=$runtime_physical
+output_parent=$(CDPATH= cd -- "$(dirname -- "$output_root")" && pwd -P) ||
+  die "image output parent must already exist"
+output_leaf=$(basename -- "$output_root")
+case "$output_leaf" in ''|.|..) die "invalid output leaf" ;; esac
+output_root="$output_parent/$output_leaf"
+case "$output_root/" in "$source_root/"*) die "image output overlaps source" ;; esac
+case "$source_root/" in "$output_root/"*) die "source overlaps image output" ;; esac
+[ ! -L "$output_root" ] || die "image output is a symlink"
+case "$target" in x86_64-pc-windows-msvc) host=windows suffix=.exe ;;
+  x86_64-unknown-linux-gnu|aarch64-unknown-linux-gnu) host=linux suffix= ;;
+  *) die "unsupported diagnostic target" ;; esac
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P) || die "repository unavailable"
+BOOTSTRAP_STAGE3_FACADE_PATH="$repo_root/scripts/check/lib/bootstrap-stage3-provenance.shs"
+export BOOTSTRAP_STAGE3_FACADE_PATH
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+mkdir -p "$output_root/images/failed" "$output_root/cache" "$output_root/logs" \
+  "$output_root/tmp" "$output_root/image-receipts" "$output_root/template-workspace" \
+  || die "image root unavailable"
+output_root=$(CDPATH= cd -- "$output_root" && pwd -P) || die "image root unavailable"
+watchdog="$repo_root/scripts/bootstrap/run-process-group-timeout.shs"
+regular "$watchdog" || die "process-tree watchdog unavailable"
+verify_pins() {
+  regular "$producer" && [ "$(hash_file "$producer")" = "$producer_digest" ] &&
+    regular "$source_snapshot" && [ "$(hash_file "$source_snapshot")" = "$source_snapshot_digest" ] &&
+    regular "$hello_receipt" && [ "$(hash_file "$hello_receipt")" = "$hello_receipt_digest" ] &&
+    regular "$compiler_tool" && [ "$(hash_file "$compiler_tool")" = "$compiler_tool_digest" ] &&
+    regular "$linker_tool" && [ "$(hash_file "$linker_tool")" = "$linker_tool_digest" ] \
+    || die "diagnostic producer, source, or hello pin changed"
+  observed="$output_root/logs/source-verify.$$.txt"
+  bootstrap_stage3_source_snapshot "$observed" "$source_root" || die "source snapshot failed"
+  cmp -s "$observed" "$source_snapshot" ||
+    die "source differs from pinned snapshot; observed bytes retained: $observed"
+  rm -f "$observed"
+}
+available_memory() {
+  case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*)
+      powershell.exe -NoProfile -Command '[int64](Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory*1024' |
+        tr -d '\r[:space:]' ;;
+    Linux*) awk '$1=="MemAvailable:" { printf "%.0f\n", $2*1024; found=1 } END { if (!found) exit 1 }' /proc/meminfo ;;
+    *) die "unsupported host memory probe" ;;
+  esac
+}
+build_image() {
+  name=$1 entry=$2 image="$output_root/images/$1$suffix"
+  image_pin_receipt="$output_root/image-receipts/$name.env"
+  verify_pins
+  regular "$source_root/$entry" || die "image entry absent from pinned source: $entry"
+  entry_digest=$(hash_file "$source_root/$entry")
+  argv_digest=$(printf '%s\n' "$producer" native-build "$entry" --backend llvm \
+    --target "$target" --runtime-bundle core-c-bootstrap --runtime-path "$runtime_path" \
+    --source src/compiler --source src/app --source src/lib --entry-closure \
+    --cache-dir "$output_root/cache/$name" --mode one-binary --output "$image" |
+    sha256sum | cut -d ' ' -f 1) || die "image argv digest unavailable"
+  image_wire() {
+    printf '%s\n' 'format=SIMPLE-PROVISIONAL-IMAGE-1' 'diagnostic_only=1' \
+      "stage=$mode" "name=$name" "entry=$entry" "entry_digest=$entry_digest" \
+      "producer_path=$producer" "producer_digest=$producer_digest" \
+      "source_root=$source_root" "source_snapshot_digest=$source_snapshot_digest" \
+      "hello_receipt_digest=$hello_receipt_digest" \
+      "compiler_tool_digest=$compiler_tool_digest" "linker_tool_digest=$linker_tool_digest" \
+      "runtime_path=$runtime_path" 'runtime_bundle=core-c-bootstrap' \
+      "target=$target" "memory_limit_bytes=$memory_bytes" \
+      'memory_enforcement=sampled-process-tree-rss' \
+      "memory_reserve_bytes=$reserve_bytes" 'timeout_seconds=21600' \
+      "watchdog_digest=$(hash_file "$watchdog")" "argv_digest=$argv_digest" \
+      "image_path=$image" "image_sha256=$(hash_file "$image")"
+  }
+  if [ -e "$image_pin_receipt" ]; then
+    regular "$image_pin_receipt" && regular "$image" || die "sealed image or receipt missing: $name"
+    image_tmp="$image_pin_receipt.check.$$"
+    image_wire >"$image_tmp" || die "sealed image replay failed"
+    cmp -s "$image_tmp" "$image_pin_receipt" || die "sealed image source, argv or bytes changed: $name"
+    rm -f "$image_tmp"
+    return
+  fi
+  [ ! -e "$receipt" ] || die "aggregate image receipt exists without $name per-image proof"
+  attempt=1
+  while [ -e "$output_root/logs/$name.attempt$attempt.stdout.log" ] ||
+      [ -e "$output_root/logs/$name.attempt$attempt.stderr.log" ] ||
+      [ -e "$output_root/images/failed/$name.attempt$attempt.partial" ] ||
+      [ -e "$output_root/images/failed/$name.attempt$attempt.recovered" ]; do
+    attempt=$((attempt + 1))
+  done
+  if [ -e "$image" ]; then
+    mv "$image" "$output_root/images/failed/$name.attempt$attempt.recovered" \
+      || die "unsealed partial image could not be preserved"
+  fi
+  available=$(available_memory) || die "host memory probe failed"
+  case "$available" in ''|*[!0-9]*) die "host memory probe invalid" ;; esac
+  [ "$available" -ge "$((memory_bytes + reserve_bytes))" ] || die "host memory below cap plus reserve"
+  available_disk=$(df -Pk "$output_root" | awk 'NR==2 { printf "%.0f\n", $4*1024 }') \
+    || die "host disk probe failed"
+  case "$available_disk" in ''|*[!0-9]*) die "host disk probe invalid" ;; esac
+  [ "$available_disk" -ge 35433480192 ] ||
+    die "host disk below 8 GiB image estimate plus 25 GiB retained reserve"
+  cap_kib=$((memory_bytes / 1024))
+  positive "$cap_kib" || die "process-tree RSS cap invalid"
+  if (CDPATH= cd -- "$source_root" && \
+    env -u SIMPLE_BOOTSTRAP_SESSION_ID -u SIMPLE_BOOTSTRAP_SESSION_EXEC \
+    TMPDIR="$output_root/tmp" SIMPLE_NO_STUB_FALLBACK=1 \
+    SIMPLE_BOOTSTRAP_RSS_CAP_MODE=enforce \
+    SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB="$cap_kib" \
+    "$watchdog" 21600 5 "$producer" native-build "$entry" --backend llvm --target "$target" \
+      --runtime-bundle core-c-bootstrap --runtime-path "$runtime_path" \
+      --source src/compiler --source src/app --source src/lib --entry-closure \
+      --cache-dir "$output_root/cache/$name" --mode one-binary --output "$image") \
+      >"$output_root/logs/$name.attempt$attempt.stdout.log" \
+      2>"$output_root/logs/$name.attempt$attempt.stderr.log"; then
+    :
+  else
+    verify_pins
+    if [ -e "$image" ]; then
+      mv "$image" "$output_root/images/failed/$name.attempt$attempt.partial" \
+        || die "failed image partial could not be preserved"
+    fi
+    die "$name diagnostic image build failed; logs retained"
+  fi
+  regular "$image" || die "$name image missing after build"
+  verify_pins
+  image_tmp="$image_pin_receipt.tmp.$$"
+  image_wire >"$image_tmp" || die "per-image receipt write failed"
+  mv "$image_tmp" "$image_pin_receipt" || die "per-image receipt publish failed"
+}
+verify_pins
+if [ "$mode" = authority ]; then
+  receipt="$output_root/provisional-authority-images.env"
+  build_image provisional-authority src/app/bootstrap_builder/native_group_provisional_main.spl
+  image="$output_root/images/provisional-authority$suffix"
+  tmp="$receipt.tmp.$$"
+  {
+    printf '%s\n' 'format=SIMPLE-PROVISIONAL-IMAGES-1' 'stage=authority' 'diagnostic_only=1' \
+      "producer_digest=$producer_digest" "source_snapshot_digest=$source_snapshot_digest" \
+      "hello_receipt_digest=$hello_receipt_digest" "target=$target" \
+      "compiler_tool_digest=$compiler_tool_digest" "linker_tool_digest=$linker_tool_digest" \
+      "authority_program=$image" "authority_sha256=$(hash_file "$image")"
+  } >"$tmp"
+else
+  for path in "$authority_program" "$authority_receipt"; do
+    [ -n "$path" ] && absolute "$path" && regular "$path" || die "provisional authority input missing"
+  done
+  digest "$authority_digest" && [ "$(hash_file "$authority_receipt")" = "$authority_digest" ] \
+    || die "provisional authority receipt changed"
+  regular "$authority_image_receipt" || die "provisional authority image receipt missing"
+  [ "$(bootstrap_stage3_manifest_value format "$authority_image_receipt")" = SIMPLE-PROVISIONAL-IMAGES-1 ] &&
+    [ "$(bootstrap_stage3_manifest_value stage "$authority_image_receipt")" = authority ] &&
+    [ "$(bootstrap_stage3_manifest_value authority_program "$authority_image_receipt")" = "$authority_program" ] &&
+    [ "$(bootstrap_stage3_manifest_value authority_sha256 "$authority_image_receipt")" = "$(hash_file "$authority_program")" ] \
+    || die "provisional authority image differs from sealed image receipt"
+  "$authority_program" native-groups-provisional-authority-verify --receipt "$authority_receipt" \
+    --digest "$authority_digest" --source-snapshot "$source_snapshot" \
+    --hello-receipt "$hello_receipt" >/dev/null || die "provisional authority recheck failed"
+  receipt="$output_root/provisional-manager-images.env"
+  case "$host" in
+    windows) manager_entry=src/app/bootstrap_builder/windows_main.spl
+      worker_entry=src/app/bootstrap_builder/windows_worker.spl
+      group_manager_entry=src/app/bootstrap_builder/native_group_windows_main.spl
+      broker_entry=src/app/bootstrap_builder/windows_group_broker.spl ;;
+    linux) manager_entry=src/app/bootstrap_builder/main.spl
+      worker_entry=src/app/bootstrap_builder/linux_worker.spl
+      group_manager_entry=src/app/bootstrap_builder/native_group_linux_main.spl
+      broker_entry=src/app/bootstrap_builder/native_group_linux_broker.spl ;;
+  esac
+  build_image manifest src/app/bootstrap_builder/manifest_main.spl
+  build_image builder "$manager_entry"
+  build_image worker "$worker_entry"
+  build_image group-manager "$group_manager_entry"
+  build_image group-worker src/app/bootstrap_builder/grouped_native_worker.spl
+  build_image group-broker "$broker_entry"
+  build_image index-builder src/app/bootstrap_builder/native_group_index_main.spl
+  template="$output_root/host-template.sdn"
+  if [ ! -e "$template" ]; then
+    "$output_root/images/manifest$suffix" --template "$output_root/images/worker$suffix" \
+      "$output_root/template-workspace" "$template" 1 --memory-limit-bytes "$memory_bytes" \
+      || die "provisional host template failed"
+  fi
+  regular "$template" || die "provisional host template missing"
+  IFS= read -r header <"$template" || die "provisional template unreadable"
+  [ "$header" = SIMPLE-BUILD-RUN-4 ] || die "provisional template uses obsolete wire"
+  verify_pins
+  tmp="$receipt.tmp.$$"
+  {
+    printf '%s\n' 'format=SIMPLE-PROVISIONAL-IMAGES-1' 'stage=manager' 'diagnostic_only=1' \
+      "producer_digest=$producer_digest" "source_snapshot_digest=$source_snapshot_digest" \
+      "hello_receipt_digest=$hello_receipt_digest" "authority_digest=$authority_digest" \
+      "compiler_tool_digest=$compiler_tool_digest" "linker_tool_digest=$linker_tool_digest" \
+      "target=$target" "memory_limit_bytes=$memory_bytes" "memory_reserve_bytes=$reserve_bytes" \
+      'memory_enforcement=sampled-process-tree-rss' 'timeout_seconds=21600'
+    for name in manifest builder worker group-manager group-worker group-broker index-builder; do
+      image="$output_root/images/$name$suffix"
+      case "$name" in
+        manifest) key=manifest_program sha_key=manifest_sha256 ;;
+        builder) key=builder_program sha_key=builder_sha256 ;;
+        worker) key=worker_program sha_key=worker_sha256 ;;
+        group-manager) key=group_program sha_key=group_sha256 ;;
+        group-worker) key=group_worker sha_key=group_worker_sha256 ;;
+        group-broker) key=group_broker sha_key=group_broker_sha256 ;;
+        index-builder) key=index_program sha_key=index_sha256 ;;
+      esac
+      printf '%s\n' "$key=$image" "$sha_key=$(hash_file "$image")"
+    done
+    printf '%s\n' "template=$template" "template_sha256=$(hash_file "$template")"
+  } >"$tmp"
+fi
+if [ -e "$receipt" ]; then
+  cmp -s "$tmp" "$receipt" || die "existing provisional image receipt differs"
+  rm -f "$tmp"
+else
+  mv "$tmp" "$receipt" || die "provisional image receipt publish failed"
+fi
+if [ "$mode" = remaining ]; then
+  tool_intent="$output_root/provisional-tool.intent"
+  tool_tmp="$tool_intent.tmp.$$"
+  {
+    printf '%s\n' 'format=SIMPLE-PROVISIONAL-TOOL-1' 'diagnostic_only=1' \
+      'actual_invocation_relation=unproven' \
+      "compiler_tool_path=$compiler_tool" "compiler_tool_digest=$compiler_tool_digest" \
+      "linker_tool_path=$linker_tool" "linker_tool_digest=$linker_tool_digest" \
+      "producer_path=$producer" "producer_digest=$producer_digest" \
+      "manager_images_path=$receipt" "manager_images_digest=$(hash_file "$receipt")" \
+      "source_root=$source_root" "source_snapshot_digest=$source_snapshot_digest" \
+      "runtime_path=$runtime_path" "target=$target" \
+      "build_argv_template=native-build {entry} --backend llvm --target $target --runtime-bundle core-c-bootstrap --runtime-path $runtime_path --source src/compiler --source src/app --source src/lib --entry-closure --cache-dir {private-cache} --mode one-binary --output {private-image}"
+  } >"$tool_tmp" || die "tool intent write failed"
+  if [ -e "$tool_intent" ]; then
+    regular "$tool_intent" && cmp -s "$tool_tmp" "$tool_intent" \
+      || die "existing provisional tool intent differs"
+    rm -f "$tool_tmp"
+  else
+    mv "$tool_tmp" "$tool_intent" || die "provisional tool intent publish failed"
+  fi
+  verify_pins
+fi
+printf '%s\n' "$receipt"

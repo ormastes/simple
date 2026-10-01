@@ -1,0 +1,69 @@
+#!/bin/sh
+set -eu
+script_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/simple-provisional-authority.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+mkdir -p "$tmp/source" "$tmp/output"
+printf 'producer\n' >"$tmp/producer"
+printf 'snapshot\n' >"$tmp/source.snapshot"
+printf 'hello\n' >"$tmp/hello.receipt"
+cat >"$tmp/authority" <<'SH'
+#!/bin/sh
+: >"$AUTHORITY_CALLED"
+exit 0
+SH
+chmod +x "$tmp/authority"
+export AUTHORITY_CALLED="$tmp/authority.called"
+snapshot_sha=$(sha256sum "$tmp/source.snapshot" | cut -d ' ' -f 1)
+hello_sha=$(sha256sum "$tmp/hello.receipt" | cut -d ' ' -f 1)
+cat >"$tmp/authority-images.env" <<EOF
+format=SIMPLE-PROVISIONAL-IMAGES-1
+stage=authority
+diagnostic_only=1
+producer_digest=$(sha256sum "$tmp/producer" | cut -d ' ' -f 1)
+source_snapshot_digest=$snapshot_sha
+hello_receipt_digest=$hello_sha
+target=x86_64-unknown-linux-gnu
+authority_program=$tmp/authority
+authority_sha256=$(sha256sum "$tmp/authority" | cut -d ' ' -f 1)
+EOF
+run_gate() {
+  sh "$script_root/prepare-provisional-phase3-phase4.shs" \
+    --producer="$tmp/producer" --source-checkout="$tmp/source" \
+    --source-snapshot="$tmp/source.snapshot" --source-snapshot-digest="$snapshot_sha" \
+    --hello-receipt="$1" --hello-receipt-digest="$hello_sha" \
+    --authority-program="$tmp/authority" --authority-image-receipt="$tmp/authority-images.env" \
+    --output-root="$tmp/output/run" \
+    --target=x86_64-unknown-linux-gnu
+}
+if run_gate "$tmp/absent.receipt" >"$tmp/out" 2>&1; then
+  echo 'FAIL: missing hello receipt accepted' >&2; exit 1
+fi
+[ ! -e "$AUTHORITY_CALLED" ] || { echo 'FAIL: authority started without hello' >&2; exit 1; }
+printf 'changed\n' >"$tmp/hello.receipt"
+if run_gate "$tmp/hello.receipt" >"$tmp/out" 2>&1; then
+  echo 'FAIL: changed hello receipt accepted' >&2; exit 1
+fi
+[ ! -e "$AUTHORITY_CALLED" ] || { echo 'FAIL: authority started after hello drift' >&2; exit 1; }
+printf 'hello\n' >"$tmp/hello.receipt"
+cp "$tmp/authority-images.env" "$tmp/authority-images.saved"
+sed 's/^authority_sha256=.*/authority_sha256=0000000000000000000000000000000000000000000000000000000000000000/' \
+  "$tmp/authority-images.saved" >"$tmp/authority-images.env"
+if run_gate "$tmp/hello.receipt" >"$tmp/out" 2>&1; then
+  echo 'FAIL: changed authority image pin accepted' >&2; exit 1
+fi
+[ ! -e "$AUTHORITY_CALLED" ] || { echo 'FAIL: unpinned authority started' >&2; exit 1; }
+cp "$tmp/authority-images.saved" "$tmp/authority-images.env"
+if sh "$script_root/prepare-provisional-phase3-phase4.shs" \
+  --producer="$tmp/producer" --source-checkout="$tmp/source" \
+  --source-snapshot="$tmp/source.snapshot" --source-snapshot-digest="$snapshot_sha" \
+  --hello-receipt="$tmp/hello.receipt" --hello-receipt-digest="$hello_sha" \
+  --authority-program="$tmp/authority" --authority-image-receipt="$tmp/authority-images.env" \
+  --output-root="$tmp/source/inside" \
+  --target=x86_64-unknown-linux-gnu >"$tmp/out" 2>&1; then
+  echo 'FAIL: output inside source accepted' >&2; exit 1
+fi
+[ ! -e "$AUTHORITY_CALLED" ] && [ ! -e "$tmp/source/inside" ] || {
+  echo 'FAIL: source was mutated or authority started on overlap' >&2; exit 1
+}
+echo 'PASS: missing or changed hello and source-overlap refuse before authority spawn'
