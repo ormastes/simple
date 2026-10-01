@@ -3,6 +3,20 @@
 Status: open; observed during bounded bootstrap qualification, not a diagnosed
 compiler defect. No passing hello result was available at this observation.
 
+## Terminal result
+
+The third attempt terminated before its 1200-second timeout with
+`rss-cap-exceeded`: aggregate process-tree peak 5,865,692 KiB against a
+5,859,375 KiB cap. The outer resource receipt records child exit 88 and
+the Job Object receipt records `quiescent=1`. Parent PID35956 and worker
+PID31052 are gone. No hello executable or compile exit file was produced;
+stderr still contained only the workarounds warning. D had approximately
+102.885 GiB free, so disk pressure did not cause this failure.
+
+The aggregate includes both parent and worker; child RSS alone is not
+headroom evidence. Preserve the passing Phase2 build and the failed hello4
+receipts. The three-cycle retry limit is reached, and Phase3/4 did not launch.
+
 ## Reproduction and identity
 
 The retained `D:/dev/bootstrap-phase2-selective-windows/hello4/run-once.shs`

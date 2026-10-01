@@ -36,12 +36,20 @@ This document was recovered into an independent Git checkout at
 The hello3 wrapper fixed `out` and pinned the runtime path, then received
 the explicit `compile-event-journal-missing` first-build refusal. Hello4
 uses the documented `SIMPLE_SCV_INVENTORY_COLD_INIT=1` plus compiler tracing,
-under the existing 1200-second timeout and resource guards. Its last
-confirmed process was PID35956; live status must be rechecked, not inferred
-from this checkpoint. This is the third hello attempt; do not retry it
-again if it fails. `resume-v8.shs` SHA256 is
+under the existing 1200-second timeout and resource guards. It terminated
+at the aggregate Job Object RSS cap: peak 5,865,692 KiB versus 5,859,375 KiB,
+status `rss-cap-exceeded`, child exit 88, quiescent process tree. Parent
+PID35956 and worker PID31052 are gone; no hello executable or compile exit
+file was produced. Disk was not the cause (about 102.885 GiB free).
+This was the third hello attempt; no further retry is permitted this session.
+`resume-v8.shs` SHA256 is
 `9069e6d53c997a4075ac1081d3e974fdc31bf0223d15ec1c976ee256847695b7`.
-No compiled-and-executed hello PASS has been recorded.
+No compiled-and-executed hello PASS has been recorded; Phase3/4 did not launch.
+Keep the passing Phase2 candidate, runtime snapshot and all failed hello
+receipts. Both Windows and Linux hello lanes have now exhausted their three
+bounded attempts; the manager worker lane also remains at its three-attempt
+digest-mismatch stop. None of these limits can be reset by renaming a lane
+or assigning another agent.
 
 Recovered Item5 metadata tests are in draft PR #2157, head
 `15a0d9c0fbfd651f7d8e64a75047e3f5478d4e17`. Its 17 scenarios require POSIX;
@@ -57,7 +65,7 @@ release `ea15d708abe`, with no additional merge:
 | 5 | #2157 | `15a0d9c0fb` | 2 metadata spec/manual paths |
 | 6 | #2159 | `e05027aff7` | 3 warm-index binding/spec/ledger paths |
 
-Structural CI passed for #2157-2159 at handoff; this does not replace native
+Structural CI passed for #2157-2160; this does not replace native
 Simple tests, doc generation, Item1 live CLI/guest checks or Item6 performance
 evidence. No qualified existing Linux test runner was found in the bounded
 runtime audit. The `3eae...` rejected candidate has no passing hello receipt;
