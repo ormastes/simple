@@ -55,38 +55,19 @@ bootstrap_stage3_verify_stage2_admission_receipt \
 regular "$producer" && [ "$(hash_file "$producer")" = "$producer_sha" ] || die "admitted producer changed"
 regular "$source_authority" || die "source authority missing"
 
-# The published Stage 2 authority lists each source file and SHA. The direct
-# image build is allowed only while these exact inputs remain present.
+# Reuse the canonical snapshotter, which also validates the admitted source
+# symlink records and checks every file for mutation while it is read.
 verify_sources() {
-  perl -e '
-    use strict; use warnings; use Digest::SHA ();
-    my ($root, $snapshot) = @ARGV;
-    open my $proof, "<:raw", $snapshot or die "source snapshot open failed\n";
-    my $count = 0;
-    while (my $row = <$proof>) {
-      $row =~ s/\n\z//;
-      $row =~ /^file-hex:([0-9a-f]+):[01]:([0-9a-f]{64})$/
-        or die "source snapshot row invalid\n";
-      my $relative = pack("H*", $1);
-      my $expected = $2;
-      next unless $relative =~ m{^src/};
-      $relative !~ /[\r\n\\]/ && $relative !~ m{(?:^|/)\.\.(?:/|$)}
-        or die "source snapshot path unsafe\n";
-      my @stat = lstat("$root/$relative");
-      @stat && -f _ && !-l _ or die "source input missing: $relative\n";
-      open my $input, "<:raw", "$root/$relative" or die "source input open failed\n";
-      my $digest = Digest::SHA->new(256)->addfile($input)->hexdigest;
-      close $input or die "source input close failed\n";
-      $digest eq $expected or die "source input digest differs: $relative\n";
-      $count++;
-    }
-    $count > 0 or die "source authority empty\n";
-  ' "$source_root" "$source_authority" || die "frozen source differs from admitted Stage 2 source"
+  observed="$output_root/logs/source-verify.$$.txt"
+  bootstrap_stage3_source_snapshot "$observed" "$source_root" \
+    || die "canonical source snapshot failed"
+  cmp -s "$observed" "$source_authority" \
+    || die "frozen source differs from admitted Stage 2 source; snapshot retained: $observed"
+  rm -f "$observed"
 }
-verify_sources
-
 mkdir -p "$output_root/images" "$output_root/cache" "$output_root/logs" "$output_root/template-workspace" \
   || die "manager image directories unavailable"
+verify_sources
 receipt="$output_root/manager-images.env"
 if [ -e "$receipt" ]; then
   regular "$receipt" || die "existing image receipt is not regular"
