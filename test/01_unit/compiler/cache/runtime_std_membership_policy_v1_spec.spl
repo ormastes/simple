@@ -1,0 +1,124 @@
+use std.spec.{describe, it, expect}
+use std.common.crypto.sha256.{sha256_text}
+use std.scv.compile_snapshot.{ScvCompileSnapshotV1}
+use compiler.driver.driver_build.native_full_inventory_sources.{
+    NativeFullInventorySourcesV1
+}
+use compiler.driver.cache.package_module_index.{
+    PackageModuleIndexEntryV1, PackageModuleIndexGenerationV1,
+    package_module_index_entry_action_digest_v1,
+    package_module_index_encode_v1
+}
+use compiler.driver.cache.runtime_std_membership_policy_v1.{
+    runtime_std_membership_policy_from_index_v1
+}
+
+fn runtime_std_policy_sources_v1() -> NativeFullInventorySourcesV1:
+    val digest = sha256_text("source")
+    NativeFullInventorySourcesV1(
+        ["/frozen/src/lib/std.spl", "/frozen/src/os/kernel.spl",
+            "/frozen/src/runtime/core.spl"],
+        ["src/lib/std.spl", "src/os/kernel.spl",
+            "src/runtime/core.spl"],
+        [digest, digest, digest], [6, 6, 6], 3,
+        sha256_text("snapshot"), sha256_text("source inventory"),
+        sha256_text("SCV receipt"))
+
+fn runtime_std_policy_snapshot_v1(
+    sources: NativeFullInventorySourcesV1
+) -> ScvCompileSnapshotV1:
+    ScvCompileSnapshotV1(true, "ok", "revision", "commit", "tree",
+        sources.snapshot_inventory_digest, 3, "/frozen",
+        "/frozen/SCV_COMPILE_SNAPSHOT", "/frozen/SCV_COMPILE_RECEIPT", false)
+
+fn runtime_std_policy_entry_v1(module_identity: text,
+        source_identity: text, source_digest: text,
+        package_identity: text) -> PackageModuleIndexEntryV1:
+    PackageModuleIndexEntryV1(
+        package_identity: package_identity,
+        module_identity: module_identity,
+        source_identity: source_identity,
+        source_digest: source_digest,
+        smf_metadata_digest: sha256_text("smf:{module_identity}"),
+        export_digest: sha256_text("export:{module_identity}"),
+        abi_digest: sha256_text("abi:{module_identity}"),
+        initializer_digest: sha256_text("initializer:{module_identity}"),
+        provider_digest: sha256_text("provider:{module_identity}"),
+        action_digest: "0000000000000000000000000000000000000000000000000000000000000000",
+        manifest_digest: sha256_text("manifest:{module_identity}"),
+        scc_identity: "scc::{module_identity}",
+        direct_imports: [], reverse_dependents: [])
+
+fn runtime_std_policy_index_v1(
+    sources: NativeFullInventorySourcesV1
+) -> PackageModuleIndexGenerationV1:
+    var generation = PackageModuleIndexGenerationV1(
+        schema_version: 2,
+        producer_digest: sha256_text("compiler"),
+        root_generation: "root",
+        scv_revision_id: "revision",
+        scv_commit_id: "commit",
+        scv_tree_id: "tree",
+        inventory_digest: sources.source_inventory_digest,
+        entries: [
+            runtime_std_policy_entry_v1("a", sources.source_identities[0],
+                sources.source_digests[0], "simple.std"),
+            runtime_std_policy_entry_v1("b", sources.source_identities[1],
+                sources.source_digests[1], "simple.os"),
+            runtime_std_policy_entry_v1("c", sources.source_identities[2],
+                sources.source_digests[2], "simple.runtime")],
+        variant_digest: sha256_text("variant"))
+    var index = 0
+    while index < generation.entries.len():
+        generation.entries[index].action_digest =
+            package_module_index_entry_action_digest_v1(
+                generation, generation.entries[index])
+        index = index + 1
+    generation
+
+describe "runtime and std membership from a pinned compiler V2 graph":
+    it "authors every SCV row from actual graph package identities":
+        val sources = runtime_std_policy_sources_v1()
+        val snapshot = runtime_std_policy_snapshot_v1(sources)
+        val generation = runtime_std_policy_index_v1(sources)
+        val index_digest = sha256_text(
+            package_module_index_encode_v1(generation))
+        val result = runtime_std_membership_policy_from_index_v1(
+            sources, snapshot, generation, index_digest,
+            generation.producer_digest, generation.variant_digest)
+        expect(result.is_ok()).to_equal(true)
+        val policy = result.unwrap()
+        expect(policy.membership.members.len()).to_equal(3)
+        expect(policy.membership.members[1].source_identity).to_equal(
+            "src/os/kernel.spl")
+        expect(policy.membership.members[1].package_identity).to_equal(
+            "simple.os")
+        expect(policy.membership_digest).to_equal(
+            sha256_text(policy.membership_content))
+        expect(policy.policy_digest.len()).to_equal(64)
+
+    it "rejects an entry-scoped graph or missing runtime package":
+        val sources = runtime_std_policy_sources_v1()
+        val snapshot = runtime_std_policy_snapshot_v1(sources)
+        var generation = runtime_std_policy_index_v1(sources)
+        val index_digest = sha256_text(
+            package_module_index_encode_v1(generation))
+        var scoped = generation
+        scoped.schema_version = 3
+        scoped.scope_entry_source_identity = "src/lib/std.spl"
+        expect(runtime_std_membership_policy_from_index_v1(
+            sources, snapshot, scoped, index_digest,
+            generation.producer_digest, generation.variant_digest
+            ).unwrap_err()).to_equal(
+                "runtime-std-membership-policy-authority-mismatch")
+        generation.entries[2].package_identity = "simple.os"
+        generation.entries[2].action_digest =
+            package_module_index_entry_action_digest_v1(
+                generation, generation.entries[2])
+        val changed_digest = sha256_text(
+            package_module_index_encode_v1(generation))
+        expect(runtime_std_membership_policy_from_index_v1(
+            sources, snapshot, generation, changed_digest,
+            generation.producer_digest, generation.variant_digest
+            ).unwrap_err()).to_equal(
+                "runtime-std-membership-policy-required-package-missing")
