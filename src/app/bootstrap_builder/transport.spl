@@ -1,7 +1,7 @@
 # All remote authority comes from an explicitly supplied, validated host record.
 # Source files are copied and checked before worker launch; workers never share
 # writable cache/output directories. A timeout observing a worker is not death.
-use app.bootstrap_builder.contracts.{BuildTaskV1, BuildHostV1, BuildResultV1, builder_validate_task_v1, builder_validate_host_v1, builder_validate_result_v1, builder_task_identity_v1}
+use app.bootstrap_builder.contracts.{BuildTaskV1, BuildHostV1, BuildResultV1, builder_validate_task_v1, builder_validate_host_v1, builder_validate_result_v1, builder_task_identity_v1, builder_relative_path_valid_v1}
 use app.bootstrap_builder.codec.{builder_write_task_v1, builder_read_task_v1,
     builder_read_result_v1, builder_encode_result_v1}
 use app.bootstrap_builder.process_port.{BuilderProcessPortV1}
@@ -14,7 +14,9 @@ use app.io.process_ops.{process_run_timeout}
 use app.io.env_ops.{host_os}
 use app.io.time_ops.{current_time_ms, sleep_ms}
 use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
-use std.nogc_sync_mut.io.dir_ops.{dir_walk_native, dir_create_all}
+use std.nogc_sync_mut.io.dir_ops.{
+    dir_walk_native, dir_create_all, dir_is_real_no_follow
+}
 
 pub struct BuilderAttemptV1:
     task_id: text
@@ -318,10 +320,55 @@ fn builder_transport_work_root_safe_v1(work: text) -> bool:
             prefix = prefix + "/"
     true
 
+fn builder_transport_private_absolute_v1(path: text) -> bool:
+    val normalized = path.replace("\\", "/")
+    if normalized == "" or normalized.contains("//") or
+            normalized.contains("\n") or normalized.contains("\r"):
+        return false
+    if normalized.ends_with("/") and normalized != "/" and
+            not (normalized.len() == 3 and
+                (normalized.byte_at(1) as i64) == 58):
+        return false
+    if host_os() == "windows":
+        if normalized.len() < 4 or
+                (normalized.byte_at(1) as i64) != 58 or
+                (normalized.byte_at(2) as i64) != 47:
+            return false
+    elif not normalized.starts_with("/"):
+        return false
+    val parts = normalized.split("/")
+    for part in parts:
+        if part == "." or part == "..": return false
+    true
+
+fn builder_transport_physical_v1(path: text) -> text:
+    var physical = path_absolute(path).replace("\\", "/")
+    if physical.starts_with("//?/"):
+        physical = physical.substring(4)
+    if host_os() == "windows": physical = physical.lower()
+    physical
+
+fn builder_transport_prune_state_root_v1(
+    task: BuildTaskV1, attempt: BuilderAttemptV1
+) -> text:
+    val root = attempt.local_root.replace("\\", "/")
+    if not builder_transport_private_absolute_v1(root): return ""
+    val attempt_dir = builder_transport_parent_v1(root)
+    val task_dir = builder_transport_parent_v1(attempt_dir)
+    val attempts_dir = builder_transport_parent_v1(task_dir)
+    val state_root = builder_transport_parent_v1(attempts_dir)
+    val expected = state_root + "/attempts/" + task.id + "/" +
+        str(task.attempt) + "/" + attempt.host.id
+    if not builder_transport_private_absolute_v1(state_root) or
+            root != expected:
+        return ""
+    state_root
+
 # Reclaim only immutable input copies after the exact worker tree has reaped,
 # the successful result was admitted, and a separate published output exists.
-# The request, producer, result, reap proof, outputs and private cache remain
-# available for recovery. A partial delete can be safely retried.
+# The request, producer, result, reap proof, and outputs remain available for
+# recovery. Successful private cache files are disposable after publication;
+# a partial delete can be safely retried.
 pub fn builder_transport_prune_terminal_inputs_v1(task: BuildTaskV1,
         attempt: BuilderAttemptV1, admitted: BuildResultV1,
         output_root: text) -> Result<i64, text>:
@@ -336,8 +383,30 @@ pub fn builder_transport_prune_terminal_inputs_v1(task: BuildTaskV1,
     val retained = builder_transport_collect_v1(attempt)?
     if builder_encode_result_v1(retained) != builder_encode_result_v1(admitted):
         return Err("input prune result differs from admitted receipt")
+    val state_root = builder_transport_prune_state_root_v1(task, attempt)
+    if state_root == "":
+        return Err("input prune attempt is outside private manager state")
+    val published_receipt = builder_read_result_v1(
+        state_root + "/receipts/" + task.id + ".sdn")?
+    if builder_encode_result_v1(published_receipt) !=
+            builder_encode_result_v1(admitted):
+        return Err("input prune published receipt differs from attempt")
     val work = attempt.local_root + "/work"
-    if not builder_transport_work_root_safe_v1(work):
+    val physical_attempt = builder_transport_physical_v1(attempt.local_root)
+    val physical_work = builder_transport_physical_v1(work)
+    val physical_output = builder_transport_physical_v1(output_root)
+    val expected_attempt = if host_os() == "windows":
+        attempt.local_root.replace("\\", "/").lower()
+    else:
+        attempt.local_root.replace("\\", "/")
+    if not builder_transport_work_root_safe_v1(work) or
+            physical_attempt == "" or physical_attempt != expected_attempt or
+            physical_work != physical_attempt + "/work" or
+            not builder_transport_private_absolute_v1(output_root) or
+            physical_output == "" or
+            physical_output == physical_attempt or
+            physical_output.starts_with(physical_attempt + "/") or
+            physical_attempt.starts_with(physical_output + "/"):
         return Err("input prune attempt root crosses a symlink or reparse directory")
     for output in admitted.outputs:
         val published = output_root + "/" + output.path
@@ -355,6 +424,44 @@ pub fn builder_transport_prune_terminal_inputs_v1(task: BuildTaskV1,
         if file_exists(path) and (not file_is_regular_no_follow(path) or
                 file_hash_sha256(path) != input.digest):
             return Err("input prune copy differs: " + input.path)
+    # A successful task will not retry, and its source authority remains in
+    # the original source root. Reclaim the private cache's file bytes too;
+    # failed attempts retain their cache for a bounded retry. The native walk
+    # returns leaves only. Preflight all leaves before deleting any input.
+    for output in task.outputs:
+        if output == ".builder-cache" or
+                output.starts_with(".builder-cache/"):
+            return Err("input prune cannot remove a declared cache output")
+    val cache_root = work + "/.builder-cache"
+    var cache_paths: [text] = []
+    if file_exists(cache_root):
+        if not dir_is_real_no_follow(cache_root) or
+                not builder_transport_input_parent_safe_v1(
+                    work, ".builder-cache/placeholder"):
+            return Err("input prune cache root crosses a reparse directory")
+        val found = dir_walk_native(cache_root)
+        if found.len() > 100000:
+            return Err("input prune cache exceeds file bound")
+        val normalized_root = cache_root.replace("\\", "/")
+        val comparable_root = if host_os() == "windows":
+            normalized_root.lower()
+        else:
+            normalized_root
+        for found_path in found:
+            val normalized = found_path.replace("\\", "/")
+            val comparable = if host_os() == "windows":
+                normalized.lower()
+            else:
+                normalized
+            if not comparable.starts_with(comparable_root + "/"):
+                return Err("input prune cache walk escaped attempt")
+            val relative = normalized[normalized_root.len() + 1:]
+            if not builder_relative_path_valid_v1(relative) or
+                    not builder_transport_input_parent_safe_v1(
+                        work, ".builder-cache/" + relative) or
+                    not file_is_regular_no_follow(found_path):
+                return Err("input prune cache contains unsafe leaf")
+            cache_paths.push(found_path)
     var deleted: i64 = 0
     for input in task.inputs:
         val path = attempt.local_root + "/work/" + input.path
@@ -365,6 +472,15 @@ pub fn builder_transport_prune_terminal_inputs_v1(task: BuildTaskV1,
                     file_hash_sha256(path) != input.digest or not file_delete(path):
                 return Err("input prune failed: " + input.path)
             deleted = deleted + 1
+    for path in cache_paths:
+        val normalized = path.replace("\\", "/")
+        val relative = normalized[cache_root.replace("\\", "/").len() + 1:]
+        if not builder_transport_work_root_safe_v1(work) or
+                not builder_relative_path_valid_v1(relative) or
+                not builder_transport_input_parent_safe_v1(
+                    work, ".builder-cache/" + relative) or
+                not file_is_regular_no_follow(path) or not file_delete(path):
+            return Err("input prune cache deletion failed")
     Ok(deleted)
 
 # Nonce freshness establishes that this exact worker still owns the compiler.

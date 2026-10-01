@@ -1,0 +1,106 @@
+use std.spec.{describe, it, expect}
+use app.bootstrap_builder.transport.{
+    BuilderAttemptV1, builder_transport_prune_terminal_inputs_v1
+}
+use app.bootstrap_builder.codec.{builder_write_result_v1}
+use app.bootstrap_builder.process_port.{builder_process_portable_v1}
+use app.io.file_ops.{
+    file_atomic_write, file_exists, file_hash_sha256, path_absolute
+}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
+use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
+use std.nogc_sync_mut.io_runtime.{time_now_unix_micros}
+use std.common.build_manager.contracts.{
+    BuildInputV1, BuildTaskV1, BuildResultV1, BuildHostV1,
+    builder_task_identity_v1
+}
+
+fn terminal_prune_fixture_v1() -> text:
+    val absolute = path_absolute(".").replace("\\", "/")
+    val base = if absolute.starts_with("//?/"):
+        absolute.substring(4)
+    else:
+        absolute
+    val root = base + "/build/builder-terminal-prune-" +
+        str(getpid()) + "-" + str(time_now_unix_micros())
+    expect(dir_create_all(root + "/source")).to_equal(true)
+    expect(dir_create_all(root + "/output")).to_equal(true)
+    expect(dir_create_all(root + "/state/receipts")).to_equal(true)
+    expect(dir_create_all(root +
+        "/state/attempts/module/1/local/work/.builder-cache/objects")
+    ).to_equal(true)
+    root
+
+describe "generic builder terminal attempt pruning":
+    it "retains input and cache until reap, persisted receipt, and output verify":
+        val root = terminal_prune_fixture_v1()
+        val attempt_root = root + "/state/attempts/module/1/local"
+        val work = attempt_root + "/work"
+        val program = root + "/source/producer.exe"
+        expect(file_atomic_write(program, "producer bytes\n")).to_equal(true)
+        expect(file_atomic_write(root + "/source/input.txt",
+            "source bytes\n")).to_equal(true)
+        expect(file_atomic_write(work + "/input.txt",
+            "source bytes\n")).to_equal(true)
+        expect(file_atomic_write(work + "/module.o",
+            "object bytes\n")).to_equal(true)
+        expect(file_atomic_write(work + "/.builder-cache/index",
+            "index bytes\n")).to_equal(true)
+        expect(file_atomic_write(work + "/.builder-cache/objects/blob",
+            "blob bytes\n")).to_equal(true)
+        val producer_digest = file_hash_sha256(program)
+        val source_digest = file_hash_sha256(root + "/source/input.txt")
+        val output_digest = file_hash_sha256(work + "/module.o")
+        val task = BuildTaskV1(id: "module", attempt: 1, phase: "native",
+            producer_digest: producer_digest, source_digest: source_digest,
+            toolchain_digest: producer_digest, dependencies: [],
+            program: program, args: ["compile"],
+            inputs: [BuildInputV1("input.txt", source_digest)],
+            outputs: ["module.o"], cache_key: source_digest,
+            timeout_ms: 0, memory_limit_bytes: 1073741824)
+        val host = BuildHostV1(id: "local", transport: "local", endpoint: "",
+            workspace: root + "/state", worker_program: program,
+            worker_digest: producer_digest, slots: 1)
+        val receipt = BuildResultV1(task_id: "module", attempt: 1,
+            identity_digest: builder_task_identity_v1(task), host_id: "local",
+            status: "OK", exit_code: 0,
+            outputs: [BuildInputV1("module.o", output_digest)],
+            cache_hits: 0, cache_misses: 0, cache_stores: 0)
+        val owned = BuilderAttemptV1(task_id: "module", attempt: 1,
+            host: host, pid: 0, local_root: attempt_root, remote_root: "",
+            error: "", identity_digest: builder_task_identity_v1(task),
+            process: builder_process_portable_v1())
+        expect(builder_write_result_v1(
+            attempt_root + "/result.sdn", receipt)).to_equal(true)
+        expect(builder_transport_prune_terminal_inputs_v1(
+            task, owned, receipt, root + "/output").is_err()).to_equal(true)
+        expect(file_exists(work + "/input.txt")).to_equal(true)
+        expect(file_exists(work + "/.builder-cache/index")).to_equal(true)
+
+        expect(file_atomic_write(attempt_root + "/compiler.reaped",
+            builder_task_identity_v1(task) + "\nlocal")).to_equal(true)
+        expect(builder_transport_prune_terminal_inputs_v1(
+            task, owned, receipt, root + "/output").is_err()).to_equal(true)
+        expect(builder_write_result_v1(
+            root + "/state/receipts/module.sdn", receipt)).to_equal(true)
+        expect(builder_transport_prune_terminal_inputs_v1(
+            task, owned, receipt, root + "/output").is_err()).to_equal(true)
+        expect(file_exists(work + "/.builder-cache/objects/blob")).to_equal(true)
+        expect(file_atomic_write(root + "/output/module.o",
+            "object bytes\n")).to_equal(true)
+        expect(builder_transport_prune_terminal_inputs_v1(
+            task, owned, receipt, attempt_root).is_err()).to_equal(true)
+
+        val pruned = builder_transport_prune_terminal_inputs_v1(
+            task, owned, receipt, root + "/output")
+        expect(pruned.is_ok()).to_equal(true)
+        expect(pruned.unwrap()).to_equal(1)
+        expect(file_exists(work + "/input.txt")).to_equal(false)
+        expect(file_exists(work + "/.builder-cache/index")).to_equal(false)
+        expect(file_exists(work + "/.builder-cache/objects/blob")).to_equal(false)
+        expect(file_exists(root + "/source/input.txt")).to_equal(true)
+        expect(file_exists(work + "/module.o")).to_equal(true)
+        expect(file_exists(attempt_root + "/result.sdn")).to_equal(true)
+        expect(file_exists(attempt_root + "/compiler.reaped")).to_equal(true)
+        expect(builder_transport_prune_terminal_inputs_v1(
+            task, owned, receipt, root + "/output").unwrap()).to_equal(0)
