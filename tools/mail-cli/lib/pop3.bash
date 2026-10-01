@@ -12,7 +12,7 @@ _mail_pop3_fetch() {
     *) echo "error: POP3 requires TLS (implicit or starttls)" >&3; return 2 ;;
   esac
   _mail_curl -s --url "${scheme}://${MAIL_ACCT_POP3_SERVER}:${MAIL_ACCT_POP3_PORT}/${id}" \
-    --user "${MAIL_ACCT_USERNAME}:${MAIL_ACCT_PASSWORD}" "${tls_args[@]}" --max-filesize 16777216
+    --user "${MAIL_ACCT_USERNAME}:${MAIL_ACCT_PASSWORD}" ${tls_args[@]+"${tls_args[@]}"} --max-filesize 16777216
 }
 
 cmd_pop3_inbox() {
