@@ -11,7 +11,15 @@ use compiler.driver.smf.runtime_std_native_outcomes_v2.{
 use compiler.driver.smf.runtime_std_native_action_budget_v2.{
     RuntimeStdNativeActionBudgetV2,
     runtime_std_native_action_budget_valid_v2,
-    runtime_std_native_action_peak_admitted_v2}
+    runtime_std_native_action_peak_admitted_v2,
+    runtime_std_native_action_abi_digest_v2}
+use compiler.driver.cache.runtime_std_authority_receipt.{
+    RuntimeStdAuthorityReceiptV1, RuntimeStdAuthorityReceiptV2,
+    RUNTIME_STD_AUTHORITY_ACTION_SCHEMA_V2,
+    runtime_std_authority_receipt_encode_v2,
+    runtime_std_authority_receipt_decode_v2}
+use compiler.driver.smf.runtime_std_package_set.{
+    RuntimeStdPackageAuthorityV1, runtime_std_action_digest_v2}
 
 fn _native_outcome_fixture_v2(
     kind: RuntimeStdNativeOutcomeKindV2, source: text,
@@ -81,3 +89,38 @@ describe "runtime/std native source outcomes v2", tag: ["only-compiled"]:
             budget, 0)).to_equal(false)
         expect(runtime_std_native_action_budget_valid_v2(
             RuntimeStdNativeActionBudgetV2("", 1024))).to_equal(false)
+
+    it "roundtrips a V2 authority receipt and changes action keys with budget":
+        val producer = sha256_text("producer")
+        val abi = runtime_std_native_action_abi_digest_v2(producer)
+        val authority = RuntimeStdPackageAuthorityV1(
+            producer, abi, sha256_text("runtime ABI"),
+            sha256_text("std ABI"), sha256_text("variant"),
+            "x86_64-unknown-linux-gnu", "revision-1")
+        val budget = RuntimeStdNativeActionBudgetV2(
+            sha256_text("manager request"), 8192)
+        val runtime_key = runtime_std_action_digest_v2(
+            authority, "simple.runtime", budget)
+        val std_key = runtime_std_action_digest_v2(
+            authority, "simple.std", budget)
+        expect(runtime_key == "").to_equal(false)
+        val base = RuntimeStdAuthorityReceiptV1(
+            producer, abi, authority.runtime_abi_digest,
+            authority.std_abi_digest, authority.config_digest,
+            authority.target_triple, authority.snapshot_revision,
+            runtime_key, std_key, sha256_text("runtime archive"),
+            sha256_text("std archive"), sha256_text("runtime receipt"),
+            sha256_text("std receipt"))
+        val v2 = RuntimeStdAuthorityReceiptV2(base, budget,
+            RUNTIME_STD_AUTHORITY_ACTION_SCHEMA_V2)
+        val encoded = runtime_std_authority_receipt_encode_v2(v2)
+        expect(encoded == "").to_equal(false)
+        val decoded = runtime_std_authority_receipt_decode_v2(encoded)
+        expect(decoded.is_ok()).to_equal(true)
+        expect(decoded.unwrap().budget.manager_request_digest).to_equal(
+            budget.manager_request_digest)
+        expect(runtime_std_action_digest_v2(authority, "simple.runtime",
+            RuntimeStdNativeActionBudgetV2(
+                sha256_text("other request"), 8192)) == runtime_key).to_equal(false)
+        expect(runtime_std_authority_receipt_decode_v2(
+            encoded + "\nextra=1").is_err()).to_equal(true)

@@ -14,7 +14,10 @@ use compiler.driver.cache.package_archive_cache.{
 use compiler.driver.cache.cas_store.{cas_blob_path, cas_get, cas_put}
 use compiler.driver.cache.runtime_std_authority_receipt.{
     RuntimeStdAuthorityReceiptV1,
-    runtime_std_authority_receipt_publish_v1
+    runtime_std_authority_receipt_publish_v1,
+    RuntimeStdAuthorityReceiptV2,
+    RUNTIME_STD_AUTHORITY_ACTION_SCHEMA_V2,
+    runtime_std_authority_receipt_publish_v2
 }
 use compiler.driver.cache.package_archive_types.{
     PackageActionKeyV1, PackageArchiveMemberReceiptV1,
@@ -257,7 +260,8 @@ fn _runtime_std_publish_set_with_actions_v2(
     std_input: RuntimeStdPackageInputV1,
     runtime_result: BuildActionResultV1,
     std_result: BuildActionResultV1,
-    runtime_action: BuildActionV1?, std_action: BuildActionV1?
+    runtime_action: BuildActionV1?, std_action: BuildActionV1?,
+    native_budget: RuntimeStdNativeActionBudgetV2?
 ) -> RuntimeStdPackageSetV1:
     if (runtime_input.package_identity != RUNTIME_PACKAGE_IDENTITY_V1 or
             std_input.package_identity != STD_PACKAGE_IDENTITY_V1):
@@ -310,8 +314,12 @@ fn _runtime_std_publish_set_with_actions_v2(
         standard.receipt!.archive_digest,
         runtime.receipt!.receipt_digest,
         standard.receipt!.receipt_digest)
-    val published_authority = runtime_std_authority_receipt_publish_v1(
-        root, authority_receipt)
+    val published_authority = if native_budget == nil:
+        runtime_std_authority_receipt_publish_v1(root, authority_receipt)
+    else:
+        runtime_std_authority_receipt_publish_v2(root,
+            RuntimeStdAuthorityReceiptV2(authority_receipt,
+                native_budget!, RUNTIME_STD_AUTHORITY_ACTION_SCHEMA_V2))
     if published_authority.is_err():
         _ = cas_batch_abort_v1(standard_stage.transaction)
         return RuntimeStdPackageSetV1(
@@ -331,7 +339,7 @@ fn runtime_std_publish_set_v1(
     _runtime_std_publish_set_with_actions_v2(root, authority,
         runtime_input, std_input, runtime_result, std_result,
         runtime_std_build_action_v1(authority, RUNTIME_PACKAGE_IDENTITY_V1),
-        runtime_std_build_action_v1(authority, STD_PACKAGE_IDENTITY_V1))
+        runtime_std_build_action_v1(authority, STD_PACKAGE_IDENTITY_V1), nil)
 
 fn runtime_std_publish_set_v2(
     root: text, authority: RuntimeStdPackageAuthorityV1,
@@ -346,7 +354,7 @@ fn runtime_std_publish_set_v2(
         runtime_std_build_action_v2(authority, RUNTIME_PACKAGE_IDENTITY_V1,
             budget),
         runtime_std_build_action_v2(authority, STD_PACKAGE_IDENTITY_V1,
-            budget))
+            budget), Some(budget))
 
 fn _runtime_std_load_package_for_action_v2(
     root: text, authority: RuntimeStdPackageAuthorityV1,

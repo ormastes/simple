@@ -3,9 +3,13 @@
 
 use std.common.build_manager.contracts.{builder_digest_valid_v1}
 use std.common.crypto.sha256.{sha256_text}
+use compiler.driver.smf.runtime_std_native_action_budget_v2.{
+    RuntimeStdNativeActionBudgetV2,
+    runtime_std_native_action_budget_valid_v2}
 use std.nogc_sync_mut.io.file_ops.{
     file_create_exclusive, file_read_regular_no_follow_bounded
 }
+use std.nogc_sync_mut.io.dir_ops.{dir_is_real_no_follow}
 
 extern fn rt_dir_create_all(path: text) -> bool
 
@@ -25,6 +29,14 @@ struct RuntimeStdAuthorityReceiptV1:
     std_archive_digest: text
     runtime_receipt_digest: text
     std_receipt_digest: text
+
+struct RuntimeStdAuthorityReceiptV2:
+    base: RuntimeStdAuthorityReceiptV1
+    budget: RuntimeStdNativeActionBudgetV2
+    action_schema: text
+
+val RUNTIME_STD_AUTHORITY_ACTION_SCHEMA_V2: text =
+    "manager-budget+source-outcomes-v2"
 
 fn runtime_std_authority_receipt_encode_v1(
     value: RuntimeStdAuthorityReceiptV1
@@ -134,7 +146,138 @@ fn runtime_std_authority_receipt_read_v1(
         return Err("runtime-std-authority-digest-mismatch")
     runtime_std_authority_receipt_decode_v1(content)
 
+fn runtime_std_authority_receipt_encode_v2(
+    value: RuntimeStdAuthorityReceiptV2
+) -> text:
+    val base = runtime_std_authority_receipt_encode_v1(value.base)
+    if base == "" or
+            not runtime_std_native_action_budget_valid_v2(value.budget) or
+            value.action_schema != RUNTIME_STD_AUTHORITY_ACTION_SCHEMA_V2:
+        return ""
+    val prefix = "simple-runtime-std-authority-receipt-v1"
+    val body = base.substring(prefix.len(), base.len())
+    val encoded = "simple-runtime-std-authority-receipt-v2" + body +
+        "\nmanager_request={value.budget.manager_request_digest}" +
+        "\nenforced_memory={value.budget.enforced_process_limit_bytes}" +
+        "\naction_schema={value.action_schema}"
+    if encoded.len() > RUNTIME_STD_AUTHORITY_RECEIPT_MAX_BYTES_V1:
+        return ""
+    encoded
+
+fn runtime_std_authority_receipt_decode_v2(
+    content: text
+) -> Result<RuntimeStdAuthorityReceiptV2, text>:
+    if content == "" or content.len() > RUNTIME_STD_AUTHORITY_RECEIPT_MAX_BYTES_V1:
+        return Err("runtime-std-authority-v2-size-invalid")
+    val lines = content.split("\n")
+    if lines.len() != 17 or
+            lines[0] != "simple-runtime-std-authority-receipt-v2" or
+            not lines[14].starts_with("manager_request=") or
+            not lines[15].starts_with("enforced_memory=") or
+            lines[16] != "action_schema=" + RUNTIME_STD_AUTHORITY_ACTION_SCHEMA_V2:
+        return Err("runtime-std-authority-v2-format-invalid")
+    var base_lines = lines[0..14]
+    base_lines[0] = "simple-runtime-std-authority-receipt-v1"
+    val base = runtime_std_authority_receipt_decode_v1(
+        base_lines.join("\n"))
+    if base.is_err(): return Err(base.unwrap_err())
+    val memory = lines[15].substring("enforced_memory=".len()).to_i64()
+    if memory == nil:
+        return Err("runtime-std-authority-v2-memory-invalid")
+    val value = RuntimeStdAuthorityReceiptV2(base.unwrap(),
+        RuntimeStdNativeActionBudgetV2(
+            lines[14].substring("manager_request=".len()), memory!),
+        RUNTIME_STD_AUTHORITY_ACTION_SCHEMA_V2)
+    if runtime_std_authority_receipt_encode_v2(value) != content:
+        return Err("runtime-std-authority-v2-noncanonical")
+    Ok(value)
+
+fn runtime_std_authority_receipt_path_v2(
+    cache_root: text, receipt_digest: text
+) -> text:
+    if cache_root == "" or not builder_digest_valid_v1(receipt_digest):
+        return ""
+    "{cache_root}/runtime-std-authority-v2/{receipt_digest}.receipt"
+
+fn _runtime_std_authority_dir_chain_real_v2(path: text) -> bool:
+    val normalized = path.replace("\\", "/")
+    if normalized == "" or normalized.contains("//"):
+        return false
+    val parts = normalized.split("/")
+    if parts.len() == 0: return false
+    var current = "."
+    var index = 0
+    if normalized.starts_with("/"):
+        current = "/"
+        index = 1
+    elif parts[0].len() == 2 and (parts[0].byte_at(1) as i64) == 58:
+        current = parts[0] + "/"
+        index = 1
+    elif parts[0] == ".":
+        index = 1
+    if not dir_is_real_no_follow(current): return false
+    while index < parts.len():
+        val part = parts[index]
+        if part == "" or part == "." or part == "..": return false
+        if current.ends_with("/"):
+            current = current + part
+        else:
+            current = current + "/" + part
+        if not dir_is_real_no_follow(current): return false
+        index = index + 1
+    true
+
+fn runtime_std_authority_receipt_read_v2(
+    path: text, expected_digest: text
+) -> Result<RuntimeStdAuthorityReceiptV2, text>:
+    val normalized = path.replace("\\", "/")
+    val slash = normalized.rfind("/")
+    if path == "" or not builder_digest_valid_v1(expected_digest) or
+            slash < 1 or
+            not _runtime_std_authority_dir_chain_real_v2(
+                normalized.substring(0, slash)):
+        return Err("runtime-std-authority-v2-read-input-invalid")
+    val loaded = file_read_regular_no_follow_bounded(
+        path, RUNTIME_STD_AUTHORITY_RECEIPT_MAX_BYTES_V1)
+    if val Err(_) = loaded:
+        return Err("runtime-std-authority-v2-unreadable")
+    val content = loaded.unwrap()
+    if sha256_text(content) != expected_digest:
+        return Err("runtime-std-authority-v2-digest-mismatch")
+    if not _runtime_std_authority_dir_chain_real_v2(
+            normalized.substring(0, slash)):
+        return Err("runtime-std-authority-v2-parent-changed")
+    runtime_std_authority_receipt_decode_v2(content)
+
+fn runtime_std_authority_receipt_publish_v2(
+    cache_root: text, value: RuntimeStdAuthorityReceiptV2
+) -> Result<(text, text), text>:
+    val encoded = runtime_std_authority_receipt_encode_v2(value)
+    if encoded == "" or cache_root == "":
+        return Err("runtime-std-authority-v2-publish-input-invalid")
+    val digest = sha256_text(encoded)
+    val path = runtime_std_authority_receipt_path_v2(cache_root, digest)
+    if not _runtime_std_authority_dir_chain_real_v2(cache_root) or
+            not rt_dir_create_all("{cache_root}/runtime-std-authority-v2") or
+            not _runtime_std_authority_dir_chain_real_v2(
+                "{cache_root}/runtime-std-authority-v2"):
+        return Err("runtime-std-authority-v2-directory-unavailable")
+    if not file_create_exclusive(path, encoded):
+        val prior = file_read_regular_no_follow_bounded(
+            path, RUNTIME_STD_AUTHORITY_RECEIPT_MAX_BYTES_V1)
+        if val Err(_) = prior:
+            return Err("runtime-std-authority-v2-publish-conflict")
+        if prior.unwrap() != encoded:
+            return Err("runtime-std-authority-v2-publish-conflict")
+    if runtime_std_authority_receipt_read_v2(path, digest).is_err():
+        return Err("runtime-std-authority-v2-publish-readback-invalid")
+    Ok((path, digest))
+
 export RuntimeStdAuthorityReceiptV1
 export runtime_std_authority_receipt_encode_v1, runtime_std_authority_receipt_decode_v1
 export runtime_std_authority_receipt_path_v1
 export runtime_std_authority_receipt_publish_v1, runtime_std_authority_receipt_read_v1
+export RUNTIME_STD_AUTHORITY_ACTION_SCHEMA_V2, RuntimeStdAuthorityReceiptV2
+export runtime_std_authority_receipt_encode_v2, runtime_std_authority_receipt_decode_v2
+export runtime_std_authority_receipt_path_v2
+export runtime_std_authority_receipt_publish_v2, runtime_std_authority_receipt_read_v2
