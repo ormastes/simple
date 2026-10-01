@@ -10,6 +10,8 @@
 use app.io.env_ops.{env_get, env_set, cwd}
 use app.cli.native_build_collection_profile_digest.{native_build_warm_collection_profile_digest}
 use compiler.common.structural_contracts.frontend_offload_switch.{frontend_offload_rows}
+use compiler.driver.cache.cache_root.{machine_cache_root}
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded}
 use std.scv.compile_snapshot.{
     scv_compile_snapshot_acquire_v1, scv_compile_snapshot_open_v1
 }
@@ -32,6 +34,7 @@ pub class NativeBuildWarmReceiptState:
     artifact_path: text
     artifact_digest: text
     collection_profile_digest: text
+    index_binding: text
     output_path: text
     args: [text]
     closure_count: i64
@@ -41,6 +44,7 @@ fn _warm_empty_state() -> NativeBuildWarmReceiptState:
         eligible: false, hit: false, key: "", receipt_path: "",
         candidate_path: "", artifact_path: "", artifact_digest: "",
         output_path: "", args: [], collection_profile_digest: "",
+        index_binding: "",
         closure_count: 0)
 
 fn _warm_valid_digest(value: text) -> bool:
@@ -277,10 +281,53 @@ fn _warm_output_path(args: [text]) -> text:
     _warm_lexical_abs(result)
 
 fn _warm_reuse_forbidden(args: [text]) -> bool:
+    # A requested cold graph build must run its worker even if the final
+    # executable's old bytes remain otherwise reusable.
+    if (env_get("SIMPLE_PACKAGE_INDEX_COLD_INIT") ?? "") == "1" or
+            (env_get("SIMPLE_PACKAGE_INDEX_REBUILD_PENDING") ?? "") == "1":
+        return true
     for arg in args:
         if arg == "--clean" or arg == "--no-incremental":
             return true
     false
+
+fn _warm_index_binding() -> text:
+    if (env_get("SIMPLE_PACKAGE_INDEX_COLD_INIT") ?? "") == "1" or
+            (env_get("SIMPLE_PACKAGE_INDEX_REBUILD_PENDING") ?? "") == "1":
+        return ""
+    val digest = env_get("SIMPLE_PACKAGE_INDEX_DIGEST") ?? ""
+    val producer = env_get("SIMPLE_PACKAGE_INDEX_PRODUCER_DIGEST") ?? ""
+    val variant = env_get("SIMPLE_PACKAGE_INDEX_VARIANT_DIGEST") ?? ""
+    val root = env_get("SIMPLE_PACKAGE_INDEX_ROOT_GENERATION") ?? ""
+    val pointer_path = machine_cache_root() +
+        "/package-module-index-v1/CURRENT"
+    if digest == "":
+        if producer == "" and variant == "" and root == "":
+            # A visible generation without its admission marker is not a
+            # legacy no-index request. Let the worker perform admission.
+            if file_exists(pointer_path):
+                return ""
+            return "none"
+        return ""
+    if not _warm_valid_digest(digest):
+        return ""
+    if producer != "" or variant != "" or root != "":
+        if not _warm_valid_digest(producer) or
+                not _warm_valid_digest(variant) or
+                not _warm_path_safe(root):
+            return ""
+    # The canonical caller verifies the immutable generation in
+    # compiler_entrypoint_admit_v1. Recheck CURRENT here and again at
+    # restore/promotion so a concurrent publication cannot turn a prior
+    # final artifact into a cache hit. This pointer check is not standalone
+    # index admission for callers that bypass the canonical entrypoint.
+    val pointer = file_read_regular_no_follow_bounded(
+        pointer_path, 64)
+    if pointer.is_err():
+        return ""
+    if pointer.unwrap() != digest:
+        return ""
+    "{digest}|{producer}|{variant}|{root.len()}:{root}"
 
 fn _warm_scv_explicit_inputs(args: [text]) -> (text, [text]):
     var entry = ""
@@ -349,7 +396,8 @@ fn _warm_scv_prepare(args: [text]) -> bool:
     bound
 
 fn _warm_frontend_identity(
-    args: [text], simple_bin: text, environment_variant_policy_identity: text
+    args: [text], simple_bin: text, environment_variant_policy_identity: text,
+    index_binding: text
 ) -> (text, text):
     if (env_get("SIMPLE_SCV_SOURCE_DRIFTED") ?? "") == "1":
         return ("", "")
@@ -365,6 +413,7 @@ fn _warm_frontend_identity(
     var rows = [
         "binary=" + binary_digest,
         "scv=" + scv_binding,
+        "package_index=" + index_binding,
         "cache_scope=" + (env_get("SIMPLE_CACHE_SCOPE") ?? ""),
         "frontend_scope=" + (env_get("SIMPLE_FRONTEND_CACHE_SCOPE") ?? ""),
         "frontend_dir=" + (env_get("SIMPLE_FRONTEND_CACHE_DIR") ?? ""),
@@ -673,13 +722,16 @@ pub fn native_build_warm_receipt_prepare(
     if (not _warm_has_entry_closure(args) or not _warm_has_explicit_output(args) or
             not _warm_args_paths_supported(args) or _warm_reuse_forbidden(args)):
         return _warm_empty_state()
+    val index_binding = _warm_index_binding()
+    if index_binding == "":
+        return _warm_empty_state()
     if not _warm_scv_prepare(args):
         return _warm_empty_state()
     if ((env_get("SIMPLE_FRONTEND_CACHE") ?? "") == "0" or
             (env_get("SIMPLE_HIR_CACHE") ?? "") == "0"):
         return _warm_empty_state()
     val identity = _warm_frontend_identity(
-        args, simple_bin, environment_variant_policy_identity)
+        args, simple_bin, environment_variant_policy_identity, index_binding)
     val key = identity[0]
     if key == "":
         return _warm_empty_state()
@@ -701,10 +753,12 @@ pub fn native_build_warm_receipt_prepare(
         artifact_path: artifact_path, output_path: output_path, args: args,
         artifact_digest: artifact_digest,
         collection_profile_digest: identity[1],
+        index_binding: index_binding,
         closure_count: closure_count)
 
 pub fn native_build_warm_artifact_restore(state: NativeBuildWarmReceiptState) -> bool:
-    if not state.eligible or not state.hit:
+    if not state.eligible or not state.hit or
+            _warm_index_binding() != state.index_binding:
         return false
     val profile_identity = native_build_warm_collection_profile_digest(state.args)
     if not profile_identity[0] or profile_identity[1] != state.collection_profile_digest:
@@ -757,7 +811,9 @@ pub fn native_build_warm_receipt_finish(
     val profile_identity = native_build_warm_collection_profile_digest(state.args)
     val profile_unchanged = profile_identity[0] and profile_identity[1] == state.collection_profile_digest
     var promoted = false
-    if worker_ok and output_ok and profile_unchanged and file_exists(state.candidate_path):
+    if worker_ok and output_ok and profile_unchanged and
+            _warm_index_binding() == state.index_binding and
+            file_exists(state.candidate_path):
         val candidate = _warm_checked_payload(
             file_read(state.candidate_path), NATIVE_BUILD_WARM_CANDIDATE_VERSION)
         if candidate != "":
