@@ -1,5 +1,6 @@
 # Live typed-HIR evidence for an explicit full-inventory native member.
 use compiler.hir.hir_types.{HirModule, SymbolKind}
+use compiler.hir.hir_definitions.{HirVariantKind}
 use compiler.driver.smf.runtime_std_section_types_v1.{
     RuntimeStdCompiledSectionPayloadV1}
 use std.common.crypto.sha256.{sha256_text}
@@ -69,13 +70,39 @@ fn runtime_std_native_emit_counts_v1(module: HirModule) -> (i64, i64, i64):
     for item in module.traits.values():
         functions = functions + item.methods.len()
 
-    # Structural declarations and globals may generate native storage or
-    # synthesized methods. Count them as emit-bearing when classification is
-    # uncertain; this witness must never infer objectlessness from a type.
+    # MIR lowering puts plain struct layouts in MirModule.types, enum
+    # variants in lookup maps, and bitfield fields in a lookup map. LLVM and
+    # Cranelift emit only MIR functions/statics as object members; the native
+    # V2 consumer independently requires both collections to be empty.
+    # Keep unknown/specialized/default-bearing forms conservatively active.
     var data = module.constants.len() + module.classes.len() +
-        module.structs.len() + module.enums.len() +
-        module.bitfields.len() + module.traits.len() +
-        module.impls.len()
+        module.traits.len() + module.impls.len()
+    for item in module.structs.values():
+        var layout_only = item.type_params.len() == 0 and
+            not item.is_generic_template and not item.has_specialization_of and
+            not item.has_platform_attr
+        for field in item.fields:
+            if field.has_default or field.is_volatile or field.has_fixed_address:
+                layout_only = false
+        if not layout_only: data = data + 1
+    for item in module.enums.values():
+        var layout_only = item.type_params.len() == 0 and
+            not item.is_generic_template and not item.has_specialization_of and
+            item.attributes.len() == 0 and not item.complete_open and
+            not item.dyn_open
+        for variant in item.variants:
+            if variant.has_discriminant:
+                layout_only = false
+            match variant.kind:
+                case HirVariantKind.Struct(fields):
+                    for field in fields:
+                        if field.has_default or field.is_volatile or
+                                field.has_fixed_address:
+                            layout_only = false
+                case _: pass
+        if not layout_only: data = data + 1
+    # A HirBitfield has only a backing type, bit widths, and offsets. Its
+    # declaration alone is layout metadata; no initializer/body is stored.
     for raw in module.symbols.root_scope_symbols.values():
         if module.symbols.symbols.has(raw):
             val symbol = module.symbols.symbols[raw]
@@ -140,5 +167,6 @@ fn runtime_std_native_emit_witness_valid_v1(
 export RuntimeStdNativeEmitWitnessV1
 export runtime_std_native_emit_witness_digest_v1
 export runtime_std_live_hir_semantic_digest_v1
+export runtime_std_native_emit_counts_v1
 export runtime_std_native_emit_witness_from_live_hir_v1
 export runtime_std_native_emit_witness_valid_v1
