@@ -10,8 +10,8 @@ use crate::mir::VReg;
 use super::super::shared::platform_call_conv;
 use super::super::types_util::type_id_to_cranelift;
 use super::helpers::{
-    adapted_call, call_runtime_1, call_runtime_2, call_runtime_2_void, call_runtime_3, create_string_constant,
-    get_vreg_or_default, indirect_call_with_result, inline_runtime_len_value,
+    adapt_value_to_type, adapted_call, call_runtime_1, call_runtime_2, call_runtime_2_void, call_runtime_3,
+    create_string_constant, get_vreg_or_default, indirect_call_with_result, inline_runtime_len_value,
 };
 use super::{InstrContext, InstrResult};
 
@@ -428,16 +428,98 @@ pub(crate) fn compile_indirect_call<M: Module>(
     return_type: TypeId,
     args: &[VReg],
 ) {
-    // A closure VALUE reaching an indirect call has unknown provenance: it may
-    // have been built here, loaded from a struct field, handed in as an
-    // argument, or produced by another module. So the call goes through the
-    // one uniform door — `rt_closure_func_ptr` (which validates the heap-object
-    // type and untags the handle, answering NULL for a non-closure instead of
-    // dereferencing garbage) to the BOXED ENTRY, whose signature is
-    // all-`RuntimeValue`. Arguments are boxed and the result unboxed here,
-    // mirroring codegen/closure_boxed_entry.rs on the other side.
+    assert_eq!(args.len(), param_types.len(), "indirect-call argument/type arity mismatch");
+    // Registered closures use a boxed entry with a hidden environment. An
+    // imported named function can instead arrive as GlobalLoad's raw two-word
+    // [native entry, SDIRECTF] record. User entries use build_mir_signature's
+    // uniform raw-I64 ABI, with no environment or RuntimeValue conversions.
     let closure_ptr = get_vreg_or_default(ctx, builder, &callee);
     let fn_ptr = call_runtime_1(ctx, builder, "rt_closure_func_ptr", closure_ptr);
+
+    let boxed_block = builder.create_block();
+    let raw_check_block = builder.create_block();
+    let marker_block = builder.create_block();
+    let direct_block = builder.create_block();
+    let invalid_block = builder.create_block();
+    let merge_block = builder.create_block();
+    if dest.is_some() {
+        let result_type = if return_type == TypeId::VOID {
+            types::I64
+        } else {
+            type_id_to_cranelift(return_type)
+        };
+        builder.append_block_param(merge_block, result_type);
+    }
+    let is_registered = builder.ins().icmp_imm(IntCC::NotEqual, fn_ptr, 0);
+    builder.ins().brif(is_registered, boxed_block, &[], raw_check_block, &[]);
+
+    // Do not probe tagged values, nil, or low immediates as raw records.
+    // An aligned raw callable is a compiler-owned record, borrowed for this
+    // call; this does not register, free, or change its allocator ownership.
+    builder.switch_to_block(raw_check_block);
+    builder.seal_block(raw_check_block);
+    let tag = builder.ins().band_imm(closure_ptr, 7);
+    let aligned = builder.ins().icmp_imm(IntCC::Equal, tag, 0);
+    let pointer_range = builder.ins().icmp_imm(IntCC::SignedGreaterThanOrEqual, closure_ptr, 0x10000);
+    let raw_record = builder.ins().band(aligned, pointer_range);
+    builder.ins().brif(raw_record, marker_block, &[], invalid_block, &[]);
+
+    builder.switch_to_block(marker_block);
+    builder.seal_block(marker_block);
+    let marker = builder.ins().load(types::I64, MemFlags::new(), closure_ptr, 8);
+    let is_direct = builder.ins().icmp_imm(IntCC::Equal, marker, 0x5344_4952_4543_5446);
+    builder.ins().brif(is_direct, direct_block, &[], invalid_block, &[]);
+
+    builder.switch_to_block(invalid_block);
+    builder.seal_block(invalid_block);
+    builder.ins().trap(cranelift_codegen::ir::TrapCode::unwrap_user(13));
+
+    builder.switch_to_block(direct_block);
+    builder.seal_block(direct_block);
+    let direct_ptr = builder.ins().load(types::I64, MemFlags::new(), closure_ptr, 0);
+    builder.ins().trapz(direct_ptr, cranelift_codegen::ir::TrapCode::unwrap_user(13));
+    let mut direct_sig = Signature::new(platform_call_conv());
+    let mut direct_args = Vec::with_capacity(args.len());
+    for (arg, ty) in args.iter().zip(param_types) {
+        let raw = get_vreg_or_default(ctx, builder, arg);
+        direct_sig.params.push(AbiParam::new(types::I64));
+        let actual_type = builder.func.dfg.value_type(raw);
+        let signed = super::core::vreg_is_signed(ctx, *arg).unwrap_or(matches!(
+            *ty,
+            TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64
+        ));
+        let word = if actual_type.is_int() && actual_type.bits() < 64 && signed {
+            builder.ins().sextend(types::I64, raw)
+        } else {
+            adapt_value_to_type(builder, raw, types::I64)
+        };
+        direct_args.push(word);
+    }
+    // Even a user function with no explicit result returns the raw nil word.
+    direct_sig.returns.push(AbiParam::new(types::I64));
+    let direct_sig = builder.import_signature(direct_sig);
+    let direct_call = builder.ins().call_indirect(direct_sig, direct_ptr, &direct_args);
+    if dest.is_some() {
+        let word = builder.inst_results(direct_call)[0];
+        let result = match return_type {
+            TypeId::F32 => {
+                let float = builder.ins().bitcast(types::F64, MemFlags::new(), word);
+                builder.ins().fdemote(types::F32, float)
+            }
+            TypeId::F64 => builder.ins().bitcast(types::F64, MemFlags::new(), word),
+            TypeId::BOOL => builder.ins().icmp_imm(IntCC::NotEqual, word, 0),
+            TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::U8 | TypeId::U16 | TypeId::U32 => {
+                builder.ins().ireduce(type_id_to_cranelift(return_type), word)
+            }
+            _ => word,
+        };
+        builder.ins().jump(merge_block, &[result.into()]);
+    } else {
+        builder.ins().jump(merge_block, &[]);
+    }
+
+    builder.switch_to_block(boxed_block);
+    builder.seal_block(boxed_block);
 
     let mut sig = Signature::new(platform_call_conv());
     sig.params.push(AbiParam::new(types::I64));
@@ -456,14 +538,21 @@ pub(crate) fn compile_indirect_call<M: Module>(
     }
 
     let call = builder.ins().call_indirect(sig_ref, fn_ptr, &call_args);
-    if let Some(d) = dest {
+    if dest.is_some() {
         let tagged = builder.inst_results(call)[0];
         let raw = if return_type == TypeId::VOID {
             tagged
         } else {
             unbox_from_closure_boundary(ctx, builder, tagged, return_type)
         };
-        ctx.vreg_values.insert(*d, raw);
+        builder.ins().jump(merge_block, &[raw.into()]);
+    } else {
+        builder.ins().jump(merge_block, &[]);
+    }
+    builder.switch_to_block(merge_block);
+    builder.seal_block(merge_block);
+    if let Some(d) = dest {
+        ctx.vreg_values.insert(*d, builder.block_params(merge_block)[0]);
     }
 }
 

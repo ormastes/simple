@@ -680,7 +680,7 @@ pub fn declare_uniform_i64_import<M: Module>(
 }
 
 /// Adapt a single value to match an expected Cranelift type.
-fn adapt_value_to_type(
+pub(super) fn adapt_value_to_type(
     builder: &mut FunctionBuilder,
     val: cranelift_codegen::ir::Value,
     expected_ty: cranelift_codegen::ir::Type,
