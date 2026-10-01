@@ -3,9 +3,10 @@
 use app.io.args_ops.{get_args}
 use app.io.env_ops.{cwd, host_os}
 use app.io.file_ops.{file_exists, file_read, file_read_regular_no_follow_bounded,
-    file_atomic_write, file_lock, file_unlock, file_copy, file_hash_sha256,
-    file_is_regular_no_follow, path_absolute}
-use std.nogc_sync_mut.io_runtime.{dir_exists}
+    file_atomic_write, file_lock, file_unlock, file_copy, file_delete,
+    file_hash_sha256, file_is_regular_no_follow, file_publish_noreplace,
+    secure_temp_dir, path_absolute}
+use std.nogc_sync_mut.io_runtime.{dir_exists, dir_remove}
 use std.nogc_sync_mut.io.windows_process_owner.{windows_process_directory_no_follow_v1}
 use app.io.dir_ops.{dir_create_all}
 use app.io.time_ops.{sleep_ms}
@@ -24,6 +25,7 @@ fn builder_cli_hash_outputs_v1(task: BuildTaskV1, root: text) -> [BuildInputV1]:
     var observed: [BuildInputV1] = []
     for path in task.outputs:
         val absolute = root + "/" + path
+        if not builder_cli_output_parent_safe_v1(root, path): return []
         if not file_is_regular_no_follow(absolute): return []
         val digest = file_hash_sha256(absolute)
         if digest.len() != 64: return []
@@ -48,12 +50,49 @@ fn builder_cli_parent_directory_v1(path: text) -> text:
         offset = offset - 1
     "."
 
+fn builder_cli_output_parent_safe_v1(root: text, relative: text) -> bool:
+    val parent = builder_cli_parent_directory_v1(root + "/" + relative)
+    if host_os() == "windows": return builder_cli_no_reparse_directories_v1(parent)
+    val canonical_root = path_absolute(root).replace("\\", "/")
+    val canonical_parent = path_absolute(parent).replace("\\", "/")
+    if canonical_root == "" or canonical_parent == "": return false
+    val prefix = if canonical_root.ends_with("/"): canonical_root else: canonical_root + "/"
+    canonical_parent == canonical_root or canonical_parent.starts_with(prefix)
+
+fn builder_cli_publish_one_v1(source: text, output_root: text, relative: text,
+        digest: text) -> bool:
+    if not file_is_regular_no_follow(source) or file_hash_sha256(source) != digest: return false
+    val destination = output_root + "/" + relative
+    val parent = builder_cli_parent_directory_v1(destination)
+    if not dir_create_all(parent) or not builder_cli_output_parent_safe_v1(output_root, relative):
+        return false
+    if file_exists(destination):
+        return file_is_regular_no_follow(destination) and file_hash_sha256(destination) == digest
+    val stage_root = match secure_temp_dir(parent, "builder-publish"):
+        case Ok(value): value
+        case Err(_reason): return false
+    val stage = stage_root + "/output"
+    var ready = file_copy(source, stage)
+    if ready: ready = file_is_regular_no_follow(stage) and file_hash_sha256(stage) == digest
+    # Recheck the full parent chain immediately before the no-replace move.
+    if ready: ready = builder_cli_output_parent_safe_v1(output_root, relative)
+    var published = false
+    if ready:
+        match file_publish_noreplace(stage, destination):
+            case Ok(value): published = value
+            case Err(_reason): ()
+    if not published: file_delete(stage)
+    if not dir_remove(stage_root, false): return false
+    file_is_regular_no_follow(destination) and file_hash_sha256(destination) == digest
+
 fn builder_cli_publish_v1(task: BuildTaskV1, receipt: BuildResultV1, attempt_root: text, output_root: text) -> bool:
     for path in task.outputs:
-        val source = attempt_root + "/work/" + path
-        val destination = output_root + "/" + path
-        if not dir_create_all(builder_cli_parent_directory_v1(destination)): return false
-        if not file_copy(source, destination): return false
+        var digest = ""
+        for item in receipt.outputs:
+            if item.path == path: digest = item.digest
+        if digest == "" or not builder_cli_publish_one_v1(attempt_root + "/work/" + path,
+                output_root, path, digest):
+            return false
     # Rehash the destination too: a copy/write failure never produces a cache hit.
     builder_manager_output_error(task, receipt, builder_cli_hash_outputs_v1(task, output_root)) == ""
 
