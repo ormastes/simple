@@ -11,6 +11,10 @@ use app.bootstrap_builder.native_group_phase2_receipt.{
 use app.bootstrap_builder.native_group_phase2_source_snapshot.{
     phase2_source_authority_decode_v1
 }
+use app.bootstrap_builder.native_group_module_roles.{
+    PHASE2_MODULE_ROLE_POLICY_PATH_V1, Phase2ModuleSourceV1,
+    phase2_module_roles_select_v1
+}
 use compiler.common.cache.canonical_identity.{canonical_identity_sort_texts}
 use compiler.driver.driver_build.native_full_inventory_sources.{
     native_full_inventory_source_paths_v1
@@ -62,6 +66,8 @@ fn phase2_native_authority_verify_v1(
     var full_paths: [text] = []
     var links: [text] = []
     var link_count = 0
+    var module_sources: [Phase2ModuleSourceV1] = []
+    var role_policy_stage2_digest = ""
     for line in authority.split("\n"):
         if line.starts_with("link-hex:") or
                 line.starts_with("link-dir-hex:"):
@@ -77,6 +83,12 @@ fn phase2_native_authority_verify_v1(
                 return Err("Phase2 source regular file differs: " +
                     record.relative_path)
             full_paths = full_paths.push(record.relative_path)
+            if record.relative_path == PHASE2_MODULE_ROLE_POLICY_PATH_V1:
+                role_policy_stage2_digest = record.digest
+            if record.relative_path.starts_with("src/") and
+                    record.relative_path.ends_with(".spl"):
+                module_sources = module_sources.push(Phase2ModuleSourceV1(
+                    record.relative_path, record.digest))
             if record.relative_path.starts_with("src/"):
                 src_paths = src_paths.push(record.relative_path)
         else:
@@ -105,6 +117,24 @@ fn phase2_native_authority_verify_v1(
             sha256_text(full_inventory) != value.full_source_inventory.digest or
             sha256_text(link_inventory) != value.full_source_links.digest:
         return Err("Phase2 Stage2 source inventories differ")
+    if role_policy_stage2_digest == "" or
+            role_policy_stage2_digest != value.module_role_policy.digest:
+        return Err("Phase2 module role policy differs from Stage2 authority")
+    val role_policy = file_read_regular_no_follow_bounded(
+        value.module_role_policy.path, 65536)?
+    if sha256_text(role_policy) != role_policy_stage2_digest or
+            file_hash_sha256(value.module_role_policy.path) !=
+                role_policy_stage2_digest:
+        return Err("Phase2 module role policy readback differs")
+    val selection = phase2_module_roles_select_v1(
+        role_policy, module_sources)?
+    if selection.included_paths.len() != value.module_inventory.count or
+            selection.excluded_count != value.excluded_inventory.count or
+            selection.included_paths.len() + selection.excluded_count !=
+                module_sources.len() or
+            sha256_text(selection.excluded_ledger) !=
+                value.excluded_inventory.digest:
+        return Err("Phase2 module role partition differs")
     val scv_sources = native_full_inventory_source_paths_v1(
         value.source_root, value.scv.snapshot_root,
         value.scv.revision_id, value.scv.commit_id,
@@ -115,6 +145,15 @@ fn phase2_native_authority_verify_v1(
     if scv_sources.source_count != value.module_inventory.count or
             sha256_text(module_inventory) != value.module_inventory.digest:
         return Err("Phase2 full-SCV module inventory differs")
+    var stage2_digest: Dict<text, text> = {}
+    for source in module_sources:
+        stage2_digest[source.path] = source.digest
+    for index in 0..scv_sources.source_count:
+        val path = scv_sources.source_identities[index]
+        if path != selection.included_paths[index] or
+                not stage2_digest.has(path) or
+                scv_sources.source_digests[index] != stage2_digest[path]:
+            return Err("Phase2 SCV source differs from selected Stage2 module")
     Ok(value)
 
 export phase2_native_authority_verify_v1

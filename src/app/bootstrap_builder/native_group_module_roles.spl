@@ -1,0 +1,102 @@
+# Exact, tracked policy for selecting production modules from copied Stage2
+# bytes. Excluded sources stay in the full snapshot and a SHA-bound ledger.
+use compiler.common.cache.canonical_identity.{canonical_identity_sort_texts}
+use std.common.build_manager.contracts.{builder_digest_valid_v1}
+use std.scv.compile_source_inventory_core.{
+    compile_source_inventory_identity_cmp_v1,
+    compile_source_inventory_path_valid_v1
+}
+
+val PHASE2_MODULE_ROLE_POLICY_PATH_V1 =
+    "src/package_ownership/native_module_roles.sdn"
+
+struct Phase2ModuleSourceV1:
+    path: text
+    digest: text
+
+struct Phase2ModuleSelectionV1:
+    included_paths: [text]
+    excluded_ledger: text
+    excluded_count: i64
+
+fn _phase2_module_exclusion_reason_v1(path: text) -> text:
+    if path.starts_with("src/test_fixture/"):
+        return "fixture-source"
+    if path.contains("/testdata/"):
+        return "testdata-source"
+    ""
+
+fn phase2_module_roles_select_v1(
+    policy: text, sources: [Phase2ModuleSourceV1]
+) -> Result<Phase2ModuleSelectionV1, text>:
+    if policy == "" or policy.len() > 65536 or
+            not policy.ends_with("\n") or policy.contains("\r") or
+            policy.contains("\0"):
+        return Err("module role policy framing invalid")
+    val lines = policy.split("\n")
+    if lines.len() < 2 or
+            lines[0] != "schema=SIMPLE-NATIVE-MODULE-ROLES-1" or
+            lines[lines.len() - 1] != "":
+        return Err("module role policy schema invalid")
+    var excluded: Dict<text, text> = {}
+    var previous = ""
+    var index = 1
+    while index < lines.len() - 1:
+        val line = lines[index]
+        if not line.starts_with("exclude="):
+            return Err("module role policy row invalid")
+        val fields = line.substring(8).split("|")
+        if fields.len() != 2:
+            return Err("module role policy row invalid")
+        val path = fields[0]
+        val reason = fields[1]
+        if not compile_source_inventory_path_valid_v1(path) or
+                not path.starts_with("src/") or
+                not path.ends_with(".spl") or
+                _phase2_module_exclusion_reason_v1(path) != reason or
+                (previous != "" and
+                    compile_source_inventory_identity_cmp_v1(path, previous) <= 0) or
+                excluded.has(path):
+            return Err("module role policy exclusion invalid or duplicated")
+        excluded[path] = reason
+        previous = path
+        index = index + 1
+    var included: [text] = []
+    var ledger: [text] = []
+    var seen: Dict<text, bool> = {}
+    var seen_folded: Dict<text, bool> = {}
+    var matched: Dict<text, bool> = {}
+    for source in sources:
+        if not compile_source_inventory_path_valid_v1(source.path) or
+                not source.path.starts_with("src/") or
+                not source.path.ends_with(".spl") or
+                not builder_digest_valid_v1(source.digest) or
+                seen.has(source.path) or seen_folded.has(source.path.lower()):
+            return Err("module role source invalid or duplicated")
+        seen[source.path] = true
+        seen_folded[source.path.lower()] = true
+        val reason = _phase2_module_exclusion_reason_v1(source.path)
+        if reason != "":
+            if not excluded.has(source.path) or excluded[source.path] != reason:
+                return Err("module role fixture source undeclared: " + source.path)
+            matched[source.path] = true
+            ledger = ledger.push(source.path + "\t" + source.digest +
+                "\t" + reason)
+        else:
+            if excluded.has(source.path):
+                return Err("module role production source excluded")
+            included = included.push(source.path)
+    for path in excluded.keys():
+        if not matched.has(path):
+            return Err("module role exclusion missing from Stage2: " + path)
+    if included.len() == 0:
+        return Err("module role production inventory empty")
+    val ordered_ledger = canonical_identity_sort_texts(ledger)
+    Ok(Phase2ModuleSelectionV1(
+        canonical_identity_sort_texts(included),
+        if ordered_ledger.len() == 0: "" else: ordered_ledger.join("\n") + "\n",
+        ordered_ledger.len()))
+
+export PHASE2_MODULE_ROLE_POLICY_PATH_V1
+export Phase2ModuleSourceV1, Phase2ModuleSelectionV1
+export phase2_module_roles_select_v1

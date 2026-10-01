@@ -45,6 +45,8 @@ struct Phase2NativeAuthorityReceiptV1:
     full_source_inventory: Phase2ReceiptInventoryV1
     full_source_links: Phase2ReceiptInventoryV1
     module_inventory: Phase2ReceiptInventoryV1
+    excluded_inventory: Phase2ReceiptInventoryV1
+    module_role_policy: Phase2ReceiptArtifactV1
     scv: Phase2ReceiptScvV1
     llvm_index_config: Phase2ReceiptArtifactV1
     cranelift_index_config: Phase2ReceiptArtifactV1
@@ -55,7 +57,7 @@ fn phase2_native_authority_receipt_encode_v1(
     value: Phase2NativeAuthorityReceiptV1
 ) -> text:
     var rows = [
-        "schema=SIMPLE-PHASE2-NATIVE-AUTHORITY-2",
+        "schema=SIMPLE-PHASE2-NATIVE-AUTHORITY-3",
         "output_root={value.output_root}",
         "source_root={value.source_root}",
         "target={value.target}",
@@ -78,6 +80,11 @@ fn phase2_native_authority_receipt_encode_v1(
         "module_inventory_path={value.module_inventory.path}",
         "module_inventory_digest={value.module_inventory.digest}",
         "module_inventory_count={value.module_inventory.count}",
+        "excluded_inventory_path={value.excluded_inventory.path}",
+        "excluded_inventory_digest={value.excluded_inventory.digest}",
+        "excluded_inventory_count={value.excluded_inventory.count}",
+        "module_role_policy_path={value.module_role_policy.path}",
+        "module_role_policy_digest={value.module_role_policy.digest}",
         "scv_snapshot_root={value.scv.snapshot_root}",
         "scv_receipt_path={value.scv.receipt.path}",
         "scv_receipt_digest={value.scv.receipt.digest}",
@@ -120,6 +127,9 @@ fn phase2_native_authority_receipt_decode_v1(
         "full_source_links_path", "full_source_links_digest",
         "full_source_links_count", "module_inventory_path",
         "module_inventory_digest", "module_inventory_count",
+        "excluded_inventory_path", "excluded_inventory_digest",
+        "excluded_inventory_count", "module_role_policy_path",
+        "module_role_policy_digest",
         "scv_snapshot_root", "scv_receipt_path", "scv_receipt_digest",
         "scv_revision_id", "scv_commit_id", "scv_tree_id",
         "scv_snapshot_inventory_digest", "scv_source_inventory_digest",
@@ -151,16 +161,20 @@ fn phase2_native_authority_receipt_decode_v1(
         fields["full_source_links_count"], 200000)
     val module_count = _phase2_receipt_number_v1(
         fields["module_inventory_count"], 20000)
+    val excluded_count = _phase2_receipt_number_v1(
+        fields["excluded_inventory_count"], 20000)
     val generation = _phase2_receipt_number_v1(
         fields["scv_source_inventory_generation"], 1000000000)
-    if fields["schema"] != "SIMPLE-PHASE2-NATIVE-AUTHORITY-2" or
+    if fields["schema"] != "SIMPLE-PHASE2-NATIVE-AUTHORITY-3" or
             source_count < 1 or full_count < source_count or
-            link_count < 0 or module_count < 1 or generation < 0:
+            link_count < 0 or module_count < 1 or excluded_count < 0 or
+            module_count + excluded_count > 20000 or generation < 0:
         return Err("Phase2 native authority receipt count or schema invalid")
     for key in ["output_root", "source_root", "stage2_receipt_path",
             "producer_path", "source_authority_path",
             "source_inventory_path", "full_source_inventory_path",
             "full_source_links_path", "module_inventory_path",
+            "excluded_inventory_path", "module_role_policy_path",
             "scv_snapshot_root", "scv_receipt_path",
             "llvm_index_config_path", "cranelift_index_config_path",
             "phase3_llvm_index_config_path",
@@ -171,6 +185,7 @@ fn phase2_native_authority_receipt_decode_v1(
             "producer_digest", "source_authority_digest",
             "source_inventory_digest", "full_source_inventory_digest",
             "full_source_links_digest", "module_inventory_digest",
+            "excluded_inventory_digest", "module_role_policy_digest",
             "scv_receipt_digest", "scv_snapshot_inventory_digest",
             "scv_source_inventory_digest", "package_policy_digest",
             "llvm_index_config_digest",
@@ -190,6 +205,10 @@ fn phase2_native_authority_receipt_decode_v1(
             fields["full_source_links_path"] !=
                 source + "/full-source-links.inventory" or
             fields["module_inventory_path"] != root + "/module.inventory" or
+            fields["excluded_inventory_path"] !=
+                root + "/excluded-modules.inventory" or
+            fields["module_role_policy_path"] != source +
+                "/src/package_ownership/native_module_roles.sdn" or
             fields["llvm_index_config_path"] !=
                 root + "/index-config-llvm.sdn" or
             fields["cranelift_index_config_path"] !=
@@ -220,6 +239,10 @@ fn phase2_native_authority_receipt_decode_v1(
             fields["full_source_links_digest"], link_count),
         Phase2ReceiptInventoryV1(fields["module_inventory_path"],
             fields["module_inventory_digest"], module_count),
+        Phase2ReceiptInventoryV1(fields["excluded_inventory_path"],
+            fields["excluded_inventory_digest"], excluded_count),
+        Phase2ReceiptArtifactV1(fields["module_role_policy_path"],
+            fields["module_role_policy_digest"]),
         Phase2ReceiptScvV1(fields["scv_snapshot_root"],
             Phase2ReceiptArtifactV1(fields["scv_receipt_path"],
                 fields["scv_receipt_digest"]),
@@ -272,6 +295,10 @@ fn phase2_native_authority_receipt_open_v1(
             not _phase2_artifact_readback_v1(
                 Phase2ReceiptArtifactV1(value.module_inventory.path,
                     value.module_inventory.digest)) or
+            not _phase2_artifact_readback_v1(
+                Phase2ReceiptArtifactV1(value.excluded_inventory.path,
+                    value.excluded_inventory.digest)) or
+            not _phase2_artifact_readback_v1(value.module_role_policy) or
             not _phase2_artifact_readback_v1(value.scv.receipt) or
             not file_is_regular_no_follow(value.scv.snapshot_root +
                 "/src/package_ownership/simple.sdn") or
@@ -355,6 +382,8 @@ fn phase2_native_authority_field_v1(
         case "scv_receipt_path": Ok(value.scv.receipt.path)
         case "source_inventory_path": Ok(value.source_inventory.path)
         case "module_inventory_path": Ok(value.module_inventory.path)
+        case "excluded_inventory_path": Ok(value.excluded_inventory.path)
+        case "module_role_policy_path": Ok(value.module_role_policy.path)
         case "full_source_inventory_path": Ok(value.full_source_inventory.path)
         case "full_source_links_path": Ok(value.full_source_links.path)
         case "llvm_index_config_path": Ok(value.llvm_index_config.path)
