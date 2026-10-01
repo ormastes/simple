@@ -10,11 +10,15 @@ use compiler.driver.driver_build.native_group_scc_inventory.{native_group_scc_in
 use compiler.driver.driver_build.native_group_warm_route.{native_group_warm_route_publish_v1}
 use compiler.driver.cache.package_config_variant_receipt.{package_config_variant_receipt_read_v1,
     package_config_variant_receipt_path_v1}
-use compiler.driver.cache.runtime_std_authority_admission.{runtime_std_authority_admit_v1}
+use compiler.driver.cache.runtime_std_authority_admission.{runtime_std_authority_admit_v2}
+use compiler.driver.cache.package_module_index.{PACKAGE_MODULE_INDEX_SCHEMA_V2}
 use app.bootstrap_builder.native_group_index_handoff.{native_group_index_handoff_read_v1,
     native_group_index_handoff_encode_v1}
-use app.bootstrap_builder.native_group_index_verify.{native_group_index_verify_v1}
+use app.bootstrap_builder.native_group_index_verify.{native_group_index_verify_v1,
+    native_group_index_v2_budget_matches_v1, native_group_index_v2_authority_path_v1}
 use app.io.file_ops.{path_absolute}
+use std.common.build_manager.codec.{builder_decode_task_v1, builder_encode_task_v1}
+use std.common.crypto.sha256.{sha256_text}
 use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded, file_is_regular_no_follow,
     file_hash_sha256, file_atomic_write, file_exists}
 use std.nogc_sync_mut.io.dir_ops.{dir_create}
@@ -319,12 +323,28 @@ fn native_group_prepare_v1(config_path: text, manifest_path: text) -> Result<Nat
             indexed.index_digest != handoff.index_digest or
             indexed.variant_digest != handoff.variant_digest or
             indexed.source_snapshot_digest != handoff.snapshot_inventory_digest or
-            indexed.scv_source_inventory_digest != handoff.source_inventory_digest:
+            indexed.scv_source_inventory_digest != handoff.source_inventory_digest or
+            indexed.index_generation.schema_version != PACKAGE_MODULE_INDEX_SCHEMA_V2 or
+            indexed.index_generation.scope_entry_source_identity != "" or
+            indexed.index_generation.entries.len() != paths.len():
         return Err("compiler variant receipt differs from admitted package index")
-    val baseline = runtime_std_authority_admit_v1(fields["index_read_root"],
+    if not native_group_index_v2_authority_path_v1(fields["index_read_root"],
+            fields["runtime_std_authority_path"],
+            fields["runtime_std_authority_digest"]):
+        return Err("native group runtime/std V2 authority path required")
+    val admitted_baseline = runtime_std_authority_admit_v2(fields["index_read_root"],
         fields["runtime_std_authority_path"], fields["runtime_std_authority_digest"],
         indexed.producer_digest, indexed.variant_digest, fields["target"],
         indexed.scv_revision_id)?
+    val request_path = handoff.retained_attempt_root + "/request.sdn"
+    val request_bytes = file_read_regular_no_follow_bounded(request_path, 16777216)?
+    val request = builder_decode_task_v1(request_bytes)?
+    if builder_encode_task_v1(request) != request_bytes or
+            request.id != "index-" + fields["backend"] or
+            not native_group_index_v2_budget_matches_v1(admitted_baseline.budget,
+                sha256_text(request_bytes), request.memory_limit_bytes):
+        return Err("native group runtime/std V2 manager request or memory cap differs")
+    val baseline = admitted_baseline.baseline
     val manifests = native_prepare_groups_v1(fields, paths, indexed)?
     val environment = [
         "SIMPLE_COMPILER_DIGEST=" + indexed.producer_digest,

@@ -8,8 +8,7 @@ use app.bootstrap_builder.native_group_index_handoff.{NativeGroupIndexHandoffV1,
     native_group_index_handoff_encode_v1, native_group_index_handoff_read_v1}
 use app.bootstrap_builder.native_group_index_build.{native_group_index_managed_path_v1,
     native_group_index_manager_task_valid_v1}
-use app.bootstrap_builder.codec.{builder_read_run_v1, builder_read_result_v1,
-    builder_read_task_v1}
+use app.bootstrap_builder.codec.{builder_read_run_v1, builder_read_result_v1}
 use app.bootstrap_builder.manager.{builder_manager_decode_v1}
 use app.bootstrap_builder.contracts.{builder_validate_result_v1,
     builder_task_identity_v1}
@@ -18,14 +17,21 @@ use compiler.driver.driver_build.native_group_scc_inventory.{native_group_scc_in
     NativeGroupSccInventoryV1}
 use compiler.driver.cache.package_config_variant_receipt.{package_config_variant_receipt_read_v1,
     package_config_variant_receipt_path_v1}
-use compiler.driver.cache.runtime_std_authority_admission.{runtime_std_authority_admit_v1}
+use compiler.driver.cache.runtime_std_authority_admission.{runtime_std_authority_admit_v2}
+use compiler.driver.cache.runtime_std_authority_receipt.{runtime_std_authority_receipt_path_v2}
+use compiler.driver.cache.runtime_std_membership_policy_v1.{
+    runtime_std_membership_policy_from_index_v1}
+use compiler.driver.smf.runtime_std_native_action_budget_v2.{RuntimeStdNativeActionBudgetV2}
 use compiler.driver.cache.package_archive_cache.{PackageArchiveAuthorityV1,
     package_archive_aggregate_entry_v1, package_archive_load_v1}
+use compiler.driver.cache.package_module_index.{PACKAGE_MODULE_INDEX_SCHEMA_V2}
 use compiler.driver.cache.cold_hir_compiler_publication_v1.{ColdHirCompilerArchiveReceiptV1,
     cold_hir_compiler_archive_receipts_digest_v1}
 use compiler.driver.cache.package_module_index.{PackageModuleIndexEntryV1}
 use compiler.common.cache.canonical_identity.{canonical_identity_sort_texts}
 use std.common.crypto.sha256.{sha256_text}
+use std.common.build_manager.codec.{builder_decode_task_v1, builder_encode_task_v1}
+use std.scv.compile_snapshot.{scv_compile_snapshot_open_v1}
 use app.io.file_ops.{path_absolute}
 use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded,
     file_hash_sha256, file_is_regular_no_follow, file_exists, file_create_exclusive}
@@ -47,6 +53,19 @@ fn native_group_index_verify_same_v1(left: text, right: text) -> bool:
         return false
     if not file_exists(left): return true
     native_group_index_verify_normalize_v1(path_absolute(left)) == normalized_left
+
+fn native_group_index_v2_budget_matches_v1(
+        observed: RuntimeStdNativeActionBudgetV2,
+        expected_request_digest: text, expected_memory_bytes: i64) -> bool:
+    observed.manager_request_digest == expected_request_digest and
+        observed.enforced_process_limit_bytes == expected_memory_bytes and
+        expected_memory_bytes > 0
+
+fn native_group_index_v2_authority_path_v1(index_root: text,
+        receipt_path: text, receipt_digest: text) -> bool:
+    val expected = runtime_std_authority_receipt_path_v2(index_root,
+        receipt_digest)
+    expected != "" and native_group_index_verify_same_v1(receipt_path, expected)
 
 # Receipt aggregation is independent of index entry order: one row per
 # package, sorted by canonical identity, with the CAS receipt SHA as value.
@@ -156,8 +175,11 @@ fn native_group_index_verify_v1(config_path: text, receipt_path: text,
     if not dir_is_real_no_follow(attempt_root) or
             not dir_is_real_no_follow(work_root):
         return Err("index retained attempt is not a real directory")
-    val request = builder_read_task_v1(attempt_root + "/request.sdn")?
+    val request_path = attempt_root + "/request.sdn"
+    val request_bytes = file_read_regular_no_follow_bounded(request_path, 16777216)?
+    val request = builder_decode_task_v1(request_bytes)?
     if request.id != task.id or request.attempt != task.attempt or
+            builder_encode_task_v1(request) != request_bytes or
             builder_task_identity_v1(request) != builder_task_identity_v1(task) or
             not file_is_regular_no_follow(attempt_root + "/producer.exe") or
             file_hash_sha256(attempt_root + "/producer.exe") != task.producer_digest or
@@ -194,6 +216,8 @@ fn native_group_index_verify_v1(config_path: text, receipt_path: text,
     if indexed.index_digest != receipt.index_digest or
             indexed.variant_digest != receipt.variant_digest or
             indexed.scv_source_inventory_digest != receipt.source_inventory_digest or
+            indexed.index_generation.schema_version != PACKAGE_MODULE_INDEX_SCHEMA_V2 or
+            indexed.index_generation.scope_entry_source_identity != "" or
             indexed.index_generation.entries.len() != config.expected_spl_count:
         return Err("index V2 CURRENT coverage differs from typed receipt")
     val canonical_variant = package_config_variant_receipt_path_v1(index_root,
@@ -205,12 +229,30 @@ fn native_group_index_verify_v1(config_path: text, receipt_path: text,
         receipt.variant_receipt_path, receipt.variant_receipt_digest)?
     if variant.index_digest != indexed.index_digest or
             variant.producer_digest != config.producer_digest or
-            variant.variant_digest != config.variant_digest:
+            variant.variant_digest != config.variant_digest or
+            variant.variant.backend != config.backend or
+            variant.variant.target_triple != config.target:
         return Err("index typed variant receipt differs")
-    runtime_std_authority_admit_v1(index_root,
+    val snapshot = scv_compile_snapshot_open_v1(config.source_root,
+        config.snapshot_root, config.scv_revision_id, config.scv_commit_id,
+        config.scv_tree_id, config.snapshot_inventory_digest)
+    val membership = runtime_std_membership_policy_from_index_v1(
+        sources, snapshot, indexed.index_generation, indexed.index_digest,
+        config.producer_digest, config.variant_digest)?
+    if membership.membership.members.len() != config.expected_spl_count or
+            membership.index_digest != indexed.index_digest:
+        return Err("index runtime/std source closure differs")
+    if not native_group_index_v2_authority_path_v1(index_root,
+            receipt.runtime_std_authority_path,
+            receipt.runtime_std_authority_digest):
+        return Err("index runtime/std V2 authority path required")
+    val baseline = runtime_std_authority_admit_v2(index_root,
         receipt.runtime_std_authority_path,
         receipt.runtime_std_authority_digest, config.producer_digest,
         config.variant_digest, config.target, config.scv_revision_id)?
+    if not native_group_index_v2_budget_matches_v1(baseline.budget,
+            sha256_text(request_bytes), request.memory_limit_bytes):
+        return Err("index runtime/std V2 manager request or memory cap differs")
     val (archive_count, archive_digest) = native_group_index_archive_receipts_v1(
         index_root, indexed)?
     if archive_count != receipt.archive_count or
@@ -236,3 +278,5 @@ fn native_group_index_verify_v1(config_path: text, receipt_path: text,
     Ok(admitted)
 
 export native_group_index_archive_receipts_v1, native_group_index_verify_v1
+export native_group_index_v2_budget_matches_v1
+export native_group_index_v2_authority_path_v1
