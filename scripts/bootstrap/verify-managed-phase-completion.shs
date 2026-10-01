@@ -1,0 +1,62 @@
+#!/bin/sh
+# Read-only final consistency gate. Compiled managers admitted each ledger before
+# the producer wrote this receipt; this checks all pinned terminal evidence.
+set -eu
+die() { echo "managed-completion: $*" >&2; exit 1; }
+regular() { [ -f "$1" ] && [ ! -L "$1" ]; }
+hash_file() { sha256sum "$1" | cut -d ' ' -f 1; }
+digest() { [ "${#1}" -eq 64 ] && case "$1" in *[!0-9a-f]*) return 1 ;; *) return 0 ;; esac; }
+receipt= root= inventory= producer_sha=
+for arg in "$@"; do
+  case "$arg" in
+    --receipt=*) receipt=${arg#*=} ;;
+    --root=*) root=${arg#*=} ;;
+    --inventory=*) inventory=${arg#*=} ;;
+    --producer-sha=*) producer_sha=${arg#*=} ;;
+    *) die "unknown option: $arg" ;;
+  esac
+done
+regular "$receipt" && regular "$inventory" && [ -d "$root" ] && [ ! -L "$root" ] \
+  || die "terminal receipt, inventory or root unavailable"
+digest "$producer_sha" || die "expected producer digest invalid"
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P) || die "repository root unavailable"
+BOOTSTRAP_STAGE3_FACADE_PATH="$repo_root/scripts/check/lib/bootstrap-stage3-provenance.shs"
+export BOOTSTRAP_STAGE3_FACADE_PATH
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+field() { bootstrap_stage3_manifest_value "$1" "$receipt"; }
+[ "$(field format)" = SIMPLE-PHASE3-PHASE4-MANAGED-COMPLETION-2 ] &&
+  [ "$(field status)" = PASS ] &&
+  [ "$(field phase3_status)" = PASS ] &&
+  [ "$(field phase4_status)" = PASS ] \
+  || die "both independent phases must report PASS"
+[ "$(field producer_sha256)" = "$producer_sha" ] || die "Phase 2 producer differs"
+inventory_count=$(wc -l <"$inventory" | tr -d ' ')
+case "$inventory_count" in ''|0|0*|*[!0-9]*) die "module inventory count invalid" ;; esac
+[ "$(field module_inventory_sha256)" = "$(hash_file "$inventory")" ] &&
+  [ "$(field module_inventory_count)" = "$inventory_count" ] &&
+  [ "$(field phase3_module_inventory_count)" = "$inventory_count" ] &&
+  [ "$(field phase4_module_inventory_count)" = "$inventory_count" ] \
+  || die "phase module counts or inventory digest differ"
+for binary in bootstrap full-cli mcp lsp test-runner phase3-bootstrap; do
+  digest "$(field "$binary")" || die "$binary output SHA missing or invalid"
+done
+for task_phase in phase3 phase4; do
+  for backend in llvm cranelift; do
+    index_receipt="$root/$task_phase/index/$backend/output/index-output/receipt.sdn"
+    index_handoff="$root/$task_phase/index/$backend/handoff.sdn"
+    group_manifest="$root/$task_phase/modules/$backend/state/manifest.sdn"
+    for proof in index_receipt index_handoff group_manifest; do
+      case "$proof" in
+        index_receipt) path=$index_receipt ;;
+        index_handoff) path=$index_handoff ;;
+        group_manifest) path=$group_manifest ;;
+      esac
+      regular "$path" || die "$task_phase/$backend $proof missing"
+      expected=$(field "${task_phase}_${backend}_${proof}_sha256") \
+        || die "$task_phase/$backend $proof digest absent"
+      digest "$expected" && [ "$(hash_file "$path")" = "$expected" ] \
+        || die "$task_phase/$backend $proof digest differs"
+    done
+  done
+done
+printf '%s\n' "$receipt"

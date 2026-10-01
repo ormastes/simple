@@ -1,8 +1,8 @@
 #!/bin/sh
-# Phase 4 uses the admitted Phase 2 compiler for every build. All compilation
-# happens inside a compiled manager; this script only prepares and verifies it.
+# Independent Phase 3 and Phase 4 lanes use the admitted Phase 2 compiler.
+# All post-readiness compilation happens inside a compiled manager.
 set -eu
-die() { echo "phase4-grouped: $*" >&2; exit 1; }
+die() { echo "phase3-phase4-grouped: $*" >&2; exit 1; }
 regular() { [ -f "$1" ] && [ ! -L "$1" ]; }
 absolute() { case "$1" in /*|[A-Za-z]:/*) return 0 ;; *) return 1 ;; esac; }
 positive() { case "$1" in ''|0|0*|*[!0-9]*) return 1 ;; *) [ "$1" -gt 0 ] 2>/dev/null ;; esac; }
@@ -24,7 +24,7 @@ disk_preflight() {
 producer_receipt= scv_receipt= source_root= source_inventory= source_links= module_inventory=
 root= template= manifest_program= builder_program= group_program= group_worker= group_broker= index_program=
 authority_program= authority_receipt= authority_digest= image_receipt=
-llvm_index_config= cranelift_index_config=
+llvm_index_config= cranelift_index_config= phase3_llvm_index_config= phase3_cranelift_index_config=
 threads= memory_bytes= reserve_bytes= target= group_size= max_attempts= poll_ms= lifetime_ms=
 estimated_group_disk_bytes= minimum_free_disk_bytes=
 for arg in "$@"; do
@@ -49,6 +49,8 @@ for arg in "$@"; do
     --index-program=*) index_program=${arg#*=} ;;
     --llvm-index-config=*) llvm_index_config=${arg#*=} ;;
     --cranelift-index-config=*) cranelift_index_config=${arg#*=} ;;
+    --phase3-llvm-index-config=*) phase3_llvm_index_config=${arg#*=} ;;
+    --phase3-cranelift-index-config=*) phase3_cranelift_index_config=${arg#*=} ;;
     --threads=*) threads=${arg#*=} ;;
     --memory-bytes=*) memory_bytes=${arg#*=} ;;
     --reserve-bytes=*) reserve_bytes=${arg#*=} ;;
@@ -66,14 +68,16 @@ for path in "$producer_receipt" "$scv_receipt" "$source_root" "$source_inventory
     "$module_inventory" "$root" "$template" "$manifest_program" "$builder_program" \
     "$group_program" "$group_worker" "$group_broker" "$index_program" \
     "$authority_program" "$authority_receipt" "$image_receipt" \
-    "$llvm_index_config" "$cranelift_index_config"; do
+    "$llvm_index_config" "$cranelift_index_config" \
+    "$phase3_llvm_index_config" "$phase3_cranelift_index_config"; do
   [ -n "$path" ] && absolute "$path" || die "absolute path required: $path"
 done
 for path in "$producer_receipt" "$scv_receipt" "$source_inventory" "$source_links" "$module_inventory" \
     "$template" "$manifest_program" "$builder_program" "$group_program" \
     "$group_worker" "$group_broker" "$index_program" "$authority_program" \
     "$authority_receipt" "$image_receipt" \
-    "$llvm_index_config" "$cranelift_index_config"; do regular "$path" || die "missing pinned input: $path"; done
+    "$llvm_index_config" "$cranelift_index_config" \
+    "$phase3_llvm_index_config" "$phase3_cranelift_index_config"; do regular "$path" || die "missing pinned input: $path"; done
 [ "$(hash_file "$authority_receipt")" = "$authority_digest" ] || die "authority receipt changed"
 [ -d "$source_root" ] && [ ! -L "$source_root" ] || die "source root unavailable"
 case "$source_inventory" in "$source_root"/*) source_inventory_relative=${source_inventory#"$source_root"/} ;; *) die "source inventory must be inside immutable source root" ;; esac
@@ -94,11 +98,13 @@ for inventory in "$source_inventory" "$module_inventory"; do
   LC_ALL=C sort "$inventory" | cmp -s - "$inventory" || die "unsorted inventory: $inventory"
 done
 awk 'length($0)==0 || index($0,"\r") || ($0 !~ /^src\// && $0 !~ /^examples\/10_tooling\//) || $0 ~ /(^|\/)\.\.?($|\/)/ { bad=1 } END { exit bad }' "$source_inventory" || die "invalid source inventory"
+module_inventory_count=$(wc -l <"$module_inventory" | tr -d ' ')
+positive "$module_inventory_count" || die "module inventory count invalid"
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P) || die "repository root unavailable"
 prepare="$repo_root/scripts/bootstrap/prepare-phase4-native-groups.shs"
 regular "$prepare" || die "tracked grouped preparer unavailable"
-mkdir -p "$root" || die "Phase 4 root unavailable"
+mkdir -p "$root" || die "managed phase root unavailable"
 receipt="$root/completion.env"
 
 # Preparation replays the canonical Stage 2 admission before any manager task
@@ -106,12 +112,13 @@ receipt="$root/completion.env"
 prepare_backend() {
   verify_shared_source
   verify_image_set
-  backend=$1
+  task_phase=$1 backend=$2
+  case "$task_phase" in phase3|phase4) ;; *) die "unsupported module phase" ;; esac
   case "$backend" in llvm|cranelift) ;; *) die "unsupported backend" ;; esac
-  index_handoff="$root/phase4/index/$backend/handoff.sdn"
+  index_handoff="$root/$task_phase/index/$backend/handoff.sdn"
   regular "$index_handoff" || die "$backend typed index handoff unavailable"
-  backend_root="$root/modules/$backend"
-  sh "$prepare" --phase=phase4 --producer-receipt="$producer_receipt" \
+  backend_root="$root/$task_phase/modules/$backend"
+  sh "$prepare" --phase="$task_phase" --producer-receipt="$producer_receipt" \
     --scv-receipt="$scv_receipt" --index-handoff="$index_handoff" \
     --index-program="$index_program" --source-root="$source_root" \
     --inventory="$module_inventory" --backend="$backend" \
@@ -205,8 +212,10 @@ build_binary() {
 # is a pinned config; the compiled CLI admits the absolute frozen source and
 # SCV authority named there. The generic manager owns retries and publication.
 build_index() {
-  backend=$1 config=$2
-  job_root="$root/phase4/index/$backend"
+  task_phase=$1 backend=$2 config=$3
+  case "$task_phase" in phase3|phase4) ;; *) die "unsupported index phase" ;; esac
+  case "$backend" in llvm|cranelift) ;; *) die "unsupported index backend" ;; esac
+  job_root="$root/$task_phase/index/$backend"
   input_root="$job_root/inputs"
   output_root="$job_root/output"
   state_root="$job_root/state"
@@ -238,7 +247,7 @@ build_index() {
   if [ ! -e "$job_root/manifest.sdn" ]; then
     verify_image_set
     "$manifest_program" --job-from-inventory "$template" "$index_program" \
-      "$input_root" "index-$backend" phase4 index-output/receipt.sdn \
+      "$input_root" "index-$task_phase-$backend" "$task_phase" index-output/receipt.sdn \
       source.inventory --memory-limit-bytes "$memory_bytes" \
       --links-inventory links.inventory \
       --manifest "$job_root/manifest.sdn" -- \
@@ -266,6 +275,38 @@ build_index() {
     || die "$backend V2 index receipt admission failed"
   regular "$job_root/handoff.sdn" \
     || die "$backend typed index handoff unavailable"
+  handoff_digest=$(hash_file "$job_root/handoff.sdn") || die "$backend handoff digest unavailable"
+  handoff_field() {
+    "$index_program" native-groups-index-handoff-field \
+      --handoff "$job_root/handoff.sdn" --digest "$handoff_digest" --field "$1"
+  }
+  [ "$(handoff_field phase)" = "$task_phase" ] &&
+    [ "$(handoff_field backend)" = "$backend" ] &&
+    [ "$(handoff_field source_count)" = "$module_inventory_count" ] \
+    || die "$task_phase/$backend V2 handoff does not cover exact module inventory"
+}
+
+run_module_backend() {
+  task_phase=$1 backend=$2
+  manifest="$root/$task_phase/modules/$backend/state/manifest.sdn"
+  regular "$manifest" || die "$task_phase/$backend group manifest unavailable"
+  verify_image_set
+  "$group_program" native-groups-run --manifest "$manifest" \
+    || die "$task_phase/$backend module run failed or produced only diagnostic objects"
+  verify_image_set
+  "$group_program" native-groups-verify --manifest "$manifest" \
+    --state "$root/$task_phase/modules/$backend/state" \
+    || die "$task_phase/$backend ledger is incomplete or lacks qualified SMF outputs"
+}
+
+build_module_phase() {
+  task_phase=$1 llvm_config=$2 cranelift_config=$3
+  build_index "$task_phase" llvm "$llvm_config"
+  prepare_backend "$task_phase" llvm
+  run_module_backend "$task_phase" llvm
+  build_index "$task_phase" cranelift "$cranelift_config"
+  prepare_backend "$task_phase" cranelift
+  run_module_backend "$task_phase" cranelift
 }
 
 # Read the exact producer from the verified admission receipt; never use the
@@ -327,47 +368,46 @@ phase4_status=0
   build_binary mcp src/app/mcp/main.spl "bin/simple_mcp_server$exe_suffix" phase4
   build_binary lsp src/app/simple_lsp_mcp/main.spl "bin/simple_lsp_mcp_server$exe_suffix" phase4
   build_binary test-runner src/app/test_runner_new/main.spl "bin/simple_test_runner$exe_suffix" phase4
-  build_index llvm "$llvm_index_config"
-  prepare_backend llvm
-  for backend in llvm cranelift; do
-    if [ "$backend" = cranelift ]; then
-      build_index cranelift "$cranelift_index_config"
-      prepare_backend cranelift
-    fi
-    manifest="$root/modules/$backend/state/manifest.sdn"
-    verify_image_set
-    "$group_program" native-groups-run --manifest "$manifest" \
-      || die "$backend module run failed or produced only diagnostic objects"
-    verify_image_set
-    "$group_program" native-groups-verify --manifest "$manifest" \
-      --state "$root/modules/$backend/state" \
-      || die "$backend ledger is incomplete or lacks qualified SMF outputs"
-  done
+  build_module_phase phase4 "$llvm_index_config" "$cranelift_index_config"
 ) || phase4_status=$?
 
 # Host memory limits make these two independent Phase 2 children serial here.
-# Phase 4 runs first; Phase 3 is attempted even if Phase 4 fails. Their states
-# and published results never gate or substitute for one another.
+# Phase 4 runs first; Phase 3 is attempted even if Phase 4 fails. Each phase
+# owns its index, grouped module ledger, and outputs independently.
 phase3_status=0
 (
   build_binary phase3-bootstrap src/app/cli/bootstrap_main.spl "bin/simple$exe_suffix" phase3
+  build_module_phase phase3 "$phase3_llvm_index_config" "$phase3_cranelift_index_config"
 ) || phase3_status=$?
 [ "$phase4_status" -eq 0 ] && [ "$phase3_status" -eq 0 ] || \
   die "managed children incomplete: phase4=$phase4_status phase3=$phase3_status"
 
 tmp="$receipt.tmp.$$"
 {
-  printf '%s\n' 'format=SIMPLE-PHASE4-MANAGED-COMPLETION-1' 'status=PASS' \
+  printf '%s\n' 'format=SIMPLE-PHASE3-PHASE4-MANAGED-COMPLETION-2' 'status=PASS' \
     'phase3_status=PASS' 'phase4_status=PASS' \
     "producer_sha256=$producer_sha" "authority_receipt_sha256=$authority_digest" \
     "manager_images_sha256=$(hash_file "$image_receipt")" \
     "source_inventory_sha256=$(hash_file "$source_inventory")" \
     "source_links_sha256=$(hash_file "$source_links")" \
     "module_inventory_sha256=$(hash_file "$module_inventory")" \
-    "module_inventory_count=$(wc -l <"$module_inventory" | tr -d ' ')"
+    "module_inventory_count=$module_inventory_count" \
+    "phase3_module_inventory_count=$module_inventory_count" \
+    "phase4_module_inventory_count=$module_inventory_count"
   cat "$hashes"
-  printf '%s\n' "llvm_manifest_sha256=$(hash_file "$root/modules/llvm/state/manifest.sdn")" \
-    "cranelift_manifest_sha256=$(hash_file "$root/modules/cranelift/state/manifest.sdn")"
+  for task_phase in phase3 phase4; do
+    for backend in llvm cranelift; do
+      index_receipt="$root/$task_phase/index/$backend/output/index-output/receipt.sdn"
+      index_handoff="$root/$task_phase/index/$backend/handoff.sdn"
+      group_manifest="$root/$task_phase/modules/$backend/state/manifest.sdn"
+      regular "$index_receipt" && regular "$index_handoff" && regular "$group_manifest" \
+        || die "$task_phase/$backend lacks terminal index or group proof"
+      printf '%s\n' \
+        "${task_phase}_${backend}_index_receipt_sha256=$(hash_file "$index_receipt")" \
+        "${task_phase}_${backend}_index_handoff_sha256=$(hash_file "$index_handoff")" \
+        "${task_phase}_${backend}_group_manifest_sha256=$(hash_file "$group_manifest")"
+    done
+  done
 } >"$tmp" || die "completion receipt write failed"
 if [ -e "$receipt" ]; then
   regular "$receipt" && cmp -s "$tmp" "$receipt" || die "existing completion receipt differs from replay"

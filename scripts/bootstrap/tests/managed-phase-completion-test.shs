@@ -1,0 +1,68 @@
+#!/bin/sh
+set -eu
+script_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/simple-managed-completion.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+root="$tmp/run"
+mkdir -p "$root"
+inventory="$tmp/module.inventory"
+printf 'src/example.spl\n' >"$inventory"
+producer_sha=$(printf 'producer' | sha256sum | cut -d ' ' -f 1)
+binary_sha=$(printf 'binary' | sha256sum | cut -d ' ' -f 1)
+receipt="$root/completion.env"
+{
+  printf '%s\n' 'format=SIMPLE-PHASE3-PHASE4-MANAGED-COMPLETION-2' \
+    'status=PASS' 'phase3_status=PASS' 'phase4_status=PASS' \
+    "producer_sha256=$producer_sha" \
+    "module_inventory_sha256=$(sha256sum "$inventory" | cut -d ' ' -f 1)" \
+    'module_inventory_count=1' 'phase3_module_inventory_count=1' \
+    'phase4_module_inventory_count=1'
+  for binary in bootstrap full-cli mcp lsp test-runner phase3-bootstrap; do
+    printf '%s=%s\n' "$binary" "$binary_sha"
+  done
+  for phase in phase3 phase4; do
+    for backend in llvm cranelift; do
+      index_receipt="$root/$phase/index/$backend/output/index-output/receipt.sdn"
+      index_handoff="$root/$phase/index/$backend/handoff.sdn"
+      group_manifest="$root/$phase/modules/$backend/state/manifest.sdn"
+      for proof in index_receipt index_handoff group_manifest; do
+        case "$proof" in
+          index_receipt) path=$index_receipt ;;
+          index_handoff) path=$index_handoff ;;
+          group_manifest) path=$group_manifest ;;
+        esac
+        mkdir -p "$(dirname -- "$path")"
+        printf '%s/%s/%s\n' "$phase" "$backend" "$proof" >"$path"
+        printf '%s=%s\n' "${phase}_${backend}_${proof}_sha256" \
+          "$(sha256sum "$path" | cut -d ' ' -f 1)"
+      done
+    done
+  done
+} >"$receipt"
+verify() {
+  sh "$script_root/verify-managed-phase-completion.shs" \
+    --receipt="$receipt" --root="$root" --inventory="$inventory" \
+    --producer-sha="$producer_sha"
+}
+verify >/dev/null || { echo 'FAIL: complete fixture rejected' >&2; exit 1; }
+cp "$receipt" "$tmp/good"
+sed '/^phase3_llvm_index_receipt_sha256=/d' "$tmp/good" >"$receipt"
+if verify >/dev/null 2>&1; then
+  echo 'FAIL: missing Phase 3 LLVM index proof admitted' >&2; exit 1
+fi
+cp "$tmp/good" "$receipt"
+phase3_group="$root/phase3/modules/cranelift/state/manifest.sdn"
+mv "$phase3_group" "$tmp/phase3-group"
+if verify >/dev/null 2>&1; then
+  echo 'FAIL: missing Phase 3 Cranelift group proof admitted' >&2; exit 1
+fi
+mv "$tmp/phase3-group" "$phase3_group"
+sed 's/^phase4_status=PASS$/phase4_status=FAIL/' "$tmp/good" >"$receipt"
+if verify >/dev/null 2>&1; then
+  echo 'FAIL: Phase 4 failure suppressed by Phase 3 proof' >&2; exit 1
+fi
+sed 's/^phase3_status=PASS$/phase3_status=FAIL/' "$tmp/good" >"$receipt"
+if verify >/dev/null 2>&1; then
+  echo 'FAIL: Phase 3 failure suppressed by Phase 4 proof' >&2; exit 1
+fi
+echo 'PASS: independent Phase 3/4 index, group, and status proofs required'

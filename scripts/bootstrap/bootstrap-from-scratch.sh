@@ -4581,7 +4581,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
   # grouped runner publishes completion only after five binary receipts and
   # both backend module ledgers pass their compiled admission gates.
   managed_producer_sha=$(bootstrap_stage3_manifest_value candidate_sha256 "${stage2_admission_receipt_absolute}") || exit 1
-  managed_phase_root="$(absolute_path "${output_dir}/managed/task3-run4/${PLATFORM}/${managed_producer_sha}")"
+  managed_phase_root="$(absolute_path "${output_dir}/managed/task3-run4-phase3-full/${PLATFORM}/${managed_producer_sha}")"
   managed_runner="${repo_root}/scripts/bootstrap/bootstrap-phase4-grouped.shs"
   if [ ! -f "${managed_runner}" ]; then
     echo "error: tracked post-Stage-2 manager handoff is unavailable" >&2
@@ -4699,6 +4699,8 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
   managed_module_inventory=$(managed_authority_field module_inventory_path) || exit 1
   managed_llvm_index_config=$(managed_authority_field llvm_index_config_path) || exit 1
   managed_cranelift_index_config=$(managed_authority_field cranelift_index_config_path) || exit 1
+  managed_phase3_llvm_index_config=$(managed_authority_field phase3_llvm_index_config_path) || exit 1
+  managed_phase3_cranelift_index_config=$(managed_authority_field phase3_cranelift_index_config_path) || exit 1
   [ "$(managed_authority_field producer_digest)" = "${managed_producer_sha}" ] &&
     [ "$(managed_authority_field target)" = "${PLATFORM}" ] || {
     echo "error: authority producer or target differs from Stage 2" >&2; exit 1;
@@ -4725,6 +4727,8 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     "--index-program=${managed_index_program}" \
     "--llvm-index-config=${managed_llvm_index_config}" \
     "--cranelift-index-config=${managed_cranelift_index_config}" \
+    "--phase3-llvm-index-config=${managed_phase3_llvm_index_config}" \
+    "--phase3-cranelift-index-config=${managed_phase3_cranelift_index_config}" \
     "--threads=${build_threads}" \
     "--memory-bytes=${managed_memory_bytes}" \
     "--reserve-bytes=${managed_reserve_bytes}" \
@@ -4737,15 +4741,14 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     "--minimum-free-disk-bytes=${managed_minimum_disk}" \
     || { echo "error: managed Phase 3/4 handoff failed; receipts retained" >&2; exit 1; }
   managed_completion="${managed_phase_root}/completion.env"
-  [ -f "${managed_completion}" ] && [ ! -L "${managed_completion}" ] || {
-    echo "error: managed Phase 3/4 completion receipt missing" >&2; exit 1;
+  managed_completion_verifier="${repo_root}/scripts/bootstrap/verify-managed-phase-completion.shs"
+  [ -f "${managed_completion_verifier}" ] || {
+    echo "error: tracked managed completion verifier unavailable" >&2; exit 1;
   }
-  [ "$(bootstrap_stage3_manifest_value format "${managed_completion}")" = SIMPLE-PHASE4-MANAGED-COMPLETION-1 ] &&
-    [ "$(bootstrap_stage3_manifest_value status "${managed_completion}")" = PASS ] &&
-    [ "$(bootstrap_stage3_manifest_value phase3_status "${managed_completion}")" = PASS ] &&
-    [ "$(bootstrap_stage3_manifest_value phase4_status "${managed_completion}")" = PASS ] || {
-    echo "error: managed Phase 3 and Phase 4 did not both complete" >&2; exit 1;
-  }
+  sh "${managed_completion_verifier}" \
+    "--receipt=${managed_completion}" "--root=${managed_phase_root}" \
+    "--inventory=${managed_module_inventory}" "--producer-sha=${managed_producer_sha}" \
+    || { echo "error: managed Phase 3/4 terminal proofs differ" >&2; exit 1; }
   bootstrap_verdict "ADMITTED: stage=phase3+phase4 exit=0 signal=none reason=managed-phase2-producer-completion"
   exit 0
 
