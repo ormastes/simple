@@ -1,0 +1,123 @@
+use std.spec.{describe, it, expect}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io.file_ops.{
+    secure_temp_dir, file_create_exclusive,
+    file_read_regular_no_follow_bounded
+}
+use std.scv.compile_source_inventory_core.{CompileSourceInventoryEntryV1}
+use compiler.driver.cache.cold_hir_semantic_seed_v1.{
+    ColdHirSemanticSeedV1, ColdHirTypedReceiptV1
+}
+use compiler.driver.cache.cold_hir_compiled_package_outputs_v1.{
+    ColdHirCompiledPayloadFileV1
+}
+use compiler.driver.cache.cold_hir_semantic_action_emission_v1.{
+    cold_hir_semantic_source_witness_v1,
+    cold_hir_semantic_action_emit_v1
+}
+use compiler.driver.cache.package_module_index_builder.{
+    PackageModuleIndexBuildAuthorityV1
+}
+use compiler.driver.cache.package_tldr_metadata.{ConfigVariantKeyV1}
+use compiler.driver.smf.runtime_std_native_sections_v1.{
+    runtime_std_mir_body_payload_v1
+}
+use compiler.mir.mir_instruction_graph.{MirModule}
+
+@unsafe(reason: "resolve the private test artifact root", capabilities: [ffi])
+extern fn rt_path_absolute(path: text) -> text
+
+fn cold_semantic_test_root_v1() -> text:
+    val created = secure_temp_dir(".", "cold-semantic-action-").unwrap()
+    var absolute = ""
+    unsafe(capabilities: [ffi]):
+        absolute = rt_path_absolute(created) ?? ""
+    absolute
+
+describe "objectless cold HIR semantic action emission":
+    it "writes an exclusive verified action bound to typed ABI, source, and MIR":
+        val root = cold_semantic_test_root_v1()
+        val source_content = "source-a"
+        val source_digest = sha256_text(source_content)
+        val source = CompileSourceInventoryEntryV1(
+            "src/a.spl", source_digest, source_digest,
+            source_digest, source_digest, source_digest,
+            source_content.len())
+        val inventory_digest = sha256_text("admitted-inventory")
+        val authority = PackageModuleIndexBuildAuthorityV1(
+            sha256_text("producer"), "root", "revision", "commit", "tree",
+            inventory_digest, ConfigVariantKeyV1(
+                "x86_64-unknown-linux-gnu", "llvm", [], "debug",
+                "abi-v1", [], []))
+        val abi = "typed-abi-a"
+        val abi_digest = sha256_text(abi)
+        val seed = ColdHirSemanticSeedV1(
+            "a", source.source_identity, source_digest,
+            inventory_digest, abi_digest, [])
+        val typed = ColdHirTypedReceiptV1(
+            seed, abi, "symbol|a|module|{abi_digest}|{abi_digest}")
+        val mir_content = runtime_std_mir_body_payload_v1(
+            MirModule("a", {}, {}, {}, {}), source.source_identity,
+            source_digest).unwrap().content
+        val mir_path = root + "/mir.body"
+        expect(file_create_exclusive(mir_path, mir_content)).to_equal(true)
+        val mir_file = ColdHirCompiledPayloadFileV1(
+            mir_path, sha256_text(mir_content), mir_content.len())
+        val witness = cold_hir_semantic_source_witness_v1(authority, source)
+        expect(witness).to_equal(sha256_text(
+            "simple-cold-hir-source-witness-v1|" +
+            "{inventory_digest}|revision|commit|tree|9:src/a.spl|" +
+            "{source_digest}|{source_content.len()}"))
+
+        val emission = cold_hir_semantic_action_emit_v1(
+            typed, source, witness, mir_file, authority, root)
+        expect(emission.is_ok()).to_equal(true)
+        val emitted = emission.unwrap()
+        val key = sha256_text("simple-cold-hir-semantic-action-v1|" +
+            "{abi_digest}|{witness}|{mir_file.digest}")
+        val action_content = "action|{key}|compile-semantic|a|{mir_file.digest}"
+        expect(emitted.semantic_action_key).to_equal(key)
+        expect(emitted.action_file.digest).to_equal(sha256_text(action_content))
+        expect(emitted.action_file.byte_count).to_equal(action_content.len())
+        expect(file_read_regular_no_follow_bounded(
+            emitted.action_file.path, 4096).unwrap()).to_equal(action_content)
+        expect(emitted.object_artifact.object_format).to_equal("none")
+        expect(emitted.object_artifact.object_digest).to_equal("")
+        expect(emitted.object_artifact.capsule_receipt_digest).to_equal("")
+        expect(cold_hir_semantic_action_emit_v1(
+            typed, source, witness, mir_file, authority, root).is_err()
+        ).to_equal(true)
+
+    it "refuses a changed source witness or MIR receipt before action publication":
+        val root = cold_semantic_test_root_v1()
+        val digest = sha256_text("source")
+        val source = CompileSourceInventoryEntryV1(
+            "src/a.spl", digest, digest, digest, digest, digest, 6)
+        val authority = PackageModuleIndexBuildAuthorityV1(
+            sha256_text("producer"), "root", "revision", "commit", "tree",
+            sha256_text("inventory"), ConfigVariantKeyV1(
+                "x86_64-unknown-linux-gnu", "llvm", [], "debug",
+                "abi-v1", [], []))
+        val abi = "typed-abi"
+        val abi_digest = sha256_text(abi)
+        val typed = ColdHirTypedReceiptV1(
+            ColdHirSemanticSeedV1("a", "src/a.spl", digest,
+                authority.inventory_digest, abi_digest, []),
+            abi, "symbol|a|module|{abi_digest}|{abi_digest}")
+        val mir = ColdHirCompiledPayloadFileV1(
+            root + "/missing.mir", sha256_text("missing"), 7)
+        var forged = typed
+        forged.interface_content = "symbol|a|module|" +
+            sha256_text("not-the-typed-abi") + "|" + abi_digest
+        expect(cold_hir_semantic_action_emit_v1(
+            forged, source, cold_hir_semantic_source_witness_v1(
+                authority, source), mir, authority, root).unwrap_err()
+        ).to_equal("cold-semantic-typed-abi-invalid")
+        expect(cold_hir_semantic_action_emit_v1(
+            typed, source, sha256_text("forged-witness"), mir,
+            authority, root).unwrap_err()).to_equal(
+                "cold-semantic-source-witness-mismatch")
+        val witness = cold_hir_semantic_source_witness_v1(authority, source)
+        expect(cold_hir_semantic_action_emit_v1(
+            typed, source, witness, mir, authority, root).is_err()
+        ).to_equal(true)
