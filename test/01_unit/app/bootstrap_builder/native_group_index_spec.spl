@@ -9,6 +9,9 @@ use app.bootstrap_builder.native_group_index_contract.{NativeGroupIndexReceiptV1
 use app.bootstrap_builder.native_group_index_build.{NativeGroupIndexAdmissionV1,
     native_group_index_compiler_publish_v1, native_group_index_managed_path_v1,
     native_group_index_manager_task_valid_v1}
+use app.bootstrap_builder.native_group_index_handoff.{NativeGroupIndexHandoffV1,
+    native_group_index_handoff_encode_v1, native_group_index_handoff_decode_v1}
+use app.bootstrap_builder.native_group_index_verify.{native_group_index_verify_v1}
 
 fn index_digest_v1(ch: text) -> text: ch.repeat(64)
 
@@ -124,3 +127,27 @@ describe "grouped native full-inventory index builder contract":
                     Ok(_): fail("missing compiler cold producer fabricated success")
                     Err(reason): expect(reason).to_contain("unavailable")
             Err(reason): fail(reason)
+
+    it "round trips a pinned write-once handoff and rejects tampering":
+        val handoff = NativeGroupIndexHandoffV1(index_digest_v1("1"),
+            index_digest_v1("2"), index_digest_v1("3"), "phase4", "llvm",
+            "x86_64-pc-windows-msvc", index_digest_v1("a"),
+            index_digest_v1("c"), index_digest_v1("d"), 15754,
+            config_variant_digest_v1(index_variant_v1()), index_digest_v1("f"),
+            "D:/state/attempts/index-llvm/1/local/work/.builder-cache/native-index",
+            "D:/state/attempts/index-llvm/1/local/work/.builder-cache/native-index/package-module-index-v1/variant.receipt",
+            index_digest_v1("4"),
+            "D:/state/attempts/index-llvm/1/local/work/.builder-cache/native-index/runtime-std-authority-v1/runtime.receipt",
+            index_digest_v1("5"), "D:/state/attempts/index-llvm/1/local")
+        val encoded = native_group_index_handoff_encode_v1(handoff)
+        expect(encoded.starts_with("SIMPLE-NATIVE-INDEX-HANDOFF-1\n")).to_equal(true)
+        match native_group_index_handoff_decode_v1(encoded):
+            Ok(decoded): expect(native_group_index_handoff_encode_v1(decoded)).to_equal(encoded)
+            Err(reason): fail(reason)
+        match native_group_index_handoff_decode_v1(encoded + "extra"):
+            Ok(_): fail("trailing handoff bytes accepted")
+            Err(reason): expect(reason).to_contain("noncanonical")
+        match native_group_index_verify_v1("D:/missing/index.config",
+                "D:/missing/output/index-output/receipt.sdn", "D:/missing/handoff.sdn"):
+            Ok(_): fail("unverified manager task produced a handoff")
+            Err(reason): expect(reason).to_contain("layout")

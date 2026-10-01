@@ -11,6 +11,9 @@ use compiler.driver.driver_build.native_group_warm_route.{native_group_warm_rout
 use compiler.driver.cache.package_config_variant_receipt.{package_config_variant_receipt_read_v1,
     package_config_variant_receipt_path_v1}
 use compiler.driver.cache.runtime_std_authority_admission.{runtime_std_authority_admit_v1}
+use app.bootstrap_builder.native_group_index_handoff.{native_group_index_handoff_read_v1,
+    native_group_index_handoff_encode_v1}
+use app.bootstrap_builder.native_group_index_verify.{native_group_index_verify_v1}
 use app.io.file_ops.{path_absolute}
 use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded, file_is_regular_no_follow,
     file_hash_sha256, file_atomic_write, file_exists}
@@ -42,7 +45,8 @@ fn native_prepare_key_valid_v1(key: text) -> bool:
      "full_source_authority_path", "full_source_authority_digest",
      "scv_receipt_path", "scv_receipt_digest", "variant_receipt_path",
      "variant_receipt_digest", "runtime_std_authority_path",
-     "runtime_std_authority_digest", "tool_path", "tool_digest",
+     "runtime_std_authority_digest", "index_handoff_path",
+     "index_handoff_digest", "tool_path", "tool_digest",
      "runtime_path", "runtime_digest", "manager_path", "manager_digest",
      "worker_path", "worker_digest", "broker_path", "broker_digest",
      "inventory_path", "inventory_digest", "inventory_count", "phase", "backend", "target",
@@ -68,7 +72,7 @@ fn native_prepare_config_v1(payload: text) -> Result<{text: text}, text>:
                 value == "" or value.len() > 4096:
             return Err("duplicate, unknown, empty, or oversized native group config field")
         fields[key] = value
-    if fields.len() != 44 or fields["format"] != "SIMPLE-NATIVE-GROUP-PREPARE-1":
+    if fields.len() != 46 or fields["format"] != "SIMPLE-NATIVE-GROUP-PREPARE-1":
         return Err("incomplete native group preparation config")
     Ok(fields)
 
@@ -265,6 +269,7 @@ fn native_group_prepare_v1(config_path: text, manifest_path: text) -> Result<Nat
     native_prepare_pin_v1(fields, "producer")?
     native_prepare_pin_v1(fields, "full_source_authority")?
     native_prepare_pin_v1(fields, "scv_receipt")?
+    native_prepare_pin_v1(fields, "index_handoff")?
     native_prepare_pin_v1(fields, "variant_receipt")?
     native_prepare_pin_v1(fields, "runtime_std_authority")?
     native_prepare_pin_v1(fields, "tool")?
@@ -274,6 +279,25 @@ fn native_group_prepare_v1(config_path: text, manifest_path: text) -> Result<Nat
     native_prepare_pin_v1(fields, "broker")?
     native_prepare_policy_v1(fields)?
     val paths = native_prepare_inventory_v1(fields)?
+    val handoff = native_group_index_handoff_read_v1(fields["index_handoff_path"],
+        fields["index_handoff_digest"])?
+    val index_job_root = native_prepare_parent_v1(fields["index_handoff_path"])
+    val reverified = native_group_index_verify_v1(index_job_root + "/inputs/index.config",
+        index_job_root + "/output/index-output/receipt.sdn",
+        fields["index_handoff_path"])?
+    if native_group_index_handoff_encode_v1(reverified) !=
+            native_group_index_handoff_encode_v1(handoff) or
+            handoff.phase != fields["phase"] or
+            handoff.backend != fields["backend"] or
+            handoff.target != fields["target"] or
+            handoff.producer_digest != fields["producer_digest"] or
+            handoff.index_read_root != fields["index_read_root"] or
+            handoff.variant_receipt_path != fields["variant_receipt_path"] or
+            handoff.variant_receipt_digest != fields["variant_receipt_digest"] or
+            handoff.runtime_std_authority_path != fields["runtime_std_authority_path"] or
+            handoff.runtime_std_authority_digest != fields["runtime_std_authority_digest"] or
+            handoff.source_count != paths.len():
+        return Err("native group index handoff differs from manager or config pins")
     val variant_receipt = package_config_variant_receipt_read_v1(fields["variant_receipt_path"],
         fields["variant_receipt_digest"])?
     val canonical_variant_path = package_config_variant_receipt_path_v1(fields["index_read_root"],
@@ -291,7 +315,11 @@ fn native_group_prepare_v1(config_path: text, manifest_path: text) -> Result<Nat
         fields["producer_digest"], variant_receipt.variant, fields["full_source_authority_path"],
         fields["full_source_authority_digest"])?
     if indexed.index_digest != variant_receipt.index_digest or
-            indexed.variant_digest != variant_receipt.variant_digest:
+            indexed.variant_digest != variant_receipt.variant_digest or
+            indexed.index_digest != handoff.index_digest or
+            indexed.variant_digest != handoff.variant_digest or
+            indexed.source_snapshot_digest != handoff.snapshot_inventory_digest or
+            indexed.scv_source_inventory_digest != handoff.source_inventory_digest:
         return Err("compiler variant receipt differs from admitted package index")
     val baseline = runtime_std_authority_admit_v1(fields["index_read_root"],
         fields["runtime_std_authority_path"], fields["runtime_std_authority_digest"],
