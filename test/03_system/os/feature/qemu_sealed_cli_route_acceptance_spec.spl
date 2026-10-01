@@ -1,0 +1,238 @@
+"""# Exercise the rebuilt SimpleOS CLI with admitted kernels and real QEMU
+
+This live system gate launches the full CLI, rather than calling its dispatch
+helper. Existing Stage4 provenance, catalog plans, QEMU host admission and
+filesystem artifact admission remain authoritative. No receipt, kernel, media
+or process response is synthesized. Run serially from an isolated repository
+checkout with its prepared catalog artifacts and SIMPLE_QEMU_CLI_ACCEPTANCE_BIN.
+
+CLI exit and displayed-command parity are host evidence. Actual captured
+serial output is checked separately against the existing guest marker oracle.
+Missing prerequisites fail as MissingEvidence; they never become skipped passes.
+"""
+# @tag: system, simpleos, qemu, live-cli
+# @manual_section: Rebuilt CLI executes the inspected catalog route
+# @evidence-display: links
+
+use std.spec.*
+use std.io_runtime.{cwd, getpid, mkdir_p}
+use app.io.mod.{file_exists, file_hash_sha256, file_write, process_run_timeout}
+use app.io.env_ops.{env_get}
+use os.qemu_cli_plan_v1.{
+    qemu_cli_inspect_plan_v1,
+    qemu_cli_inspect_named_lane_v1, qemu_cli_dispatch_command_v1,
+    qemu_cli_command_display_v1
+}
+use os.qemu_runner.{
+    OsTarget, arch_from_name, get_qemu_target, scenario_by_name_direct,
+    scenario_target, scenario_kernel_path,
+    scenario_sealed_run_supported_v1, qemu_scenario_serial_acceptance_reason,
+    _scenario_required_marker_fragments
+}
+use os.fs_wrapper_artifact.{fs_wrapper_artifact_admitted}
+use os.qemu_compiler_admission_v1.{qemu_compiler_select_v1}
+
+var admitted_cli: text = ""
+var admitted_cli_digest: text = ""
+var route_evidence_root: text = ""
+
+# @inline
+fn missing_cli_evidence(reason: text) -> bool:
+    fail("MissingEvidence: " + reason)
+    false
+
+# @inline
+fn retain_cli_result(label: text, stdout: text, stderr: text, status: i32) -> bool:
+    val path = route_evidence_root + "/" + label + ".txt"
+    val result = "exit={status}\nstdout:\n{stdout}\nstderr:\n{stderr}\n"
+    if not file_write(path, result):
+        return missing_cli_evidence("could not retain real process result " + path)
+    true
+
+# @inline
+fn admit_full_cli_for_routes() -> bool:
+    val cli = env_get("SIMPLE_QEMU_CLI_ACCEPTANCE_BIN") ?? ""
+    if cli == "" or not file_exists(cli) or not file_exists(cli + ".provenance.env"):
+        return missing_cli_evidence("set SIMPLE_QEMU_CLI_ACCEPTANCE_BIN to a full Stage4 candidate with its canonical provenance")
+    route_evidence_root = cwd().replace("\\", "/") +
+        "/build/test-artifacts/os/qemu-sealed-cli-route-" + getpid().to_text()
+    if not mkdir_p(route_evidence_root):
+        return missing_cli_evidence("could not create isolated CLI evidence directory")
+    # Static shell program; binary/root are positional argv, never shell text.
+    val admission = "set -eu; BOOTSTRAP_STAGE3_FACADE_PATH=\"$2/scripts/check/lib/bootstrap-stage3-provenance.shs\"; " +
+        "STAGE4_PROVENANCE_HELPER_PATH=\"$2/scripts/check/lib/stage4-candidate-provenance.shs\"; " +
+        "export BOOTSTRAP_STAGE3_FACADE_PATH STAGE4_PROVENANCE_HELPER_PATH; " +
+        ". \"$BOOTSTRAP_STAGE3_FACADE_PATH\"; . \"$STAGE4_PROVENANCE_HELPER_PATH\"; " +
+        "stage4_verify_candidate_provenance \"$1.provenance.env\" \"$1\" \"$2\""
+    val (stdout, stderr, status) = process_run_timeout(
+        "sh", ["-c", admission, "qemu-cli-admission",
+        cli.replace("\\", "/"), cwd().replace("\\", "/")], 180000)
+    if not retain_cli_result("full-cli-admission", stdout, stderr, status): return false
+    if status != 0:
+        return missing_cli_evidence("canonical full-CLI Stage4 provenance did not admit the selected binary; see full-cli-admission.txt")
+    step("Require production selection to honor the explicit admitted compiler")
+    val selected = qemu_compiler_select_v1(cli, "/unselected/compiler-alias", cwd())
+    if selected == "" or file_hash_sha256(selected) != file_hash_sha256(cli):
+        return missing_cli_evidence("production OS compiler selection did not preserve the explicit admitted candidate")
+    step("Refuse a missing explicit compiler even when its alias is admitted")
+    val missing_primary = route_evidence_root + "/absent-explicit-compiler"
+    if file_exists(missing_primary):
+        return missing_cli_evidence("missing-explicit test path unexpectedly exists")
+    expect(qemu_compiler_select_v1(missing_primary, cli, cwd())).to_equal("")
+    step("Use the admitted alias only when the primary override is absent")
+    val selected_alias = qemu_compiler_select_v1("", cli, cwd())
+    if selected_alias == "" or file_hash_sha256(selected_alias) != file_hash_sha256(cli):
+        fail("CompilerSelectionFailed: an admitted alias was not selected with no primary override")
+        return false
+    admitted_cli = selected
+    admitted_cli_digest = file_hash_sha256(cli)
+    if admitted_cli_digest.len() != 64:
+        admitted_cli = ""
+        return missing_cli_evidence("could not hash the admitted full CLI")
+    if not file_write(route_evidence_root + "/identity.txt",
+        "cli={cli}\ncli_sha256={admitted_cli_digest}\n" +
+        "provenance_sha256=" + file_hash_sha256(cli + ".provenance.env") + "\n"):
+        admitted_cli = ""
+        return missing_cli_evidence("could not retain admitted CLI identity")
+    true
+
+# @inline
+fn run_admitted_cli(args: [text], timeout_ms: i64) -> (text, text, i32):
+    var child_args = [
+        "SIMPLE_BINARY=" + admitted_cli, "SIMPLE_BIN=" + admitted_cli,
+        "SIMPLE_BOOTSTRAP_DRIVER=" + admitted_cli,
+        "SIMPLE_FRONTEND_DELEGATE=" + admitted_cli, "SIMPLE_FRONTEND_DELEGATED=1",
+        "SIMPLE_BOOTSTRAP=0", "SIMPLE_NO_STUB_FALLBACK=1",
+        "SIMPLE_ALLOW_FREESTANDING_STUBS=0", "SIMPLE_LIB=" + cwd() + "/src",
+        "SIMPLE_OS_BUILD_TIMEOUT_MS=120000", admitted_cli
+    ]
+    for arg in args: child_args.push(arg)
+    process_run_timeout("env", child_args, timeout_ms)
+
+# @inline
+fn cli_output_field(output: text, prefix: text) -> text:
+    for line in output.replace("\r\n", "\n").split("\n"):
+        if line.starts_with(prefix): return line[prefix.len():].trim()
+    ""
+
+# @inline
+fn run_live_cli_route(arch: text, scenario_name: text) -> bool:
+    if admitted_cli == "": return missing_cli_evidence("full CLI admission is unavailable")
+    if file_hash_sha256(admitted_cli) != admitted_cli_digest:
+        return missing_cli_evidence("admitted CLI changed before route execution")
+    var target: OsTarget = get_qemu_target(arch_from_name(arch).unwrap())
+    var kernel = target.output
+    var args = ["os", "run", "--arch=" + arch]
+    val route = if scenario_name == "": "default-" + arch else: scenario_name
+    if scenario_name != "":
+        val scenario = scenario_by_name_direct(scenario_name)
+        if not scenario_sealed_run_supported_v1(scenario):
+            return missing_cli_evidence("requested named scenario has no sealed route: " + scenario_name)
+        target = scenario_target(scenario)
+        kernel = scenario_kernel_path(scenario, target)
+        args = ["os", "run", "--scenario=" + scenario_name]
+    step("Require the prepared catalog kernel and its production artifact admission")
+    if not file_exists(kernel): return missing_cli_evidence("prepare the real catalog kernel " + kernel)
+    if not fs_wrapper_artifact_admitted(target.entry, kernel):
+        return missing_cli_evidence("production filesystem artifact admission rejected " + kernel)
+    val kernel_digest = file_hash_sha256(kernel)
+    if kernel_digest.len() != 64: return missing_cli_evidence("kernel digest is unavailable")
+    val prepared = if scenario_name == "":
+        qemu_cli_inspect_plan_v1(arch, kernel, target.qemu_memory, target.qemu_bios, target.qemu_extra, false)
+    else:
+        qemu_cli_inspect_named_lane_v1(
+            arch, scenario_name, kernel, target.qemu_memory, target.qemu_bios, target.qemu_extra, false)
+    if not prepared.ok() or prepared.launch_plan() == nil:
+        return missing_cli_evidence("real kernel/media/QEMU plan refused for " + route + ": " + prepared.error())
+    val plan = prepared.launch_plan().unwrap()
+    val command = qemu_cli_dispatch_command_v1(plan)
+    if command.len() == 0: return missing_cli_evidence("prepared plan has no admitted sealed command")
+
+    step("Admit real QEMU by the canonical host and accelerator probe")
+    val (probe_out, probe_err, probe_status) = process_run_timeout("sh", [
+        "scripts/qemu/simple-qemu-host-admission.shs", "--arch", arch,
+        "--accelerator", "tcg", "--qemu-binary", plan.executable_path(), "--probe-seconds", "3"
+    ], 30000)
+    if not retain_cli_result(route + ".qemu-admission", probe_out, probe_err, probe_status): return false
+    if probe_status != 0:
+        return missing_cli_evidence("real QEMU host/accelerator admission failed for " + route)
+
+    step("Inspect the plan through the admitted full CLI")
+    val inspect_args = args + ["--show-plan"]
+    val (inspect_out, inspect_err, inspect_status) = run_admitted_cli(inspect_args, 30000)
+    if not retain_cli_result(route + ".inspection", inspect_out, inspect_err, inspect_status): return false
+    expect(inspect_status).to_equal(0)
+    expect(cli_output_field(inspect_out, "Plan SHA256:")).to_equal(plan.argv_digest())
+    expect(cli_output_field(inspect_out, "Image SHA256:")).to_equal(kernel_digest)
+    expect(cli_output_field(inspect_out, "Sealed:")).to_equal("true")
+    if inspect_status != 0: return false
+    val host = cli_output_field(inspect_out, "Host:")
+    val (display_out, display_err, display_status) = run_admitted_cli(args + ["--print-command"], 30000)
+    if not retain_cli_result(route + ".command", display_out, display_err, display_status): return false
+    expect(display_status).to_equal(0)
+    expect(display_out.trim()).to_equal(qemu_cli_command_display_v1(host, command[0], command.slice(1)))
+    if display_status != 0: return false
+
+    step("Run the actual CLI route and retain its bounded process result")
+    # The real CLI may reuse its canonical kernel cache or rebuild; no cache
+    # stamp is fabricated. A changed kernel invalidates this parity observation.
+    val (stdout, stderr, status) = run_admitted_cli(args, 600000)
+    if not retain_cli_result(route + ".run", stdout, stderr, status): return false
+    expect(status).to_equal(0)
+    expect(file_hash_sha256(admitted_cli)).to_equal(admitted_cli_digest)
+    expect(file_hash_sha256(kernel)).to_equal(kernel_digest)
+    expect(fs_wrapper_artifact_admitted(target.entry, kernel)).to_equal(true)
+    val label = if scenario_name == "": arch else: scenario_name
+    expect(stdout).to_contain("[run] " + label + ": " + command.join(" "))
+    if stdout.contains("phase=spawn"):
+        expect(stdout).to_contain("cmd: " + admitted_cli + " native-build")
+    if status != 0: return false
+
+    step("Separate captured guest completion from successful host CLI invocation")
+    val serial_sections = stdout.replace("\r\n", "\n").split("[run] serial output:\n")
+    if serial_sections.len() != 2:
+        fail("GuestEvidenceFailed: expected one actual serial-output section for " + route)
+        return false
+    val serial = serial_sections[1].split("[run] stderr:")[0]
+    if scenario_name == "":
+        # Same bounded smoke oracle as the existing default test_os owner.
+        expect(serial).to_contain("SimpleOS")
+    else:
+        val scenario = scenario_by_name_direct(scenario_name)
+        expect(_scenario_required_marker_fragments(scenario).len()).to_be_greater_than(0)
+        expect(qemu_scenario_serial_acceptance_reason(scenario, "off", serial)).to_equal("ready")
+    true
+
+describe "Rebuilt CLI executes sealed SimpleOS routes with real QEMU":
+    before_all:
+        step("Require canonical full-CLI Stage4 provenance once for this suite")
+        expect(admit_full_cli_for_routes()).to_equal(true)
+
+    it "runs the inspected default x86_64 route and checks its guest smoke banner":
+        # @req: REQ-001 REQ-014 REQ-016
+        """I inspect and run the default route through the actual admitted CLI."""
+        expect(run_live_cli_route("x86_64", "")).to_equal(true)
+
+    it "runs the inspected named x86_64 NVMe route and checks catalog completion":
+        # @req: REQ-001 REQ-014 REQ-016
+        """I inspect and launch the named NVMe lane through the actual CLI,
+        then check its guest completion separately from the host exit."""
+        expect(run_live_cli_route("x86_64", "x86_64-q35-pure-nvme-perf")).to_equal(true)
+
+    it "runs the inspected named x86_32 initrd route and checks catalog completion":
+        # @req: REQ-001 REQ-014 REQ-016
+        """I require real initrd media and admitted executable policy before
+        the named x86_32 CLI route can supply guest completion evidence."""
+        expect(run_live_cli_route("x86_32", "x86_32-initrd-fat32-smf")).to_equal(true)
+
+    it "runs the inspected named RISC-V 64 route and checks catalog completion":
+        # @req: REQ-001 REQ-014 REQ-016
+        """I inspect and run the RISC-V 64 filesystem lane, requiring the
+        catalog's actual serial markers after the CLI returns."""
+        expect(run_live_cli_route("riscv64", "riscv64-virtio-fat32-smf")).to_equal(true)
+
+    it "runs the inspected named RISC-V 32 route and checks catalog completion":
+        # @req: REQ-001 REQ-014 REQ-016
+        """I inspect and run the RISC-V 32 filesystem lane with its own
+        kernel and media; another architecture's completion is insufficient."""
+        expect(run_live_cli_route("riscv32", "riscv32-virtio-fat32-smf")).to_equal(true)

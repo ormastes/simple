@@ -19,7 +19,9 @@
 # Admission: export SIMPLE_QUALIFIED_RUNTIME=/abs/path/to/simple
 
 use std.spec.*
-use std.io_runtime.{process_run, env_get, platform_name}
+use std.io_runtime.{process_run, process_run_timeout, env_get, platform_name,
+    cwd, file_exists, file_hash_sha256, read_file_text, file_write, mkdir_p,
+    getpid}
 
 # The native facade normally sees the caller's environment. Some older test
 # runners do not (see simpleos_kernel_fabricated_rt_symbol_guard_spec.spl), so
@@ -136,6 +138,66 @@ fn admit_pure_simple_runtime() -> text:
         return ""
 
     binary
+
+# Reuse the repository's Stage4 provenance verifier, including its exact
+# candidate hash and owned-source revision check. Call once from the suite
+# entry hook; do not cache partial dependencies across a mutable source tree.
+
+fn stage4_source_revision_from_provenance(body: text) -> text:
+    for line in body.split("\n"):
+        if line.starts_with("source_revision="):
+            return line.substring("source_revision=".len(), line.len()).trim()
+    ""
+
+fn admit_source_matched_pure_simple_runtime() -> text:
+    val selected = admit_pure_simple_runtime()
+    if selected == "":
+        return ""
+    val candidate = selected.replace("\\", "/")
+    val source_root = cwd().replace("\\", "/")
+    val provenance = candidate + ".provenance.env"
+    if not file_exists(candidate) or not file_exists(provenance):
+        fail("MissingEvidence: exact Stage4 candidate and canonical .provenance.env are required")
+        return ""
+    val candidate_digest = file_hash_sha256(candidate)
+    val provenance_digest = file_hash_sha256(provenance)
+    val source_revision = stage4_source_revision_from_provenance(read_file_text(provenance))
+    if candidate_digest.len() != 64 or provenance_digest.len() != 64:
+        fail("MissingEvidence: could not hash the Stage4 candidate and its provenance")
+        return ""
+    if source_revision.len() != 64:
+        fail("MissingEvidence: canonical Stage4 provenance lacks a source revision")
+        return ""
+    # Static shell program: candidate and root are positional arguments, not
+    # interpolated shell text. The sourced verifier owns the provenance rules.
+    val verify = "set -eu; BOOTSTRAP_STAGE3_FACADE_PATH=\"$2/scripts/check/lib/bootstrap-stage3-provenance.shs\"; " +
+        "STAGE4_PROVENANCE_HELPER_PATH=\"$2/scripts/check/lib/stage4-candidate-provenance.shs\"; " +
+        "export BOOTSTRAP_STAGE3_FACADE_PATH STAGE4_PROVENANCE_HELPER_PATH; " +
+        ". \"$BOOTSTRAP_STAGE3_FACADE_PATH\"; . \"$STAGE4_PROVENANCE_HELPER_PATH\"; " +
+        "stage4_verify_candidate_provenance \"$1.provenance.env\" \"$1\" \"$2\""
+    val (_out, err, status) = process_run_timeout("sh", ["-c", verify,
+        "stage4-source-admission", candidate, source_root], 180000)
+    if status != 0:
+        fail("MissingEvidence: canonical Stage4 source/candidate provenance refused " +
+            candidate + " (exit {status}): " + err)
+        return ""
+    if file_hash_sha256(candidate) != candidate_digest or
+            file_hash_sha256(provenance) != provenance_digest or
+            stage4_source_revision_from_provenance(read_file_text(provenance)) != source_revision:
+        fail("MissingEvidence: Stage4 candidate or provenance changed during admission")
+        return ""
+    if not mkdir_p("build/test-artifacts"):
+        fail("MissingEvidence: cannot retain Stage4 canonical admission evidence")
+        return ""
+    val receipt = "build/test-artifacts/stage4-source-admission-{getpid()}.txt"
+    if not file_write(receipt, "candidate={candidate}\n" +
+            "candidate_sha256={candidate_digest}\nprovenance_sha256={provenance_digest}\n" +
+            "source_revision={source_revision}\nsource_root={source_root}\n" +
+            "canonical_verifier=stage4_verify_candidate_provenance\n" +
+            "verifier_exit={status}\n"):
+        fail("MissingEvidence: cannot write Stage4 canonical admission evidence")
+        return ""
+    candidate
 
 # Proves the admitted runtime can actually compile before a scenario draws any
 # conclusion from its output. A segfaulting compiler must not be mistaken for a

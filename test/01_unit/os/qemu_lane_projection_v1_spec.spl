@@ -5,6 +5,10 @@
 use std.spec.{describe, it, expect, step}
 use os.kernel.arch.arch_context.{Architecture}
 use os.qemu_runner.{build_qemu_command, get_qemu_target}
+use os.qemu_launch_resources_v1.{
+    qemu_effective_memory, qemu_effective_cpus,
+    qemu_launch_memory_mib_v1, qemu_launch_cpu_count_v1
+}
 use os.port.simpleos_multiplatform_build.{simpleos_machine_target_projection}
 use os.port.qemu_machine_plan_v1.{
     QemuAcceleratorV1, QemuAcceleratorRequestKindV1, QemuAcceleratorRequestV1,
@@ -20,12 +24,13 @@ fn parity_argv(arch: Architecture, target_name: text) -> [text]:
     val target = get_qemu_target(arch)
     val platform = simpleos_machine_target_projection(target_name)
     val lane = platform.default_qemu_lane()
-    val memory = int(lane.qemu_memory[:lane.qemu_memory.len() - 1]) as u64
+    val memory = qemu_launch_memory_mib_v1(qemu_effective_memory(lane.qemu_memory))
+    val cpus = qemu_launch_cpu_count_v1(qemu_effective_cpus())
     val spec = qemu_machine_spec_from_lane_v1(
         platform, lane, HASH_A, memory,
         QemuAcceleratorRequestV1(
             kind: QemuAcceleratorRequestKindV1.Auto,
-            accelerator: QemuAcceleratorV1.Tcg))
+            accelerator: QemuAcceleratorV1.Tcg), cpus)
     val legacy = build_qemu_command(target)
     val plan = qemu_launch_plan_bind_lane_parity_v1(
         spec,
@@ -42,6 +47,8 @@ fn parity_argv(arch: Architecture, target_name: text) -> [text]:
 
 describe "REQ-SIMPLEOS-QEMU-LANE-PROJECTION-001: bounded catalog wiring [importance=high; importance_weight=2]":
     it "matches all six established default runner commands exactly":
+        # @req: REQ-001 REQ-014 REQ-016
+        """Each architecture keeps its selected memory and CPU count when its command is sealed."""
         step("Project and seal every default architecture lane")
         val x64 = parity_argv(Architecture.X86_64, "x86_64")
         val x32 = parity_argv(Architecture.X86, "x86_32")
