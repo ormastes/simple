@@ -11,7 +11,8 @@ use std.common.build_manager.grouped_native_contract.{NativeGroupManifestV1,
     native_group_manifest_identity_v1, native_group_result_decode_v1,
     native_group_result_encode_v1, native_group_result_validate_against_manifest_v1,
     native_group_smf_loader_receipt_v1}
-use std.common.build_manager.contracts.{builder_digest_valid_v1}
+use std.common.build_manager.contracts.{builder_digest_valid_v1,
+    builder_identifier_valid_v1}
 use std.common.crypto.sha256.{sha256_text}
 use std.platform.{get_host_os, get_host_arch}
 use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded, file_atomic_write, file_is_regular_no_follow, file_hash_sha256}
@@ -27,6 +28,7 @@ struct NativeGroupWorkerRequestV1:
     source_root: text
     entry_source: text
     index_read_root: text
+    run_id: text
     output_root: text
     backend: text
     threads: i64
@@ -46,6 +48,8 @@ fn native_group_worker_parent_v1(path: text) -> text:
 fn native_group_worker_request_valid_v1(request: NativeGroupWorkerRequestV1) -> text:
     if not builder_digest_valid_v1(request.producer_digest) or not builder_digest_valid_v1(request.manifest_digest):
         return "worker input digest invalid"
+    if not builder_identifier_valid_v1(request.run_id):
+        return "worker run identity invalid"
     for path in [request.producer, request.group_manifest, request.group_result,
             request.source_root, request.entry_source, request.index_read_root,
             request.output_root]:
@@ -76,7 +80,7 @@ fn native_group_worker_request_encode_v1(request: NativeGroupWorkerRequestV1) ->
     for field in [request.producer, request.producer_digest, request.group_manifest,
             request.manifest_digest, request.group_result, request.source_root,
             request.entry_source, request.index_read_root,
-            request.output_root,
+            request.run_id, request.output_root,
             request.backend, str(request.threads), request.target, str(request.timeout_ms)]:
         payload = payload + builder_wire_line_v1(field)
     payload
@@ -87,7 +91,7 @@ fn native_group_worker_request_decode_v1(payload: text) -> Result<NativeGroupWor
     if reader.scalar() != "SIMPLE-NATIVE-GROUP-WORKER-1": return Err("worker request header differs")
     val request = NativeGroupWorkerRequestV1(reader.scalar(), reader.scalar(), reader.scalar(),
         reader.scalar(), reader.scalar(), reader.scalar(), reader.scalar(), reader.scalar(),
-        reader.scalar(),
+        reader.scalar(), reader.scalar(),
         reader.scalar(),
         reader.number(256, false), reader.scalar(), reader.number(86400000, false))
     if reader.complete_error() != "": return Err(reader.reason)
