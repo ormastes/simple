@@ -1,17 +1,24 @@
 # The manager owns every canonical transition and published output. Worker
 # processes own isolated attempt directories and return encoded receipts.
 use app.io.args_ops.{get_args}
-use app.io.env_ops.{cwd}
-use app.io.file_ops.{file_exists, file_read, file_atomic_write, file_lock, file_unlock, file_copy, file_hash_sha256, file_is_regular_no_follow}
+use app.io.env_ops.{cwd, host_os}
+use app.io.file_ops.{file_exists, file_read, file_read_regular_no_follow_bounded,
+    file_atomic_write, file_lock, file_unlock, file_copy, file_hash_sha256,
+    file_is_regular_no_follow, path_absolute}
+use std.nogc_sync_mut.io_runtime.{dir_exists}
+use std.nogc_sync_mut.io.windows_process_owner.{windows_process_directory_no_follow_v1}
 use app.io.dir_ops.{dir_create_all}
 use app.io.time_ops.{sleep_ms}
 use app.bootstrap_builder.cli_args.{BuilderCliV1, builder_cli_parse_v1}
 use app.bootstrap_builder.process_port.{BuilderProcessPortV1, builder_process_portable_v1}
 use app.bootstrap_builder.contracts.{BuildInputV1, BuildTaskV1, BuildResultV1, BuildRunV1, builder_task_identity_v1, builder_validate_result_v1}
-use app.bootstrap_builder.codec.{builder_read_run_v1, builder_read_result_v1, builder_write_result_v1}
+use app.bootstrap_builder.codec.{builder_read_run_v1, builder_read_result_v1, builder_write_result_v1,
+    builder_encode_result_v1}
 use app.bootstrap_builder.manager.{BuilderManagerV1, builder_manager_start, builder_manager_ready, builder_manager_dependencies_ready, builder_manager_host_slots, builder_manager_dispatch, builder_manager_reap, builder_manager_unresolved, builder_manager_accept, builder_manager_resume, builder_manager_done, builder_manager_succeeded, builder_manager_output_error, builder_manager_encode_v1, builder_manager_decode_v1}
 use app.bootstrap_builder.worker.{builder_worker_execute_v1}
-use app.bootstrap_builder.transport.{BuilderAttemptV1, builder_transport_start_v1, builder_transport_recover_v1, builder_transport_poll_v1, builder_transport_cancel_v1, builder_transport_collect_v1}
+use app.bootstrap_builder.transport.{BuilderAttemptV1, builder_transport_start_v1,
+    builder_transport_recover_v1, builder_transport_poll_v1, builder_transport_cancel_v1,
+    builder_transport_collect_v1, builder_transport_reaped_v1}
 
 fn builder_cli_hash_outputs_v1(task: BuildTaskV1, root: text) -> [BuildInputV1]:
     var observed: [BuildInputV1] = []
@@ -41,20 +48,21 @@ fn builder_cli_parent_directory_v1(path: text) -> text:
         offset = offset - 1
     "."
 
-fn builder_cli_publish_v1(task: BuildTaskV1, receipt: BuildResultV1, attempt_root: text, source_root: text) -> bool:
+fn builder_cli_publish_v1(task: BuildTaskV1, receipt: BuildResultV1, attempt_root: text, output_root: text) -> bool:
     for path in task.outputs:
         val source = attempt_root + "/work/" + path
-        val destination = source_root + "/" + path
+        val destination = output_root + "/" + path
         if not dir_create_all(builder_cli_parent_directory_v1(destination)): return false
         if not file_copy(source, destination): return false
     # Rehash the destination too: a copy/write failure never produces a cache hit.
-    builder_manager_output_error(task, receipt, builder_cli_hash_outputs_v1(task, source_root)) == ""
+    builder_manager_output_error(task, receipt, builder_cli_hash_outputs_v1(task, output_root)) == ""
 
 fn builder_cli_persist_v1(state: BuilderManagerV1, directory: text) -> bool:
     val payload = builder_manager_encode_v1(state)
     payload != "" and file_atomic_write(directory + "/journal.sdn", payload)
 
-fn builder_cli_restore_v1(task: BuildTaskV1, cached: BuildResultV1, run: BuildRunV1, directory: text, source_root: text, process: BuilderProcessPortV1) -> bool:
+fn builder_cli_restore_v1(task: BuildTaskV1, cached: BuildResultV1, run: BuildRunV1,
+        directory: text, source_root: text, output_root: text, process: BuilderProcessPortV1) -> bool:
     # A damaged published copy need not discard a valid immutable attempt.
     # Recovery proves the old compiler tree was reaped before we collect files.
     for host in run.hosts:
@@ -70,7 +78,7 @@ fn builder_cli_restore_v1(task: BuildTaskV1, cached: BuildResultV1, run: BuildRu
                             val observed = builder_cli_hash_outputs_v1(task, attempt.local_root + "/work")
                             if builder_manager_output_error(task, cached, observed) != "": return false
                             if not builder_cli_inputs_match_v1(task, source_root): return false
-                            return builder_cli_publish_v1(task, cached, attempt.local_root, source_root)
+                            return builder_cli_publish_v1(task, cached, attempt.local_root, output_root)
     false
 
 fn builder_cli_cancel_v1(attempts: [BuilderAttemptV1]) -> bool:
@@ -89,6 +97,7 @@ fn builder_cli_run_locked_v1(run: BuildRunV1, config: BuilderCliV1, process: Bui
         return 2
     var source_root = config.source_root
     if source_root == "": source_root = cwd()
+    val output_root = if config.output_root == "": source_root else: config.output_root
     val journal = config.state + "/journal.sdn"
     if file_exists(journal):
         match builder_manager_decode_v1(run, file_read(journal)):
@@ -117,10 +126,11 @@ fn builder_cli_run_locked_v1(run: BuildRunV1, config: BuilderCliV1, process: Bui
                     match builder_read_result_v1(path):
                         case Ok(cached):
                             if cached.status == "OK" and builder_validate_result_v1(task, cached) == "":
-                                var observed = builder_cli_hash_outputs_v1(task, source_root)
+                                var observed = builder_cli_hash_outputs_v1(task, output_root)
                                 if builder_manager_output_error(task, cached, observed) != "":
-                                    if builder_cli_restore_v1(task, cached, run, config.state, source_root, process):
-                                        observed = builder_cli_hash_outputs_v1(task, source_root)
+                                    if builder_cli_restore_v1(task, cached, run, config.state,
+                                            source_root, output_root, process):
+                                        observed = builder_cli_hash_outputs_v1(task, output_root)
                                         print "builder: {task.id} restored=verified-artifact"
                                 if builder_manager_output_error(task, cached, observed) == "":
                                     state = builder_manager_resume(state, cached, observed)
@@ -190,7 +200,7 @@ fn builder_cli_run_locked_v1(run: BuildRunV1, config: BuilderCliV1, process: Bui
                         val observed = builder_cli_hash_outputs_v1(task, attempt.local_root + "/work")
                         state = builder_manager_accept(state, receipt, observed)
                         if state.error == "" and receipt.status == "OK":
-                            if not builder_cli_publish_v1(task, receipt, attempt.local_root, source_root):
+                            if not builder_cli_publish_v1(task, receipt, attempt.local_root, output_root):
                                 state.error = "cannot publish verified task output"
                         if state.error == "" and not builder_write_result_v1(config.state + "/receipts/" + task.id + ".sdn", receipt):
                             state.error = "cannot persist admitted result"
@@ -214,7 +224,7 @@ fn builder_cli_run_locked_v1(run: BuildRunV1, config: BuilderCliV1, process: Bui
             if file_exists(cached_path):
                 match builder_read_result_v1(cached_path):
                     case Ok(cached):
-                        val observed = builder_cli_hash_outputs_v1(task, source_root)
+                        val observed = builder_cli_hash_outputs_v1(task, output_root)
                         if cached.status == "OK" and builder_validate_result_v1(task, cached) == "" and builder_manager_output_error(task, cached, observed) == "":
                             state = builder_manager_resume(state, cached, observed)
                             cache_hit = true
@@ -272,13 +282,73 @@ fn builder_cli_run_locked_v1(run: BuildRunV1, config: BuilderCliV1, process: Bui
     if succeeded: return 0
     1
 
-fn builder_cli_run_v1(run: BuildRunV1, config: BuilderCliV1, process: BuilderProcessPortV1) -> i64:
+fn builder_cli_private_path_v1(path: text) -> bool:
+    if path == "" or path.contains("\\") or path.contains("\0") or
+            path.contains("\n") or path.contains("\r") or path.contains("//"):
+        return false
+    if not path.starts_with("/") and not (path.len() > 3 and path[1:3] == ":/"):
+        return false
+    for part in path.split("/"):
+        if part == "." or part == "..": return false
+    true
+
+fn builder_cli_no_reparse_directories_v1(path: text) -> bool:
+    if host_os() != "windows": return true
+    val parts = path.split("/")
+    if parts.len() < 2: return false
+    var prefix = parts[0] + "/"
+    if not windows_process_directory_no_follow_v1(prefix): return false
+    for index in 1..parts.len():
+        if parts[index] != "":
+            prefix = prefix + parts[index]
+            if not windows_process_directory_no_follow_v1(prefix): return false
+            prefix = prefix + "/"
+    true
+
+fn builder_cli_roots_overlap_v1(left: text, right: text) -> bool:
+    val left_prefix = if left.ends_with("/"): left else: left + "/"
+    val right_prefix = if right.ends_with("/"): right else: right + "/"
+    left == right or left.starts_with(right_prefix) or right.starts_with(left_prefix)
+
+fn builder_cli_resolve_roots_v1(config: BuilderCliV1) -> Result<BuilderCliV1, text>:
     var resolved = config
     if not resolved.state.starts_with("/") and not resolved.state.contains(":"):
         resolved.state = cwd() + "/" + resolved.state
     if resolved.source_root == "": resolved.source_root = cwd()
     elif not resolved.source_root.starts_with("/") and not resolved.source_root.contains(":"):
         resolved.source_root = cwd() + "/" + resolved.source_root
+    if not dir_exists(resolved.source_root): return Err("source root does not exist")
+    if resolved.output_root == "":
+        resolved.output_root = resolved.source_root
+    else:
+        # An explicit output owner is a separate existing tree. The manager
+        # never creates that root inside an immutable source snapshot.
+        if not builder_cli_private_path_v1(resolved.source_root) or
+                not builder_cli_private_path_v1(resolved.output_root) or
+                not builder_cli_private_path_v1(resolved.state):
+            return Err("explicit source, output, and state roots must be clean absolute paths")
+        if not dir_exists(resolved.output_root) or not dir_exists(resolved.state):
+            return Err("private output and state roots must already exist")
+        if not builder_cli_no_reparse_directories_v1(resolved.source_root) or
+                not builder_cli_no_reparse_directories_v1(resolved.output_root) or
+                not builder_cli_no_reparse_directories_v1(resolved.state):
+            return Err("source, output, or state root crosses a reparse directory")
+        val source = path_absolute(resolved.source_root).replace("\\", "/").lower()
+        val output = path_absolute(resolved.output_root).replace("\\", "/").lower()
+        val state = path_absolute(resolved.state).replace("\\", "/").lower()
+        if source == "" or output == "" or state == "" or
+                builder_cli_roots_overlap_v1(source, output):
+            return Err("explicit output root must be outside source root")
+        if builder_cli_roots_overlap_v1(source, state):
+            return Err("manager state must be outside source root")
+    Ok(resolved)
+
+fn builder_cli_run_v1(run: BuildRunV1, config: BuilderCliV1, process: BuilderProcessPortV1) -> i64:
+    val resolved = match builder_cli_resolve_roots_v1(config):
+        case Ok(value): value
+        case Err(message):
+            print "builder: {message}"
+            return 2
     if not dir_create_all(resolved.state):
         print "builder: cannot create state directory"
         return 2
@@ -290,6 +360,77 @@ fn builder_cli_run_v1(run: BuildRunV1, config: BuilderCliV1, process: BuilderPro
     val code = builder_cli_run_locked_v1(run, resolved, process)
     file_unlock(lock)
     code
+
+# Read-only post-run admission. A published file alone is insufficient: each
+# task must have a matching completed journal row, immutable result receipt,
+# exact tree-reap proof, and the same verified output inside the attempt.
+fn builder_cli_verify_v1(run: BuildRunV1, config: BuilderCliV1, process: BuilderProcessPortV1) -> i64:
+    val resolved = match builder_cli_resolve_roots_v1(config):
+        case Ok(value): value
+        case Err(message):
+            print "builder: {message}"
+            return 2
+    val journal = match file_read_regular_no_follow_bounded(resolved.state + "/journal.sdn", 16777216):
+        case Ok(value): value
+        case Err(message):
+            print "builder: journal unavailable: {message}"
+            return 2
+    val state = match builder_manager_decode_v1(run, journal):
+        case Ok(value): value
+        case Err(message):
+            print "builder: journal invalid: {message}"
+            return 2
+    val lines = journal.split("\n")
+    for index in 0..state.tasks.len():
+        val task = state.tasks[index]
+        val fields = lines[index + 1].split("\t")
+        if fields[2] != "SUCCEEDED":
+            print "builder: task is not completed: {task.id}"
+            return 1
+        if not builder_cli_inputs_match_v1(task, resolved.source_root):
+            print "builder: source input differs: {task.id}"
+            return 1
+        val cached = match builder_read_result_v1(resolved.state + "/receipts/" + task.id + ".sdn"):
+            case Ok(value): value
+            case Err(message):
+                print "builder: task receipt unavailable: {task.id}: {message}"
+                return 1
+        if cached.status != "OK" or cached.host_id != state.host_ids[index] or
+                builder_validate_result_v1(task, cached) != "":
+            print "builder: task receipt is not admitted: {task.id}"
+            return 1
+        var host_found = false
+        for host in run.hosts:
+            if host.id == cached.host_id:
+                host_found = true
+                if host.transport != "local":
+                    print "builder: verify requires a local retained attempt: {task.id}"
+                    return 2
+                val attempt_root = resolved.state + "/attempts/" + task.id + "/" +
+                    str(task.attempt) + "/" + host.id
+                val attempt = BuilderAttemptV1(task_id: task.id, attempt: task.attempt,
+                    host: host, pid: 0, local_root: attempt_root, remote_root: "", error: "",
+                    identity_digest: builder_task_identity_v1(task), process: process)
+                if not builder_transport_reaped_v1(attempt):
+                    print "builder: exact terminal proof unavailable: {task.id}"
+                    return 1
+                val collected = match builder_transport_collect_v1(attempt):
+                    case Ok(value): value
+                    case Err(message):
+                        print "builder: attempt result unavailable: {task.id}: {message}"
+                        return 1
+                if builder_encode_result_v1(collected) != builder_encode_result_v1(cached):
+                    print "builder: attempt and published result differ: {task.id}"
+                    return 1
+        if not host_found:
+            print "builder: task host is unknown: {task.id}"
+            return 1
+        val observed = builder_cli_hash_outputs_v1(task, resolved.output_root)
+        if builder_manager_output_error(task, cached, observed) != "":
+            print "builder: published output differs: {task.id}"
+            return 1
+    print "builder: verified tasks={state.tasks.len()}"
+    0
 
 fn builder_cli_main_v1(process: BuilderProcessPortV1) -> i64:
     # Compiled native application argv; avoid the general CLI command facade,
@@ -303,7 +444,8 @@ fn builder_cli_main_v1(process: BuilderProcessPortV1) -> i64:
         print "builder: {config.error}"
         return 2
     if config.command == "--help" or config.command == "-h":
-        print "bootstrap-builder run --manifest FILE --state DIR [--source-root DIR]"
+        print "bootstrap-builder run --manifest FILE --state DIR [--source-root DIR] [--output-root DIR]"
+        print "bootstrap-builder verify --manifest FILE --state DIR [--source-root DIR] [--output-root DIR]"
         print "bootstrap-builder check --manifest FILE"
         print "bootstrap-builder worker --request FILE --attempt-root DIR --host ID"
         return 0
@@ -317,6 +459,7 @@ fn builder_cli_main_v1(process: BuilderProcessPortV1) -> i64:
             if config.command == "check":
                 print "builder: manifest valid tasks={run.tasks.len()} hosts={run.hosts.len()}"
                 return 0
+            if config.command == "verify": return builder_cli_verify_v1(run, config, process)
             return builder_cli_run_v1(run, config, process)
 
 fn main() -> i64:

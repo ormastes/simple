@@ -90,7 +90,8 @@ fn bootstrap_manifest_job_v1(args: [text]) -> Result<text, text>:
         source_digest: source_sha, toolchain_digest: tools_sha, dependencies: [],
         program: args[2], args: command, inputs: inputs, outputs: [args[6]],
         cache_key: sha256_text(identity + source_sha + tools_sha), timeout_ms: 0)
-    val run = BuildRunV1(tasks: [task], hosts: template.hosts, keep_going: template.keep_going, max_attempts: 1)
+    val run = BuildRunV1(tasks: [task], hosts: template.hosts,
+        keep_going: template.keep_going, max_attempts: template.max_attempts)
     if not builder_write_run_v1(root + "/manifest.sdn", run): return Err("job manifest rejected or unwritable")
     Ok(root + "/manifest.sdn")
 
@@ -120,6 +121,41 @@ fn bootstrap_manifest_plain_path_v1(path: text) -> text:
     val normalized = path.replace("\\", "/")
     if normalized.starts_with("//?/"): normalized.substring(4) else: normalized
 
+fn bootstrap_manifest_parent_v1(path: text) -> text:
+    var offset = path.len() - 1
+    while offset >= 0:
+        if path[offset:offset + 1] == "/": return path[0:offset]
+        offset = offset - 1
+    ""
+
+fn bootstrap_manifest_private_target_v1(root: text, candidate: text) -> Result<text, text>:
+    if not bootstrap_manifest_absolute_v1(candidate) or candidate.len() > 4096 or
+            candidate.contains("\\") or candidate.contains("//"):
+        return Err("manifest destination must be a portable absolute path")
+    val manifest = bootstrap_manifest_plain_path_v1(candidate)
+    for part in manifest.split("/"):
+        if part == "." or part == "..": return Err("manifest destination contains traversal")
+    val parent = bootstrap_manifest_parent_v1(manifest)
+    if parent == "" or file_exists(manifest): return Err("manifest destination is unavailable or already exists")
+    val canonical_parent = bootstrap_manifest_plain_path_v1(path_absolute(parent))
+    if canonical_parent == "": return Err("manifest parent must already exist")
+    if host_os() == "windows":
+        val parts = parent.split("/")
+        var prefix = parts[0] + "/"
+        if not windows_process_directory_no_follow_v1(prefix):
+            return Err("manifest path crosses a reparse directory")
+        for index in 1..parts.len():
+            if parts[index] != "":
+                prefix = prefix + parts[index]
+                if not windows_process_directory_no_follow_v1(prefix):
+                    return Err("manifest path crosses a reparse directory")
+                prefix = prefix + "/"
+    val normalized_root = root.lower()
+    val normalized_parent = canonical_parent.lower()
+    if normalized_parent == normalized_root or normalized_parent.starts_with(normalized_root + "/"):
+        return Err("manifest destination must be outside source root")
+    Ok(manifest)
+
 # Every intermediate directory must remain a materialized directory. On
 # Windows the native handle probe rejects reparse points that path_absolute
 # cannot distinguish; elsewhere canonical resolution detects a link/escape.
@@ -142,11 +178,17 @@ fn bootstrap_manifest_regular_under_root_v1(root: text, relative: text) -> Resul
         return Err("input is a symlink or escapes root: " + relative)
     Ok(path)
 
-# --job-from-inventory TEMPLATE PROGRAM ROOT ID PHASE OUTPUT INVENTORY -- ARGS...
+# --job-from-inventory TEMPLATE PROGRAM ROOT ID PHASE OUTPUT INVENTORY
+#     [--manifest ABSOLUTE_PRIVATE_PATH] -- ARGS...
 # The inventory and its members are all declared, digest-pinned task inputs.
 fn bootstrap_manifest_job_from_inventory_v1(args: [text]) -> Result<text, text>:
-    if args.len() < 10 or args[8] != "--":
-        return Err("--job-from-inventory TEMPLATE PROGRAM ROOT ID PHASE OUTPUT INVENTORY -- ARGS...")
+    if args.len() < 10: return Err("incomplete --job-from-inventory invocation")
+    var first_argument: i64 = 9
+    if args[8] == "--manifest":
+        if args.len() < 12 or args[10] != "--": return Err("--manifest ABS must precede -- ARGS...")
+        first_argument = 11
+    elif args[8] != "--":
+        return Err("expected --manifest ABS or -- before job arguments")
     for index in 1..4:
         if not bootstrap_manifest_absolute_v1(args[index]): return Err("job paths must be absolute")
     if not builder_identifier_valid_v1(args[4]) or not builder_identifier_valid_v1(args[5]):
@@ -163,7 +205,11 @@ fn bootstrap_manifest_job_from_inventory_v1(args: [text]) -> Result<text, text>:
     val template_sha = bootstrap_manifest_hash_v1(args[1])?
     val root = bootstrap_manifest_plain_path_v1(path_absolute(args[3]))
     if root == "" or not bootstrap_manifest_absolute_v1(root): return Err("job root cannot be canonicalized")
-    if file_exists(root + "/manifest.sdn"): return Err("job manifest already exists")
+    val manifest_path = if args[8] == "--manifest":
+        bootstrap_manifest_private_target_v1(root, args[9])?
+    else:
+        root + "/manifest.sdn"
+    if file_exists(manifest_path): return Err("job manifest already exists")
     val inventory_path = bootstrap_manifest_regular_under_root_v1(root, args[7])?
     val inventory_sha = bootstrap_manifest_hash_v1(inventory_path)?
     val payload = file_read_regular_no_follow_bounded(inventory_path, 8388608)?
@@ -184,7 +230,7 @@ fn bootstrap_manifest_job_from_inventory_v1(args: [text]) -> Result<text, text>:
         source_pieces.push(digest)
     var command: [text] = []
     var identity = "bootstrap-canonical-job-v1|" + root + "|" + args[4]
-    for index in 9..args.len():
+    for index in first_argument..args.len():
         val argument = args[index]
         command = command.push(argument)
         identity = identity + "{argument.len()}:" + argument
@@ -195,16 +241,16 @@ fn bootstrap_manifest_job_from_inventory_v1(args: [text]) -> Result<text, text>:
         program: args[2], args: command, inputs: inputs, outputs: [args[6]],
         cache_key: sha256_text(identity + source_sha + tools_sha), timeout_ms: 0)
     val run = BuildRunV1(tasks: [task], hosts: template.hosts,
-        keep_going: template.keep_going, max_attempts: 1)
+        keep_going: template.keep_going, max_attempts: template.max_attempts)
     # Recheck every file after constructing the record. The worker repeats
     # these digest checks after transport and before starting the producer.
     for item in inputs:
         val absolute = bootstrap_manifest_regular_under_root_v1(root, item.path)?
         if bootstrap_manifest_hash_v1(absolute)? != item.digest:
             return Err("declared input changed: " + item.path)
-    if not builder_write_run_v1(root + "/manifest.sdn", run):
+    if not builder_write_run_v1(manifest_path, run):
         return Err("job manifest rejected or unwritable")
-    Ok(root + "/manifest.sdn")
+    Ok(manifest_path)
 
 # Arguments: TEMPLATE SHELL ROOT OUTPUT SOURCE_SNAPSHOT TOOL_SNAPSHOT MANAGER
 # WORKER JOB_ROOT INVOCATION_ID -- <original canonical bootstrap arguments>.

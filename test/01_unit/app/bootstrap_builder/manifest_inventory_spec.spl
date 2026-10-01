@@ -1,8 +1,9 @@
 use std.spec.{describe, it, expect}
 use app.bootstrap_builder.manifest_main.{bootstrap_manifest_inventory_paths_v1,
-    bootstrap_manifest_job_from_inventory_v1, bootstrap_manifest_plain_path_v1}
+    bootstrap_manifest_job_from_inventory_v1, bootstrap_manifest_plain_path_v1,
+    bootstrap_manifest_private_target_v1}
 use app.bootstrap_builder.codec.{builder_read_run_v1, builder_write_run_v1}
-use app.io.file_ops.{file_atomic_write, file_hash_sha256, path_absolute}
+use app.io.file_ops.{file_atomic_write, file_hash_sha256, file_exists, path_absolute}
 use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
 use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
 use std.nogc_sync_mut.io_runtime.{time_now_unix_micros}
@@ -29,7 +30,12 @@ describe "bootstrap inventory backed job manifest":
     it "writes one manager task with the inventory and every input digest pinned":
         val root = bootstrap_manifest_plain_path_v1(path_absolute(".")) +
             "/build/manifest-inventory-spec-" + str(getpid()) + "-" + str(time_now_unix_micros())
+        val private_root = root + "-private"
         expect(dir_create_all(root + "/nested")).to_equal(true)
+        expect(dir_create_all(private_root)).to_equal(true)
+        match bootstrap_manifest_private_target_v1(root, root + "/manifest.sdn"):
+            case Ok(_path): fail("source-owned manifest accepted")
+            case Err(reason): expect(reason).to_contain("outside source root")
         expect(file_atomic_write(root + "/producer.exe", "fixture producer\n")).to_equal(true)
         expect(file_atomic_write(root + "/a.txt", "alpha\n")).to_equal(true)
         expect(file_atomic_write(root + "/nested/b.txt", "beta\n")).to_equal(true)
@@ -46,8 +52,14 @@ describe "bootstrap inventory backed job manifest":
             BuildRunV1(tasks: [placeholder], hosts: [host], keep_going: true, max_attempts: 2))).to_equal(true)
         match bootstrap_manifest_job_from_inventory_v1(["--job-from-inventory",
                 root + "/template.sdn", producer, root, "group_1", "native", "result.sdn",
-                "inventory.txt", "--", "--group", "one"]):
+                "inventory.txt", "--manifest", private_root + "/manifest.sdn",
+                "--", "--group", "one"]):
             case Ok(manifest):
+                expect(manifest).to_equal(private_root + "/manifest.sdn")
+                expect(file_exists(root + "/manifest.sdn")).to_equal(false)
+                match bootstrap_manifest_private_target_v1(root, manifest):
+                    case Ok(_path): fail("existing manifest destination accepted")
+                    case Err(reason): expect(reason).to_contain("already exists")
                 match builder_read_run_v1(manifest):
                     case Ok(run):
                         expect(run.tasks.len()).to_equal(1)
@@ -57,6 +69,6 @@ describe "bootstrap inventory backed job manifest":
                         expect(run.tasks[0].inputs[0].digest).to_equal(file_hash_sha256(root + "/inventory.txt"))
                         expect(run.tasks[0].inputs[1].digest).to_equal(file_hash_sha256(root + "/a.txt"))
                         expect(run.tasks[0].inputs[2].digest).to_equal(file_hash_sha256(root + "/nested/b.txt"))
-                        expect(run.max_attempts).to_equal(1)
+                        expect(run.max_attempts).to_equal(2)
                     case Err(reason): fail(reason)
             case Err(reason): fail(reason)
