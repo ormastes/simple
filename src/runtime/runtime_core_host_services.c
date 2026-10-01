@@ -33,6 +33,11 @@
 #include <winioctl.h>
 #include "platform/runtime_win_long_path.h"
 #include <sys/stat.h>
+#ifndef SYMLINK_FLAG_RELATIVE
+/* SymbolicLinkReparseBuffer.Flags bit 0 is the relative-target marker.
+ * Some clang-cl Windows SDK views omit the symbolic name. */
+#define SYMLINK_FLAG_RELATIVE 1u
+#endif
 #undef max
 #else
 #include <fcntl.h>
