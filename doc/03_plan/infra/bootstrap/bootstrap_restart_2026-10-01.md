@@ -47,6 +47,31 @@ Recovered Item5 metadata tests are in draft PR #2157, head
 `15a0d9c0fbfd651f7d8e64a75047e3f5478d4e17`. Its 17 scenarios require POSIX;
 native SSpec and doc generation remain UNRUN. This is not a landed item.
 
+The bounded item recovery handoff now has four separate drafts against
+release `ea15d708abe`, with no additional merge:
+
+| Item | Draft PR | Recovered head | Scope |
+| --- | --- | --- | --- |
+| 1 | #2160 | `c06a99ab8c` | 28 owned SimpleOS source/spec/doc paths |
+| 2 | #2158 | `c1c37cef2e` | 3 read-only transport/spec/manual paths |
+| 5 | #2157 | `15a0d9c0fb` | 2 metadata spec/manual paths |
+| 6 | #2159 | `e05027aff7` | 3 warm-index binding/spec/ledger paths |
+
+Structural CI passed for #2157-2159 at handoff; this does not replace native
+Simple tests, doc generation, Item1 live CLI/guest checks or Item6 performance
+evidence. No qualified existing Linux test runner was found in the bounded
+runtime audit. The `3eae...` rejected candidate has no passing hello receipt;
+the `a6c7...` and `b6c8...` producer binaries cannot substitute as test runners.
+
+Remaining recovery gaps are implementation prerequisites, not verification
+alone. Item3's eight-path slice imports absent `collection_site_profile.spl`
+and earlier MIR/profile methods. Item7's three-path follow-up depends on the
+earlier acc983 HIR/profile implementation; `collection_feedback` does exist
+under `10.frontend` and must not be reported absent from a wrong path lookup.
+Item4's eleven-path patch cannot apply because release lacks the parent
+`macho/macho_link.spl` implementation. Preserve the surviving source snapshots
+and exact patch; do not copy unrelated stale compiler files to close these gaps.
+
 ### Earlier observations, superseded by the recovery above where applicable
 
 This section supersedes earlier process states. Neither corrected Phase2
