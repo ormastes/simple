@@ -1,0 +1,228 @@
+#!/bin/sh
+# Phase 4 uses the admitted Phase 2 compiler for every build. All compilation
+# happens inside a compiled manager; this script only prepares and verifies it.
+set -eu
+die() { echo "phase4-grouped: $*" >&2; exit 1; }
+regular() { [ -f "$1" ] && [ ! -L "$1" ]; }
+absolute() { case "$1" in /*|[A-Za-z]:/*) return 0 ;; *) return 1 ;; esac; }
+positive() { case "$1" in ''|*[!0-9]*|0) return 1 ;; *) [ "$1" -gt 0 ] 2>/dev/null ;; esac; }
+hash_file() { sha256sum "$1" | cut -d ' ' -f 1; }
+
+producer_receipt= scv_receipt= llvm_variant_receipt= cranelift_variant_receipt= index_read_root= source_root= source_inventory= module_inventory=
+root= template= manifest_program= builder_program= group_program= group_worker= group_broker=
+threads= memory_bytes= reserve_bytes= target= group_size= max_attempts= poll_ms= lifetime_ms=
+estimated_group_disk_bytes= minimum_free_disk_bytes=
+for arg in "$@"; do
+  case "$arg" in
+    --producer-receipt=*) producer_receipt=${arg#*=} ;;
+    --scv-receipt=*) scv_receipt=${arg#*=} ;;
+    --llvm-variant-receipt=*) llvm_variant_receipt=${arg#*=} ;;
+    --cranelift-variant-receipt=*) cranelift_variant_receipt=${arg#*=} ;;
+    --index-read-root=*) index_read_root=${arg#*=} ;;
+    --source-root=*) source_root=${arg#*=} ;;
+    --source-inventory=*) source_inventory=${arg#*=} ;;
+    --module-inventory=*) module_inventory=${arg#*=} ;;
+    --root=*) root=${arg#*=} ;;
+    --template=*) template=${arg#*=} ;;
+    --manifest-program=*) manifest_program=${arg#*=} ;;
+    --builder-program=*) builder_program=${arg#*=} ;;
+    --group-program=*) group_program=${arg#*=} ;;
+    --group-worker=*) group_worker=${arg#*=} ;;
+    --group-broker=*) group_broker=${arg#*=} ;;
+    --threads=*) threads=${arg#*=} ;;
+    --memory-bytes=*) memory_bytes=${arg#*=} ;;
+    --reserve-bytes=*) reserve_bytes=${arg#*=} ;;
+    --target=*) target=${arg#*=} ;;
+    --group-size=*) group_size=${arg#*=} ;;
+    --max-attempts=*) max_attempts=${arg#*=} ;;
+    --poll-ms=*) poll_ms=${arg#*=} ;;
+    --lifetime-ms=*) lifetime_ms=${arg#*=} ;;
+    --estimated-group-disk-bytes=*) estimated_group_disk_bytes=${arg#*=} ;;
+    --minimum-free-disk-bytes=*) minimum_free_disk_bytes=${arg#*=} ;;
+    *) die "unknown option: $arg" ;;
+  esac
+done
+for path in "$producer_receipt" "$scv_receipt" "$llvm_variant_receipt" "$cranelift_variant_receipt" "$index_read_root" "$source_root" "$source_inventory" \
+    "$module_inventory" "$root" "$template" "$manifest_program" "$builder_program" \
+    "$group_program" "$group_worker" "$group_broker"; do
+  [ -n "$path" ] && absolute "$path" || die "absolute path required: $path"
+done
+for path in "$producer_receipt" "$scv_receipt" "$llvm_variant_receipt" "$cranelift_variant_receipt" "$source_inventory" "$module_inventory" \
+    "$template" "$manifest_program" "$builder_program" "$group_program" \
+    "$group_worker" "$group_broker"; do regular "$path" || die "missing pinned input: $path"; done
+[ -d "$source_root" ] && [ ! -L "$source_root" ] || die "source root unavailable"
+for n in "$threads" "$memory_bytes" "$reserve_bytes" "$group_size" "$max_attempts" \
+    "$poll_ms" "$lifetime_ms" "$estimated_group_disk_bytes" "$minimum_free_disk_bytes"; do
+  positive "$n" || die "positive resource policy required"
+done
+[ -n "$target" ] || die "target required"
+case "$(uname -s 2>/dev/null)" in MINGW*|MSYS*|CYGWIN*) exe_suffix=.exe ;; *) exe_suffix= ;; esac
+for inventory in "$source_inventory" "$module_inventory"; do
+  [ -s "$inventory" ] || die "empty inventory: $inventory"
+  [ "$(LC_ALL=C sort -u "$inventory" | wc -l | tr -d ' ')" = "$(wc -l <"$inventory" | tr -d ' ')" ] || die "duplicate inventory row"
+  LC_ALL=C sort "$inventory" | cmp -s - "$inventory" || die "unsorted inventory: $inventory"
+done
+awk 'length($0)==0 || index($0,"\r") || $0 !~ /^src\// || $0 ~ /(^|\/)\.\.?($|\/)/ { bad=1 } END { exit bad }' "$source_inventory" || die "invalid source inventory"
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P) || die "repository root unavailable"
+prepare="$repo_root/scripts/bootstrap/prepare-phase4-native-groups.shs"
+regular "$prepare" || die "tracked grouped preparer unavailable"
+mkdir -p "$root" || die "Phase 4 root unavailable"
+receipt="$root/completion.env"
+
+# Preparation replays the canonical Stage 2 admission before any manager task
+# can start. Its SCV check is compiled and refuses absent warm source metadata.
+prepare_backend() {
+  backend=$1
+  case "$backend" in
+    llvm) variant_receipt=$llvm_variant_receipt ;;
+    cranelift) variant_receipt=$cranelift_variant_receipt ;;
+    *) die "unsupported backend" ;;
+  esac
+  backend_root="$root/modules/$backend"
+  sh "$prepare" --phase=phase4 --producer-receipt="$producer_receipt" \
+    --scv-receipt="$scv_receipt" --variant-receipt="$variant_receipt" --source-root="$source_root" \
+    --index-read-root="$index_read_root" \
+    --inventory="$module_inventory" --backend="$backend" \
+    --output-root="$backend_root" --manager-program="$group_program" \
+    --worker-program="$group_worker" --broker-program="$group_broker" \
+    --threads="$threads" --memory-bytes="$memory_bytes" \
+    --manifest="$backend_root/state/manifest.sdn" --target="$target" \
+    --reserve-bytes="$reserve_bytes" --group-size="$group_size" \
+    --max-attempts="$max_attempts" --poll-ms="$poll_ms" \
+    --lifetime-ms="$lifetime_ms" \
+    --estimated-group-disk-bytes="$estimated_group_disk_bytes" \
+    --minimum-free-disk-bytes="$minimum_free_disk_bytes" >/dev/null \
+    || die "$backend preparation blocked"
+}
+# One immutable source inventory is copied for each manager job. A completed
+# job retains its staged inputs and receipt for exact resume verification.
+stage_job() {
+  job_root=$1
+  if [ -f "$job_root/source.inventory" ]; then
+    cmp -s "$source_inventory" "$job_root/source.inventory" || die "staged source inventory changed"
+    return
+  fi
+  [ ! -e "$job_root/manifest.sdn" ] || die "job manifest exists without staged inventory"
+  mkdir -p "$job_root" || die "cannot create job root"
+  archive="$job_root/source.tar.tmp.$$"
+  trap 'rm -f "$archive"' EXIT HUP INT TERM
+  tar -C "$source_root" -cf "$archive" -T "$source_inventory" || die "source staging archive failed"
+  tar -C "$job_root" -xf "$archive" || die "source staging extraction failed"
+  rm -f "$archive"
+  cp "$source_inventory" "$job_root/source.inventory" || die "source inventory staging failed"
+  trap - EXIT HUP INT TERM
+}
+
+# The manager's worker runs in its own work root, so output and cache paths in
+# the compiler argv are relative. Output publication is hash checked by run.
+build_binary() {
+  id=$1 entry=$2 output=$3 task_phase=$4
+  job_root="$root/$task_phase/binaries/$id"
+  stage_job "$job_root"
+  mkdir -p "$job_root/bin" "$job_root/cache" "$job_root/state" || die "job directories unavailable"
+  if [ ! -f "$job_root/manifest.sdn" ]; then
+    "$manifest_program" --job-from-inventory "$template" "$producer" "$job_root" \
+      "$id" "$task_phase" "$output" source.inventory -- \
+      native-build --target "$target" --backend llvm \
+      --source src/compiler --source src/app --source src/lib \
+      --entry-closure --entry "$entry" --threads "$threads" \
+      --cache-dir "cache/$id" --output "$output" \
+      || die "$id manifest blocked"
+  fi
+  SIMPLE_BUILD_PRESPAWN_REQUIRED_MEMORY_BYTES="$((memory_bytes + reserve_bytes))" \
+  "$builder_program" run --manifest "$job_root/manifest.sdn" \
+    --state "$job_root/state" --source-root "$job_root" || die "$id manager task failed"
+  regular "$job_root/$output" && regular "$job_root/state/receipts/$id.sdn" \
+    || die "$id has no published output and terminal receipt"
+  printf '%s=%s\n' "$id" "$(hash_file "$job_root/$output")" >>"$root/binary-hashes.tmp.$$"
+}
+
+# Read the exact producer from the verified admission receipt; never use the
+# Stage 3 output or ambient `bin/simple` as a Phase 4 producer.
+. "$repo_root/scripts/check/lib/bootstrap-stage3-provenance.shs"
+producer=$(bootstrap_stage3_manifest_value candidate_path "$producer_receipt") || die "Stage 2 producer absent"
+regular "$producer" || die "Stage 2 producer missing"
+producer_sha=$(bootstrap_stage3_manifest_value candidate_sha256 "$producer_receipt") || die "Stage 2 producer hash absent"
+[ "$(hash_file "$producer")" = "$producer_sha" ] || die "Stage 2 producer changed"
+source_authority=$(bootstrap_stage3_manifest_value source_snapshot_path "$producer_receipt") || die "Stage 2 source authority absent"
+regular "$source_authority" || die "Stage 2 source authority missing"
+runtime_snapshot=$(bootstrap_stage3_manifest_value runtime_snapshot_path "$producer_receipt") || die "runtime authority absent"
+runtime_authority=$(bootstrap_stage3_manifest_value runtime_authority_path "$producer_receipt") || die "runtime root absent"
+tool_authority=$(bootstrap_stage3_manifest_value tool_authority_path "$producer_receipt") || die "tool authority absent"
+args_digest=$(bootstrap_stage3_manifest_value build_args_sha256 "$producer_receipt") || die "build args absent"
+sanity=$(bootstrap_stage3_manifest_value sanity_evidence_path "$producer_receipt") || die "sanity receipt absent"
+receiver=$(bootstrap_stage3_manifest_value receiver_evidence_path "$producer_receipt") || die "receiver receipt absent"
+receiver_log=$(bootstrap_stage3_manifest_value receiver_log_path "$producer_receipt") || die "receiver log absent"
+bootstrap_stage3_verify_stage2_admission_receipt \
+  "$producer_receipt" "$producer_receipt" "$producer" "$producer" \
+  "$source_authority" "$source_authority" "$runtime_snapshot" "$runtime_snapshot" \
+  "$runtime_authority" "$runtime_authority" "$tool_authority" "$tool_authority" \
+  "$args_digest" "$sanity" "$sanity" "$(dirname -- "$sanity")" \
+  "$receiver" "$receiver" "$receiver_log" "$receiver_log" "$repo_root" \
+  || die "Stage 2 admission replay failed"
+expected_inventory="$root/source-authority-inventory.tmp.$$"
+hashes=
+trap 'rm -f "$expected_inventory" "$hashes"' EXIT HUP INT TERM
+perl -e '
+  use strict; use warnings;
+  my $path = shift @ARGV;
+  open my $input, "<:raw", $path or die "source authority open failed\n";
+  while (my $line = <$input>) {
+    $line =~ s/\n\z//;
+    $line =~ /^file-hex:([0-9a-f]+):[01]:[0-9a-f]{64}$/
+      or die "source authority has unknown row\n";
+    my $relative = pack("H*", $1);
+    $relative !~ /[\r\n\\]/ or die "source authority path unsafe\n";
+    print "$relative\n" if $relative =~ m{^src/};
+  }
+' "$source_authority" | LC_ALL=C sort >"$expected_inventory" \
+  || die "Stage 2 source inventory decode failed"
+cmp -s "$expected_inventory" "$source_inventory" \
+  || die "binary source inventory differs from complete admitted Stage 2 source paths"
+rm -f "$expected_inventory"
+
+hashes="$root/binary-hashes.tmp.$$"
+trap 'rm -f "$hashes"' EXIT HUP INT TERM
+: >"$hashes"
+build_binary bootstrap src/app/cli/bootstrap_main.spl "bin/simple_bootstrap$exe_suffix" phase4
+build_binary full-cli src/app/cli/_CliMain/main_and_help.spl "bin/simple$exe_suffix" phase4
+build_binary mcp src/app/mcp/main.spl "bin/simple_mcp_server$exe_suffix" phase4
+build_binary lsp src/app/simple_lsp_mcp/main.spl "bin/simple_lsp_mcp_server$exe_suffix" phase4
+build_binary test-runner src/app/test_runner_new/main.spl "bin/simple_test_runner$exe_suffix" phase4
+
+prepare_backend llvm
+for backend in llvm cranelift; do
+  [ "$backend" = llvm ] || prepare_backend cranelift
+  manifest="$root/modules/$backend/state/manifest.sdn"
+  "$group_program" native-groups-run --manifest "$manifest" \
+    || die "$backend module run failed or produced only diagnostic objects"
+  "$group_program" native-groups-verify --manifest "$manifest" \
+    --state "$root/modules/$backend/state" \
+    || die "$backend ledger is incomplete or lacks qualified SMF outputs"
+done
+
+# Phase 3 is another child of the same admitted Phase 2 producer. It gets its
+# own manifest, cache, state, and output; Phase 4 has already reached its own
+# completion gates before this task starts, so there is no Phase 3 edge in the
+# Phase 4 dependency graph.
+build_binary phase3-bootstrap src/app/cli/bootstrap_main.spl "bin/simple$exe_suffix" phase3
+
+tmp="$receipt.tmp.$$"
+{
+  printf '%s\n' 'format=SIMPLE-PHASE4-MANAGED-COMPLETION-1' 'status=PASS' \
+    "producer_sha256=$producer_sha" "module_inventory_sha256=$(hash_file "$module_inventory")" \
+    "module_inventory_count=$(wc -l <"$module_inventory" | tr -d ' ')"
+  cat "$hashes"
+  printf '%s\n' "llvm_manifest_sha256=$(hash_file "$root/modules/llvm/state/manifest.sdn")" \
+    "cranelift_manifest_sha256=$(hash_file "$root/modules/cranelift/state/manifest.sdn")"
+} >"$tmp" || die "completion receipt write failed"
+if [ -e "$receipt" ]; then
+  regular "$receipt" && cmp -s "$tmp" "$receipt" || die "existing completion receipt differs from replay"
+  rm -f "$tmp"
+else
+  mv "$tmp" "$receipt" || die "completion receipt publish failed"
+fi
+rm -f "$hashes"
+trap - EXIT HUP INT TERM
+printf '%s\n' "$receipt"

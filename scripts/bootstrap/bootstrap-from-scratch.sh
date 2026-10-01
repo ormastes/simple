@@ -3129,24 +3129,13 @@ else
 fi
 
 if [ -n "${resume_stage4_output}" ]; then
-  echo "  mode:     admitted Stage 3 → Stage 4 continuation"
-  stage3_provenance_dir="${output_dir}/stage3/${PLATFORM}"
-  stage3_provenance_manifest="${stage3_provenance_dir}/provenance.env"
-  resume_stage4_prepare "${output_dir}" "${repo_root}" "${PLATFORM}" \
-    "${bootstrap_receipt_path}" || exit 1
-  stage2="${output_dir}/stage2/${PLATFORM}/simple${exe_suffix}"
-  stage3="${output_dir}/stage3/${PLATFORM}/simple${exe_suffix}"
-  stage3_ok=1
-elif [ "${can_full_bootstrap}" -eq 1 ]; then
-  # Full CLI available — use high-level staged bootstrap
-  echo "  mode:     full CLI (build bootstrap)"
-  RUST_LOG="${RUST_LOG:-error}" \
-    SIMPLE_RUNTIME_PATH="${bootstrap_runtime_authority_path}" \
-    SIMPLE_BUILD_PROGRESS_EVENTS="${build_progress_events}" \
-    "${seed_bin}" run src/app/cli/main.spl build bootstrap "--backend=${backend}" "--output=${output_dir}"
-else
-  # Bootstrap-only or missing — manual staged bootstrap via seed
-  echo "  mode:     manual (seed → bootstrap_main → bootstrap_main)"
+  echo "error: direct Stage 4 resume bypasses the admitted Phase 2 build manager" >&2
+  exit 1
+fi
+# The manual Phase 2 path exposes its exact admission receipt before any
+# successor starts. The high-level seed bootstrap had hidden direct Stage 3/4
+# compilation, so every full run now takes this manager handoff path.
+echo "  mode:     admitted Phase 2 → managed Phase 3 and Phase 4"
   if [ ! -x "${seed_bin}" ]; then
     echo "error: Rust seed required for manual bootstrap (${seed_bin})" >&2
     echo "Run: scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap" >&2
@@ -4587,6 +4576,54 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     exit 0
   fi
 
+  # Once Stage 2 is admitted, all remaining compilation is manager-owned.
+  # Phase 3 and Phase 4 are independent children of this exact producer. The
+  # grouped runner publishes completion only after five binary receipts and
+  # both backend module ledgers pass their compiled admission gates.
+  managed_phase_root="$(absolute_path "${output_dir}/managed/${PLATFORM}")"
+  managed_runner="${repo_root}/scripts/bootstrap/bootstrap-phase4-grouped.shs"
+  if [ ! -f "${managed_runner}" ]; then
+    echo "error: tracked post-Stage-2 manager handoff is unavailable" >&2
+    exit 1
+  fi
+  managed_required_environment='SIMPLE_BOOTSTRAP_MANAGED_SCV_RECEIPT SIMPLE_BOOTSTRAP_MANAGED_LLVM_VARIANT_RECEIPT SIMPLE_BOOTSTRAP_MANAGED_CRANELIFT_VARIANT_RECEIPT SIMPLE_BOOTSTRAP_MANAGED_INDEX_READ_ROOT SIMPLE_BOOTSTRAP_MANAGED_SOURCE_ROOT SIMPLE_BOOTSTRAP_MANAGED_SOURCE_INVENTORY SIMPLE_BOOTSTRAP_MANAGED_MODULE_INVENTORY SIMPLE_BOOTSTRAP_MANAGED_TEMPLATE SIMPLE_BOOTSTRAP_MANAGED_MANIFEST_PROGRAM SIMPLE_BOOTSTRAP_MANAGED_BUILDER_PROGRAM SIMPLE_BOOTSTRAP_MANAGED_GROUP_PROGRAM SIMPLE_BOOTSTRAP_MANAGED_GROUP_WORKER SIMPLE_BOOTSTRAP_MANAGED_GROUP_BROKER SIMPLE_BOOTSTRAP_MANAGED_MEMORY_BYTES SIMPLE_BOOTSTRAP_MANAGED_RESERVE_BYTES SIMPLE_BOOTSTRAP_MANAGED_GROUP_SIZE SIMPLE_BOOTSTRAP_MANAGED_MAX_ATTEMPTS SIMPLE_BOOTSTRAP_MANAGED_POLL_MS SIMPLE_BOOTSTRAP_MANAGED_LIFETIME_MS SIMPLE_BOOTSTRAP_MANAGED_ESTIMATED_GROUP_DISK_BYTES SIMPLE_BOOTSTRAP_MANAGED_MINIMUM_FREE_DISK_BYTES'
+  for managed_name in ${managed_required_environment}; do
+    eval "managed_value=\${${managed_name}:-}"
+    if [ -z "${managed_value}" ]; then
+      echo "error: post-Stage-2 manager handoff blocked: ${managed_name} is missing" >&2
+      exit 1
+    fi
+  done
+  sh "${managed_runner}" \
+    "--producer-receipt=${stage2_admission_receipt_absolute}" \
+    "--scv-receipt=${SIMPLE_BOOTSTRAP_MANAGED_SCV_RECEIPT}" \
+    "--llvm-variant-receipt=${SIMPLE_BOOTSTRAP_MANAGED_LLVM_VARIANT_RECEIPT}" \
+    "--cranelift-variant-receipt=${SIMPLE_BOOTSTRAP_MANAGED_CRANELIFT_VARIANT_RECEIPT}" \
+    "--index-read-root=${SIMPLE_BOOTSTRAP_MANAGED_INDEX_READ_ROOT}" \
+    "--source-root=${SIMPLE_BOOTSTRAP_MANAGED_SOURCE_ROOT}" \
+    "--source-inventory=${SIMPLE_BOOTSTRAP_MANAGED_SOURCE_INVENTORY}" \
+    "--module-inventory=${SIMPLE_BOOTSTRAP_MANAGED_MODULE_INVENTORY}" \
+    "--root=${managed_phase_root}" \
+    "--template=${SIMPLE_BOOTSTRAP_MANAGED_TEMPLATE}" \
+    "--manifest-program=${SIMPLE_BOOTSTRAP_MANAGED_MANIFEST_PROGRAM}" \
+    "--builder-program=${SIMPLE_BOOTSTRAP_MANAGED_BUILDER_PROGRAM}" \
+    "--group-program=${SIMPLE_BOOTSTRAP_MANAGED_GROUP_PROGRAM}" \
+    "--group-worker=${SIMPLE_BOOTSTRAP_MANAGED_GROUP_WORKER}" \
+    "--group-broker=${SIMPLE_BOOTSTRAP_MANAGED_GROUP_BROKER}" \
+    "--threads=${build_threads}" \
+    "--memory-bytes=${SIMPLE_BOOTSTRAP_MANAGED_MEMORY_BYTES}" \
+    "--reserve-bytes=${SIMPLE_BOOTSTRAP_MANAGED_RESERVE_BYTES}" \
+    "--target=${PLATFORM}" \
+    "--group-size=${SIMPLE_BOOTSTRAP_MANAGED_GROUP_SIZE}" \
+    "--max-attempts=${SIMPLE_BOOTSTRAP_MANAGED_MAX_ATTEMPTS}" \
+    "--poll-ms=${SIMPLE_BOOTSTRAP_MANAGED_POLL_MS}" \
+    "--lifetime-ms=${SIMPLE_BOOTSTRAP_MANAGED_LIFETIME_MS}" \
+    "--estimated-group-disk-bytes=${SIMPLE_BOOTSTRAP_MANAGED_ESTIMATED_GROUP_DISK_BYTES}" \
+    "--minimum-free-disk-bytes=${SIMPLE_BOOTSTRAP_MANAGED_MINIMUM_FREE_DISK_BYTES}" \
+    || { echo "error: managed Phase 3/4 handoff failed; receipts retained" >&2; exit 1; }
+  bootstrap_verdict "ADMITTED: stage=phase4 exit=0 signal=none reason=managed-phase2-producer-completion"
+  exit 0
+
   # Stage 3: stage2 recompiles bootstrap_main.spl (self-host verification)
   # Note: Stage3 is optional — the stage2 binary may lack features needed for
   # pure in-process self-hosting. When Stage 3 fails, the wrapper stops before
@@ -5029,8 +5066,6 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     echo "  warning: Stage 2 native-build capability failed; using seed for stage 4" >&2
     echo "  warning: see ${log_dir}/stage2-capability.log" >&2
   fi
-fi
-
 # Locate stage outputs — check new layout first, fall back to flat
 if [ -x "${output_dir}/stage2/${PLATFORM}/simple${exe_suffix}" ]; then
   stage2="${output_dir}/stage2/${PLATFORM}/simple${exe_suffix}"
