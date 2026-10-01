@@ -1,0 +1,94 @@
+use std.spec.{describe, it, expect, step}
+use app.io.mod (cwd, dir_create, file_write, process_run)
+use std.nogc_sync_mut.io.crypto_sffi.{random_hex}
+use app.scv.db.git_settlement_transport.{db_git_settlement_ref_head, db_git_settlement_reconcile}
+
+fn settlement_git(args: [text]) -> text:
+    val (out, _err, code) = process_run("git", args)
+    expect(code).to_equal(0)
+    out.trim()
+
+fn settlement_paths() -> (text, text, text):
+    val nonce = random_hex(8) ?? ""
+    expect(nonce.len()).to_equal(16)
+    val root = "{cwd()}/build/test-artifacts/item2-readback-{nonce}"
+    val source = "{root}/source"
+    val remote = "{root}/remote.git"
+    expect(dir_create(root, true)).to_be(true)
+    settlement_git(["init", "-q", source])
+    settlement_git(["init", "--bare", "-q", remote])
+    settlement_git(["-C", source, "config", "user.name", "Settlement read-back fixture"])
+    settlement_git(["-C", source, "config", "user.email", "fixture@example.invalid"])
+    expect(file_write("{source}/state.txt", "genesis\n")).to_be(true)
+    settlement_git(["-C", source, "add", "state.txt"])
+    settlement_git(["-C", source, "commit", "-q", "-m", "genesis"])
+    val genesis = settlement_git(["-C", source, "rev-parse", "HEAD"])
+    settlement_git(["-C", source, "push", "-q", remote, "HEAD:refs/heads/settled"])
+    (source, remote, genesis)
+
+fn settlement_candidate(source: text, content: text) -> text:
+    expect(file_write("{source}/state.txt", content)).to_be(true)
+    settlement_git(["-C", source, "add", "state.txt"])
+    settlement_git(["-C", source, "commit", "-q", "-m", "candidate"])
+    settlement_git(["-C", source, "rev-parse", "HEAD"])
+
+describe "Git settlement read-back transport":
+    it "reconciles a lost acknowledgement from the actual authority ref":
+        # @req REQ-008 REQ-022
+        step("Prepare a local Git authority and a one-parent candidate")
+        val (source, remote, genesis) = settlement_paths()
+        val candidate = settlement_candidate(source, "accepted\n")
+        expect(db_git_settlement_ref_head(source, remote).oid).to_equal(genesis)
+        expect(db_git_settlement_reconcile(source, remote, genesis, candidate).code).to_equal("not_published")
+
+        step("Publish through Git and read the exact candidate back")
+        settlement_git(["-C", source, "push", "-q", remote, "{candidate}:refs/heads/settled"])
+        val result = db_git_settlement_reconcile(source, remote, genesis, candidate)
+        expect(result.code).to_equal("published")
+        expect(result.observed_head).to_equal(candidate)
+        expect(db_git_settlement_ref_head(source, remote).oid).to_equal(candidate)
+
+    it "holds allocation when canonical history moves beyond an uncertain candidate":
+        # @req REQ-008
+        step("Prepare a published candidate and a later head")
+        val (source, remote, genesis) = settlement_paths()
+        val candidate = settlement_candidate(source, "first\n")
+        settlement_git(["-C", source, "push", "-q", remote, "{candidate}:refs/heads/settled"])
+        val later = settlement_candidate(source, "later\n")
+        settlement_git(["-C", source, "push", "-q", remote, "{later}:refs/heads/settled"])
+
+        step("Require a full canonical-history check before another allocation")
+        val result = db_git_settlement_reconcile(source, remote, genesis, candidate)
+        expect(result.code).to_equal("SCVDB_HISTORY_REQUIRED")
+        expect(result.observed_head).to_equal(later)
+
+    it "uses raw commit parent when local replace refs forge a walk":
+        # @req REQ-008 NFR-010
+        step("Publish two real commits and forge a local replacement parent")
+        val (source, remote, genesis) = settlement_paths()
+        val first = settlement_candidate(source, "first\n")
+        settlement_git(["-C", source, "push", "-q", remote, "{first}:refs/heads/settled"])
+        val second = settlement_candidate(source, "second\n")
+        settlement_git(["-C", source, "push", "-q", remote, "{second}:refs/heads/settled"])
+        settlement_git(["-C", source, "replace", "--graft", second, genesis])
+
+        step("Reject the forged parent despite the candidate being the remote head")
+        expect(settlement_git(["-C", source, "rev-list", "--parents", "-n", "1", second])).to_equal("{second} {genesis}")
+        expect(db_git_settlement_reconcile(source, remote, genesis, second).code).to_equal("SCVDB_PARENT_MISMATCH")
+
+    it "rejects a wrong-parent candidate and unscoped or unavailable remotes":
+        # @req REQ-008 REQ-022 NFR-013
+        step("Prepare real commits, then supply a false expected parent")
+        val (source, remote, genesis) = settlement_paths()
+        val candidate = settlement_candidate(source, "candidate\n")
+        expect(db_git_settlement_reconcile(source, remote, candidate, genesis).code).to_equal("SCVDB_PARENT_MISMATCH")
+        expect(db_git_settlement_reconcile(source, remote, "not-an-oid", candidate).code).to_equal("SCVDB_GIT_OID")
+
+        step("Refuse credentials in URLs and missing ref read-back")
+        expect(db_git_settlement_ref_head(source, "https://token@github.com/org/repo.git").code).to_equal("SCVDB_REMOTE_SCOPE")
+        expect(db_git_settlement_ref_head(source, "https://github.com/org/repo.git?token=secret").code).to_equal("SCVDB_REMOTE_SCOPE")
+        expect(db_git_settlement_ref_head(source, "https://github.com/org/repo/extra.git").code).to_equal("SCVDB_REMOTE_SCOPE")
+        expect(db_git_settlement_ref_head(source, "https://github.com/org/repo.git\n").code).to_equal("SCVDB_REMOTE_SCOPE")
+        settlement_git(["-C", remote, "update-ref", "-d", "refs/heads/settled"])
+        expect(db_git_settlement_ref_head(source, remote).code).to_equal("SCVDB_READBACK_UNAVAILABLE")
+        expect(db_git_settlement_reconcile(source, remote, genesis, candidate).code).to_equal("SCVDB_READBACK_UNAVAILABLE")
