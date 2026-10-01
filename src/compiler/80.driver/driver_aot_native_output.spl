@@ -54,7 +54,17 @@ use compiler.driver.driver_build.native_full_inventory_sources.{
     NativeFullInventorySourcesV1}
 use compiler.driver.smf.runtime_std_native_sections_v1.{
     RuntimeStdNativeMemberV1, runtime_std_mir_body_payload_v1,
-    runtime_std_native_directory_chain_real_v1}
+    runtime_std_native_directory_chain_real_v1,
+    runtime_std_native_observed_output_digest_v1}
+use compiler.driver.smf.runtime_std_package_set.{
+    RuntimeStdPackageAuthorityV1, runtime_std_build_action_v1}
+use compiler.driver.action_graph.build_action_v1.{BuildActionResultV1}
+use compiler.driver.action_graph.persisted_graph.{
+    PersistedBuildGraphV1, persisted_graph_digest_v1,
+    persisted_graph_validate_v1}
+use compiler.driver.action_graph.coordinator.{BuildPoolBudgetV1,
+    coordinator_new_v1, coordinator_claim_v1, coordinator_complete_v1}
+use std.nogc_sync_mut.io.sysinfo_ops.{process_peak_rss_kb}
 use compiler.driver.smf_binary_helpers.{smf_u64_to_bytes}
 use driver_types.{CompileResult, CompileContext, FrozenStorageModuleSnapshotV1,
     FrozenNativeModuleCapsuleV1, FrozenNativeModuleCapsuleBatchV1,
@@ -3166,6 +3176,81 @@ pub fn driver_runtime_std_compile_native_members_v1(
                 return Err("runtime/std native backend session close failed")
             result
 
+struct RuntimeStdNativeActionEmissionV1:
+    members: [RuntimeStdNativeMemberV1]
+    observed_output_digest: text
+    action_result: BuildActionResultV1
+
+# Claim the versioned package action before codegen and commit it only after
+# every object and capsule receipt has been read back and CAS-pinned.
+pub fn driver_runtime_std_compile_native_action_v1(
+    ctx: CompileContext, policy: RuntimeStdMembershipPolicyOutputV1,
+    sources: NativeFullInventorySourcesV1, package_identity: text,
+    expected_index_digest: text, artifact_root: text,
+    object_store_root: text, target_cpu: text, expected_target: text,
+    authority: RuntimeStdPackageAuthorityV1
+) -> Result<RuntimeStdNativeActionEmissionV1, text>:
+    val expected_policy_digest = sha256_text(
+        "simple/runtime-std-membership-policy/v1\n" +
+        "index={expected_index_digest}\n" +
+        "producer={authority.compiler_digest}\n" +
+        "variant={authority.config_digest}\n" +
+        "snapshot={sources.snapshot_inventory_digest}\n" +
+        "source-inventory={sources.source_inventory_digest}\n" +
+        "membership={policy.membership_digest}")
+    if authority.target_triple != expected_target or
+            policy.policy_digest != expected_policy_digest or
+            not runtime_std_native_directory_chain_real_v1(object_store_root):
+        return Err("runtime/std native action target or object store invalid")
+    val action = runtime_std_build_action_v1(authority, package_identity)
+    if action == nil:
+        return Err("runtime/std native package action unavailable")
+    var graph = PersistedBuildGraphV1("pending", "",
+        action!.snapshot_revision, [action!])
+    val generation = persisted_graph_digest_v1(graph)
+    if generation == "":
+        return Err("runtime/std native action graph digest unavailable")
+    graph.generation = generation
+    if persisted_graph_validate_v1(graph) != "ok":
+        return Err("runtime/std native action graph invalid")
+    val budget = BuildPoolBudgetV1(action!.pool, 1,
+        action!.memory_budget_bytes)
+    val owner_token = sha256_text("runtime-std-native-action-owner-v1|" +
+        package_identity + "|" + generation + "|" +
+        getpid().to_text() + "|" + artifact_root)
+    val claim = coordinator_claim_v1(
+        coordinator_new_v1(graph, [budget]), action!.action_id,
+        owner_token)
+    if not claim.claim.valid:
+        return Err("runtime/std native action claim failed: " +
+            claim.claim.reason)
+    val compiled = driver_runtime_std_compile_native_members_v1(
+        ctx, policy, sources, package_identity, expected_index_digest,
+        artifact_root, target_cpu, expected_target)
+    if compiled.is_err(): return Err(compiled.unwrap_err())
+    val members = compiled.unwrap()
+    val observed = runtime_std_native_observed_output_digest_v1(
+        members, object_store_root)
+    if observed.is_err(): return Err(observed.unwrap_err())
+    val peak_kb = process_peak_rss_kb()
+    if peak_kb <= 0 or
+            peak_kb > action!.memory_budget_bytes / 1024:
+        return Err("runtime/std native measured action memory unavailable or over budget")
+    val output_digest = observed.unwrap()
+    val complete = coordinator_complete_v1(claim.coordinator,
+        action!.action_id, owner_token, true, false,
+        action!.restat_identity,
+        ["verified-object-output-digest=" + output_digest],
+        peak_kb * 1024)
+    if not complete.commit.accepted or
+            complete.coordinator.runtime.len() != 1 or
+            complete.coordinator.runtime[0].result == nil:
+        return Err("runtime/std native action completion rejected")
+    val result = complete.coordinator.runtime[0].result!
+    if not result.success or result.cancelled:
+        return Err("runtime/std native action was not successful")
+    Ok(RuntimeStdNativeActionEmissionV1(members, output_digest, result))
+
 fn _compile_selected_module(backend_name: text, is_release: bool, opt_level: i64,
                             output_base: text, name: text, mir_module: MirModule,
                             storage_snapshot: FrozenStorageModuleSnapshotV1,
@@ -3332,3 +3417,7 @@ fn _finish_selected_module_compile(
                 _aot_compile_failure(name, "backend produced no object code")
         case _:
             _aot_compile_failure(name, "backend result not Ok")
+
+export RuntimeStdNativeActionEmissionV1
+export driver_runtime_std_compile_native_members_v1
+export driver_runtime_std_compile_native_action_v1
