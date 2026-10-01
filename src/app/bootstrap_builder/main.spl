@@ -19,7 +19,8 @@ use app.bootstrap_builder.manager.{BuilderManagerV1, builder_manager_start, buil
 use app.bootstrap_builder.worker.{builder_worker_execute_v1}
 use app.bootstrap_builder.transport.{BuilderAttemptV1, builder_transport_start_v1,
     builder_transport_recover_v1, builder_transport_poll_v1, builder_transport_cancel_v1,
-    builder_transport_collect_v1, builder_transport_reaped_v1}
+    builder_transport_collect_v1, builder_transport_reaped_v1,
+    builder_transport_prune_terminal_inputs_v1}
 
 fn builder_cli_hash_outputs_v1(task: BuildTaskV1, root: text) -> [BuildInputV1]:
     var observed: [BuildInputV1] = []
@@ -126,6 +127,24 @@ fn builder_cli_cancel_v1(attempts: [BuilderAttemptV1]) -> bool:
         if not builder_transport_cancel_v1(attempt): all_reaped = false
     all_reaped
 
+fn builder_cli_prune_success_v1(task: BuildTaskV1, receipt: BuildResultV1,
+        run: BuildRunV1, state_root: text, source_root: text, output_root: text,
+        process: BuilderProcessPortV1) -> text:
+    # Legacy runs publish into the source tree and retain their original
+    # attempt layout. The isolated local inventory lane opts into pruning.
+    if output_root == source_root: return ""
+    for host in run.hosts:
+        if host.id == receipt.host_id:
+            if host.transport != "local": return ""
+            val root = state_root + "/attempts/" + task.id + "/" + str(task.attempt) + "/" + host.id
+            val attempt = BuilderAttemptV1(task_id: task.id, attempt: task.attempt,
+                host: host, pid: 0, local_root: root, remote_root: "", error: "",
+                identity_digest: builder_task_identity_v1(task), process: process)
+            return match builder_transport_prune_terminal_inputs_v1(task, attempt, receipt, output_root):
+                case Ok(_deleted): ""
+                case Err(reason): reason
+    "input prune host is unknown"
+
 fn builder_cli_failure_v1(task: BuildTaskV1, host: text, status: text, code: i64) -> BuildResultV1:
     BuildResultV1(task_id: task.id, attempt: task.attempt, identity_digest: builder_task_identity_v1(task), host_id: host, status: status, exit_code: code, outputs: [], cache_hits: -1, cache_misses: -1, cache_stores: -1)
 
@@ -150,6 +169,7 @@ fn builder_cli_run_locked_v1(run: BuildRunV1, config: BuilderCliV1, process: Bui
     var active: [BuilderAttemptV1] = []
     var unknown: [BuilderAttemptV1] = []
     var reused = 0
+    var prune_failed = false
     # Revalidate every available completed dependency before attaching an
     # interrupted live descendant. This loop is bounded by the DAG size.
     var cache_changed = true
@@ -173,6 +193,11 @@ fn builder_cli_run_locked_v1(run: BuildRunV1, config: BuilderCliV1, process: Bui
                                         print "builder: {task.id} restored=verified-artifact"
                                 if builder_manager_output_error(task, cached, observed) == "":
                                     state = builder_manager_resume(state, cached, observed)
+                                    val prune_error = builder_cli_prune_success_v1(task, cached,
+                                        run, config.state, source_root, output_root, process)
+                                    if prune_error != "":
+                                        prune_failed = true
+                                        print "builder: {task.id} terminal input cleanup failed: {prune_error}"
                                     reused = reused + 1
                                     cache_changed = true
                         case Err(_): ()
@@ -243,6 +268,12 @@ fn builder_cli_run_locked_v1(run: BuildRunV1, config: BuilderCliV1, process: Bui
                                 state.error = "cannot publish verified task output"
                         if state.error == "" and not builder_write_result_v1(config.state + "/receipts/" + task.id + ".sdn", receipt):
                             state.error = "cannot persist admitted result"
+                        if state.error == "" and receipt.status == "OK":
+                            val prune_error = builder_cli_prune_success_v1(task, receipt,
+                                run, config.state, source_root, output_root, process)
+                            if prune_error != "":
+                                prune_failed = true
+                                print "builder: {task.id} terminal input cleanup failed: {prune_error}"
                         if state.error == "":
                             print "builder: {attempt.task_id} attempt={attempt.attempt} status={receipt.status}"
                 changed = true
@@ -266,6 +297,11 @@ fn builder_cli_run_locked_v1(run: BuildRunV1, config: BuilderCliV1, process: Bui
                         val observed = builder_cli_hash_outputs_v1(task, output_root)
                         if cached.status == "OK" and builder_validate_result_v1(task, cached) == "" and builder_manager_output_error(task, cached, observed) == "":
                             state = builder_manager_resume(state, cached, observed)
+                            val prune_error = builder_cli_prune_success_v1(task, cached,
+                                run, config.state, source_root, output_root, process)
+                            if prune_error != "":
+                                prune_failed = true
+                                print "builder: {task.id} terminal input cleanup failed: {prune_error}"
                             cache_hit = true
                             reused = reused + 1
                             changed = true
@@ -318,6 +354,7 @@ fn builder_cli_run_locked_v1(run: BuildRunV1, config: BuilderCliV1, process: Bui
         if active.len() > 0: sleep_ms(100)
     val succeeded = builder_manager_succeeded(state)
     print "builder: completed success={succeeded} verified_cache_hits={reused}"
+    if succeeded and prune_failed: return 2
     if succeeded: return 0
     1
 

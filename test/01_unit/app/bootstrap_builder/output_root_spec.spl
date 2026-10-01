@@ -5,6 +5,8 @@ use app.bootstrap_builder.main.{builder_cli_resolve_roots_v1, builder_cli_publis
 use app.bootstrap_builder.manager.{builder_manager_start, builder_manager_encode_v1}
 use app.bootstrap_builder.codec.{builder_write_result_v1}
 use app.bootstrap_builder.process_port.{builder_process_portable_v1}
+use app.bootstrap_builder.transport.{BuilderAttemptV1,
+    builder_transport_prune_terminal_inputs_v1}
 use app.io.file_ops.{file_atomic_write, file_hash_sha256, file_exists, path_absolute}
 use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
 use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
@@ -87,19 +89,44 @@ describe "bootstrap builder private output owner":
         expect(file_atomic_write(root + "/state/journal.sdn", builder_manager_encode_v1(state))).to_equal(true)
         val attempt = root + "/state/attempts/module/1/local"
         expect(dir_create_all(attempt + "/work")).to_equal(true)
+        expect(dir_create_all(attempt + "/work/.builder-cache")).to_equal(true)
         expect(dir_create_all(root + "/state/receipts")).to_equal(true)
         expect(file_atomic_write(attempt + "/work/module.o", "object bytes\n")).to_equal(true)
+        expect(file_atomic_write(attempt + "/work/input.txt", "input bytes\n")).to_equal(true)
+        expect(file_atomic_write(attempt + "/work/.builder-cache/keep", "cache bytes\n")).to_equal(true)
         val receipt = BuildResultV1(task_id: "module", attempt: 1,
             identity_digest: builder_task_identity_v1(task), host_id: "local", status: "OK",
             exit_code: 0, outputs: [BuildInputV1(path: "module.o", digest: output_digest)],
             cache_hits: 0, cache_misses: 0, cache_stores: 0)
         expect(builder_write_result_v1(attempt + "/result.sdn", receipt)).to_equal(true)
         expect(builder_write_result_v1(root + "/state/receipts/module.sdn", receipt)).to_equal(true)
+        val owned = BuilderAttemptV1(task_id: "module", attempt: 1, host: host, pid: 0,
+            local_root: attempt, remote_root: "", error: "",
+            identity_digest: builder_task_identity_v1(task), process: builder_process_portable_v1())
+        match builder_transport_prune_terminal_inputs_v1(task, owned, receipt, root + "/output"):
+            case Ok(_deleted): fail("input pruned without terminal proof")
+            case Err(reason): expect(reason).to_contain("tree-reap")
+        expect(file_exists(attempt + "/work/input.txt")).to_equal(true)
         expect(file_atomic_write(attempt + "/compiler.reaped",
             builder_task_identity_v1(task) + "\nlocal")).to_equal(true)
         val config = builder_cli_parse_v1(["verify", "--manifest", root + "/manifest.sdn",
             "--state", root + "/state", "--source-root", root + "/source",
             "--output-root", root + "/output"])
+        expect(builder_cli_verify_v1(run, config, builder_process_portable_v1())).to_equal(0)
+        expect(file_atomic_write(attempt + "/work/input.txt", "changed bytes\n")).to_equal(true)
+        match builder_transport_prune_terminal_inputs_v1(task, owned, receipt, root + "/output"):
+            case Ok(_deleted): fail("changed input copy was pruned")
+            case Err(reason): expect(reason).to_contain("copy differs")
+        expect(file_exists(attempt + "/work/input.txt")).to_equal(true)
+        expect(file_atomic_write(attempt + "/work/input.txt", "input bytes\n")).to_equal(true)
+        match builder_transport_prune_terminal_inputs_v1(task, owned, receipt, root + "/output"):
+            case Ok(deleted): expect(deleted).to_equal(1)
+            case Err(reason): fail(reason)
+        expect(file_exists(attempt + "/work/input.txt")).to_equal(false)
+        expect(file_exists(attempt + "/work/module.o")).to_equal(true)
+        expect(file_exists(attempt + "/work/.builder-cache/keep")).to_equal(true)
+        expect(file_exists(attempt + "/result.sdn")).to_equal(true)
+        expect(file_exists(attempt + "/compiler.reaped")).to_equal(true)
         expect(builder_cli_verify_v1(run, config, builder_process_portable_v1())).to_equal(0)
         expect(file_atomic_write(root + "/output/module.o", "damaged bytes\n")).to_equal(true)
         expect(builder_cli_verify_v1(run, config, builder_process_portable_v1())).to_equal(1)
