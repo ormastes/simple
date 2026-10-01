@@ -19,7 +19,8 @@ fn builder_contract_fixture_v1() -> BuildTaskV1:
         source_digest: digest, toolchain_digest: digest, dependencies: [],
         program: "bin/llc", args: ["input.ll", "-o", "output.o"],
         inputs: [BuildInputV1(path: "input.ll", digest: digest)],
-        outputs: ["output.o"], cache_key: digest, timeout_ms: 0)
+        outputs: ["output.o"], cache_key: digest, timeout_ms: 0,
+        memory_limit_bytes: 1073741824)
 
 fn builder_contract_host_v1() -> BuildHostV1:
     BuildHostV1(id: "local", transport: "local", endpoint: "", workspace: "build/worker",
@@ -54,17 +55,32 @@ describe "Build manager immutable request and receipt contract":
                 expect(decoded.args).to_equal(["", "a b", "$(do-not-execute)", "x\ty\nz", "%0A"])
                 expect(decoded.inputs[0].path).to_equal("input.ll")
                 expect(decoded.timeout_ms).to_equal(0)
+                expect(decoded.memory_limit_bytes).to_equal(1073741824)
             case Err(reason): fail(reason)
 
     it "rejects truncated and trailing task records":
         val encoded = builder_encode_task_v1(builder_contract_fixture_v1())
         expect(builder_contract_decode_error_v1(encoded + "extra\n")).to_equal("trailing wire fields")
-        expect(builder_contract_decode_error_v1("SIMPLE-BUILD-TASK-1\nmodule_a\n")).to_equal("truncated wire record")
+        expect(builder_contract_decode_error_v1("SIMPLE-BUILD-TASK-2\nmodule_a\n")).to_equal("truncated wire record")
+        expect(builder_contract_decode_error_v1(encoded.replace("SIMPLE-BUILD-TASK-2", "SIMPLE-BUILD-TASK-1"))).to_equal("invalid task wire header (memory cap required)")
 
     it "rejects noncanonical integers and count overflow before allocation":
         val encoded = builder_encode_task_v1(builder_contract_fixture_v1())
         expect(builder_contract_decode_error_v1(encoded.replace("module_a\n1\n", "module_a\n01\n"))).to_equal("noncanonical wire integer")
         expect(builder_contract_decode_error_v1(encoded.replace("module_a\n1\n", "module_a\n99999999999999999\n"))).to_equal("wire integer exceeds bound")
+
+    it "requires a bounded task memory cap and binds it to identity":
+        val task = builder_contract_fixture_v1()
+        var changed = builder_contract_fixture_v1()
+        changed.memory_limit_bytes = 2147483648
+        expect(builder_task_identity_v1(task) == builder_task_identity_v1(changed)).to_equal(false)
+        changed.memory_limit_bytes = 0
+        expect(builder_validate_task_v1(changed)).to_equal("invalid task memory limit")
+        changed.memory_limit_bytes = 1125899906842625
+        expect(builder_validate_task_v1(changed)).to_equal("invalid task memory limit")
+        val encoded = builder_encode_task_v1(task)
+        expect(builder_contract_decode_error_v1(encoded.replace("\n1073741824\n", "\n0\n"))).to_equal("invalid task memory limit")
+        expect(builder_contract_decode_error_v1(encoded.replace("\n1073741824\n", "\n1125899906842625\n"))).to_equal("wire integer exceeds bound")
 
     it "rejects traversal and Windows path aliases on every host":
         expect(builder_relative_path_valid_v1("../escape.o")).to_equal(false)
@@ -126,10 +142,10 @@ describe "Build manager immutable request and receipt contract":
 
     it "rejects legacy manifests and absent compiled worker identity":
         val run = BuildRunV1(tasks: [builder_contract_fixture_v1()], hosts: [builder_contract_host_v1()], keep_going: true, max_attempts: 2)
-        val legacy = builder_encode_run_v1(run).replace("SIMPLE-BUILD-RUN-2", "SIMPLE-BUILD-RUN-1")
+        val legacy = builder_encode_run_v1(run).replace("SIMPLE-BUILD-RUN-3", "SIMPLE-BUILD-RUN-2")
         match builder_decode_run_v1(legacy):
             case Ok(decoded): fail("legacy host layout accepted")
-            case Err(reason): expect(reason).to_equal("invalid run wire header (compiled worker digest required)")
+            case Err(reason): expect(reason).to_equal("invalid run wire header (compiled worker digest and memory cap required)")
         var host = builder_contract_host_v1()
         host.worker_digest = ""
         val missing = BuildRunV1(tasks: [builder_contract_fixture_v1()], hosts: [host], keep_going: true, max_attempts: 2)

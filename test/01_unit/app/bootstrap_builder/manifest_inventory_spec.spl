@@ -1,7 +1,8 @@
 use std.spec.{describe, it, expect}
 use app.bootstrap_builder.manifest_main.{bootstrap_manifest_inventory_paths_v1,
-    bootstrap_manifest_job_from_inventory_v1, bootstrap_manifest_plain_path_v1,
-    bootstrap_manifest_private_target_v1}
+    bootstrap_manifest_job_from_inventory_v1, bootstrap_manifest_job_v1,
+    bootstrap_manifest_template_v1, bootstrap_manifest_plain_path_v1,
+    bootstrap_manifest_private_target_v1, bootstrap_manifest_memory_limit_v2}
 use app.bootstrap_builder.codec.{builder_read_run_v1, builder_write_run_v1}
 use app.io.file_ops.{file_atomic_write, file_hash_sha256, file_exists, path_absolute}
 use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
@@ -15,6 +16,24 @@ fn inventory_paths_error_v1(payload: text) -> text:
         case Err(reason): reason
 
 describe "bootstrap inventory backed job manifest":
+    it "requires canonical explicit memory limits within 1..2^50":
+        match bootstrap_manifest_memory_limit_v2("1125899906842624"):
+            case Ok(value): expect(value).to_equal(1125899906842624)
+            case Err(reason): fail(reason)
+        for value in ["", "0", "01", "+1", "1.0", "1125899906842625"]:
+            match bootstrap_manifest_memory_limit_v2(value):
+                case Ok(_limit): fail("invalid memory limit accepted")
+                case Err(reason): expect(reason).to_contain("memory limit")
+        match bootstrap_manifest_template_v1(["--template", "worker", "work", "out", "1"]):
+            case Ok(_path): fail("template without cap accepted")
+            case Err(reason): expect(reason).to_contain("--memory-limit-bytes")
+        match bootstrap_manifest_job_v1(["--job"]):
+            case Ok(_path): fail("job without cap accepted")
+            case Err(reason): expect(reason).to_contain("--memory-limit-bytes")
+        match bootstrap_manifest_job_from_inventory_v1(["--job-from-inventory"]):
+            case Ok(_path): fail("inventory job without cap accepted")
+            case Err(reason): expect(reason).to_contain("--memory-limit-bytes")
+
     it "requires a bounded sorted unique LF list of contained paths":
         match bootstrap_manifest_inventory_paths_v1("a.txt\nnested/b.txt\n", "inventory.txt"):
             case Ok(paths): expect(paths).to_equal(["a.txt", "nested/b.txt"])
@@ -45,14 +64,16 @@ describe "bootstrap inventory backed job manifest":
         val marker = file_hash_sha256(root + "/a.txt")
         val placeholder = BuildTaskV1(id: "template", attempt: 1, phase: "template", producer_digest: digest,
             source_digest: marker, toolchain_digest: digest, dependencies: [], program: producer,
-            args: ["unused"], inputs: [], outputs: ["unused.out"], cache_key: marker, timeout_ms: 0)
+            args: ["unused"], inputs: [], outputs: ["unused.out"], cache_key: marker,
+            timeout_ms: 0, memory_limit_bytes: 1073741824)
         val host = BuildHostV1(id: "local", transport: "local", endpoint: "", workspace: root,
             worker_program: producer, worker_digest: digest, slots: 1)
         expect(builder_write_run_v1(root + "/template.sdn",
             BuildRunV1(tasks: [placeholder], hosts: [host], keep_going: true, max_attempts: 2))).to_equal(true)
         match bootstrap_manifest_job_from_inventory_v1(["--job-from-inventory",
                 root + "/template.sdn", producer, root, "group_1", "native", "result.sdn",
-                "inventory.txt", "--manifest", private_root + "/manifest.sdn",
+                "inventory.txt", "--memory-limit-bytes", "2147483648",
+                "--manifest", private_root + "/manifest.sdn",
                 "--", "--group", "one"]):
             case Ok(manifest):
                 expect(manifest).to_equal(private_root + "/manifest.sdn")
@@ -70,5 +91,7 @@ describe "bootstrap inventory backed job manifest":
                         expect(run.tasks[0].inputs[1].digest).to_equal(file_hash_sha256(root + "/a.txt"))
                         expect(run.tasks[0].inputs[2].digest).to_equal(file_hash_sha256(root + "/nested/b.txt"))
                         expect(run.max_attempts).to_equal(2)
+                        expect(run.tasks[0].memory_limit_bytes).to_equal(2147483648)
+                        expect(run.tasks[0].timeout_ms).to_equal(86400000)
                     case Err(reason): fail(reason)
             case Err(reason): fail(reason)

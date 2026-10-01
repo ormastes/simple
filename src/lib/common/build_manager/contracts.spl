@@ -3,6 +3,7 @@ use std.common.crypto.sha256.{sha256_text}
 
 # Repo-sized isolated snapshots; other collection and wire limits are unchanged.
 val BUILDER_MAX_INPUTS_V1: i64 = 32768
+val BUILDER_MEMORY_LIMIT_MAX_V2: i64 = 1125899906842624
 
 struct BuildInputV1:
     path: text
@@ -22,6 +23,7 @@ struct BuildTaskV1:
     outputs: [text]
     cache_key: text
     timeout_ms: i64
+    memory_limit_bytes: i64
 
 struct BuildHostV1:
     id: text
@@ -128,6 +130,8 @@ fn builder_validate_task_v1(task: BuildTaskV1) -> text:
         return "invalid task or phase identifier"
     if task.attempt < 1 or task.attempt > 100 or task.timeout_ms < 0 or task.timeout_ms > 604800000:
         return "invalid attempt or timeout"
+    if task.memory_limit_bytes < 1 or task.memory_limit_bytes > BUILDER_MEMORY_LIMIT_MAX_V2:
+        return "invalid task memory limit"
     if not builder_digest_valid_v1(task.producer_digest) or
             not builder_digest_valid_v1(task.source_digest) or
             not builder_digest_valid_v1(task.toolchain_digest) or
@@ -211,10 +215,11 @@ fn builder_identity_field_v1(value: text) -> text:
 
 fn builder_task_identity_v1(task: BuildTaskV1) -> text:
     if builder_validate_task_v1(task) != "": return ""
-    var pieces: [text] = ["simple-build-task-identity-v1"]
+    var pieces: [text] = ["simple-build-task-identity-v2"]
     for field in [task.id, "{task.attempt}", task.phase, task.producer_digest,
             task.source_digest, task.toolchain_digest, task.program, task.cache_key,
-            "{task.timeout_ms}", "{task.dependencies.len()}"]:
+            "{task.timeout_ms}", "{task.memory_limit_bytes}",
+            "{task.dependencies.len()}"]:
         pieces.push(builder_identity_field_v1(field))
     for dep in task.dependencies:
         pieces.push(builder_identity_field_v1(dep))

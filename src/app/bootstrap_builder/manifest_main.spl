@@ -8,7 +8,8 @@ use std.nogc_sync_mut.io.windows_process_owner.{windows_process_directory_no_fol
 use app.io.dir_ops.{dir_create}
 use app.bootstrap_builder.codec.{builder_read_run_v1, builder_write_run_v1}
 use std.common.build_manager.contracts.{BuildInputV1, BuildTaskV1, BuildHostV1, BuildRunV1, BUILDER_MAX_INPUTS_V1,
-    builder_identifier_valid_v1, builder_digest_valid_v1, builder_relative_path_valid_v1}
+    BUILDER_MEMORY_LIMIT_MAX_V2, builder_identifier_valid_v1,
+    builder_digest_valid_v1, builder_relative_path_valid_v1}
 use std.common.crypto.sha256.{sha256_text}
 
 fn bootstrap_manifest_absolute_v1(path: text) -> bool:
@@ -22,24 +23,43 @@ fn bootstrap_manifest_hash_v1(path: text) -> Result<text, text>:
     if not builder_digest_valid_v1(digest): return Err("cannot hash input: " + path)
     Ok(digest)
 
+fn bootstrap_manifest_memory_limit_v2(value: text) -> Result<i64, text>:
+    if value == "" or value.len() > 16 or value.starts_with("0"):
+        return Err("memory limit must be canonical decimal 1..2^50")
+    var limit: i64 = 0
+    for index in 0..value.len():
+        val digit_text = value[index:index + 1]
+        if digit_text < "0" or digit_text > "9":
+            return Err("memory limit must be canonical decimal 1..2^50")
+        val digit = digit_text.char_code_at(0) - 48
+        if limit > (BUILDER_MEMORY_LIMIT_MAX_V2 - digit) / 10:
+            return Err("memory limit exceeds 2^50")
+        limit = limit * 10 + digit
+    if limit < 1 or limit > BUILDER_MEMORY_LIMIT_MAX_V2:
+        return Err("memory limit must be 1..2^50")
+    Ok(limit)
+
 # The codec requires a nonempty task array even for a host template. This
 # deliberately failing placeholder must be replaced by the compiler/qualifier;
 # accidentally running a template cannot emit successful artifact evidence.
 fn bootstrap_manifest_template_v1(args: [text]) -> Result<text, text>:
-    if args.len() != 5: return Err("--template WORKER WORKSPACE OUTPUT SLOTS")
+    if args.len() != 7 or args[5] != "--memory-limit-bytes":
+        return Err("--template WORKER WORKSPACE OUTPUT SLOTS --memory-limit-bytes N")
     for i in 1..4:
         if not bootstrap_manifest_absolute_v1(args[i]): return Err("template paths must be absolute")
     var slots: i64 = 0
     for candidate in 1..65:
         if args[4] == "{candidate}": slots = candidate
     if slots == 0: return Err("template slots must be 1..64")
+    val memory_limit = bootstrap_manifest_memory_limit_v2(args[6])?
     val digest = bootstrap_manifest_hash_v1(args[1])?
     if file_exists(args[3]): return Err("template already exists")
     val marker = sha256_text("bootstrap-host-template-must-replace-task-v1")
     val placeholder = BuildTaskV1(id: "template-must-replace", attempt: 1, phase: "template-only",
         producer_digest: digest, source_digest: marker, toolchain_digest: digest,
         dependencies: [], program: args[1], args: ["--invalid-template-task"], inputs: [],
-        outputs: ["template-must-not-run"], cache_key: marker, timeout_ms: 1000)
+        outputs: ["template-must-not-run"], cache_key: marker,
+        timeout_ms: 1000, memory_limit_bytes: memory_limit)
     val host = BuildHostV1(id: "bootstrap-local", transport: "local", endpoint: "",
         workspace: args[2], worker_program: args[1], worker_digest: digest, slots: slots)
     val run = BuildRunV1(tasks: [placeholder], hosts: [host], keep_going: true, max_attempts: 2)
@@ -47,10 +67,13 @@ fn bootstrap_manifest_template_v1(args: [text]) -> Result<text, text>:
     Ok(args[3])
 
 # General local invocation emitter for an already prepared, private job root.
-# --job TEMPLATE PROGRAM ROOT ID PHASE OUTPUT --inputs FILE... -- ARGS...
+# --job TEMPLATE PROGRAM ROOT ID PHASE OUTPUT --memory-limit-bytes N
+#     --inputs FILE... -- ARGS...
 # Only the compiled codec writes wire records. Every staged input is hash-bound.
 fn bootstrap_manifest_job_v1(args: [text]) -> Result<text, text>:
-    if args.len() < 11 or args[7] != "--inputs": return Err("invalid --job invocation")
+    if args.len() < 13 or args[7] != "--memory-limit-bytes" or args[9] != "--inputs":
+        return Err("invalid --job invocation; explicit --memory-limit-bytes N required")
+    val memory_limit = bootstrap_manifest_memory_limit_v2(args[8])?
     for i in 1..4:
         if not bootstrap_manifest_absolute_v1(args[i]): return Err("job paths must be absolute")
     if not builder_identifier_valid_v1(args[4]) or not builder_identifier_valid_v1(args[5]):
@@ -67,7 +90,7 @@ fn bootstrap_manifest_job_v1(args: [text]) -> Result<text, text>:
     if file_exists(root + "/manifest.sdn"): return Err("job manifest already exists")
     var inputs: [BuildInputV1] = []
     var source_identity = "bootstrap-canonical-job-inputs-v1"
-    var index: i64 = 8
+    var index: i64 = 10
     while index < args.len() and args[index] != "--":
         val path = args[index]
         if not builder_relative_path_valid_v1(path): return Err("invalid relative input")
@@ -78,7 +101,8 @@ fn bootstrap_manifest_job_v1(args: [text]) -> Result<text, text>:
     if inputs.len() == 0 or index >= args.len() - 1: return Err("job requires inputs and argv")
     index = index + 1
     var command: [text] = []
-    var identity = "bootstrap-canonical-job-v1|" + root + "|" + args[4]
+    var identity = "bootstrap-canonical-job-v2|" + root + "|" + args[4] +
+        "|memory=" + str(memory_limit)
     while index < args.len():
         val argument = args[index]
         command = command.push(argument)
@@ -89,7 +113,8 @@ fn bootstrap_manifest_job_v1(args: [text]) -> Result<text, text>:
     val task = BuildTaskV1(id: args[4], attempt: 1, phase: args[5], producer_digest: program_sha,
         source_digest: source_sha, toolchain_digest: tools_sha, dependencies: [],
         program: args[2], args: command, inputs: inputs, outputs: [args[6]],
-        cache_key: sha256_text(identity + source_sha + tools_sha), timeout_ms: 0)
+        cache_key: sha256_text(identity + source_sha + tools_sha),
+        timeout_ms: 86400000, memory_limit_bytes: memory_limit)
     val run = BuildRunV1(tasks: [task], hosts: template.hosts,
         keep_going: template.keep_going, max_attempts: template.max_attempts)
     if not builder_write_run_v1(root + "/manifest.sdn", run): return Err("job manifest rejected or unwritable")
@@ -179,15 +204,17 @@ fn bootstrap_manifest_regular_under_root_v1(root: text, relative: text) -> Resul
     Ok(path)
 
 # --job-from-inventory TEMPLATE PROGRAM ROOT ID PHASE OUTPUT INVENTORY
-#     [--manifest ABSOLUTE_PRIVATE_PATH] -- ARGS...
+#     --memory-limit-bytes N [--manifest ABSOLUTE_PRIVATE_PATH] -- ARGS...
 # The inventory and its members are all declared, digest-pinned task inputs.
 fn bootstrap_manifest_job_from_inventory_v1(args: [text]) -> Result<text, text>:
-    if args.len() < 10: return Err("incomplete --job-from-inventory invocation")
-    var first_argument: i64 = 9
-    if args[8] == "--manifest":
-        if args.len() < 12 or args[10] != "--": return Err("--manifest ABS must precede -- ARGS...")
-        first_argument = 11
-    elif args[8] != "--":
+    if args.len() < 12 or args[8] != "--memory-limit-bytes":
+        return Err("--job-from-inventory requires --memory-limit-bytes N")
+    val memory_limit = bootstrap_manifest_memory_limit_v2(args[9])?
+    var first_argument: i64 = 11
+    if args[10] == "--manifest":
+        if args.len() < 14 or args[12] != "--": return Err("--manifest ABS must precede -- ARGS...")
+        first_argument = 13
+    elif args[10] != "--":
         return Err("expected --manifest ABS or -- before job arguments")
     for index in 1..4:
         if not bootstrap_manifest_absolute_v1(args[index]): return Err("job paths must be absolute")
@@ -205,8 +232,8 @@ fn bootstrap_manifest_job_from_inventory_v1(args: [text]) -> Result<text, text>:
     val template_sha = bootstrap_manifest_hash_v1(args[1])?
     val root = bootstrap_manifest_plain_path_v1(path_absolute(args[3]))
     if root == "" or not bootstrap_manifest_absolute_v1(root): return Err("job root cannot be canonicalized")
-    val manifest_path = if args[8] == "--manifest":
-        bootstrap_manifest_private_target_v1(root, args[9])?
+    val manifest_path = if args[10] == "--manifest":
+        bootstrap_manifest_private_target_v1(root, args[11])?
     else:
         root + "/manifest.sdn"
     if file_exists(manifest_path): return Err("job manifest already exists")
@@ -229,7 +256,8 @@ fn bootstrap_manifest_job_from_inventory_v1(args: [text]) -> Result<text, text>:
         source_pieces.push(path)
         source_pieces.push(digest)
     var command: [text] = []
-    var identity = "bootstrap-canonical-job-v1|" + root + "|" + args[4]
+    var identity = "bootstrap-canonical-job-v2|" + root + "|" + args[4] +
+        "|memory=" + str(memory_limit)
     for index in first_argument..args.len():
         val argument = args[index]
         command = command.push(argument)
@@ -239,7 +267,8 @@ fn bootstrap_manifest_job_from_inventory_v1(args: [text]) -> Result<text, text>:
     val task = BuildTaskV1(id: args[4], attempt: 1, phase: args[5], producer_digest: program_sha,
         source_digest: source_sha, toolchain_digest: tools_sha, dependencies: [],
         program: args[2], args: command, inputs: inputs, outputs: [args[6]],
-        cache_key: sha256_text(identity + source_sha + tools_sha), timeout_ms: 0)
+        cache_key: sha256_text(identity + source_sha + tools_sha),
+        timeout_ms: 86400000, memory_limit_bytes: memory_limit)
     val run = BuildRunV1(tasks: [task], hosts: template.hosts,
         keep_going: template.keep_going, max_attempts: template.max_attempts)
     # Recheck every file after constructing the record. The worker repeats
@@ -262,6 +291,8 @@ fn bootstrap_manifest_emit_v1(args: [text]) -> Result<text, text>:
         if not bootstrap_manifest_absolute_v1(args[i]): return Err("identity paths must be absolute")
     if not builder_identifier_valid_v1(args[9]): return Err("invalid invocation identifier")
     val template = builder_read_run_v1(args[0])?
+    if template.tasks.len() != 1 or template.tasks[0].id != "template-must-replace":
+        return Err("outer bootstrap requires explicit-cap host template")
     val shell_sha = bootstrap_manifest_hash_v1(args[1])?
     val root = args[2]
     val output = args[3]
@@ -303,7 +334,8 @@ fn bootstrap_manifest_emit_v1(args: [text]) -> Result<text, text>:
             BuildInputV1(path: "source.inputs", digest: source_sha),
             BuildInputV1(path: "tools.inputs", digest: tools_sha)],
         outputs: ["bootstrap-stage2.exit.env"], cache_key: sha256_text(identity + source_sha + tool_identity),
-        timeout_ms: 604800000)
+        timeout_ms: 604800000,
+        memory_limit_bytes: template.tasks[0].memory_limit_bytes)
     # One outer worker owns the phase. Inner native compiler/group budgets stay
     # with canonical bootstrap; the host template never multiplies this task.
     val run = BuildRunV1(tasks: [task], hosts: template.hosts, keep_going: template.keep_going, max_attempts: 1)
