@@ -54,6 +54,30 @@ It adds worker-spawn, phase-profile and memory-snapshot diagnostics, plus a
 bounded external process-tree sampler pinned to PID and creation time. This
 exception does not reset the attempt count or authorize another retry.
 
+Hello5 is now terminal: the Job Object reported `rss-cap-exceeded`, exit 88,
+peak 5,864,024 KiB against 5,859,375 KiB, and `quiescent=1`. The disk guard
+reported child 88 with approximately 129.449 GiB free. Parent22460, child9168
+and external sampler36356 are gone; the sampler exited 0 and retained
+32,535 bytes in `hello5/owned-rss.csv`. No hello executable or compile/run
+exit receipt was produced. No further attempt is authorized.
+
+The last sample at 23:14:22 UTC records parent 2,163,585,024 bytes plus child
+3,404,926,976 bytes, totaling 5,568,512,000 bytes. The faster Job Object
+guard observed the higher peak before termination. The child argv identifies
+`--hir-shard=0/1`: this is HIR preparation before the final build worker.
+Its invocation queue `hello4/cache/default/frontend/queue-22460-0` had no
+direct entries at the one-time inspection. No phase-profile, HIR snapshot,
+or progress file appeared; stdout was empty and stderr contained only the
+workarounds warning. Therefore no specific HIR-lowering, MIR or codegen
+operation can be blamed from these traces.
+
+The final-worker spawn marker is located after `run_hir_shards`, explaining
+its absence while this child runs. The frozen source deliberately starts at
+least one isolated HIR-preparation child in a serial build. It also supports
+`SIMPLE_HIR_SHARDING=0`, but that setting was not used or tested here. Future
+diagnosis should distinguish parent inventory retention from child snapshot,
+entry-closure and HIR preparation; none is established as the sole cause.
+
 Two source observations constrain interpretation of the measurements:
 
 - `bootstrap_main.spl` handles the marked internal worker `run` route with

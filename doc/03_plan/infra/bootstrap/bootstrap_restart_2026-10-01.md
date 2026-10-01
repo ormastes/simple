@@ -51,6 +51,19 @@ bounded attempts; the manager worker lane also remains at its three-attempt
 digest-mismatch stop. None of these limits can be reset by renaming a lane
 or assigning another agent.
 
+The user subsequently authorized exactly one additional instrumented Windows
+attempt, hello5. It reused candidate `81500d1a...` and hello4's cache, with
+unchanged 1200-second timeout and 6,000,000,000-byte aggregate cap. It also
+failed: Job receipt `rss-cap-exceeded`, exit88, peak5,864,024KiB versus
+5,859,375KiB, quiescent1. The last external sample separated parent memory
+(2,163,585,024B) from HIR preparation child memory (3,404,926,976B).
+That child was `--hir-shard=0/1`; the final hello worker never started. No
+phase-profile/HIR snapshot/progress file or hello executable was produced.
+The sampler stopped successfully and its CSV is retained under hello5.
+This one-attempt exception is consumed; do not launch hello6 automatically.
+See `doc/08_tracking/bug/windows_phase2_hello_worker_latency_2026-10-02.md`
+for exact evidence and distinctions between confirmed facts and hypotheses.
+
 Recovered Item5 metadata tests are in draft PR #2157, head
 `15a0d9c0fbfd651f7d8e64a75047e3f5478d4e17`. Its 17 scenarios require POSIX;
 native SSpec and doc generation remain UNRUN. This is not a landed item.
