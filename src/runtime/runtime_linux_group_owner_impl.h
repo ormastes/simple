@@ -389,7 +389,7 @@ SplArray *rt_linux_group_start_v1(const char *program_data, uint64_t program_len
     int created = 0, child_started = 0, pidfd = -1;
     pid_t pid = -1;
     if (rt_linux_group.active || memory_limit < 1 || memory_limit > 1125899906842624LL ||
-        timeout_ms < 1 || timeout_ms > 86400000 ||
+        timeout_ms < 1 || timeout_ms > 604800000 ||
         !rt_lg_copy_text(program_data, program_len, program, sizeof(program)) ||
         !rt_lg_copy_text(directory_data, directory_len, directory, sizeof(directory)) ||
         !rt_lg_copy_text(root_data, root_len, root, sizeof(root)) ||
