@@ -42,10 +42,14 @@ use compiler.driver.cache.package_module_index_builder.{
 }
 use compiler.driver.cache.package_tldr_metadata.{config_variant_digest_v1}
 use compiler.driver.cache.runtime_std_authority_receipt.{
-    RuntimeStdAuthorityReceiptV1,
+    RuntimeStdAuthorityReceiptV1, RuntimeStdAuthorityReceiptV2,
+    RUNTIME_STD_AUTHORITY_ACTION_SCHEMA_V2,
     runtime_std_authority_receipt_encode_v1,
     runtime_std_authority_receipt_path_v1,
-    runtime_std_authority_receipt_read_v1
+    runtime_std_authority_receipt_read_v1,
+    runtime_std_authority_receipt_encode_v2,
+    runtime_std_authority_receipt_path_v2,
+    runtime_std_authority_receipt_read_v2
 }
 use compiler.driver.smf.runtime_std_compiled_publication.{
     RuntimeStdCompiledPackageReceiptV1,
@@ -354,20 +358,47 @@ fn cold_hir_compiler_publish_full_v2(
         baseline_after_graph.std.action_digest,
         runtime_receipt.archive_digest, std_receipt.archive_digest,
         runtime_receipt.receipt_digest, std_receipt.receipt_digest)
-    val baseline_encoded = runtime_std_authority_receipt_encode_v1(
-        baseline_value)
-    if baseline_encoded == "":
-        return Err("cold-compiler-runtime-std-authority-invalid")
+    var baseline_encoded = ""
+    var baseline_path = ""
+    var observed_baseline = baseline_value
+    if input.runtime_receipt.native_budget == nil:
+        baseline_encoded = runtime_std_authority_receipt_encode_v1(
+            baseline_value)
+        if baseline_encoded == "":
+            return Err("cold-compiler-runtime-std-authority-invalid")
+        val digest = sha256_text(baseline_encoded)
+        baseline_path = runtime_std_authority_receipt_path_v1(
+            input.cache_root, digest)
+        val read = runtime_std_authority_receipt_read_v1(
+            baseline_path, digest)
+        if read.is_err():
+            return Err("cold-compiler-runtime-std-authority-readback-invalid")
+        observed_baseline = read.unwrap()
+    else:
+        val value = RuntimeStdAuthorityReceiptV2(baseline_value,
+            input.runtime_receipt.native_budget!,
+            RUNTIME_STD_AUTHORITY_ACTION_SCHEMA_V2)
+        baseline_encoded = runtime_std_authority_receipt_encode_v2(value)
+        if baseline_encoded == "":
+            return Err("cold-compiler-runtime-std-authority-v2-invalid")
+        val digest = sha256_text(baseline_encoded)
+        baseline_path = runtime_std_authority_receipt_path_v2(
+            input.cache_root, digest)
+        val read = runtime_std_authority_receipt_read_v2(
+            baseline_path, digest)
+        if read.is_err():
+            return Err("cold-compiler-runtime-std-authority-v2-readback-invalid")
+        val observed = read.unwrap()
+        if observed.budget.manager_request_digest !=
+                    value.budget.manager_request_digest or
+                observed.budget.enforced_process_limit_bytes !=
+                    value.budget.enforced_process_limit_bytes:
+            return Err("cold-compiler-runtime-std-authority-v2-readback-invalid")
+        observed_baseline = observed.base
     val baseline_digest = sha256_text(baseline_encoded)
-    val baseline_path = runtime_std_authority_receipt_path_v1(
-        input.cache_root, baseline_digest)
-    val baseline_read = runtime_std_authority_receipt_read_v1(
-        baseline_path, baseline_digest)
-    if baseline_read.is_err():
-        return Err("cold-compiler-runtime-std-authority-readback-invalid")
-    if baseline_read.unwrap().runtime_archive_digest !=
+    if observed_baseline.runtime_archive_digest !=
                 runtime_receipt.archive_digest or
-            baseline_read.unwrap().std_archive_digest !=
+            observed_baseline.std_archive_digest !=
                 std_receipt.archive_digest:
         return Err("cold-compiler-runtime-std-authority-readback-invalid")
     Ok(ColdHirCompilerPublishPinsV1(
