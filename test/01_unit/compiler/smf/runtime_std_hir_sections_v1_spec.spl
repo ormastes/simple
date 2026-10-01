@@ -1,0 +1,100 @@
+"""Frozen typed HIR produces bounded, source-bound runtime/std semantic payloads."""
+# @cover src/compiler/80.driver/smf/runtime_std_hir_sections_v1.spl
+
+use compiler.driver.driver_bootstrap.{bootstrap_empty_hir_module}
+use compiler.driver.smf.runtime_std_hir_sections_v1.{
+    runtime_std_hir_sections_from_module_v1,
+    cold_hir_compiled_facets_from_module_v1}
+use compiler.hir.hir_types.{HirImport, HirDomainBlock}
+use compiler.hir.hir_definitions.{HirDiBinding}
+use compiler.common.diagnostics.span.{Span}
+use std.common.crypto.sha256.{sha256_text}
+
+describe "Runtime/std typed HIR section emitter", tag: ["only-compiled"]:
+    it "emits the seven canonical semantic members from one frozen module":
+        var module = bootstrap_empty_hir_module()
+        module.name = "std.example"
+        module.path = "src/lib/std/example.spl"
+        module.exports = ["start"]
+        module.types = ["Widget"]
+        val result = runtime_std_hir_sections_from_module_v1(module,
+            "src/lib/std/example.spl", sha256_text("source"))
+        expect(result.is_ok()).to_equal(true)
+        val sections = result.unwrap()
+        expect(sections.len()).to_equal(7)
+        expect(sections[0].member_name).to_equal("debug.smf")
+        expect(sections[1].member_name).to_equal("exports.smf")
+        expect(sections[2].member_name).to_equal("generics.smf")
+        expect(sections[3].member_name).to_equal("hir-summaries.smf")
+        expect(sections[4].member_name).to_equal("imports.smf")
+        expect(sections[5].member_name).to_equal("initialization.smf")
+        expect(sections[6].member_name).to_equal("types.smf")
+        for section in sections:
+            expect(section.content.contains("src/lib/std/example.spl")).to_equal(true)
+            expect(section.content.contains("simple/runtime-std-typed-hir-section/v1")).to_equal(true)
+        expect(sections[1].content.contains("start")).to_equal(true)
+        expect(sections[6].content.contains("Widget")).to_equal(true)
+
+    it "changes the direct HIR rows when an import or initialization payload changes":
+        var first = bootstrap_empty_hir_module()
+        first.name = "runtime.example"
+        first.imports = [HirImport(module_path: "std.alpha", items: [],
+            is_lazy: false, span: Span.empty())]
+        first.domain_blocks = [HirDomainBlock(kind: "config",
+            payload: "alpha", context: "runtime", span: Span.empty())]
+        var second = bootstrap_empty_hir_module()
+        second.name = first.name
+        second.imports = [HirImport(module_path: "std.beta", items: [],
+            is_lazy: false, span: Span.empty())]
+        second.domain_blocks = [HirDomainBlock(kind: "config",
+            payload: "beta", context: "runtime", span: Span.empty())]
+        val digest = sha256_text("same-source-witness")
+        val left = runtime_std_hir_sections_from_module_v1(first,
+            "src/runtime/example.spl", digest)
+        val right = runtime_std_hir_sections_from_module_v1(second,
+            "src/runtime/example.spl", digest)
+        expect(left.is_ok()).to_equal(true)
+        expect(right.is_ok()).to_equal(true)
+        expect(left.unwrap()[4].content == right.unwrap()[4].content).to_equal(false)
+        expect(left.unwrap()[5].content == right.unwrap()[5].content).to_equal(false)
+
+    it "rejects invalid source witnesses instead of publishing semantic files":
+        val module = bootstrap_empty_hir_module()
+        expect(runtime_std_hir_sections_from_module_v1(module, "", sha256_text("x"))
+            .is_err()).to_equal(true)
+        expect(runtime_std_hir_sections_from_module_v1(module, "valid.spl", "bad")
+            .is_err()).to_equal(true)
+
+    it "emits real cold facets and proves an absent generated source":
+        var module = bootstrap_empty_hir_module()
+        module.name = "std.facets"
+        module.exports = ["run"]
+        val result = cold_hir_compiled_facets_from_module_v1(module,
+            "src/lib/std/facets.spl", sha256_text("facet source"))
+        expect(result.is_ok()).to_equal(true)
+        val facets = result.unwrap()
+        expect(facets.len()).to_equal(4)
+        expect(facets[0].member_name).to_equal("export.facet")
+        expect(facets[0].content.contains("run")).to_equal(true)
+        expect(facets[1].content).to_equal("")
+        expect(facets[2].content).to_equal("")
+        expect(facets[3].content).to_equal("")
+
+    it "rejects a source-producing domain block without a generator receipt":
+        var module = bootstrap_empty_hir_module()
+        module.domain_blocks = [HirDomainBlock(kind: "schema",
+            payload: "table User", context: "module", span: Span.empty())]
+        val result = cold_hir_compiled_facets_from_module_v1(module,
+            "src/lib/std/schema.spl", sha256_text("schema source"))
+        expect(result.is_err()).to_equal(true)
+
+    it "writes provider and initializer facets from a typed DI binding":
+        var module = bootstrap_empty_hir_module()
+        module.di_bindings = [HirDiBinding(predicate_text: "service=cache",
+            implementation: "CacheImpl", span: Span.empty())]
+        val result = cold_hir_compiled_facets_from_module_v1(module,
+            "src/lib/std/service.spl", sha256_text("service source"))
+        expect(result.is_ok()).to_equal(true)
+        val facets = result.unwrap()
+        expect(facets[1].content.contains("di-binding")).to_equal(true)
+        expect(facets[2].content.contains("CacheImpl")).to_equal(true)

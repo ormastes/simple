@@ -1,0 +1,396 @@
+# Bounded semantic section payloads extracted from one frozen typed HIR module.
+# The package publisher aggregates these source-scoped payloads in source order.
+
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_codec_support.{HirCodecWriter}
+use compiler.hir.generated.hir_codec.{hc_enc_hir_import, hc_enc_hir_function,
+    hc_enc_hir_class, hc_enc_hir_struct, hc_enc_hir_enum, hc_enc_hir_bitfield,
+    hc_enc_hir_trait, hc_enc_hir_impl, hc_enc_hir_const,
+    hc_enc_hir_static_assert, hc_enc_hir_domain_block, hc_enc_hir_di_binding,
+    hc_enc_hir_arch_rule, hc_enc_hir_aop_advice, hc_enc_hir_mock_decl,
+    hc_enc_hir_extend_enum}
+use compiler.driver.smf.package_image_v1.{PackageSectionKindV1}
+use compiler.common.cache.canonical_identity.{canonical_identity_sort_texts}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.encoding.utf8.{text_byte_len}
+
+val RUNTIME_STD_HIR_MAX_NODES_V1: i64 = 8192
+val RUNTIME_STD_HIR_MAX_ENCODED_BYTES_V1: i64 = 8 * 1024 * 1024
+val RUNTIME_STD_HIR_MAX_SECTION_BYTES_V1: i64 = 2 * 1024 * 1024
+
+struct RuntimeStdCompiledSectionPayloadV1:
+    kind: PackageSectionKindV1
+    member_name: text
+    content: text
+
+struct ColdHirCompiledFacetPayloadV1:
+    member_name: text
+    content: text
+
+class RuntimeStdHirEncodingBudgetV1:
+    var nodes: i64
+    var encoded_bytes: i64
+
+impl RuntimeStdHirEncodingBudgetV1:
+    static fn create() -> RuntimeStdHirEncodingBudgetV1:
+        RuntimeStdHirEncodingBudgetV1(nodes: 0, encoded_bytes: 0)
+
+    me digest(w: HirCodecWriter) -> Result<text, text>:
+        if not w.ok:
+            return Err("typed HIR node encoding refused: " + w.unsupported)
+        val encoded = w.finish()
+        if not w.ok:
+            return Err("typed HIR node encoding refused: " + w.unsupported)
+        val byte_count = text_byte_len(encoded)
+        if byte_count == 0 or self.nodes >= RUNTIME_STD_HIR_MAX_NODES_V1 or
+                byte_count > RUNTIME_STD_HIR_MAX_ENCODED_BYTES_V1 - self.encoded_bytes:
+            return Err("typed HIR semantic encoding exceeds bounds")
+        self.nodes = self.nodes + 1
+        self.encoded_bytes = self.encoded_bytes + byte_count
+        Ok(sha256_text("simple/runtime-std-hir-node/v1\n" + encoded))
+
+fn runtime_std_hir_writer_v1() -> HirCodecWriter:
+    HirCodecWriter.create_canonical_bounded(256 * 1024, 4 * 1024 * 1024, 1000000)
+
+fn runtime_std_hir_field_v1(value: text) -> text:
+    text_byte_len(value).to_text() + ":" + value
+
+fn runtime_std_hir_row_v1(kind: text, name: text, digest: text) -> text:
+    runtime_std_hir_field_v1(kind) + runtime_std_hir_field_v1(name) + digest
+
+fn runtime_std_hir_content_v1(member_name: text,
+        source_identity: text, source_digest: text, module_name: text,
+        rows: [text]) -> Result<text, text>:
+    val sorted = canonical_identity_sort_texts(rows)
+    val content = "simple/runtime-std-typed-hir-section/v1\n" +
+        runtime_std_hir_field_v1(source_identity) + "\n" + source_digest + "\n" +
+        runtime_std_hir_field_v1(module_name) + "\n" +
+        sorted.len().to_text() + "\n" + sorted.join("\n") + "\n"
+    if text_byte_len(content) > RUNTIME_STD_HIR_MAX_SECTION_BYTES_V1:
+        return Err("typed HIR semantic section exceeds bounds: " + member_name)
+    Ok(content)
+
+fn runtime_std_hir_section_v1(kind: PackageSectionKindV1, member_name: text,
+        source_identity: text, source_digest: text, module_name: text,
+        rows: [text]) -> Result<RuntimeStdCompiledSectionPayloadV1, text>:
+    match runtime_std_hir_content_v1(member_name, source_identity,
+            source_digest, module_name, rows):
+        case Err(reason): Err(reason)
+        case Ok(content): Ok(RuntimeStdCompiledSectionPayloadV1(kind: kind,
+            member_name: member_name, content: content))
+
+fn runtime_std_hir_digest_valid_v1(value: text) -> bool:
+    if value.len() != 64:
+        return false
+    for ch in value:
+        if not ((ch >= "0" and ch <= "9") or (ch >= "a" and ch <= "f")):
+            return false
+    true
+
+fn runtime_std_hir_input_valid_v1(value: text) -> bool:
+    value != "" and text_byte_len(value) <= 4096 and
+        not value.contains("\n") and not value.contains("\r")
+
+fn runtime_std_hir_span_v1(start: i64, end: i64, line: i64, col: i64) -> text:
+    start.to_text() + ":" + end.to_text() + ":" +
+        line.to_text() + ":" + col.to_text()
+
+fn runtime_std_hir_node_row_v1(budget: RuntimeStdHirEncodingBudgetV1,
+        writer: HirCodecWriter, kind: text, name: text) -> Result<text, text>:
+    match budget.digest(writer):
+        case Err(reason): Err(reason)
+        case Ok(digest): Ok(runtime_std_hir_row_v1(kind, name, digest))
+
+fn runtime_std_hir_emit_sections_v1(module: HirModule, source_identity: text,
+        source_digest: text, exports: [text], imports: [text], types: [text],
+        generics: [text], summaries: [text], initialization: [text],
+        debug: [text]) -> Result<[RuntimeStdCompiledSectionPayloadV1], text>:
+    var output: [RuntimeStdCompiledSectionPayloadV1] = []
+    match runtime_std_hir_section_v1(PackageSectionKindV1.debug, "debug.smf",
+            source_identity, source_digest, module.name, debug):
+        case Err(reason): return Err(reason)
+        case Ok(section): output.push(section)
+    match runtime_std_hir_section_v1(PackageSectionKindV1.exports, "exports.smf",
+            source_identity, source_digest, module.name, exports):
+        case Err(reason): return Err(reason)
+        case Ok(section): output.push(section)
+    match runtime_std_hir_section_v1(PackageSectionKindV1.generics, "generics.smf",
+            source_identity, source_digest, module.name, generics):
+        case Err(reason): return Err(reason)
+        case Ok(section): output.push(section)
+    match runtime_std_hir_section_v1(PackageSectionKindV1.hir_summaries,
+            "hir-summaries.smf", source_identity, source_digest,
+            module.name, summaries):
+        case Err(reason): return Err(reason)
+        case Ok(section): output.push(section)
+    match runtime_std_hir_section_v1(PackageSectionKindV1.imports, "imports.smf",
+            source_identity, source_digest, module.name, imports):
+        case Err(reason): return Err(reason)
+        case Ok(section): output.push(section)
+    match runtime_std_hir_section_v1(PackageSectionKindV1.initialization,
+            "initialization.smf", source_identity, source_digest,
+            module.name, initialization):
+        case Err(reason): return Err(reason)
+        case Ok(section): output.push(section)
+    match runtime_std_hir_section_v1(PackageSectionKindV1.types, "types.smf",
+            source_identity, source_digest, module.name, types):
+        case Err(reason): return Err(reason)
+        case Ok(section): output.push(section)
+    Ok(output)
+
+fn runtime_std_hir_sections_from_module_v1(module: HirModule,
+        source_identity: text, source_digest: text
+) -> Result<[RuntimeStdCompiledSectionPayloadV1], text>:
+    if not runtime_std_hir_input_valid_v1(source_identity) or
+            not runtime_std_hir_input_valid_v1(module.name) or
+            not runtime_std_hir_digest_valid_v1(source_digest):
+        return Err("invalid frozen typed HIR source identity")
+    val top_level_count = module.exports.len() + module.imports.len() +
+        module.types.len() + module.functions.len() + module.classes.len() +
+        module.structs.len() + module.enums.len() + module.bitfields.len() +
+        module.traits.len() + module.impls.len() + module.constants.len() +
+        module.static_asserts.len() + module.domain_blocks.len() +
+        module.di_bindings.len() + module.arch_rules.len() +
+        module.aop_advices.len() + module.mock_decls.len() +
+        module.extend_enums.len()
+    if top_level_count > RUNTIME_STD_HIR_MAX_NODES_V1:
+        return Err("typed HIR semantic node count exceeds bounds")
+    var budget = RuntimeStdHirEncodingBudgetV1.create()
+    var exports: [text] = []
+    var imports: [text] = []
+    var types: [text] = []
+    var generics: [text] = []
+    var summaries: [text] = []
+    var initialization: [text] = []
+    var debug: [text] = []
+
+    for name in module.exports:
+        if not runtime_std_hir_input_valid_v1(name):
+            return Err("invalid typed HIR export")
+        exports.push(runtime_std_hir_row_v1("export", name, sha256_text(name)))
+    for item in module.imports:
+        var w = runtime_std_hir_writer_v1()
+        hc_enc_hir_import(w, item)
+        match runtime_std_hir_node_row_v1(budget, w,
+                "import", item.module_path):
+            case Err(reason): return Err(reason)
+            case Ok(row): imports.push(row)
+    for name in module.types:
+        if not runtime_std_hir_input_valid_v1(name):
+            return Err("invalid typed HIR type name")
+        types.push(runtime_std_hir_row_v1("type-name", name, sha256_text(name)))
+
+    for item in module.functions.values():
+        var w = runtime_std_hir_writer_v1()
+        hc_enc_hir_function(w, item)
+        match budget.digest(w):
+            case Err(reason): return Err(reason)
+            case Ok(digest):
+                summaries.push(runtime_std_hir_row_v1("function", item.name, digest))
+                if item.is_public:
+                    exports.push(runtime_std_hir_row_v1("function", item.name, digest))
+                if item.is_generic_template or item.type_params.len() > 0:
+                    generics.push(runtime_std_hir_row_v1("function", item.name, digest))
+                debug.push(runtime_std_hir_row_v1("function", item.name,
+                    runtime_std_hir_span_v1(item.span.start, item.span.end,
+                        item.span.line, item.span.col)))
+    for item in module.classes.values():
+        var w = runtime_std_hir_writer_v1()
+        hc_enc_hir_class(w, item)
+        match budget.digest(w):
+            case Err(reason): return Err(reason)
+            case Ok(digest):
+                types.push(runtime_std_hir_row_v1("class", item.name, digest))
+                if item.is_public:
+                    exports.push(runtime_std_hir_row_v1("class", item.name, digest))
+                if item.is_generic_template or item.type_params.len() > 0:
+                    generics.push(runtime_std_hir_row_v1("class", item.name, digest))
+                debug.push(runtime_std_hir_row_v1("class", item.name,
+                    runtime_std_hir_span_v1(item.span.start, item.span.end,
+                        item.span.line, item.span.col)))
+    for item in module.structs.values():
+        var w = runtime_std_hir_writer_v1()
+        hc_enc_hir_struct(w, item)
+        match budget.digest(w):
+            case Err(reason): return Err(reason)
+            case Ok(digest):
+                types.push(runtime_std_hir_row_v1("struct", item.name, digest))
+                if item.is_public:
+                    exports.push(runtime_std_hir_row_v1("struct", item.name, digest))
+                if item.is_generic_template or item.type_params.len() > 0:
+                    generics.push(runtime_std_hir_row_v1("struct", item.name, digest))
+                debug.push(runtime_std_hir_row_v1("struct", item.name,
+                    runtime_std_hir_span_v1(item.span.start, item.span.end,
+                        item.span.line, item.span.col)))
+    for item in module.enums.values():
+        var w = runtime_std_hir_writer_v1()
+        hc_enc_hir_enum(w, item)
+        match budget.digest(w):
+            case Err(reason): return Err(reason)
+            case Ok(digest):
+                types.push(runtime_std_hir_row_v1("enum", item.name, digest))
+                if item.is_public:
+                    exports.push(runtime_std_hir_row_v1("enum", item.name, digest))
+                if item.is_generic_template or item.type_params.len() > 0:
+                    generics.push(runtime_std_hir_row_v1("enum", item.name, digest))
+                debug.push(runtime_std_hir_row_v1("enum", item.name,
+                    runtime_std_hir_span_v1(item.span.start, item.span.end,
+                        item.span.line, item.span.col)))
+    for item in module.bitfields.values():
+        var w = runtime_std_hir_writer_v1()
+        hc_enc_hir_bitfield(w, item)
+        match runtime_std_hir_node_row_v1(budget, w,
+                "bitfield", item.name):
+            case Err(reason): return Err(reason)
+            case Ok(row):
+                types.push(row)
+                if item.is_public:
+                    exports.push(row)
+    for item in module.traits.values():
+        var w = runtime_std_hir_writer_v1()
+        hc_enc_hir_trait(w, item)
+        match budget.digest(w):
+            case Err(reason): return Err(reason)
+            case Ok(digest):
+                types.push(runtime_std_hir_row_v1("trait", item.name, digest))
+                if item.is_public:
+                    exports.push(runtime_std_hir_row_v1("trait", item.name, digest))
+                if item.is_generic_template or item.type_params.len() > 0:
+                    generics.push(runtime_std_hir_row_v1("trait", item.name, digest))
+                debug.push(runtime_std_hir_row_v1("trait", item.name,
+                    runtime_std_hir_span_v1(item.span.start, item.span.end,
+                        item.span.line, item.span.col)))
+    for item in module.impls:
+        var w = runtime_std_hir_writer_v1()
+        hc_enc_hir_impl(w, item)
+        match runtime_std_hir_node_row_v1(budget, w,
+                "impl", item.span.start.to_text()):
+            case Err(reason): return Err(reason)
+            case Ok(row):
+                summaries.push(row)
+                if item.type_params.len() > 0:
+                    generics.push(row)
+    for item in module.constants.values():
+        var w = runtime_std_hir_writer_v1()
+        hc_enc_hir_const(w, item)
+        match budget.digest(w):
+            case Err(reason): return Err(reason)
+            case Ok(digest):
+                initialization.push(runtime_std_hir_row_v1("constant", item.name, digest))
+                if item.is_public:
+                    exports.push(runtime_std_hir_row_v1("constant", item.name, digest))
+                debug.push(runtime_std_hir_row_v1("constant", item.name,
+                    runtime_std_hir_span_v1(item.span.start, item.span.end,
+                        item.span.line, item.span.col)))
+    for item in module.static_asserts:
+        var w = runtime_std_hir_writer_v1()
+        hc_enc_hir_static_assert(w, item)
+        match runtime_std_hir_node_row_v1(budget, w,
+                "static-assert", item.span.start.to_text()):
+            case Err(reason): return Err(reason)
+            case Ok(row): initialization.push(row)
+    for item in module.domain_blocks:
+        var w = runtime_std_hir_writer_v1()
+        hc_enc_hir_domain_block(w, item)
+        match runtime_std_hir_node_row_v1(budget, w,
+                "domain-block", item.kind):
+            case Err(reason): return Err(reason)
+            case Ok(row): initialization.push(row)
+    for item in module.di_bindings:
+        var w = runtime_std_hir_writer_v1()
+        hc_enc_hir_di_binding(w, item)
+        match runtime_std_hir_node_row_v1(budget, w,
+                "di-binding", item.implementation):
+            case Err(reason): return Err(reason)
+            case Ok(row): initialization.push(row)
+    for item in module.arch_rules:
+        var w = runtime_std_hir_writer_v1()
+        hc_enc_hir_arch_rule(w, item)
+        match runtime_std_hir_node_row_v1(budget, w,
+                "arch-rule", item.kind):
+            case Err(reason): return Err(reason)
+            case Ok(row): initialization.push(row)
+    for item in module.aop_advices:
+        var w = runtime_std_hir_writer_v1()
+        hc_enc_hir_aop_advice(w, item)
+        match runtime_std_hir_node_row_v1(budget, w,
+                "aop-advice", item.advice_function):
+            case Err(reason): return Err(reason)
+            case Ok(row): initialization.push(row)
+    for item in module.mock_decls:
+        var w = runtime_std_hir_writer_v1()
+        hc_enc_hir_mock_decl(w, item)
+        match runtime_std_hir_node_row_v1(budget, w,
+                "mock", item.name):
+            case Err(reason): return Err(reason)
+            case Ok(row): summaries.push(row)
+    for item in module.extend_enums:
+        var w = runtime_std_hir_writer_v1()
+        hc_enc_hir_extend_enum(w, item)
+        match runtime_std_hir_node_row_v1(budget, w,
+                "extend-enum", item.target):
+            case Err(reason): return Err(reason)
+            case Ok(row): types.push(row)
+    debug.push(runtime_std_hir_row_v1("module-path", module.path,
+        sha256_text(module.path)))
+    runtime_std_hir_emit_sections_v1(module, source_identity, source_digest,
+        exports, imports, types, generics, summaries, initialization, debug)
+
+# The cold package bridge writes these exact contents to four distinct files and
+# receipts their path, SHA-256 and UTF-8 byte count. A zero-row facet is an
+# actual empty file; it is never a claim that a producer ran.
+fn cold_hir_compiled_facets_from_module_v1(module: HirModule,
+        source_identity: text, source_digest: text
+) -> Result<[ColdHirCompiledFacetPayloadV1], text>:
+    val semantic = runtime_std_hir_sections_from_module_v1(
+        module, source_identity, source_digest)
+    if semantic.is_err():
+        return Err(semantic.unwrap_err())
+    val sections = semantic.unwrap()
+    var export_count = module.exports.len()
+    for item in module.functions.values():
+        if item.is_public: export_count = export_count + 1
+    for item in module.classes.values():
+        if item.is_public: export_count = export_count + 1
+    for item in module.structs.values():
+        if item.is_public: export_count = export_count + 1
+    for item in module.enums.values():
+        if item.is_public: export_count = export_count + 1
+    for item in module.bitfields.values():
+        if item.is_public: export_count = export_count + 1
+    for item in module.traits.values():
+        if item.is_public: export_count = export_count + 1
+    for item in module.constants.values():
+        if item.is_public: export_count = export_count + 1
+    val initializer_count = module.constants.len() + module.static_asserts.len() +
+        module.domain_blocks.len() + module.di_bindings.len() +
+        module.arch_rules.len() + module.aop_advices.len()
+    var provider_rows: [text] = []
+    var budget = RuntimeStdHirEncodingBudgetV1.create()
+    for item in module.di_bindings:
+        var w = runtime_std_hir_writer_v1()
+        hc_enc_hir_di_binding(w, item)
+        match runtime_std_hir_node_row_v1(budget, w,
+                "di-binding", item.implementation):
+            case Err(reason): return Err(reason)
+            case Ok(row): provider_rows.push(row)
+    # Raw domain blocks can feed a generator. HIR alone has no emitted source
+    # bytes or generator receipt, so an empty generated-source file would lie.
+    if module.domain_blocks.len() > 0:
+        return Err("generated source requires a real domain producer receipt")
+    var provider_content = ""
+    if provider_rows.len() > 0:
+        match runtime_std_hir_content_v1("provider.facet", source_identity,
+                source_digest, module.name, provider_rows):
+            case Err(reason): return Err(reason)
+            case Ok(content): provider_content = content
+    Ok([
+        ColdHirCompiledFacetPayloadV1(member_name: "export.facet",
+            content: if export_count == 0: "" else: sections[1].content),
+        ColdHirCompiledFacetPayloadV1(member_name: "initializer.facet",
+            content: if initializer_count == 0: "" else: sections[5].content),
+        ColdHirCompiledFacetPayloadV1(member_name: "provider.facet",
+            content: provider_content),
+        ColdHirCompiledFacetPayloadV1(member_name: "generated-source.facet",
+            content: "")
+    ])
