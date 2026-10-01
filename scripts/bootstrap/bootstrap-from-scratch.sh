@@ -4586,7 +4586,35 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     echo "error: tracked post-Stage-2 manager handoff is unavailable" >&2
     exit 1
   fi
-  managed_required_environment='SIMPLE_BOOTSTRAP_MANAGED_SCV_RECEIPT SIMPLE_BOOTSTRAP_MANAGED_LLVM_VARIANT_RECEIPT SIMPLE_BOOTSTRAP_MANAGED_CRANELIFT_VARIANT_RECEIPT SIMPLE_BOOTSTRAP_MANAGED_RUNTIME_STD_AUTHORITY SIMPLE_BOOTSTRAP_MANAGED_INDEX_READ_ROOT SIMPLE_BOOTSTRAP_MANAGED_SOURCE_ROOT SIMPLE_BOOTSTRAP_MANAGED_SOURCE_INVENTORY SIMPLE_BOOTSTRAP_MANAGED_MODULE_INVENTORY SIMPLE_BOOTSTRAP_MANAGED_TEMPLATE SIMPLE_BOOTSTRAP_MANAGED_MANIFEST_PROGRAM SIMPLE_BOOTSTRAP_MANAGED_BUILDER_PROGRAM SIMPLE_BOOTSTRAP_MANAGED_GROUP_PROGRAM SIMPLE_BOOTSTRAP_MANAGED_GROUP_WORKER SIMPLE_BOOTSTRAP_MANAGED_GROUP_BROKER SIMPLE_BOOTSTRAP_MANAGED_MEMORY_BYTES SIMPLE_BOOTSTRAP_MANAGED_RESERVE_BYTES SIMPLE_BOOTSTRAP_MANAGED_GROUP_SIZE SIMPLE_BOOTSTRAP_MANAGED_MAX_ATTEMPTS SIMPLE_BOOTSTRAP_MANAGED_POLL_MS SIMPLE_BOOTSTRAP_MANAGED_LIFETIME_MS SIMPLE_BOOTSTRAP_MANAGED_ESTIMATED_GROUP_DISK_BYTES SIMPLE_BOOTSTRAP_MANAGED_MINIMUM_FREE_DISK_BYTES'
+  managed_required_environment='SIMPLE_BOOTSTRAP_MANAGED_SOURCE_ROOT SIMPLE_BOOTSTRAP_MANAGED_MEMORY_BYTES SIMPLE_BOOTSTRAP_MANAGED_RESERVE_BYTES'
+  for managed_name in ${managed_required_environment}; do
+    eval "managed_value=\${${managed_name}:-}"
+    if [ -z "${managed_value}" ]; then
+      echo "error: post-Stage-2 manager handoff blocked: ${managed_name} is missing" >&2
+      exit 1
+    fi
+  done
+  managed_image_preparer="${repo_root}/scripts/bootstrap/prepare-phase2-build-manager.shs"
+  [ -f "${managed_image_preparer}" ] || {
+    echo "error: tracked Phase 2 manager image builder unavailable" >&2; exit 1;
+  }
+  managed_image_receipt="${managed_phase_root}/manager-images/manager-images.env"
+  sh "${managed_image_preparer}" \
+    "--producer-receipt=${stage2_admission_receipt_absolute}" \
+    "--source-root=${SIMPLE_BOOTSTRAP_MANAGED_SOURCE_ROOT}" \
+    "--output-root=${managed_phase_root}/manager-images" \
+    "--target=${PLATFORM}" \
+    "--runtime-bundle=${SIMPLE_BOOTSTRAP_MANAGED_RUNTIME_BUNDLE:-core-c-bootstrap}" \
+    "--memory-bytes=${SIMPLE_BOOTSTRAP_MANAGED_MEMORY_BYTES}" \
+    "--reserve-bytes=${SIMPLE_BOOTSTRAP_MANAGED_RESERVE_BYTES}" \
+    || { echo "error: Phase 2 manager image admission blocked; logs retained" >&2; exit 1; }
+  managed_template=$(bootstrap_stage3_manifest_value template "${managed_image_receipt}") || exit 1
+  managed_manifest_program=$(bootstrap_stage3_manifest_value manifest_program "${managed_image_receipt}") || exit 1
+  managed_builder_program=$(bootstrap_stage3_manifest_value builder_program "${managed_image_receipt}") || exit 1
+  managed_group_program=$(bootstrap_stage3_manifest_value group_program "${managed_image_receipt}") || exit 1
+  managed_group_worker=$(bootstrap_stage3_manifest_value group_worker "${managed_image_receipt}") || exit 1
+  managed_group_broker=$(bootstrap_stage3_manifest_value group_broker "${managed_image_receipt}") || exit 1
+  managed_required_environment='SIMPLE_BOOTSTRAP_MANAGED_SCV_RECEIPT SIMPLE_BOOTSTRAP_MANAGED_LLVM_VARIANT_RECEIPT SIMPLE_BOOTSTRAP_MANAGED_CRANELIFT_VARIANT_RECEIPT SIMPLE_BOOTSTRAP_MANAGED_RUNTIME_STD_AUTHORITY SIMPLE_BOOTSTRAP_MANAGED_INDEX_READ_ROOT SIMPLE_BOOTSTRAP_MANAGED_SOURCE_INVENTORY SIMPLE_BOOTSTRAP_MANAGED_MODULE_INVENTORY SIMPLE_BOOTSTRAP_MANAGED_GROUP_SIZE SIMPLE_BOOTSTRAP_MANAGED_MAX_ATTEMPTS SIMPLE_BOOTSTRAP_MANAGED_POLL_MS SIMPLE_BOOTSTRAP_MANAGED_LIFETIME_MS SIMPLE_BOOTSTRAP_MANAGED_ESTIMATED_GROUP_DISK_BYTES SIMPLE_BOOTSTRAP_MANAGED_MINIMUM_FREE_DISK_BYTES'
   for managed_name in ${managed_required_environment}; do
     eval "managed_value=\${${managed_name}:-}"
     if [ -z "${managed_value}" ]; then
@@ -4605,12 +4633,12 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     "--source-inventory=${SIMPLE_BOOTSTRAP_MANAGED_SOURCE_INVENTORY}" \
     "--module-inventory=${SIMPLE_BOOTSTRAP_MANAGED_MODULE_INVENTORY}" \
     "--root=${managed_phase_root}" \
-    "--template=${SIMPLE_BOOTSTRAP_MANAGED_TEMPLATE}" \
-    "--manifest-program=${SIMPLE_BOOTSTRAP_MANAGED_MANIFEST_PROGRAM}" \
-    "--builder-program=${SIMPLE_BOOTSTRAP_MANAGED_BUILDER_PROGRAM}" \
-    "--group-program=${SIMPLE_BOOTSTRAP_MANAGED_GROUP_PROGRAM}" \
-    "--group-worker=${SIMPLE_BOOTSTRAP_MANAGED_GROUP_WORKER}" \
-    "--group-broker=${SIMPLE_BOOTSTRAP_MANAGED_GROUP_BROKER}" \
+    "--template=${managed_template}" \
+    "--manifest-program=${managed_manifest_program}" \
+    "--builder-program=${managed_builder_program}" \
+    "--group-program=${managed_group_program}" \
+    "--group-worker=${managed_group_worker}" \
+    "--group-broker=${managed_group_broker}" \
     "--threads=${build_threads}" \
     "--memory-bytes=${SIMPLE_BOOTSTRAP_MANAGED_MEMORY_BYTES}" \
     "--reserve-bytes=${SIMPLE_BOOTSTRAP_MANAGED_RESERVE_BYTES}" \
