@@ -391,6 +391,7 @@ validate_bootstrap_receipt=0
 # invented here; the operator types it, exactly as the planner policy requires.
 produce_stage3_receipt_reason=''
 produce_managed_receipt_reason=''
+produce_managed_receipt_requested=0
 stop_after_stage3=0
 stage3_current_acceptance_status=unverified
 case "${SIMPLE_NO_STUB_FALLBACK:-0}" in
@@ -416,6 +417,7 @@ while [ "$#" -gt 0 ]; do
       produce_stage3_receipt_reason=${1#*=}
       ;;
     --produce-managed-receipt=*)
+      produce_managed_receipt_requested=1
       produce_managed_receipt_reason=${1#*=}
       ;;
     --stop-after-stage3)
@@ -616,6 +618,15 @@ if [ -n "${produce_stage3_receipt_reason}" ] &&
      { [ -n "${bootstrap_receipt_path}" ] && [ -f "${bootstrap_receipt_path}" ]; }; }; then
   echo "bootstrap-policy-error: produce-stage3-receipt-requires-stage2-trust-root-lane" >&2
   exit 64
+fi
+if [ "${produce_managed_receipt_requested}" -eq 1 ]; then
+  [ -n "${produce_managed_receipt_reason}" ] &&
+    { [ "${stop_after_stage2}" -eq 1 ] ||
+      { [ "${full_bootstrap}" -eq 1 ] && [ -n "${bootstrap_receipt_path}" ] &&
+        [ -f "${bootstrap_receipt_path}" ]; }; } || {
+    echo "bootstrap-policy-error: managed planner production requires a typed reason and Stage 2 trust-root stop or receipt-authorized full bootstrap" >&2
+    exit 64
+  }
 fi
 bootstrap_stage2_trust_root=0
 bootstrap_stage2_parent_override=
