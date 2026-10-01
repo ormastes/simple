@@ -4,7 +4,7 @@
 
 use compiler.driver.driver_compiler_type.{CompilerDriver}
 use compiler.driver.driver_aot_native_output.{
-    driver_runtime_std_compile_native_action_v1
+    driver_runtime_std_compile_native_action_v2
 }
 use compiler.driver.driver_build.native_full_inventory_sources.{
     NativeFullInventorySourcesV1
@@ -57,13 +57,16 @@ use compiler.driver.smf.runtime_std_package_set.{
     RUNTIME_PACKAGE_IDENTITY_V1, STD_PACKAGE_IDENTITY_V1
 }
 use compiler.driver.smf.runtime_std_native_sections_v1.{
-    runtime_std_native_sections_emit_v1
+    runtime_std_native_sections_emit_v2
+}
+use compiler.driver.smf.runtime_std_native_action_budget_v2.{
+    RuntimeStdNativeActionBudgetV2,
+    runtime_std_native_action_abi_digest_v2
 }
 use compiler.driver.smf.runtime_std_compiled_publication.{
     RuntimeStdCompiledSectionReceiptV1,
     RuntimeStdCompiledPackageReceiptV1
 }
-use std.common.crypto.sha256.{sha256_text}
 use std.common.build_manager.contracts.{builder_digest_valid_v1}
 use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded}
 use std.scv.compile_snapshot.{ScvCompileSnapshotV1}
@@ -72,17 +75,6 @@ use std.scv.compile_source_inventory_core.{
 }
 
 val COLD_FULL_INDEX_MAX_MANIFEST_BYTES_V1: i64 = 65536
-
-fn _cold_full_index_abi_source_v1(
-    inventory: CompileSourceInventoryV1,
-    indexed: Dict<text, i64>, identity: text
-) -> Result<text, text>:
-    if not indexed.has(identity):
-        return Err("full-index-action-abi-source-missing:{identity}")
-    val digest = inventory.entries[indexed[identity]].content_digest
-    if not builder_digest_valid_v1(digest):
-        return Err("full-index-action-abi-source-invalid:{identity}")
-    Ok(digest)
 
 fn _cold_full_index_export_digest_v1(
     sections: [RuntimeStdCompiledSectionReceiptV1]
@@ -129,7 +121,8 @@ fn cold_full_index_publish_from_driver_v1(
     cache_root: text,
     artifact_root: text,
     producer_digest: text,
-    variant: ConfigVariantKeyV1
+    variant: ConfigVariantKeyV1,
+    budget: RuntimeStdNativeActionBudgetV2
 ) -> Result<ColdHirCompilerPublishPinsV1, text>:
     val ctx = driver.ctx
     val variant_digest = config_variant_digest_v1(variant)
@@ -147,7 +140,9 @@ fn cold_full_index_publish_from_driver_v1(
             (variant.backend != "llvm" and
                 variant.backend != "cranelift") or
             ctx.native_target != variant.target_triple or
-            variant_digest == "" or not builder_digest_valid_v1(producer_digest):
+            variant_digest == "" or not builder_digest_valid_v1(producer_digest) or
+            not builder_digest_valid_v1(budget.manager_request_digest) or
+            budget.enforced_process_limit_bytes < 1:
         return Err("full-index-driver-authority-invalid")
     var indexed: Dict<text, i64> = {}
     var record_index = 0
@@ -247,12 +242,10 @@ fn cold_full_index_publish_from_driver_v1(
             runtime_std_package_hir_sections_write_v1(
                 artifact_root, policy.membership, sources,
                 package_identity, hir_members)?)
-    val action_schema = _cold_full_index_abi_source_v1(inventory, indexed,
-        "src/compiler/80.driver/action_graph/build_action_v1.spl")?
-    val package_schema = _cold_full_index_abi_source_v1(inventory, indexed,
-        "src/compiler/80.driver/smf/runtime_std_package_set.spl")?
-    val action_abi_digest = sha256_text(
-        "simple-full-index-action-abi-v1|{action_schema}|{package_schema}")
+    val action_abi_digest = runtime_std_native_action_abi_digest_v2(
+        producer_digest)
+    if not builder_digest_valid_v1(action_abi_digest):
+        return Err("full-index-native-action-abi-unavailable")
     val runtime_abi_digest = _cold_full_index_export_digest_v1(
         package_sections[0])?
     val std_abi_digest = _cold_full_index_export_digest_v1(
@@ -264,10 +257,10 @@ fn cold_full_index_publish_from_driver_v1(
     var package_index = 0
     for package_identity in [RUNTIME_PACKAGE_IDENTITY_V1,
             STD_PACKAGE_IDENTITY_V1]:
-        val action = driver_runtime_std_compile_native_action_v1(
+        val action = driver_runtime_std_compile_native_action_v2(
             ctx, policy, sources, package_identity, index_digest,
             artifact_root, cache_root, "generic", variant.target_triple,
-            runtime_authority)?
+            runtime_authority, budget)?
         val selected = runtime_std_package_members_v1(
             policy.membership, sources, package_identity)?
         var identities: [text] = []
@@ -278,11 +271,12 @@ fn cold_full_index_publish_from_driver_v1(
         val dependencies = _cold_full_index_dependency_digests_v1(
             generation, package_identity)?
         package_receipts = package_receipts.push(
-            runtime_std_native_sections_emit_v1(artifact_root, cache_root,
+            runtime_std_native_sections_emit_v2(artifact_root, cache_root,
                 runtime_authority, package_identity,
                 sources.source_inventory_digest, identities, digests,
                 action.members, package_sections[package_index], dependencies,
-                action.action_result, action.observed_output_digest)?)
+                action.action_result, action.observed_output_digest,
+                budget)?)
         package_index = package_index + 1
     cold_hir_compiler_publish_full_v2(ColdHirCompilerPublishInputV1(
         cache_root, artifact_root, index_digest, inventory, sources,

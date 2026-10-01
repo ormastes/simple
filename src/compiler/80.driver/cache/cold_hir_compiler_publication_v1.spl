@@ -53,9 +53,12 @@ use compiler.driver.smf.runtime_std_compiled_publication.{
     runtime_std_compiled_publish_v1
 }
 use compiler.driver.smf.runtime_std_package_set.{
-    RuntimeStdPackageAuthorityV1,
+    RuntimeStdPackageAuthorityV1, RuntimeStdPackageSetV1,
     RUNTIME_PACKAGE_IDENTITY_V1, STD_PACKAGE_IDENTITY_V1,
-    runtime_std_load_baseline_v1
+    runtime_std_load_baseline_v1, runtime_std_load_baseline_v2
+}
+use compiler.driver.smf.runtime_std_native_action_budget_v2.{
+    RuntimeStdNativeActionBudgetV2
 }
 use std.common.crypto.sha256.{sha256_text}
 use std.scv.compile_snapshot.{ScvCompileSnapshotV1}
@@ -262,6 +265,25 @@ fn _cold_compiler_archive_receipts_v1(
     if digest.is_err(): return Err(digest.unwrap_err())
     Ok((rows.len(), digest.unwrap()))
 
+fn _cold_compiler_load_published_baseline_v1(
+    input: ColdHirCompilerPublishInputV1
+) -> Result<RuntimeStdPackageSetV1, text>:
+    val runtime_budget = input.runtime_receipt.native_budget
+    val std_budget = input.std_receipt.native_budget
+    if runtime_budget == nil and std_budget == nil:
+        return Ok(runtime_std_load_baseline_v1(
+            input.cache_root, input.runtime_std_authority))
+    if runtime_budget == nil or std_budget == nil:
+        return Err("cold-compiler-runtime-std-budget-mode-differs")
+    val budget: RuntimeStdNativeActionBudgetV2 = runtime_budget!
+    val standard: RuntimeStdNativeActionBudgetV2 = std_budget!
+    if budget.manager_request_digest != standard.manager_request_digest or
+            budget.enforced_process_limit_bytes !=
+                standard.enforced_process_limit_bytes:
+        return Err("cold-compiler-runtime-std-budget-differs")
+    Ok(runtime_std_load_baseline_v2(
+        input.cache_root, input.runtime_std_authority, budget))
+
 fn cold_hir_compiler_publish_full_v2(
     input: ColdHirCompilerPublishInputV1
 ) -> Result<ColdHirCompilerPublishPinsV1, text>:
@@ -276,8 +298,7 @@ fn cold_hir_compiler_publish_full_v2(
         input.inventory, input.authority.inventory_digest,
         input.runtime_receipt, input.std_receipt)
     if baseline.is_err(): return Err(baseline.unwrap_err())
-    val baseline_readback = runtime_std_load_baseline_v1(
-        input.cache_root, input.runtime_std_authority)
+    val baseline_readback = _cold_compiler_load_published_baseline_v1(input)?
     if not baseline_readback.valid:
         return Err("cold-compiler-runtime-std-readback-invalid")
     val generation_result = cold_hir_package_publish_from_driver_v1(
@@ -294,8 +315,7 @@ fn cold_hir_compiler_publish_full_v2(
     val current = package_module_index_read_current_v1(input.cache_root)
     if not current.valid or current.digest != index_digest:
         return Err("cold-compiler-index-readback-invalid")
-    val baseline_after_graph = runtime_std_load_baseline_v1(
-        input.cache_root, input.runtime_std_authority)
+    val baseline_after_graph = _cold_compiler_load_published_baseline_v1(input)?
     if not baseline_after_graph.valid or
             baseline_after_graph.runtime.receipt == nil or
             baseline_after_graph.std.receipt == nil:
