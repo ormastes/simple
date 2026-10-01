@@ -316,6 +316,21 @@ fn native_group_normalize_crashed_sccs_v1(members: [NativeGroupMemberV1],
                 completed.output_kind, "", "", false, completed.diagnostic_digest)
     modules
 
+fn native_group_demote_unqualified_smf_v1(members: [NativeGroupMemberV1],
+        rows: [NativeModuleResultV1], code: i64,
+        timed_out: bool) -> [NativeModuleResultV1]:
+    var demoted: [NativeModuleResultV1] = []
+    for row in rows:
+        if row.status == "OK" and row.output_kind == "SMF" and
+                not row.smf_qualified:
+            demoted = demoted.push(NativeModuleResultV1(row.module_id,
+                if timed_out: "TIMEOUT" else: "CRASHED", code,
+                "SMF", "", "", false,
+                sha256_text("worker-unqualified-smf|" + row.module_id)))
+        else:
+            demoted = demoted.push(row)
+    native_group_normalize_crashed_sccs_v1(members, demoted, code)
+
 fn native_group_recover_result_v1(run: NativeGroupRunV1, manifest: NativeGroupManifestV1,
         code: i64, peak: i64, timed_out: bool) -> Result<NativeGroupResultV1, text>:
     val root = native_group_attempt_root_v1(run, manifest)
@@ -324,6 +339,14 @@ fn native_group_recover_result_v1(run: NativeGroupRunV1, manifest: NativeGroupMa
         val payload = file_read_regular_no_follow_bounded(root + "/result.sdn", 16777216)?
         var result = native_group_result_decode_v1(payload)?
         result.peak_memory_bytes = peak
+        # The compiler writes an unqualified SMF result before the worker
+        # calls the target loader. If that worker tree dies, those private
+        # outputs are crash evidence, not completed modules. Demote them and
+        # retry their complete SCC instead of treating a stale compiler
+        # result as a terminal authority failure.
+        if code != 0 or timed_out:
+            result.modules = native_group_demote_unqualified_smf_v1(
+                manifest.members, result.modules, code, timed_out)
         val invalid = native_group_files_valid_v1(run, manifest, result)
         if invalid != "": return Err(invalid)
         return Ok(result)
@@ -759,3 +782,4 @@ fn native_group_verify_v1(input: NativeGroupRunV1) -> NativeGroupedRunOutcomeV1:
 export NativeGroupedRunOutcomeV1, NativeGroupedCapacityV1
 export native_group_run_v1, native_group_verify_v1, native_group_completion_json_v1
 export native_group_normalize_crashed_sccs_v1
+export native_group_demote_unqualified_smf_v1
