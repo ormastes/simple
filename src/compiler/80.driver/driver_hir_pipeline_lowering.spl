@@ -147,11 +147,14 @@ impl CompilerDriver:
         self.ctx.cold_hir_native_capsule_identities = {}
         self.ctx.cold_hir_objectless_modules = {}
         self.ctx.cold_hir_native_object_artifacts = []
+        val full_inventory_cold =
+            (sosix_env_get_nullable("SIMPLE_PACKAGE_INDEX_FULL_INVENTORY") ?? "") == "1"
         val compatibility_markers_present =
             (sosix_env_get_nullable("SIMPLE_PACKAGE_INDEX_PRODUCER_DIGEST") ?? "") != "" and
             (sosix_env_get_nullable("SIMPLE_PACKAGE_INDEX_ROOT_GENERATION") ?? "") != "" and
             (sosix_env_get_nullable("SIMPLE_PACKAGE_INDEX_VARIANT_DIGEST") ?? "") != ""
-        val cold_init = (sosix_env_get_nullable("SIMPLE_PACKAGE_INDEX_COLD_INIT") ?? "") == "1" or
+        val cold_init = full_inventory_cold or
+            (sosix_env_get_nullable("SIMPLE_PACKAGE_INDEX_COLD_INIT") ?? "") == "1" or
             not compatibility_markers_present
         if not cold_init:
             return true
@@ -160,6 +163,9 @@ impl CompilerDriver:
             snapshot_manifest_digest: sosix_env_get_nullable("SIMPLE_SCV_INVENTORY_DIGEST") ?? "",
             source_inventory_digest: sosix_env_get_nullable("SIMPLE_SCV_SOURCE_INVENTORY_DIGEST") ?? "")
         if source_root == "" and inventory_binding.snapshot_manifest_digest == "" and inventory_binding.source_inventory_digest == "":
+            if full_inventory_cold:
+                self.ctx.add_error("full inventory cold HIR authority missing")
+                return false
             return true
         if source_root == "" or inventory_binding.snapshot_manifest_digest == "" or inventory_binding.source_inventory_digest == "":
             self.ctx.add_error("cold HIR receipt authority incomplete")
@@ -213,6 +219,18 @@ impl CompilerDriver:
                         self.ctx.add_error("cold HIR receipt capture failed: {reason}")
                         return false
                     case Ok(receipts):
+                        if full_inventory_cold:
+                            val expected_count = (
+                                sosix_env_get_nullable(
+                                    "SIMPLE_PACKAGE_INDEX_EXPECTED_SOURCE_COUNT") ??
+                                "").to_i64() ?? -1
+                            if expected_count < 1 or
+                                    self.ctx.source_paths_owner.len() !=
+                                        expected_count or
+                                    receipts.len() != expected_count:
+                                self.ctx.add_error(
+                                    "full inventory cold HIR receipt count mismatch: expected={expected_count} sources={self.ctx.source_paths_owner.len()} receipts={receipts.len()}")
+                                return false
                         self.ctx.cold_hir_typed_receipts = receipts
                         log_phase("phase3:cold-hir-receipts:done count={receipts.len()}")
                         return true
