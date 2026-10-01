@@ -3343,6 +3343,15 @@ fn _runtime_std_compile_native_members_v2(
     var cfg_digests: [text] = []
     var code_selected: [RuntimeStdPackageMemberV1] = []
     var prior_source = ""
+    var receipt_indices: Dict<text, i64> = {}
+    var receipt_index = 0
+    while receipt_index < ctx.cold_hir_typed_receipts.len():
+        val source_identity =
+            ctx.cold_hir_typed_receipts[receipt_index].seed.source_identity
+        if source_identity == "" or receipt_indices.has(source_identity):
+            return Err("runtime/std native v2 duplicate SCV source receipt")
+        receipt_indices[source_identity] = receipt_index
+        receipt_index = receipt_index + 1
     for member in selected:
         if (prior_source != "" and
                 compile_source_inventory_identity_cmp_v1(
@@ -3353,19 +3362,14 @@ fn _runtime_std_compile_native_members_v2(
                 not ctx.runtime_std_cfg_decisions.has(member.source_identity):
             return Err("runtime/std native v2 selected source lacks live evidence")
         prior_source = member.source_identity
-        var matched = -1
-        var receipt_index = 0
-        while receipt_index < ctx.cold_hir_typed_receipts.len():
-            val seed = ctx.cold_hir_typed_receipts[receipt_index].seed
-            if seed.source_identity == member.source_identity:
-                if matched >= 0 or seed.source_digest != member.source_digest or
-                        seed.inventory_digest !=
-                            ctx.runtime_std_full_inventory_selection!.source_inventory_digest:
-                    return Err("runtime/std native v2 source differs from SCV")
-                matched = receipt_index
-            receipt_index = receipt_index + 1
-        if matched < 0:
+        if not receipt_indices.has(member.source_identity):
             return Err("runtime/std native v2 source absent from SCV")
+        val matched = receipt_indices[member.source_identity]
+        val seed = ctx.cold_hir_typed_receipts[matched].seed
+        if seed.source_digest != member.source_digest or
+                seed.inventory_digest !=
+                    ctx.runtime_std_full_inventory_selection!.source_inventory_digest:
+            return Err("runtime/std native v2 source differs from SCV")
         val name = ctx.cold_hir_typed_receipts[matched].seed.module_identity
         if name == "" or name.contains("/") or name.contains("\\") or
                 name.contains("..") or names.contains(name) or
@@ -3488,9 +3492,8 @@ fn _runtime_std_compile_native_members_v2(
         return Err("runtime/std native v2 unconsumed code member")
     Ok(members)
 
-# V2 claims the manager-budgeted action. The current producer admits only
-# code_object rows; a source with no emit-bearing MIR still fails closed until
-# live-HIR/cfg objectless classification is wired and qualified.
+# V2 claims the manager-budgeted action. Code objects and proven objectless
+# sources retain distinct per-source outcomes under one observed action.
 pub fn driver_runtime_std_compile_native_action_v2(
     ctx: CompileContext, policy: RuntimeStdMembershipPolicyOutputV1,
     sources: NativeFullInventorySourcesV1, package_identity: text,
