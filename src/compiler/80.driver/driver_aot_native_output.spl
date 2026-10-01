@@ -171,6 +171,13 @@ use std.common.crypto.sha256.{sha256_text}
 use compiler.driver.cache.native_build_environment_identity.{native_build_environment_fingerprint_v1}
 use std.nogc_sync_mut.io_runtime.{env_get_nullable, env_set, process_run}
 use std.nogc_sync_mut.sffi.fs.{file_create_excl}
+use compiler.driver.driver_build.native_group_request.{native_group_request_path_v1,
+    native_group_request_v1}
+use std.common.build_manager.grouped_native_contract.{NativeGroupManifestV1,
+    NativeModuleResultV1, NativeGroupResultV1, native_group_manifest_identity_v1,
+    native_group_result_encode_v1, native_module_result_encode_v1,
+    native_group_result_validate_against_manifest_v1}
+use std.nogc_sync_mut.shell.file.{rename}
 
 @unsafe(reason: "raw recursive directory-remove ABI", capabilities: [ffi])
 extern fn rt_dir_remove_all(path: text) -> bool
@@ -1787,7 +1794,42 @@ impl CompilerDriver:
         # reasoning (bootstrap_stage4_selfhost_parse_memory_blowup_2026-07-20,
         # hazard 3).
         val low_memory = driver_mir_eviction_enabled(ctx.options.low_memory, ctx.options.output_format)
-        val module_names = ctx.mir_modules.keys()
+        val all_module_names = ctx.mir_modules.keys()
+        var module_names = all_module_names
+        var native_group: NativeGroupManifestV1? = nil
+        var group_name_by_source: {text: text} = {}
+        if native_group_request_path_v1() != "":
+            val admitted_group = match native_group_request_v1():
+                case Ok(value): value
+                case Err(reason):
+                    return CompileResult.CodegenError(
+                        "native group manifest rejected: {reason}")
+            if admitted_group.backend != effective_backend or
+                    admitted_group.target != native_target:
+                return CompileResult.CodegenError(
+                    "native group backend or target mismatch")
+            native_group = Some(admitted_group)
+            module_names = []
+            for member in admitted_group.members:
+                var matched = ""
+                for candidate in all_module_names:
+                    val candidate_source = driver_native_module_cache_source(ctx,
+                        candidate).replace("\\", "/")
+                    if candidate_source == member.source_path or
+                            candidate_source.ends_with("/" + member.source_path):
+                        if matched != "":
+                            return CompileResult.CodegenError(
+                                "native group member has multiple logical modules: {member.source_path}")
+                        matched = candidate
+                if matched == "" or module_names.contains(matched):
+                    return CompileResult.CodegenError(
+                        "native group member source has no unique MIR module: {member.source_path}")
+                val observed_source = driver_native_module_cache_source(ctx, matched)
+                if driver_native_disk_source_identity(observed_source) != member.source_digest:
+                    return CompileResult.CodegenError(
+                        "native group member source changed: {member.source_path}")
+                group_name_by_source[member.source_path] = matched
+                module_names = module_names.push(matched)
         val total_modules = module_names.len()
         if trace:
             print "[NATIVE] compiling {total_modules} modules..."
@@ -1813,6 +1855,7 @@ impl CompilerDriver:
         # are whole-BUILD guards, not per-module failures, and stay immediate.
         # See doc/02_requirements/compiler/supervised_builder.md R2/R3/R4.
         var module_outcomes = BuildOutcomeSet.empty()
+        var group_object_paths: {text: text} = {}
         # Stable within one build; lets the attribution line name a unit even
         # when its path is ambiguous.
         var module_unit_id: i64 = 0
@@ -1934,6 +1977,8 @@ impl CompilerDriver:
                             BuildUnitOutcome.ok(module_unit_id, name, 0, 0))
                         for obj in scoped_outputs:
                             object_files = object_files.push(obj)
+                        if native_group.? and scoped_outputs.len() == 1:
+                            group_object_paths[name] = scoped_outputs[0]
                         if low_memory:
                             ctx.evict_mir_module(name)
                         used_cache = true
@@ -2146,6 +2191,7 @@ impl CompilerDriver:
                         return CompileResult.CodegenError(handoff_reason)
                     reconstructed_outputs = reconstructed_outputs.push(obj_path)
                     object_files = object_files.push(obj_path)
+                    if native_group.?: group_object_paths[name] = obj_path
                     if ctx.demand_scc_publication != nil:
                         var publication = ctx.demand_scc_publication!
                         if not scc_publication_complete_object_v1(
@@ -2230,6 +2276,116 @@ impl CompilerDriver:
             if manifest_reason != "ok":
                 return CompileResult.CodegenError(
                     "Phase 2 compatibility manifest failed: {manifest_reason}")
+
+        # Group mode is a compiler child, not a linker invocation. The parent
+        # admits only exact per-module receipts after it reaps this process
+        # tree. Emit a result for EVERY requested member, including failures.
+        # A failed SCC is entirely non-OK so retry never splits its ownership.
+        if val manifest = native_group:
+            val group_result_path = env_get_nullable("SIMPLE_NATIVE_GROUP_RESULT") ?? ""
+            if group_result_path == "" or not _sffi_dir_create(
+                    dirname(group_result_path), true):
+                return CompileResult.CodegenError(
+                    "native group result path unavailable")
+            val group_result_root = dirname(group_result_path)
+            val group_output_root = _sffi_path_join(group_result_root, "outputs")
+            val group_progress_root = _sffi_path_join(group_result_root, "progress")
+            if not _sffi_dir_create(group_output_root, true) or
+                    not _sffi_dir_create(group_progress_root, true):
+                return CompileResult.CodegenError(
+                    "native group private output directory unavailable")
+            var failed_sccs: {text: bool} = {}
+            for member in manifest.members:
+                val name = group_name_by_source[member.source_path]
+                if member.output_kind != "OBJECT" or
+                        not group_object_paths.contains_key(name) or
+                        not _sffi_file_exists(group_object_paths[name]):
+                    failed_sccs[member.scc_id] = true
+            var group_results: [NativeModuleResultV1] = []
+            var group_failed = false
+            for member in manifest.members:
+                val name = group_name_by_source[member.source_path]
+                var result = NativeModuleResultV1(member.module_id, "ERROR", 1,
+                    member.output_kind, "", "", false,
+                    sha256_text("native-group-scc-failed|" + member.scc_id))
+                if not failed_sccs.contains_key(member.scc_id):
+                    val object_path = group_object_paths[name]
+                    val private_output = _sffi_path_join(group_output_root,
+                        member.output_path)
+                    if not _sffi_dir_create(dirname(private_output), true) or
+                            not _sffi_file_copy(object_path, private_output):
+                        failed_sccs[member.scc_id] = true
+                    else:
+                        val digest = rt_file_hash_sha256(private_output)
+                        if digest.len() != 64:
+                            failed_sccs[member.scc_id] = true
+                        else:
+                            result = NativeModuleResultV1(member.module_id,
+                                "OK", 0, "OBJECT", member.output_path,
+                                digest, false, "")
+                if failed_sccs.contains_key(member.scc_id):
+                    group_failed = true
+                group_results = group_results.push(result)
+            # A late copy/hash failure must also invalidate earlier outputs in
+            # that SCC. The files remain private diagnostics, never admitted.
+            var normalized_results: [NativeModuleResultV1] = []
+            for index in 0..manifest.members.len():
+                val member = manifest.members[index]
+                if failed_sccs.contains_key(member.scc_id):
+                    val name = group_name_by_source[member.source_path]
+                    var observed = "NOT_RUN"
+                    for outcome in module_outcomes.records:
+                        if outcome.source_path == name:
+                            observed = outcome.label()
+                    val blocked_status = if observed == "OK":
+                        "BLOCKED"
+                    elif observed == "ERROR" or observed == "CRASHED" or
+                            observed == "TERMINATED" or observed == "TIMEOUT" or
+                            observed == "NOT_RUN":
+                        observed
+                    else:
+                        "BLOCKED"
+                    val blocked_exit = if blocked_status == "ERROR" or
+                            blocked_status == "CRASHED": 1 else: 0
+                    normalized_results = normalized_results.push(
+                        NativeModuleResultV1(member.module_id, blocked_status,
+                            blocked_exit,
+                            member.output_kind, "", "", false,
+                            sha256_text("native-group-scc-failed|" + member.scc_id)))
+                else:
+                    normalized_results = normalized_results.push(group_results[index])
+            val group_result = NativeGroupResultV1(
+                native_group_manifest_identity_v1(manifest), manifest.group_id,
+                manifest.generation, manifest.attempt, normalized_results, 0, 0)
+            val validation = native_group_result_validate_against_manifest_v1(
+                manifest, group_result)
+            if validation != "":
+                return CompileResult.CodegenError(
+                    "native group result rejected: {validation}")
+            for item in normalized_results:
+                val progress_path = _sffi_path_join(group_progress_root,
+                    sha256_text(item.module_id) + ".sdn")
+                val progress_tmp = progress_path + ".tmp-{getpid()}"
+                val progress_text = native_module_result_encode_v1(item)
+                if progress_text == "" or not _sffi_file_write_text(
+                        progress_tmp, progress_text) or
+                        not rename(progress_tmp, progress_path):
+                    return CompileResult.CodegenError(
+                        "native group progress receipt write failed")
+            val result_text = native_group_result_encode_v1(group_result)
+            val result_tmp = group_result_path + ".tmp-{getpid()}"
+            if result_text == "" or not _sffi_file_write_text(result_tmp,
+                    result_text) or not rename(result_tmp, group_result_path):
+                return CompileResult.CodegenError(
+                    "native group result write failed")
+            if group_failed:
+                val diagnostics = driver_native_report_module_outcomes_v1(
+                    module_outcomes)
+                return CompileResult.CodegenError(if diagnostics != "":
+                    diagnostics
+                else:
+                    "native group has failed or unqualified SCCs")
+            return CompileResult.Success(group_result_path)
 
         # Fail closed at the boundary, not early (R4). Every module has now been
         # attempted and the summary names them all; only now do we refuse to link.
@@ -2469,6 +2625,41 @@ fn _compile_frozen_module_capsule(
         return _aot_compile_failure(name, "capsule-identity-mismatch")
     if capsule.storage_snapshot.registry_identity != batch.registry_identity:
         return _aot_compile_failure(name, "capsule-registry-mismatch")
+    if native_group_request_path_v1() != "":
+        val manifest = match native_group_request_v1():
+            case Ok(value): value
+            case Err(reason):
+                return _aot_compile_failure(name,
+                    "native group start manifest invalid: {reason}")
+        val result_path = env_get_nullable("SIMPLE_NATIVE_GROUP_RESULT") ?? ""
+        if result_path == "":
+            return _aot_compile_failure(name,
+                "native group start result path absent")
+        var member_id = ""
+        val frozen_source = capsule.cache_source.replace("\\", "/")
+        for member in manifest.members:
+            if frozen_source == member.source_path or
+                    frozen_source.ends_with("/" + member.source_path):
+                if member_id != "":
+                    return _aot_compile_failure(name,
+                        "native group start source ambiguous")
+                member_id = member.module_id
+        if member_id == "":
+            return _aot_compile_failure(name,
+                "native group start source not scheduled")
+        val progress_root = _sffi_path_join(dirname(result_path), "progress")
+        if not _sffi_dir_create(progress_root, true):
+            return _aot_compile_failure(name,
+                "native group progress directory unavailable")
+        val marker = _sffi_path_join(progress_root,
+            sha256_text(member_id) + ".started")
+        val marker_tmp = marker + ".tmp-{getpid()}"
+        val marker_body = "SIMPLE-NATIVE-MODULE-STARTED-1\n" +
+            native_group_manifest_identity_v1(manifest) + "\n" + member_id + "\n"
+        if not _sffi_file_write_text(marker_tmp, marker_body) or
+                not rename(marker_tmp, marker):
+            return _aot_compile_failure(name,
+                "native group start marker write failed")
     val trace = (env_get_nullable("SIMPLE_COMPILER_TRACE") ?? "") == "1"
     if trace:
         print "[NATIVE] compiling module: {name}"

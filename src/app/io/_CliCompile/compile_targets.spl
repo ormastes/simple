@@ -32,6 +32,9 @@ use compiler.driver.driver_source_loading.{
     driver_entry_scan_cache_read_count, driver_entry_scan_cache_scan_count,
     driver_entry_scan_cache_hit_count
 }
+use compiler.driver.driver_build.native_group_request.{
+    native_group_request_path_v1, native_group_request_v1,
+    native_group_source_paths_v1}
 use app.io._CliCompile.compile_llvm_ir_facade.{
     cli_compile_source_llvm_artifacts
 }
@@ -673,6 +676,13 @@ fn _cli_native_build_create_driver_with_environment_variant_policy_v1(
 fn _cli_native_build(
     args: [text], collection: EnvironmentVariantPolicyCollectionV1?
 ) -> i64:
+    val native_group_requested = native_group_request_path_v1() != ""
+    if native_group_requested:
+        match native_group_request_v1():
+            case Ok(_): pass
+            case Err(reason):
+                _cli_eprint("Error: native group request rejected: {reason}")
+                return 2
     val option_error = cli_native_build_option_error(args)
     if option_error != "":
         _cli_eprint("Error: {option_error}")
@@ -1247,7 +1257,14 @@ fn _cli_native_build(
         val _nb_target_opt_ctx = target_opt_context_default()
         driver_entry_scan_cache_reset()
 
-        val native_action_inputs = _native_build_entry_closure(entry_point, source_dirs)
+        val native_action_inputs = if native_group_requested:
+            match native_group_source_paths_v1():
+                case Ok(paths): paths
+                case Err(reason):
+                    _cli_eprint("Error: native group sources rejected: {reason}")
+                    return 1
+        else:
+            _native_build_entry_closure(entry_point, source_dirs)
         # A real closure always contains the entry itself, so [] means the SCV
         # freeze failed (already reported). Continuing with zero inputs crashed
         # later with "method `len` not found on type `i64`".
@@ -1264,8 +1281,8 @@ fn _cli_native_build(
             use compiler.driver.driver_types (CompileOptions, CompileMode)
             var options = driver_core_compile_options_default()
             var native_inputs: [text] = []
-            if effective_entry_closure:
-                for cf in _native_build_entry_closure(entry_point, source_dirs):
+            if effective_entry_closure or native_group_requested:
+                for cf in native_action_inputs:
                     native_inputs = native_inputs.push(cf)
                     options = cli_native_build_add_bootstrap_input(options, cf)
             else:
@@ -1275,7 +1292,7 @@ fn _cli_native_build(
                 native_inputs = native_inputs.push(entry_point)
                 options = cli_native_build_add_bootstrap_input(options, entry_point)
             options.input_files = native_inputs
-            if effective_entry_closure:
+            if effective_entry_closure or native_group_requested:
                 if verbose:
                     _cli_eprint("[native-build] closure scan cache release reads={driver_entry_scan_cache_read_count()} scans={driver_entry_scan_cache_scan_count()} hits={driver_entry_scan_cache_hit_count()}")
                 # The immutable closure paths are now owned by native_inputs.
@@ -1314,8 +1331,8 @@ fn _cli_native_build(
         else:
             var options = driver_core_compile_options_default()
             var native_inputs: [text] = []
-            if effective_entry_closure:
-                for cf in _native_build_entry_closure(entry_point, source_dirs):
+            if effective_entry_closure or native_group_requested:
+                for cf in native_action_inputs:
                     native_inputs = native_inputs.push(cf)
                     options = cli_native_build_add_bootstrap_input(options, cf)
             else:
@@ -1325,7 +1342,7 @@ fn _cli_native_build(
                 native_inputs = native_inputs.push(entry_point)
                 options = cli_native_build_add_bootstrap_input(options, entry_point)
             options.input_files = native_inputs
-            if effective_entry_closure:
+            if effective_entry_closure or native_group_requested:
                 if verbose:
                     _cli_eprint("[native-build] closure scan cache release reads={driver_entry_scan_cache_read_count()} scans={driver_entry_scan_cache_scan_count()} hits={driver_entry_scan_cache_hit_count()}")
                 driver_entry_scan_cache_release()
@@ -1334,7 +1351,8 @@ fn _cli_native_build(
             options.mode = CompileMode.Aot
             options.cli_mode_text = "aot"
             options.output_file = Some(staged_output)
-            if build_mode == "dynload" and not emit_object and not emit_archive and not emit_shared:
+            if not native_group_requested and build_mode == "dynload" and
+                    not emit_object and not emit_archive and not emit_shared:
                 options.output_format = driver_output_format_both()
             else:
                 options.output_format = driver_output_format_native()
@@ -1365,6 +1383,13 @@ fn _cli_native_build(
         env_set("SIMPLE_PRINT_BUILD_INTERMEDIATES", old_print_intermediates)
         match result:
             case CompileResult.Success(_):
+                if native_group_requested:
+                    val group_result_path = env_get("SIMPLE_NATIVE_GROUP_RESULT") ?? ""
+                    if group_result_path == "" or not file_exists(group_result_path):
+                        _cli_eprint("error: native group driver returned success without result")
+                        return 1
+                    _cli_eprint("[native-build] Artifact published: {group_result_path}")
+                    return 0
                 # Root-cause guard for the exit-0-with-no-binary hang
                 # (doc/08_tracking/bug/native_build_worker_zombie_parent_hang_2026-07-03.md):
                 # the driver/linker pipeline can report Success (e.g. a linker
