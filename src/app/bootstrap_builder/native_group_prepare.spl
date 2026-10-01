@@ -55,7 +55,7 @@ fn native_prepare_key_valid_v1(key: text) -> bool:
      "runtime_path", "runtime_digest", "manager_path", "manager_digest",
      "worker_path", "worker_digest", "broker_path", "broker_digest",
      "inventory_path", "inventory_digest", "inventory_count", "phase", "backend", "target",
-     "output_kind", "index_read_root",
+     "output_kind", "index_read_root", "shared_parse_cas_root",
      "output_root", "state_root", "group_size", "memory_limit_bytes", "max_threads",
      "available_memory_bytes", "memory_reserve_bytes", "estimated_group_disk_bytes",
      "available_disk_bytes", "minimum_free_disk_bytes", "max_attempts", "poll_ms",
@@ -77,9 +77,18 @@ fn native_prepare_config_v1(payload: text) -> Result<{text: text}, text>:
                 value == "" or value.len() > 4096:
             return Err("duplicate, unknown, empty, or oversized native group config field")
         fields[key] = value
-    if fields.len() != 46 or fields["format"] != "SIMPLE-NATIVE-GROUP-PREPARE-1":
+    if fields.len() != 47 or fields["format"] != "SIMPLE-NATIVE-GROUP-PREPARE-1":
         return Err("incomplete native group preparation config")
     Ok(fields)
+
+fn native_prepare_shared_parse_root_v1(fields: {text: text}) -> Result<text, text>:
+    val root = fields["shared_parse_cas_root"]
+    if not native_prepare_absolute_v1(root):
+        return Err("shared parse CAS root must be absolute")
+    for key in ["source_root", "index_read_root", "state_root", "output_root"]:
+        if builder_paths_overlap_v1(root, fields[key]):
+            return Err("shared parse CAS root overlaps native group authority: " + key)
+    Ok(root)
 
 fn native_prepare_number_v1(value: text, minimum: i64, maximum: i64) -> Result<i64, text>:
     if value == "" or value.len() > 17 or (value.len() > 1 and value.starts_with("0")):
@@ -268,6 +277,7 @@ fn native_group_prepare_v1(config_path: text, manifest_path: text) -> Result<Nat
             builder_paths_overlap_v1(fields["source_root"], fields["output_root"]) or
             builder_paths_overlap_v1(fields["state_root"], fields["output_root"]):
         return Err("native group source, state, and output roots overlap")
+    val shared_parse_cas_root = native_prepare_shared_parse_root_v1(fields)?
     if not manifest_path.starts_with(fields["state_root"] + "/"):
         return Err("native group manifest must be within isolated state root")
     native_prepare_pin_v1(fields, "producer")?
@@ -361,7 +371,8 @@ fn native_group_prepare_v1(config_path: text, manifest_path: text) -> Result<Nat
         "SIMPLE_RUNTIME_ABI_DIGEST=" + baseline.runtime_abi_digest,
         "SIMPLE_STDLIB_ABI_DIGEST=" + baseline.std_abi_digest,
         "SIMPLE_RUNTIME_ACTION_DIGEST=" + baseline.runtime_action_digest,
-        "SIMPLE_STDLIB_ACTION_DIGEST=" + baseline.std_action_digest
+        "SIMPLE_STDLIB_ACTION_DIGEST=" + baseline.std_action_digest,
+        "SIMPLE_SHARED_PARSE_CAS_ROOT=" + shared_parse_cas_root
     ]
     val run = NativeGroupRunV1(fields["run_id"], fields["producer_digest"],
         indexed.source_snapshot_digest, fields["full_source_authority_digest"],
@@ -403,4 +414,5 @@ fn native_group_prepare_v1(config_path: text, manifest_path: text) -> Result<Nat
 
 export native_group_prepare_v1, native_prepare_config_v1, native_prepare_inventory_v1,
     native_prepare_policy_v1, native_prepare_scc_conflicts_v1,
-    native_prepare_group_boundary_v1, native_prepare_absolute_v1
+    native_prepare_group_boundary_v1, native_prepare_absolute_v1,
+    native_prepare_shared_parse_root_v1

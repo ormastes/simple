@@ -1,7 +1,7 @@
 use std.spec.{describe, it, expect, fail}
 use app.bootstrap_builder.native_group_prepare.{native_prepare_config_v1, native_prepare_policy_v1,
     native_prepare_scc_conflicts_v1, native_prepare_group_boundary_v1,
-    native_prepare_absolute_v1}
+    native_prepare_absolute_v1, native_prepare_shared_parse_root_v1}
 
 fn native_prepare_config_fixture_v1() -> text:
     ["format=SIMPLE-NATIVE-GROUP-PREPARE-1", "run_id=phase4-llvm", "producer_path=D:/p.exe",
@@ -25,6 +25,7 @@ fn native_prepare_config_fixture_v1() -> text:
      "inventory_count=15754", "phase=phase4", "backend=llvm", "target=x86_64-pc-windows-msvc",
      "output_kind=OBJECT", "index_read_root=D:/stage2-index",
      "output_root=D:/out/llvm", "state_root=D:/state/llvm", "group_size=64",
+     "shared_parse_cas_root=D:/shared-parse-cas",
      "memory_limit_bytes=8589934592", "max_threads=1", "available_memory_bytes=17179869184",
      "memory_reserve_bytes=4294967296", "estimated_group_disk_bytes=1073741824",
      "available_disk_bytes=21474836480", "minimum_free_disk_bytes=8589934592",
@@ -56,7 +57,10 @@ describe "native group preparation admission":
         val good = native_prepare_config_v1(native_prepare_config_fixture_v1())
         match good:
             case Ok(fields):
-                expect(fields.len()).to_equal(46)
+                expect(fields.len()).to_equal(47)
+                match native_prepare_shared_parse_root_v1(fields):
+                    case Ok(root): expect(root).to_equal("D:/shared-parse-cas")
+                    case Err(reason): fail(reason)
                 match native_prepare_policy_v1(fields):
                     case Ok(value): expect(value).to_equal("")
                     case Err(reason): fail(reason)
@@ -78,6 +82,17 @@ describe "native group preparation admission":
         match native_prepare_config_v1(native_prepare_config_fixture_v1() + "max_threads=2\n"):
             case Ok(_): fail("duplicate thread policy accepted")
             case Err(reason): expect(reason).to_contain("duplicate")
+
+    it "rejects a shared parse root inside source or mutable group state":
+        for root in ["D:/snapshot/cache", "D:/state/llvm/shared"]:
+            val payload = native_prepare_config_fixture_v1().replace(
+                "shared_parse_cas_root=D:/shared-parse-cas", "shared_parse_cas_root=" + root)
+            match native_prepare_config_v1(payload):
+                case Ok(fields):
+                    match native_prepare_shared_parse_root_v1(fields):
+                        case Ok(_): fail("overlapping shared parse CAS root accepted")
+                        case Err(reason): expect(reason).to_contain("overlaps")
+                case Err(reason): fail(reason)
 
     it "rejects memory and disk capacity claims that cannot admit one group":
         val starved = native_prepare_config_fixture_v1().replace("available_memory_bytes=17179869184", "available_memory_bytes=8589934592")
