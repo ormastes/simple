@@ -11,16 +11,24 @@ use compiler.frontend.core.flat_pool_codec.{FLAT_POOL_CODEC_VERSION}
 use compiler.frontend.cache_dir_evict.{cache_dir_evict_to_cap}
 use std.common.crypto.sha256.{sha256_text}
 use std.common.encoding.utf8.{text_byte_len}
+use std.common.binary_inspect.{byte_to_hex}
 use std.nogc_sync_mut.io_runtime.{env_get_opt, dir_exists, dir_create_all,
     file_delete, getpid, time_now_unix_micros}
-use std.nogc_sync_mut.io.file_ops.{file_create_exclusive, file_publish_noreplace}
+use std.nogc_sync_mut.io.file_ops.{file_create_exclusive, file_publish_noreplace,
+    file_read_regular_no_follow_bounded}
 use std.nogc_sync_mut.io.shared_parse_cell.{shared_parse_cell_read_nofollow_v1}
 
 val SHARED_PARSE_CELL_VERSION_V1: text = "simple-shared-flat-pool-v1"
 val SHARED_PARSE_MAX_CELL_BYTES_V1: i64 = 33554432
 val SHARED_PARSE_MAX_ROOT_BYTES_V1: i64 = 4294967296
+val SHARED_PARSE_MAX_AUTHORITY_BYTES_V1: i64 = 67108864
+val SHARED_PARSE_MAX_SOURCE_BYTES_V1: i64 = 268435456
 
 var _shared_parse_stores_v1: i64 = 0
+var _shared_parse_authority_path_v1: text = ""
+var _shared_parse_authority_digest_v1: text = ""
+var _shared_parse_authority_ready_v1: bool = false
+var _shared_parse_authority_rows_v1: Dict<text, text> = {}
 
 fn _shared_parse_digest_valid_v1(digest: text) -> bool:
     if digest.len() != 64: return false
@@ -38,8 +46,17 @@ pub fn frontend_shared_parse_path_portable_v1(path: text) -> bool:
 pub fn frontend_shared_parse_logical_path_v1(path: text) -> text:
     val normalized = path.replace("\\", "/")
     if frontend_shared_parse_path_portable_v1(normalized): return normalized
-    val src_at = normalized.last_index_of("/src/")
-    val example_at = normalized.last_index_of("/examples/10_tooling/")
+    # A private staging prefix may differ by OS. Admit only one unambiguous
+    # repository-relative suffix; a second src marker can select another file.
+    if normalized.contains("//") or normalized.contains(".."):
+        return ""
+    val src_at = normalized.index_of("/src/")
+    val example_at = normalized.index_of("/examples/10_tooling/")
+    if (src_at >= 0 and normalized.last_index_of("/src/") != src_at) or
+            (example_at >= 0 and
+                normalized.last_index_of("/examples/10_tooling/") != example_at) or
+            (src_at >= 0 and example_at >= 0):
+        return ""
     val at = if src_at > example_at: src_at else: example_at
     if at < 0: return ""
     val logical = normalized.substring(at + 1, normalized.len())
@@ -54,13 +71,85 @@ fn _shared_parse_payload_has_host_path_v1(path: text, blob: text) -> bool:
     if root.len() < 3: return true
     blob.contains(root + "/") or blob.contains(root.replace("/", "\\") + "\\")
 
-fn _shared_parse_path_under_admitted_root_v1(path: text) -> bool:
-    val root = (env_get_opt("SIMPLE_SHARED_PARSE_SOURCE_ROOT") ?? "").replace("\\", "/")
+fn _shared_parse_absolute_v1(path: text) -> bool:
     val normalized = path.replace("\\", "/")
-    if root == "" or root.ends_with("/") or not normalized.starts_with(root + "/"):
+    if normalized == "" or normalized.ends_with("/") or
+            normalized.contains("//") or normalized.contains("..") or
+            normalized.contains("\n") or normalized.contains("\r") or
+            normalized.contains("\0"):
         return false
-    frontend_shared_parse_path_portable_v1(
-        normalized.substring(root.len() + 1, normalized.len()))
+    normalized.starts_with("/") or (normalized.len() > 2 and
+        normalized.substring(1, 2) == ":" and
+        normalized.substring(2, 3) == "/")
+
+fn _shared_parse_path_hex_v1(path: text) -> text:
+    var encoded = ""
+    for byte in path.bytes():
+        encoded = encoded + byte_to_hex(byte as i64)
+    encoded
+
+fn _shared_parse_authority_ready_for_v1(path: text, digest: text) -> bool:
+    # One bounded, no-follow snapshot read per process. The manager sealed the
+    # path/digest from Stage2; changing either drops the memo and re-verifies.
+    if path == _shared_parse_authority_path_v1 and
+            digest == _shared_parse_authority_digest_v1:
+        return _shared_parse_authority_ready_v1
+    _shared_parse_authority_path_v1 = path
+    _shared_parse_authority_digest_v1 = digest
+    _shared_parse_authority_ready_v1 = false
+    _shared_parse_authority_rows_v1 = {}
+    if not _shared_parse_absolute_v1(path) or
+            not _shared_parse_digest_valid_v1(digest):
+        return false
+    val snapshot = match file_read_regular_no_follow_bounded(path,
+            SHARED_PARSE_MAX_AUTHORITY_BYTES_V1):
+        case Ok(value): value
+        case Err(_): return false
+    if snapshot == "" or sha256_text(snapshot) != digest: return false
+    var rows: Dict<text, text> = {}
+    var count = 0
+    for row in snapshot.split("\n"):
+        if not row.starts_with("file-hex:"): continue
+        val fields = row.split(":")
+        if fields.len() != 5 or fields[2] == "" or
+                (fields[3] != "0" and fields[3] != "1") or
+                not _shared_parse_digest_valid_v1(fields[4]) or
+                rows.contains_key(fields[2]):
+            return false
+        rows[fields[2]] = fields[1] + ":" + fields[3] + ":" + fields[4]
+        count = count + 1
+        if count > 100000: return false
+    if count == 0: return false
+    _shared_parse_authority_rows_v1 = rows
+    _shared_parse_authority_ready_v1 = true
+    true
+
+fn _shared_parse_source_authorized_v1(source_sha: text,
+        logical_path: text) -> bool:
+    if not _shared_parse_digest_valid_v1(source_sha) or
+            not frontend_shared_parse_path_portable_v1(logical_path):
+        return false
+    val root = env_get_opt("SIMPLE_SHARED_PARSE_SOURCE_ROOT") ?? ""
+    val authority_path = env_get_opt(
+        "SIMPLE_SHARED_PARSE_SOURCE_AUTHORITY_PATH") ?? ""
+    val authority_digest = env_get_opt(
+        "SIMPLE_SHARED_PARSE_SOURCE_AUTHORITY_DIGEST") ?? ""
+    if not _shared_parse_absolute_v1(root) or
+            not _shared_parse_authority_ready_for_v1(authority_path,
+                authority_digest):
+        return false
+    val row = _shared_parse_authority_rows_v1.get_or(
+        _shared_parse_path_hex_v1(logical_path), "")
+    val length = logical_path.bytes().len()
+    if row != "{length}:0:{source_sha}" and
+            row != "{length}:1:{source_sha}":
+        return false
+    val current = match file_read_regular_no_follow_bounded(
+            root.replace("\\", "/") + "/" + logical_path,
+            SHARED_PARSE_MAX_SOURCE_BYTES_V1):
+        case Ok(value): value
+        case Err(_): return false
+    sha256_text(current) == source_sha
 
 pub fn frontend_shared_parse_key_v1(source_sha: text, parser_input_sha: text,
         parser_identity: text, target_identity: text, logical_path: text,
@@ -92,13 +181,14 @@ fn _shared_parse_key_for_v1(source_sha: text, parse_source: text,
             (env_get_opt("SIMPLE_BOOTSTRAP") ?? "") == "1" or
             (env_get_opt("SIMPLE_FRONTEND_CACHE") ?? "") == "0" or
             not _shared_parse_digest_valid_v1(target_identity) or
-            not _shared_parse_path_under_admitted_root_v1(logical_path) or
             frontend_shared_parse_logical_path_v1(logical_path) == "":
+        return ""
+    val relative = frontend_shared_parse_logical_path_v1(logical_path)
+    if not _shared_parse_source_authorized_v1(source_sha, relative):
         return ""
     val parser_identity = env_get_opt("SIMPLE_SHARED_PARSE_CAS_PARSER_IDENTITY") ?? ""
     frontend_shared_parse_key_v1(source_sha, sha256_text(parse_source),
-        parser_identity, target_identity,
-        frontend_shared_parse_logical_path_v1(logical_path),
+        parser_identity, target_identity, relative,
         frontend_shared_parse_feature_identity_v1())
 
 pub fn frontend_shared_parse_cell_encode_v1(key: text, blob: text) -> text:

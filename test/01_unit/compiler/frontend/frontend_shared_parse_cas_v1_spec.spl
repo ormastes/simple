@@ -2,8 +2,9 @@
 
 use std.spec.{describe, it, assert_equal, assert_true, assert_false}
 use std.common.crypto.sha256.{sha256_text}
+use std.common.binary_inspect.{byte_to_hex}
 use std.nogc_sync_mut.io_runtime.{dir_create_all, env_get_opt, env_set, file_delete,
-    file_write_exact, getpid}
+    file_write_exact, getpid, cwd}
 use compiler.frontend.frontend_shared_parse_cas_v1.{
     frontend_shared_parse_path_portable_v1, frontend_shared_parse_logical_path_v1,
     frontend_shared_parse_key_v1,
@@ -18,6 +19,12 @@ val TARGET_ID: text = sha256_text("target-cfg-v1|x86_64-unknown-linux|post-targe
 val PARSER_ID: text = sha256_text("sorted frontend parser and codec source inventory")
 val BLOB_A: text = "spl-flatpool-v2\nvalidated-pool-a\n"
 val BLOB_B: text = "spl-flatpool-v2\nvalidated-pool-b\n"
+
+fn path_hex(path: text) -> text:
+    var encoded = ""
+    for byte in path.bytes():
+        encoded = encoded + byte_to_hex(byte as i64)
+    encoded
 
 fn key_for(target: text, path: text) -> text:
     frontend_shared_parse_key_v1(SOURCE_SHA, sha256_text(PARSE_SOURCE),
@@ -68,6 +75,12 @@ describe("shared parse CAS v1", fn():
         assert_equal(frontend_shared_parse_logical_path_v1(
             "/mnt/d/private/src/example.spl"), "src/example.spl",
             "WSL snapshot source normalizes to the same logical path")
+        assert_equal(frontend_shared_parse_logical_path_v1(
+            "C:/private/src/staged/src/example.spl"), "",
+            "two src anchors cannot select an ambiguous source")
+        assert_equal(frontend_shared_parse_logical_path_v1(
+            "/mnt/d/private/../src/example.spl"), "",
+            "traversal cannot select a logical source")
         assert_equal(key_for("", "src/example.spl"), "",
             "host-default parse has no target cfg authority")
     )
@@ -89,17 +102,36 @@ describe("shared parse CAS v1", fn():
     it("keeps one immutable winner under competing publishers and reparses corruption", fn():
         val prior_root = env_get_opt("SIMPLE_SHARED_PARSE_CAS_ROOT") ?? ""
         val prior_source = env_get_opt("SIMPLE_SHARED_PARSE_SOURCE_ROOT") ?? ""
+        val prior_authority = env_get_opt(
+            "SIMPLE_SHARED_PARSE_SOURCE_AUTHORITY_PATH") ?? ""
+        val prior_digest = env_get_opt(
+            "SIMPLE_SHARED_PARSE_SOURCE_AUTHORITY_DIGEST") ?? ""
         val prior_parser = env_get_opt("SIMPLE_SHARED_PARSE_CAS_PARSER_IDENTITY") ?? ""
         val prior_bootstrap = env_get_opt("SIMPLE_BOOTSTRAP") ?? ""
         val prior_enabled = env_get_opt("SIMPLE_FRONTEND_CACHE") ?? ""
         val _root = dir_create_all(ROOT)
+        val admitted = cwd().replace("\\", "/") + "/" + ROOT + "/admitted"
+        val source_dir = admitted + "/src"
+        val _source_dir = dir_create_all(source_dir)
+        val logical = "src/competing-publishers.spl"
+        val admitted_file = admitted + "/" + logical
+        val _source_file = file_write_exact(admitted_file, "source-file-bytes")
+        val authority = "file-hex:{logical.bytes().len()}:" +
+            path_hex(logical) + ":0:" + SOURCE_SHA + "\n"
+        val authority_path = cwd().replace("\\", "/") + "/" +
+            ROOT + "/source-inputs-before.txt"
+        val _authority_file = file_write_exact(authority_path, authority)
         val _env_root = env_set("SIMPLE_SHARED_PARSE_CAS_ROOT", ROOT)
-        val _env_source = env_set("SIMPLE_SHARED_PARSE_SOURCE_ROOT", "C:/private")
+        val _env_source = env_set("SIMPLE_SHARED_PARSE_SOURCE_ROOT", admitted)
+        val _env_authority = env_set(
+            "SIMPLE_SHARED_PARSE_SOURCE_AUTHORITY_PATH", authority_path)
+        val _env_digest = env_set(
+            "SIMPLE_SHARED_PARSE_SOURCE_AUTHORITY_DIGEST", sha256_text(authority))
         val _env_parser = env_set("SIMPLE_SHARED_PARSE_CAS_PARSER_IDENTITY", PARSER_ID)
         val _env_bootstrap = env_set("SIMPLE_BOOTSTRAP", "0")
         val _env_enabled = env_set("SIMPLE_FRONTEND_CACHE", "1")
         val path = "C:/private/src/competing-publishers.spl"
-        val key = key_for(TARGET_ID, "src/competing-publishers.spl")
+        val key = key_for(TARGET_ID, logical)
         val cell_path = ROOT + "/parse-v1/" + key + ".spc"
         val _clean_old = file_delete(cell_path)
         assert_true(frontend_shared_parse_store_v1(SOURCE_SHA, PARSE_SOURCE,
@@ -111,13 +143,33 @@ describe("shared parse CAS v1", fn():
         assert_equal(frontend_shared_parse_load_v1(SOURCE_SHA, PARSE_SOURCE,
             TARGET_ID, "C:/private/src/competing-publishers.spl"), BLOB_A,
             "Windows private source path hydrates the shared winner")
-        val _wsl_source = env_set("SIMPLE_SHARED_PARSE_SOURCE_ROOT", "/mnt/d/private")
         assert_equal(frontend_shared_parse_load_v1(SOURCE_SHA, PARSE_SOURCE,
             TARGET_ID, "/mnt/d/private/src/competing-publishers.spl"), BLOB_A,
-            "WSL private source path hydrates the same shared winner")
+            "another staged root and WSL spelling hydrate the same winner")
         assert_equal(frontend_shared_parse_load_v1(SOURCE_SHA, PARSE_SOURCE,
-            TARGET_ID, "C:/private/src/competing-publishers.spl"), "",
-            "a path outside the current admitted source root is refused")
+            TARGET_ID, "D:/different/work/src/competing-publishers.spl"), BLOB_A,
+            "private staging root does not affect source authority")
+        assert_equal(frontend_shared_parse_load_v1(sha256_text("altered-stage"),
+            PARSE_SOURCE, TARGET_ID,
+            "/mnt/d/private/src/competing-publishers.spl"), "",
+            "staged source bytes must match the pinned snapshot row")
+        val wrong_authority = "file-hex:{logical.bytes().len()}:" +
+            path_hex(logical) + ":0:" + sha256_text("other snapshot bytes") + "\n"
+        val wrong_path = cwd().replace("\\", "/") + "/" +
+            ROOT + "/wrong-source-inputs-before.txt"
+        val _wrong_file = file_write_exact(wrong_path, wrong_authority)
+        val _wrong_path_env = env_set(
+            "SIMPLE_SHARED_PARSE_SOURCE_AUTHORITY_PATH", wrong_path)
+        val _wrong_digest_env = env_set(
+            "SIMPLE_SHARED_PARSE_SOURCE_AUTHORITY_DIGEST",
+            sha256_text(wrong_authority))
+        assert_equal(frontend_shared_parse_load_v1(SOURCE_SHA, PARSE_SOURCE,
+            TARGET_ID, "/mnt/d/private/src/competing-publishers.spl"), "",
+            "matching live bytes cannot override a different snapshot row")
+        val _restore_path_env = env_set(
+            "SIMPLE_SHARED_PARSE_SOURCE_AUTHORITY_PATH", authority_path)
+        val _restore_digest_env = env_set(
+            "SIMPLE_SHARED_PARSE_SOURCE_AUTHORITY_DIGEST", sha256_text(authority))
         assert_equal(frontend_shared_parse_load_v1(SOURCE_SHA, PARSE_SOURCE,
             sha256_text("windows target cfg"),
             "/mnt/d/private/src/competing-publishers.spl"), "",
@@ -126,6 +178,11 @@ describe("shared parse CAS v1", fn():
             TARGET_ID, "/mnt/d/private/src/host-payload.spl",
             "spl-flatpool-v2\n/mnt/d/private/src/host-payload.spl\n"),
             "serialized producer private path is refused")
+        val _alter_admitted = file_write_exact(admitted_file, "altered-admitted")
+        assert_equal(frontend_shared_parse_load_v1(SOURCE_SHA, PARSE_SOURCE,
+            TARGET_ID, "/mnt/d/private/src/competing-publishers.spl"), "",
+            "altered admitted source fails despite unchanged pinned snapshot")
+        val _restore_admitted = file_write_exact(admitted_file, "source-file-bytes")
         val _corrupt = file_write_exact(cell_path, "broken-cell")
         assert_equal(frontend_shared_parse_load_v1(SOURCE_SHA, PARSE_SOURCE,
             TARGET_ID, "/mnt/d/private/src/competing-publishers.spl"), "",
@@ -133,6 +190,10 @@ describe("shared parse CAS v1", fn():
         val _clean = file_delete(cell_path)
         val _unset_root = env_set("SIMPLE_SHARED_PARSE_CAS_ROOT", prior_root)
         val _unset_source = env_set("SIMPLE_SHARED_PARSE_SOURCE_ROOT", prior_source)
+        val _unset_authority = env_set(
+            "SIMPLE_SHARED_PARSE_SOURCE_AUTHORITY_PATH", prior_authority)
+        val _unset_digest = env_set(
+            "SIMPLE_SHARED_PARSE_SOURCE_AUTHORITY_DIGEST", prior_digest)
         val _unset_parser = env_set("SIMPLE_SHARED_PARSE_CAS_PARSER_IDENTITY", prior_parser)
         val _restore_bootstrap = env_set("SIMPLE_BOOTSTRAP", prior_bootstrap)
         val _restore_enabled = env_set("SIMPLE_FRONTEND_CACHE", prior_enabled)
