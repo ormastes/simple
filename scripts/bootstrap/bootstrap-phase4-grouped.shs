@@ -209,28 +209,34 @@ verify_shared_source
 hashes="$root/binary-hashes.tmp.$$"
 trap 'rm -f "$hashes"' EXIT HUP INT TERM
 : >"$hashes"
-build_binary bootstrap src/app/cli/bootstrap_main.spl "bin/simple_bootstrap$exe_suffix" phase4
-build_binary full-cli src/app/cli/_CliMain/main_and_help.spl "bin/simple$exe_suffix" phase4
-build_binary mcp src/app/mcp/main.spl "bin/simple_mcp_server$exe_suffix" phase4
-build_binary lsp src/app/simple_lsp_mcp/main.spl "bin/simple_lsp_mcp_server$exe_suffix" phase4
-build_binary test-runner src/app/test_runner_new/main.spl "bin/simple_test_runner$exe_suffix" phase4
+phase4_status=0
+(
+  build_binary bootstrap src/app/cli/bootstrap_main.spl "bin/simple_bootstrap$exe_suffix" phase4
+  build_binary full-cli src/app/cli/_CliMain/main_and_help.spl "bin/simple$exe_suffix" phase4
+  build_binary mcp src/app/mcp/main.spl "bin/simple_mcp_server$exe_suffix" phase4
+  build_binary lsp src/app/simple_lsp_mcp/main.spl "bin/simple_lsp_mcp_server$exe_suffix" phase4
+  build_binary test-runner src/app/test_runner_new/main.spl "bin/simple_test_runner$exe_suffix" phase4
+  prepare_backend llvm
+  for backend in llvm cranelift; do
+    [ "$backend" = llvm ] || prepare_backend cranelift
+    manifest="$root/modules/$backend/state/manifest.sdn"
+    "$group_program" native-groups-run --manifest "$manifest" \
+      || die "$backend module run failed or produced only diagnostic objects"
+    "$group_program" native-groups-verify --manifest "$manifest" \
+      --state "$root/modules/$backend/state" \
+      || die "$backend ledger is incomplete or lacks qualified SMF outputs"
+  done
+) || phase4_status=$?
 
-prepare_backend llvm
-for backend in llvm cranelift; do
-  [ "$backend" = llvm ] || prepare_backend cranelift
-  manifest="$root/modules/$backend/state/manifest.sdn"
-  "$group_program" native-groups-run --manifest "$manifest" \
-    || die "$backend module run failed or produced only diagnostic objects"
-  "$group_program" native-groups-verify --manifest "$manifest" \
-    --state "$root/modules/$backend/state" \
-    || die "$backend ledger is incomplete or lacks qualified SMF outputs"
-done
-
-# Phase 3 is another child of the same admitted Phase 2 producer. It gets its
-# own manifest, cache, state, and output; Phase 4 has already reached its own
-# completion gates before this task starts, so there is no Phase 3 edge in the
-# Phase 4 dependency graph.
-build_binary phase3-bootstrap src/app/cli/bootstrap_main.spl "bin/simple$exe_suffix" phase3
+# Host memory limits make these two independent Phase 2 children serial here.
+# Phase 4 runs first; Phase 3 is attempted even if Phase 4 fails. Their states
+# and published results never gate or substitute for one another.
+phase3_status=0
+(
+  build_binary phase3-bootstrap src/app/cli/bootstrap_main.spl "bin/simple$exe_suffix" phase3
+) || phase3_status=$?
+[ "$phase4_status" -eq 0 ] && [ "$phase3_status" -eq 0 ] || \
+  die "managed children incomplete: phase4=$phase4_status phase3=$phase3_status"
 
 tmp="$receipt.tmp.$$"
 {
