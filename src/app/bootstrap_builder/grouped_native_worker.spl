@@ -5,6 +5,8 @@ use app.io.env_ops.{env_get}
 use app.io.process_ops.{process_run_bounded}
 use compiler.loader.loader.module_loader.{LoadResult, lazymoduleloader_with_defaults,
     moduleloader_load}
+use compiler.driver.driver_build.native_group_warm_route.{NativeGroupDependencySmfV1,
+    NativeGroupWarmRouteV1, native_group_warm_route_decode_v1}
 use std.common.build_manager.codec.{BuilderWireReaderV1, builder_wire_line_v1}
 use std.common.build_manager.grouped_native_contract.{NativeGroupManifestV1,
     NativeGroupResultV1, NativeModuleResultV1, native_group_manifest_decode_v1,
@@ -34,6 +36,10 @@ struct NativeGroupWorkerRequestV1:
     threads: i64
     target: text
     timeout_ms: i64
+
+struct NativeGroupWorkerDependencyMarkerV1:
+    scc_id: text
+    payload: text
 
 fn native_group_worker_absolute_v1(path: text) -> bool:
     path.starts_with("/") or (path.len() > 2 and path[1:2] == ":" and
@@ -106,6 +112,123 @@ fn native_group_worker_host_target_v1(target: text) -> bool:
     if os == "linux": return target.contains("-linux-")
     if os == "macos": return target.contains("-darwin") or target.contains("-macos")
     false
+
+# A marker is one complete, contiguous predecessor SCC. The route codec
+# separately proves that the predecessor closure contains all SCC peers.
+fn native_group_worker_dependency_markers_v1(request: NativeGroupWorkerRequestV1,
+        manifest: NativeGroupManifestV1, dependencies: [NativeGroupDependencySmfV1],
+        digests: {text: text}) -> Result<[NativeGroupWorkerDependencyMarkerV1], text>:
+    var markers: [NativeGroupWorkerDependencyMarkerV1] = []
+    var seen_sccs: {text: bool} = {}
+    var seen_modules: {text: bool} = {}
+    var current = ""
+    var payload = ""
+    for dependency in dependencies:
+        if not builder_identifier_valid_v1(dependency.scc_id) or
+                not builder_identifier_valid_v1(dependency.module_id) or
+                seen_modules.contains_key(dependency.module_id) or
+                not digests.contains_key(dependency.module_id) or
+                not builder_digest_valid_v1(digests[dependency.module_id]):
+            return Err("dependency SCC marker has duplicate or unpinned member")
+        seen_modules[dependency.module_id] = true
+        if current != dependency.scc_id:
+            if current != "":
+                markers = markers.push(NativeGroupWorkerDependencyMarkerV1(current, payload))
+            if seen_sccs.contains_key(dependency.scc_id):
+                return Err("dependency SCC marker has noncontiguous peers")
+            seen_sccs[dependency.scc_id] = true
+            current = dependency.scc_id
+            payload = "SIMPLE-NATIVE-SCC-COMMIT-1\n" + request.run_id + "\n" +
+                manifest.inventory_digest + "\n" + current + "\n"
+        payload = payload + dependency.module_id + " " + digests[dependency.module_id] + "\n"
+    if current != "":
+        markers = markers.push(NativeGroupWorkerDependencyMarkerV1(current, payload))
+    Ok(markers)
+
+fn native_group_worker_route_pins_v1(request: NativeGroupWorkerRequestV1,
+        manifest: NativeGroupManifestV1, route: NativeGroupWarmRouteV1) -> text:
+    if route.index_read_root != request.index_read_root or
+            not builder_digest_valid_v1(route.index_digest) or
+            route.producer_digest != request.producer_digest or
+            route.producer_digest != manifest.producer_digest or
+            route.variant_digest != manifest.variant_digest or
+            route.source_snapshot_digest != manifest.source_snapshot_digest or
+            route.full_source_authority_digest != manifest.full_source_authority_digest or
+            route.group_id != manifest.group_id or route.attempt != manifest.attempt or
+            route.target_backend != request.backend or
+            route.target_backend != manifest.backend:
+        return "dependency route identity differs from worker manifest"
+    var group_sccs: [text] = []
+    var members_by_path: {text: NativeGroupMemberV1} = {}
+    for member in manifest.members:
+        if group_sccs.len() == 0 or group_sccs[group_sccs.len() - 1] != member.scc_id:
+            group_sccs = group_sccs.push(member.scc_id)
+        members_by_path[member.source_path] = member
+    if group_sccs.len() != route.group_scc_ids.len() or
+            route.source_entries.len() != manifest.members.len():
+        return "dependency route omits manifest SCC or source member"
+    for index in 0..group_sccs.len():
+        if group_sccs[index] != route.group_scc_ids[index]:
+            return "dependency route SCC order differs"
+    var seen_sources: {text: bool} = {}
+    for entry in route.source_entries:
+        if not members_by_path.contains_key(entry.source_identity) or
+                seen_sources.contains_key(entry.source_identity):
+            return "dependency route source member differs"
+        seen_sources[entry.source_identity] = true
+        val member = members_by_path[entry.source_identity]
+        val expected_id = sha256_text("simple/native-group-module/v1|" +
+            "{entry.module_identity.len()}:{entry.module_identity}")
+        if member.module_id != expected_id or member.scc_id != entry.scc_identity or
+                member.source_digest != entry.source_digest:
+            return "dependency route source identity differs"
+    ""
+
+# Return only previously promoted, hash-checked dependency SMFs. The caller
+# will later hand these paths to a bounded target-host loader batch.
+fn native_group_worker_dependency_paths_v1(request: NativeGroupWorkerRequestV1,
+        manifest: NativeGroupManifestV1) -> Result<[text], text>:
+    if native_group_worker_request_valid_v1(request) != "" or
+            native_group_manifest_identity_v1(manifest) != request.manifest_digest or
+            manifest.group_route_path == "":
+        return Err("dependency request or manifest pin invalid")
+    if not file_is_regular_no_follow(manifest.group_route_path) or
+            file_hash_sha256(manifest.group_route_path) != manifest.group_route_digest:
+        return Err("dependency warm route digest differs")
+    val payload = file_read_regular_no_follow_bounded(manifest.group_route_path, 16777216)?
+    if sha256_text(payload) != manifest.group_route_digest:
+        return Err("dependency warm route bytes differ")
+    val route = native_group_warm_route_decode_v1(payload)?
+    val pin_error = native_group_worker_route_pins_v1(request, manifest, route)
+    if pin_error != "": return Err(pin_error)
+    var paths: [text] = []
+    var digests: {text: text} = {}
+    for dependency in route.dependency_smf_entries:
+        val path = request.output_root + "/" + dependency.smf_path
+        if not file_is_regular_no_follow(path):
+            return Err("promoted dependency SMF missing: " + dependency.module_id)
+        val digest = file_hash_sha256(path)
+        if not builder_digest_valid_v1(digest):
+            return Err("promoted dependency SMF digest invalid")
+        paths = paths.push(path)
+        digests[dependency.module_id] = digest
+    val markers = native_group_worker_dependency_markers_v1(request, manifest,
+        route.dependency_smf_entries, digests)?
+    for marker in markers:
+        val path = request.output_root + "/.native-scc-committed/" +
+            sha256_text(marker.scc_id) + ".sdn"
+        if not file_is_regular_no_follow(path) or
+                file_read_regular_no_follow_bounded(path, 16777216)? != marker.payload:
+            return Err("promoted dependency SCC marker differs: " + marker.scc_id)
+    for index in 0..paths.len():
+        if not file_is_regular_no_follow(paths[index]) or
+                file_hash_sha256(paths[index]) !=
+                    digests[route.dependency_smf_entries[index].module_id]:
+            return Err("promoted dependency SMF changed after marker check")
+    if not file_is_regular_no_follow(manifest.group_route_path) or
+            file_hash_sha256(manifest.group_route_path) != manifest.group_route_digest:
+        return Err("dependency warm route changed during admission")
+    Ok(paths)
 
 # The compiler cannot assert loader acceptance. Rebuild every OK SMF row from
 # receipts written by this worker, and make an entire SCC retry if one peer
@@ -283,3 +406,5 @@ export NativeGroupWorkerRequestV1, native_group_worker_request_encode_v1
 export native_group_worker_request_decode_v1, native_group_worker_request_valid_v1
 export native_group_worker_execute_v1
 export native_group_worker_reconcile_v1, native_group_worker_host_target_v1
+export NativeGroupWorkerDependencyMarkerV1, native_group_worker_dependency_markers_v1
+export native_group_worker_dependency_paths_v1
