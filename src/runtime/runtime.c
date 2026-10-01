@@ -110,6 +110,7 @@ typedef long long ssize_t;
 #ifndef _WIN32
 #include <dirent.h>
 #endif
+#include "platform/runtime_group_self_charge.h"
 
 /* ================================================================
  * Runtime Configuration
@@ -2385,10 +2386,18 @@ int rt_mem_snapshot_record(int64_t fd, int64_t seq,
         rt_mem_snapshot_token(event_token, sizeof(event_token), event, event_len) < 0 ||
         rt_mem_snapshot_token(phase_token, sizeof(phase_token), phase, phase_len) < 0 ||
         rt_mem_snapshot_token(path_token, sizeof(path_token), source_path, source_path_len) < 0) return 0;
+    int64_t group_current = -1, group_peak = -1;
+    int group_measured = rt_group_self_charge_snapshot(&group_current, &group_peak);
+    const char* group_kind = "unavailable";
+#if defined(_WIN32)
+    if (group_measured) group_kind = "job-commit";
+#elif defined(__linux__)
+    if (group_measured) group_kind = "cgroup-memory";
+#endif
     const char* path_kind = source_path_len > 0 ? "recorded" : "none";
     const char* emitted_path = source_path_len > 0 ? path_token : "-";
     int n = snprintf(line, sizeof(line),
-        "schema=simple.compiler.mem_snapshot.v1 run_id=%s seq=%lld pid=%lld monotonic_ms=%lld event=%s phase=%s source_index=%lld source_path_kind=%s source_path=%s retained_modules=%lld validation_keys=%lld validation_values=%lld shared_traits=%lld hir_names=%lld hir_symbols=%lld hir_functions=%lld hir_constants=%lld hir_enums=%lld hir_structs=%lld hir_classes=%lld heap_live_bytes=%lld heap_peak_bytes=%lld rss_kib=%lld hwm_kib=%lld\n",
+        "schema=simple.compiler.mem_snapshot.v1 run_id=%s seq=%lld pid=%lld monotonic_ms=%lld event=%s phase=%s source_index=%lld source_path_kind=%s source_path=%s retained_modules=%lld validation_keys=%lld validation_values=%lld shared_traits=%lld hir_names=%lld hir_symbols=%lld hir_functions=%lld hir_constants=%lld hir_enums=%lld hir_structs=%lld hir_classes=%lld heap_live_bytes=%lld heap_peak_bytes=%lld rss_kib=%lld hwm_kib=%lld group_charge_metric=%s group_charge_current_bytes=%lld group_charge_peak_bytes=%lld\n",
         run_token, (long long)seq, (long long)rt_getpid(), (long long)rt_time_now_monotonic_ms(),
         event_token, phase_token, (long long)source_index, path_kind, emitted_path,
         (long long)retained_modules, (long long)validation_keys,
@@ -2396,7 +2405,8 @@ int rt_mem_snapshot_record(int64_t fd, int64_t seq,
         (long long)hir_symbols, (long long)hir_functions, (long long)hir_constants,
         (long long)hir_enums, (long long)hir_structs, (long long)hir_classes,
         (long long)rt_heap_live_bytes(), (long long)rt_heap_peak_bytes(),
-        (long long)rt_process_rss_kib(), (long long)rt_process_hwm_kib());
+        (long long)rt_process_rss_kib(), (long long)rt_process_hwm_kib(),
+        group_kind, (long long)group_current, (long long)group_peak);
     return n > 0 && (size_t)n < sizeof(line) && rt_mem_snapshot_append_flush(fd, line, n);
 }
 

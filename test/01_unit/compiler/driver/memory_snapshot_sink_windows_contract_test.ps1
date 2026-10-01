@@ -48,7 +48,7 @@ int main(int argc, char** argv) {
     & $exe complete $sink
     if ($LASTEXITCODE -ne 0) { throw "Windows sink write failed: $LASTEXITCODE" }
     $lines = Get-Content -LiteralPath $sink
-    if ($lines.Count -ne 2 -or $lines[0] -notmatch "^schema=simple.compiler.mem_snapshot.v1 .*seq=0 .*rss_kib=[1-9][0-9]* hwm_kib=[1-9][0-9]*$" -or
+    if ($lines.Count -ne 2 -or $lines[0] -notmatch "^schema=simple.compiler.mem_snapshot.v1 .*seq=0 .*rss_kib=[1-9][0-9]* hwm_kib=[1-9][0-9]* group_charge_metric=unavailable group_charge_current_bytes=-1 group_charge_peak_bytes=-1$" -or
             $lines[1] -ne "seq=1 event=done") { throw "flushed sink records differ" }
     & $exe reject $sink
     if ($LASTEXITCODE -ne 0) { throw "existing sink was accepted" }

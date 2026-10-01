@@ -47,6 +47,7 @@ typedef int pid_t;
 #include <sys/wait.h>
 #include <unistd.h>
 #endif
+#include "platform/runtime_group_self_charge.h"
 
 int64_t rt_getpid(void) {
 #if defined(_WIN32)
@@ -728,14 +729,23 @@ int rt_mem_snapshot_record(int64_t fd, int64_t seq,
         rt_mem_snapshot_token(e, sizeof(e), event, event_len) < 0 ||
         rt_mem_snapshot_token(p, sizeof(p), phase, phase_len) < 0 ||
         rt_mem_snapshot_token(sp, sizeof(sp), path, path_len) < 0) return 0;
-    int n = snprintf(line, sizeof(line), "schema=simple.compiler.mem_snapshot.v1 run_id=%s seq=%lld pid=%lld monotonic_ms=%lld event=%s phase=%s source_index=%lld source_path_kind=%s source_path=%s retained_modules=%lld validation_keys=%lld validation_values=%lld shared_traits=%lld hir_names=%lld hir_symbols=%lld hir_functions=%lld hir_constants=%lld hir_enums=%lld hir_structs=%lld hir_classes=%lld heap_live_bytes=%lld heap_peak_bytes=%lld rss_kib=%lld hwm_kib=%lld\n",
+    int64_t group_current = -1, group_peak = -1;
+    int group_measured = rt_group_self_charge_snapshot(&group_current, &group_peak);
+    const char* group_kind = "unavailable";
+#if defined(_WIN32)
+    if (group_measured) group_kind = "job-commit";
+#elif defined(__linux__)
+    if (group_measured) group_kind = "cgroup-memory";
+#endif
+    int n = snprintf(line, sizeof(line), "schema=simple.compiler.mem_snapshot.v1 run_id=%s seq=%lld pid=%lld monotonic_ms=%lld event=%s phase=%s source_index=%lld source_path_kind=%s source_path=%s retained_modules=%lld validation_keys=%lld validation_values=%lld shared_traits=%lld hir_names=%lld hir_symbols=%lld hir_functions=%lld hir_constants=%lld hir_enums=%lld hir_structs=%lld hir_classes=%lld heap_live_bytes=%lld heap_peak_bytes=%lld rss_kib=%lld hwm_kib=%lld group_charge_metric=%s group_charge_current_bytes=%lld group_charge_peak_bytes=%lld\n",
         run, (long long)seq, (long long)rt_getpid(), (long long)rt_time_now_monotonic_ms(), e, p,
         (long long)source_index, path_len > 0 ? "recorded" : "none", path_len > 0 ? sp : "-",
         (long long)retained, (long long)keys, (long long)values, (long long)traits,
         (long long)names, (long long)symbols, (long long)functions, (long long)constants,
         (long long)enums, (long long)structs, (long long)classes,
         (long long)rt_heap_live_bytes(), (long long)rt_heap_peak_bytes(),
-        (long long)rt_process_rss_kib(), (long long)rt_process_hwm_kib());
+        (long long)rt_process_rss_kib(), (long long)rt_process_hwm_kib(),
+        group_kind, (long long)group_current, (long long)group_peak);
     return n > 0 && n < (int)sizeof(line) && rt_mem_snapshot_append_flush_raw(fd, line, n);
 }
 

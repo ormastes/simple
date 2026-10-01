@@ -91,10 +91,14 @@ The same two broker samples would misleadingly suggest a 50-byte increment.
 Compiler self RSS/HWM cannot repair that ambiguity because Windows Job charge
 is committed bytes and Linux cgroup charge is a different tree-wide metric.
 Automatic `measured_thread_bytes` and `thread_reserve_bytes` therefore remain
-zero. The next instrumentation step must sample the same Job/cgroup charge at
-the codegen boundary under an exclusive serial calibration lease and retain a
-phase-scoped peak or allocator attribution; a comparable backend, target,
-producer, source/policy key and reaped successful result must gate reuse.
+zero. Linux compiler phase records now attempt a direct cgroup-v2
+`memory.current`/`memory.peak` probe at each codegen boundary; failure is
+recorded explicitly as unavailable. Windows cannot expose current aggregate
+Job charge from the documented extended-limit row, so its direct probe remains
+unavailable. A calibration still needs an exclusive serial codegen interval,
+phase-correlated broker coverage, conservative charge bound, and a comparable
+backend, target, producer, source/policy key tied to a reaped successful result
+before any pin may be reused. No such admitted calibration exists yet.
 
 The first implementation gate is a focused policy test using measured fixture
 values, including a post-staging capacity drop, unavailable commit headroom,
