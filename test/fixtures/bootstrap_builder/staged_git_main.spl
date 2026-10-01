@@ -1,0 +1,53 @@
+use app.io.args_ops.{get_args}
+use app.io.env_ops.{env_set}
+use app.io.file_ops.{file_atomic_write}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
+use std.nogc_sync_mut.io.windows_process_owner.{windows_process_file_digest_v1}
+use app.bootstrap_builder.contracts.{BuildTaskV1, BuildInputV1}
+use app.bootstrap_builder.windows_staged_git.{builder_windows_staged_git_v1}
+
+fn main() -> i64:
+    val args = get_args()
+    if args.len() != 4: return 2
+    val root = args[1]
+    val _policy = env_set("SIMPLE_BUILD_STAGED_GIT_POLICY", "raw-v1-20000101")
+    val _enabled = env_set("SIMPLE_BUILD_STAGED_GIT", "1")
+    val _program = env_set("SIMPLE_BUILD_GIT_PROGRAM", args[2])
+    val _digest = env_set("SIMPLE_BUILD_GIT_SHA256", args[3])
+    for leaf in ["a", "b", "changed", "attributes"]:
+        if not dir_create_all(root + "/" + leaf + "/work/src"): return 3
+        if not file_atomic_write(root + "/" + leaf + "/work/src/good.spl", "fn main() -> i64:\r\n    0\r\n"): return 4
+    val digest = windows_process_file_digest_v1(root + "/a/work/src/good.spl")
+    val task = BuildTaskV1("git-proof", 1, "bootstrap", digest, digest, digest, [], "unused", ["native-build"], [BuildInputV1("src/good.spl", digest)], ["out/result.exe"], digest, 300000)
+    val first = match builder_windows_staged_git_v1(task, root + "/a"):
+        Ok(value): value
+        Err(reason):
+            print "FAIL first {reason.message}"
+            return 5
+    val peer = match builder_windows_staged_git_v1(task, root + "/b"):
+        Ok(value): value
+        Err(reason):
+            print "FAIL peer {reason.message}"
+            return 6
+    if first != peer or first == "": return 7
+    if not file_atomic_write(root + "/changed/work/src/good.spl", "changed"): return 8
+    match builder_windows_staged_git_v1(task, root + "/changed"):
+        Ok(_value): return 9
+        Err(_reason): nil
+    match builder_windows_staged_git_v1(task, root + "/a"):
+        Ok(_value): return 10
+        Err(_reason): nil
+    if not file_atomic_write(root + "/attributes/work/src/.gitattributes", "*.spl text\n"): return 11
+    val attr_digest = windows_process_file_digest_v1(root + "/attributes/work/src/.gitattributes")
+    val attr_task = BuildTaskV1("attributes", 1, "bootstrap", digest, digest, digest, [], "unused", ["native-build"], [BuildInputV1("src/.gitattributes", attr_digest)], ["out/result.exe"], digest, 300000)
+    match builder_windows_staged_git_v1(attr_task, root + "/attributes"):
+        Ok(_value): return 12
+        Err(_reason): nil
+    val _disabled = env_set("SIMPLE_BUILD_STAGED_GIT", "0")
+    match builder_windows_staged_git_v1(task, root + "/a"):
+        Ok(value):
+            if value != "": return 13
+        Err(_reason): return 14
+    print "PASS staged Git deterministic commit, raw CRLF, altered input, existing metadata, attributes, opt-out"
+    print "commit={first}"
+    0

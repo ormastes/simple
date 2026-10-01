@@ -1,0 +1,360 @@
+# Native black-box lifecycle checks. Only this executed harness may emit the
+# qualification receipt; shell launchers and source scans are not evidence.
+use std.nogc_sync_mut.io.env_ops.{env_get}
+use std.nogc_sync_mut.io.file_ops.{file_read, file_exists, file_atomic_write, file_create_exclusive, file_hash_sha256, file_is_regular_no_follow}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
+use std.nogc_sync_mut.io.process_ops.{process_run_timeout}
+use app.bootstrap_builder.process_port.{BuilderProcessPortV1}
+use std.nogc_sync_mut.io.time_ops.{sleep_ms, current_time_ms}
+use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
+use app.bootstrap_builder.contracts.{BuildInputV1, BuildTaskV1, BuildHostV1, BuildRunV1, builder_task_identity_v1}
+use app.bootstrap_builder.codec.{builder_read_run_v1, builder_write_run_v1, builder_read_result_v1}
+use std.common.crypto.sha256.{sha256_text}
+
+struct BuilderQualificationConfig:
+    process_port: BuilderProcessPortV1
+    manager: text
+    fixture: text
+    hosts_path: text
+    producer: text
+    source_identity: text
+    llc: text
+    worker_image: text
+    worker_digest: text
+    root: text
+    hosts: [BuildHostV1]
+    manager_digest: text
+    fixture_digest: text
+    hosts_digest: text
+    producer_digest: text
+    source_digest: text
+    llc_digest: text
+
+struct BuilderLifecycleFixture:
+    config: BuilderQualificationConfig
+    directory: text
+    run: BuildRunV1
+
+fn qualification_require(condition: bool, message: text) -> Result<bool, text>:
+    if not condition: return Err(message)
+    Ok(true)
+
+fn qualification_file_digest(path: text) -> Result<text, text>:
+    qualification_require(file_is_regular_no_follow(path), "missing regular identity file: " + path)?
+    val digest = file_hash_sha256(path)
+    qualification_require(digest.len() == 64, "cannot hash identity file: " + path)?
+    Ok(digest)
+
+fn qualification_config(process_port: BuilderProcessPortV1) -> Result<BuilderQualificationConfig, text>:
+    val manager = env_get("SIMPLE_NATIVE_BUILD_MANAGER")
+    val fixture = env_get("SIMPLE_BUILDER_FIXTURE_PROGRAM")
+    val hosts_path = env_get("SIMPLE_NATIVE_BUILD_MANAGER_HOSTS")
+    val producer = env_get("SIMPLE_NATIVE_BUILD_MANAGER_PRODUCER")
+    val source_identity = env_get("SIMPLE_NATIVE_BUILD_MANAGER_SOURCE_IDENTITY")
+    val llc = env_get("SIMPLE_NATIVE_BUILD_MANAGER_LLC")
+    val worker_image = env_get("SIMPLE_NATIVE_BUILD_MANAGER_WORKER")
+    val configured_worker_digest = env_get("SIMPLE_NATIVE_BUILD_MANAGER_WORKER_SHA256")
+    var selected_worker = manager
+    if worker_image != "": selected_worker = worker_image
+    val worker_digest = qualification_file_digest(selected_worker)?
+    if worker_image == "":
+        qualification_require(configured_worker_digest == "", "worker digest requires a separate worker image")?
+    else:
+        qualification_require(worker_image.starts_with("/") or worker_image.contains(":"), "worker image must be absolute")?
+        qualification_require(configured_worker_digest == worker_digest, "separate worker image digest mismatch")?
+    val base = env_get("SIMPLE_BUILDER_QUALIFICATION_ROOT")
+    qualification_require(base.starts_with("/") or base.contains(":"), "qualification root must be absolute")?
+    val template = builder_read_run_v1(hosts_path)?
+    for host in template.hosts:
+        qualification_require(host.transport == "local", "local lifecycle suite cannot qualify a remote host")?
+        qualification_require(host.worker_program == selected_worker, "host worker must match the selected qualified image path")?
+        qualification_require(host.worker_digest == worker_digest and qualification_file_digest(host.worker_program)? == worker_digest, "host worker bytes differ from the frozen worker identity")?
+    val root = base + "/run-{getpid()}-{current_time_ms()}"
+    qualification_require(dir_create_all(root), "cannot create qualification root")?
+    qualification_require(file_create_exclusive(root + "/qualification.claim", "native lifecycle\n"), "qualification run directory already claimed")?
+    Ok(BuilderQualificationConfig(process_port: process_port, manager: manager, fixture: fixture, hosts_path: hosts_path,
+        producer: producer, source_identity: source_identity, llc: llc, worker_image: worker_image, worker_digest: worker_digest, root: root, hosts: template.hosts,
+        manager_digest: qualification_file_digest(manager)?, fixture_digest: qualification_file_digest(fixture)?,
+        hosts_digest: qualification_file_digest(hosts_path)?, producer_digest: qualification_file_digest(producer)?,
+        source_digest: qualification_file_digest(source_identity)?, llc_digest: qualification_file_digest(llc)?))
+
+fn qualification_task(config: BuilderQualificationConfig, id: text, mode: text, dependencies: [text]) -> BuildTaskV1:
+    BuildTaskV1(id: id, attempt: 1, phase: "qualification", producer_digest: config.fixture_digest,
+        source_digest: config.source_digest, toolchain_digest: config.llc_digest, dependencies: dependencies,
+        program: config.fixture, args: [mode, "input.txt", id + ".out"],
+        inputs: [BuildInputV1(path: "input.txt", digest: sha256_text("builder-fixture-input-v1"))],
+        outputs: [id + ".out"], cache_key: sha256_text("qualification-" + id), timeout_ms: 70000)
+
+fn prepare_builder_fixture(config: BuilderQualificationConfig, name: text, tasks: [BuildTaskV1], keep_going: bool, serial: bool) -> Result<BuilderLifecycleFixture, text>:
+    val directory = config.root + "/" + name
+    qualification_require(dir_create_all(directory + "/source"), "cannot create fixture source")?
+    qualification_require(file_atomic_write(directory + "/source/input.txt", "builder-fixture-input-v1"), "cannot write fixture input")?
+    var hosts = config.hosts
+    if serial:
+        var host = hosts[0]
+        host.slots = 1
+        hosts = [host]
+    val run = BuildRunV1(tasks: tasks, hosts: hosts, keep_going: keep_going, max_attempts: 1)
+    qualification_require(builder_write_run_v1(directory + "/run.sdn", run), "cannot encode fixture run")?
+    Ok(BuilderLifecycleFixture(config: config, directory: directory, run: run))
+
+fn qualification_arguments(fixture: BuilderLifecycleFixture) -> [text]:
+    ["run", "--manifest", fixture.directory + "/run.sdn", "--state", fixture.directory + "/state", "--source-root", fixture.directory + "/source"]
+
+fn start_builder_run(fixture: BuilderLifecycleFixture) -> Result<(text, text, i32), text>:
+    val result = process_run_timeout(fixture.config.manager, qualification_arguments(fixture), 90000)
+    qualification_require(file_atomic_write(fixture.directory + "/manager.stdout", result.0), "cannot record manager stdout")?
+    qualification_require(file_atomic_write(fixture.directory + "/manager.stderr", result.1), "cannot record manager stderr")?
+    Ok(result)
+
+fn resume_builder_run(fixture: BuilderLifecycleFixture) -> Result<(text, text, i32), text>:
+    start_builder_run(fixture)
+
+fn assert_terminal_task_rows(fixture: BuilderLifecycleFixture, expected: [text]) -> Result<bool, text>:
+    val rows = file_read(fixture.directory + "/state/journal.sdn").split("\n")
+    qualification_require(rows.len() == fixture.run.tasks.len() + 2, "journal must have exactly one row per task")?
+    qualification_require(expected.len() == fixture.run.tasks.len(), "test expected ledger has wrong size")?
+    for i in 0..fixture.run.tasks.len():
+        val fields = rows[i + 1].split("\t")
+        qualification_require(fields.len() == 5, "malformed terminal row")?
+        qualification_require(fields[0] == fixture.run.tasks[i].id and fields[2] == expected[i], "unexpected terminal status: " + rows[i + 1])?
+        qualification_require(fields[4] == builder_task_identity_v1(fixture.run.tasks[i]), "terminal task identity mismatch")?
+    Ok(true)
+
+fn assert_dependency_blocked(fixture: BuilderLifecycleFixture, id: text) -> Result<bool, text>:
+    qualification_require(not file_exists(fixture.directory + "/source/" + id + ".out"), "blocked descendant published output")?
+    qualification_require(not file_exists(fixture.directory + "/state/receipts/" + id + ".sdn"), "blocked descendant admitted a receipt")?
+    for host in fixture.run.hosts:
+        qualification_require(not file_exists(fixture.directory + "/state/attempts/" + id + "/1/" + host.id + "/attempt.claim"), "blocked descendant was dispatched")?
+    Ok(true)
+
+fn qualification_attempt_root(fixture: BuilderLifecycleFixture, id: text) -> text:
+    fixture.directory + "/state/attempts/" + id + "/1/" + fixture.run.hosts[0].id
+
+fn qualification_wait_for_file(fixture: BuilderLifecycleFixture, path: text, manager_token: i64) -> Result<bool, text>:
+    var ticks = 0
+    while ticks < 200:
+        if file_exists(path): return Ok(true)
+        val observed = fixture.config.process_port.wait_operation(manager_token, 1)?
+        if observed != -2: return Err("manager stopped or observation failed before fixture reached barrier: {observed}")
+        sleep_ms(100)
+        ticks = ticks + 1
+    Err("fixture barrier timed out: " + path)
+
+fn interrupt_owned_worker(fixture: BuilderLifecycleFixture, id: text) -> Result<bool, text>:
+    val root = qualification_attempt_root(fixture, id)
+    # Worker owns termination/reaping of its compiler. Never kill a guessed PID.
+    qualification_require(file_atomic_write(root + "/cancel.request", "qualification\n"), "cannot request owned worker cancellation")?
+    Ok(true)
+
+fn qualification_abort_owned(fixture: BuilderLifecycleFixture, manager_token: i64) -> Result<bool, text>:
+    val requested = file_atomic_write(fixture.directory + "/state/cancel.request", "qualification cleanup\n")
+    val observed = fixture.config.process_port.wait_operation(manager_token, 10000)?
+    Ok(requested and observed != -2)
+
+fn qualification_local(config: BuilderQualificationConfig) -> Result<bool, text>:
+    val fixture = prepare_builder_fixture(config, "local_execution", [qualification_task(config, "first", "copy", []), qualification_task(config, "second", "copy", ["first"])], true, false)?
+    val result = start_builder_run(fixture)?
+    qualification_require(result.2 == 0, "local execution exit {result.2}: " + result.0 + result.1)?
+    assert_terminal_task_rows(fixture, ["SUCCEEDED", "SUCCEEDED"])?
+    for task in fixture.run.tasks:
+        val receipt = builder_read_result_v1(fixture.directory + "/state/receipts/" + task.id + ".sdn")?
+        qualification_require(receipt.status == "OK" and receipt.identity_digest == builder_task_identity_v1(task), "local execution receipt identity mismatch")?
+        qualification_require(receipt.outputs[0].digest == file_hash_sha256(fixture.directory + "/source/" + task.outputs[0]), "published bytes disagree with receipt")?
+        qualification_require(file_read(fixture.directory + "/source/" + task.outputs[0]).contains("producer-pid="), "fixture producer did not execute")?
+    qualification_worker_identity(config)?
+    Ok(true)
+
+fn qualification_worker_identity(config: BuilderQualificationConfig) -> Result<bool, text>:
+    val fixture = prepare_builder_fixture(config, "worker_identity_rejection", [qualification_task(config, "untrusted", "copy", [])], true, true)?
+    var run = fixture.run
+    var host = run.hosts[0]
+    host.worker_digest = sha256_text("not-the-qualified-worker-image")
+    run.hosts = [host]
+    qualification_require(builder_write_run_v1(fixture.directory + "/run.sdn", run), "cannot encode mismatched-worker fixture")?
+    val result = start_builder_run(fixture)?
+    qualification_require(result.2 == 1 or result.2 == 2, "manager executed a worker with a mismatched image digest")?
+    qualification_require(not file_exists(fixture.directory + "/source/untrusted.out"), "mismatched worker published an output")?
+    qualification_require(not file_exists(qualification_attempt_root(fixture, "untrusted") + "/work/started"), "mismatched worker executed the native producer")?
+    host.worker_digest = ""
+    run.hosts = [host]
+    qualification_require(not builder_write_run_v1(fixture.directory + "/empty-worker-digest.sdn", run), "empty worker digest was accepted by the run codec")?
+    Ok(true)
+
+fn assert_cache_reused(fixture: BuilderLifecycleFixture, original_output: text, stdout: text) -> Result<bool, text>:
+    qualification_require(stdout.contains("verified_cache_hits=1"), "manager did not report exactly one verified receipt reuse")?
+    qualification_require(file_hash_sha256(fixture.directory + "/source/cached.out") == original_output, "cache reuse reran or changed task output")?
+    assert_terminal_task_rows(fixture, ["SUCCEEDED"])
+
+fn qualification_cache(config: BuilderQualificationConfig) -> Result<bool, text>:
+    val fixture = prepare_builder_fixture(config, "cache_reuse", [qualification_task(config, "cached", "copy", [])], true, false)?
+    val initial = start_builder_run(fixture)?
+    qualification_require(initial.2 == 0, "initial cache producer failed")?
+    val original = qualification_file_digest(fixture.directory + "/source/cached.out")?
+    val result = resume_builder_run(fixture)?
+    qualification_require(result.2 == 0, "cached manager resume failed")?
+    assert_cache_reused(fixture, original, result.0)
+
+fn qualification_failure_policy(config: BuilderQualificationConfig, keep_going: bool) -> Result<bool, text>:
+    var name = "fail_fast"
+    if keep_going: name = "keep_going"
+    val fixture = prepare_builder_fixture(config, name, [qualification_task(config, "broken", "fail", []), qualification_task(config, "dependent", "copy", ["broken"]), qualification_task(config, "independent", "copy", [])], keep_going, true)?
+    val result = start_builder_run(fixture)?
+    qualification_require(result.2 == 1, "failed run must return task failure, observed {result.2}")?
+    var final_status = "BLOCKED"
+    if keep_going: final_status = "SUCCEEDED"
+    assert_terminal_task_rows(fixture, ["FAILED", "BLOCKED", final_status])?
+    assert_dependency_blocked(fixture, "dependent")?
+    if keep_going:
+        qualification_require(file_read(fixture.directory + "/source/independent.out").contains("producer-pid="), "keep-going independent task did not execute")?
+    else:
+        assert_dependency_blocked(fixture, "independent")?
+    val receipt = builder_read_result_v1(qualification_attempt_root(fixture, "broken") + "/result.sdn")?
+    qualification_require(receipt.status == "ERROR" and receipt.exit_code == 23, "real child exit was not propagated")?
+    Ok(true)
+
+fn qualification_worker_failure(config: BuilderQualificationConfig) -> Result<bool, text>:
+    val fixture = prepare_builder_fixture(config, "worker_failure", [qualification_task(config, "waiting", "wait", []), qualification_task(config, "dependent", "copy", ["waiting"])], true, true)?
+    val token = config.process_port.spawn_operation(config.manager, config.manager_digest, qualification_arguments(fixture), fixture.directory)?
+    match qualification_worker_failure_running(fixture, token):
+        Ok(value): Ok(value)
+        Err(message):
+            val requested = interrupt_owned_worker(fixture, "waiting")
+            val cleaned = qualification_abort_owned(fixture, token)
+            Err(message + "; cancellation requested={requested}; cleanup={cleaned}")
+
+fn qualification_worker_failure_running(fixture: BuilderLifecycleFixture, token: i64) -> Result<bool, text>:
+    match qualification_wait_for_file(fixture, qualification_attempt_root(fixture, "waiting") + "/work/started", token):
+        Err(message):
+            val cleaned = qualification_abort_owned(fixture, token)
+            return Err(message + "; cleanup={cleaned}")
+        Ok(_ready): ()
+    interrupt_owned_worker(fixture, "waiting")?
+    val observed = fixture.config.process_port.wait_operation(token, 20000)?
+    if observed == -2:
+        val cleaned = qualification_abort_owned(fixture, token)
+        return Err("cancelled worker unresolved {observed}; cleanup={cleaned}")
+    qualification_require(observed == 1, "cancelled compiler must fail run")?
+    val root = qualification_attempt_root(fixture, "waiting")
+    qualification_require(file_read(root + "/compiler.reaped") == builder_task_identity_v1(fixture.run.tasks[0]) + "\n" + fixture.run.hosts[0].id, "worker did not prove compiler tree reaped")?
+    val receipt = builder_read_result_v1(root + "/result.sdn")?
+    qualification_require(receipt.status == "ERROR" and receipt.exit_code == 125, "worker cancellation was not propagated")?
+    assert_terminal_task_rows(fixture, ["FAILED", "BLOCKED"])?
+    assert_dependency_blocked(fixture, "dependent")
+
+fn qualification_restart(config: BuilderQualificationConfig) -> Result<bool, text>:
+    val fixture = prepare_builder_fixture(config, "restart", [qualification_task(config, "waiting", "wait", [])], true, true)?
+    val token = config.process_port.spawn_operation(config.manager, config.manager_digest, qualification_arguments(fixture), fixture.directory)?
+    match qualification_restart_running(fixture, token):
+        Ok(value): Ok(value)
+        Err(message):
+            val requested = interrupt_owned_worker(fixture, "waiting")
+            val cleaned = qualification_abort_owned(fixture, token)
+            Err(message + "; original worker cancellation requested={requested}; original manager cleanup={cleaned}")
+
+fn qualification_restart_running(fixture: BuilderLifecycleFixture, token: i64) -> Result<bool, text>:
+    val root = qualification_attempt_root(fixture, "waiting")
+    match qualification_wait_for_file(fixture, root + "/work/started", token):
+        Err(message):
+            val cleaned = qualification_abort_owned(fixture, token)
+            return Err(message + "; cleanup={cleaned}")
+        Ok(_ready): ()
+    val started = qualification_file_digest(root + "/work/started")?
+    qualification_require(fixture.config.process_port.terminate_operation(token)?, "cannot interrupt owned manager")?
+    val terminal = fixture.config.process_port.wait_operation(token, 5000)?
+    qualification_require(terminal != -2, "original manager death not confirmed")?
+    val baseline_request = file_read(root + "/control.request")
+    val baseline_response = file_read(root + "/control.response")
+    val resumed_token = fixture.config.process_port.spawn_operation(fixture.config.manager, fixture.config.manager_digest, qualification_arguments(fixture), fixture.directory)?
+    match qualification_restart_recovered(fixture, resumed_token, root, started, baseline_request, baseline_response):
+        Ok(value): Ok(value)
+        Err(message):
+            val requested = interrupt_owned_worker(fixture, "waiting")
+            val cleaned = qualification_abort_owned(fixture, resumed_token)
+            Err(message + "; replacement worker cancellation requested={requested}; replacement manager cleanup={cleaned}")
+
+fn qualification_restart_recovered(fixture: BuilderLifecycleFixture, resumed_token: i64, root: text, started: text, baseline_request: text, baseline_response: text) -> Result<bool, text>:
+    match qualification_restart_ack_v1(fixture, resumed_token, root, baseline_request, baseline_response):
+        Err(message):
+            val cancelled = interrupt_owned_worker(fixture, "waiting")
+            val cleaned = qualification_abort_owned(fixture, resumed_token)
+            return Err(message + "; worker cancel={cancelled}; manager cleanup={cleaned}")
+        Ok(_ready): ()
+    qualification_require(file_atomic_write(root + "/work/release", "continue\n"), "cannot release live task")?
+    val observed = fixture.config.process_port.wait_operation(resumed_token, 20000)?
+    if observed == -2:
+        val cleaned = qualification_abort_owned(fixture, resumed_token)
+        return Err("replacement manager unresolved; cleanup={cleaned}")
+    qualification_require(observed == 0, "replacement manager failed")?
+    qualification_require(qualification_file_digest(root + "/work/started")? == started, "restart reran task rather than recovering existing worker")?
+    qualification_require(not file_exists(fixture.directory + "/state/attempts/waiting/2/" + fixture.run.hosts[0].id + "/attempt.claim"), "restart spawned duplicate attempt")?
+    assert_terminal_task_rows(fixture, ["SUCCEEDED"])
+
+fn qualification_restart_ack_v1(fixture: BuilderLifecycleFixture, resumed_token: i64, root: text, baseline_request: text, baseline_response: text) -> Result<bool, text>:
+    val deadline = current_time_ms() + 10000
+    val identity = builder_task_identity_v1(fixture.run.tasks[0])
+    while current_time_ms() < deadline:
+        val request = file_read(root + "/control.request")
+        val response = file_read(root + "/control.response")
+        val confirmed = file_read(root + "/control.request")
+        val fields = request.split("\n")
+        if request != baseline_request and response != baseline_response and request == response and request == confirmed and fields.len() == 4:
+            if fields[0] == identity and fields[1] == fixture.run.hosts[0].id and fields[2] != "" and fields[3] == "probe":
+                return Ok(true)
+        if fixture.config.process_port.wait_operation(resumed_token, 1)? != -2:
+            return Err("replacement manager terminated before fresh exact acknowledgement")
+        sleep_ms(25)
+    Err("replacement manager fresh exact acknowledgement deadline exceeded")
+
+fn assert_stale_result_rejected(fixture: BuilderLifecycleFixture, result: (text, text, i32)) -> Result<bool, text>:
+    qualification_require(not result.0.contains("cache=verified-hit"), "corrupted output admitted from stale receipt")?
+    if result.0.contains("restored=verified-artifact"):
+        qualification_require(result.0.contains("verified_cache_hits=1"), "restoration did not report the verified retained artifact")?
+    else:
+        qualification_require(result.0.contains("verified_cache_hits=0"), "invalidated single-task run reported reuse without verified artifact restoration")?
+    qualification_require(result.2 == 0, "invalidated output was rejected but not rebuilt; cached continuation remains incomplete")?
+    val receipt = builder_read_result_v1(fixture.directory + "/state/receipts/cached.sdn")?
+    qualification_require(file_hash_sha256(fixture.directory + "/source/cached.out") == receipt.outputs[0].digest, "successful rebuild retained corrupt output")?
+    qualification_require(file_read(fixture.directory + "/source/cached.out").contains("producer-pid="), "invalidated output not rebuilt")?
+    Ok(true)
+
+fn qualification_invalidation(config: BuilderQualificationConfig) -> Result<bool, text>:
+    val fixture = prepare_builder_fixture(config, "cache_invalidation", [qualification_task(config, "cached", "copy", [])], true, false)?
+    val initial = start_builder_run(fixture)?
+    qualification_require(initial.2 == 0, "invalidation initial producer failed")?
+    qualification_require(file_atomic_write(fixture.directory + "/source/cached.out", "tampered-output"), "cannot corrupt owned output")?
+    assert_stale_result_rejected(fixture, resume_builder_run(fixture)?)
+
+fn qualification_case(config: BuilderQualificationConfig, name: text) -> Result<bool, text>:
+    if name == "local_execution": return qualification_local(config)
+    if name == "cache_reuse": return qualification_cache(config)
+    if name == "worker_failure": return qualification_worker_failure(config)
+    if name == "restart": return qualification_restart(config)
+    if name == "keep_going": return qualification_failure_policy(config, true)
+    if name == "fail_fast": return qualification_failure_policy(config, false)
+    if name == "cache_invalidation": return qualification_invalidation(config)
+    Err("unknown lifecycle case; remote execution requires a separate configured-host qualification")
+
+fn qualification_emit(config: BuilderQualificationConfig, evidence: text) -> Result<text, text>:
+    for pair in [(config.manager, config.manager_digest), (config.fixture, config.fixture_digest), (config.hosts_path, config.hosts_digest), (config.producer, config.producer_digest), (config.source_identity, config.source_digest), (config.llc, config.llc_digest)]:
+        qualification_require(qualification_file_digest(pair.0)? == pair.1, "identity changed during native lifecycle qualification: " + pair.0)?
+    for host in config.hosts:
+        qualification_require(host.worker_digest == config.worker_digest and qualification_file_digest(host.worker_program)? == config.worker_digest, "worker binary changed during native qualification: " + host.id)?
+    val log_path = config.root + "/runtime-evidence.log"
+    qualification_require(file_atomic_write(log_path, evidence), "cannot persist lifecycle evidence")?
+    var receipt = "schema=simple-native-build-manager-qualification-v1\nstatus=pass\nexecution_mode=local\n"
+    receipt = receipt + "producer_kind=bootstrap-phase1-seed\nproducer_phase=stage1\nuse_scope=bootstrap-manager-only\nretained_through=stage4\n"
+    receipt = receipt + "manager_sha256=" + config.manager_digest + "\nhosts_sha256=" + config.hosts_digest + "\nllc_sha256=" + config.llc_digest + "\n"
+    receipt = receipt + "producer=" + config.producer + "\nproducer_sha256=" + config.producer_digest + "\nsource_identity=" + config.source_identity + "\nsource_sha256=" + config.source_digest + "\n"
+    receipt = receipt + "fixture_sha256=" + config.fixture_digest + "\nruntime_evidence=" + log_path + "\nruntime_evidence_sha256=" + qualification_file_digest(log_path)? + "\n"
+    if config.worker_image != "":
+        receipt = receipt + "worker_image=" + config.worker_image + "\nworker_image_sha256=" + config.worker_digest + "\n"
+    for name in ["local_execution", "cache_reuse", "worker_failure", "restart", "keep_going", "fail_fast", "cache_invalidation"]:
+        qualification_require(evidence.contains("builder-qualification-v1 " + name + " PASS\n"), "missing executed case evidence")?
+        receipt = receipt + name + "=pass\n"
+    val path = config.root + "/qualification.env"
+    qualification_require(file_atomic_write(path, receipt), "cannot persist qualification receipt")?
+    Ok(path)
+
+export BuilderQualificationConfig, BuilderLifecycleFixture
+export qualification_config, qualification_case, qualification_emit

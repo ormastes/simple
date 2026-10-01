@@ -1,0 +1,79 @@
+# Native lifecycle proof for the canonical durable worker launcher.
+use app.io.args_ops.{get_args}
+use std.nogc_sync_mut.io.file_ops.{file_atomic_write, file_read}
+use std.nogc_sync_mut.io.windows_process_owner.{windows_process_file_digest_v1}
+use std.nogc_sync_mut.io.windows_worker_launcher.{windows_worker_spawn_v1, windows_worker_wait_v1, windows_worker_terminate_v1, windows_worker_detach_v1}
+
+fn launcher_fixture_failure(reason: text) -> i64:
+    print "launcher-proof FAIL: {reason}"
+    1
+
+fn main() -> i64:
+    val args = get_args()
+    if args.len() < 2: return launcher_fixture_failure("mode required")
+    val mode = args[1]
+    if mode == "child-args":
+        if args.len() != 7: return 41
+        if args[2] != "space value": return 42
+        if args[3] != "quote\"value": return 43
+        if args[4] != "trailing\\": return 44
+        if args[5] != "": return 45
+        if args[6] != "한글😀": return 46
+        if file_read("input") != "launcher-proof-input": return 47
+        if not file_atomic_write("output", "exact-argv-cwd-pass"): return 48
+        return 0
+    val root = "D:/wk-bootstrap-manager-resume-20260930/build/bootstrap-builder/phase1-seed-292b59a3/worker-launcher-proof/cases/" + mode
+    var program = "D:/wk-bootstrap-manager-resume-20260930/build/bootstrap-builder/phase1-seed-292b59a3/fixture-program/fixture-program.exe"
+    var child_mode = "copy"
+    if mode == "nonzero": child_mode = "fail"
+    if mode == "parent-exit" or mode == "detach" or mode == "terminate": child_mode = "wait"
+    var child_args: [text] = [child_mode, "input", "output"]
+    if mode == "argv":
+        program = args[0]
+        child_args = ["child-args", "space value", "quote\"value", "trailing\\", "", "한글😀"]
+    var digest = windows_process_file_digest_v1(program)
+    if mode == "bad-digest": digest = "0000000000000000000000000000000000000000000000000000000000000000"
+    if mode == "missing": program = root + "/missing-program.exe"
+    val launched = windows_worker_spawn_v1(program, digest, child_args, root)
+    if mode == "missing" or mode == "bad-digest":
+        match launched:
+            Ok(_token): return launcher_fixture_failure("invalid image accepted")
+            Err(message):
+                print "launcher-proof PASS {mode}: {message}"
+                return 0
+    val token = match launched:
+        Ok(value): value
+        Err(message): return launcher_fixture_failure(message)
+    if mode == "parent-exit":
+        print "launcher-proof parent exiting with live worker token={token}"
+        return 0
+    if mode == "detach":
+        match windows_worker_detach_v1(token):
+            Ok(detached):
+                if not detached: return launcher_fixture_failure("detach rejected")
+            Err(message): return launcher_fixture_failure(message)
+        match windows_worker_wait_v1(token, 1):
+            Ok(_status): return launcher_fixture_failure("detached token remained valid")
+            Err(_message):
+                print "launcher-proof detached with live worker"
+                return 0
+    if mode == "terminate":
+        val running = match windows_worker_wait_v1(token, 1):
+            Ok(value): value
+            Err(message): return launcher_fixture_failure(message)
+        if running != -2: return launcher_fixture_failure("running observation lost")
+        match windows_worker_terminate_v1(token):
+            Ok(terminated):
+                if not terminated: return launcher_fixture_failure("terminate rejected")
+            Err(message): return launcher_fixture_failure(message)
+    val status = match windows_worker_wait_v1(token, 10000):
+        Ok(value): value
+        Err(message): return launcher_fixture_failure(message)
+    if mode == "nonzero" and status != 23: return launcher_fixture_failure("nonzero exit lost")
+    if mode == "terminate" and status <= 0: return launcher_fixture_failure("termination exit lost")
+    if mode != "nonzero" and mode != "terminate" and status != 0: return launcher_fixture_failure("unexpected child failure")
+    match windows_worker_wait_v1(token, 1):
+        Ok(_status): return launcher_fixture_failure("collected token remained valid")
+        Err(_message):
+            print "launcher-proof PASS {mode}: exit={status}, stale token rejected"
+    0

@@ -1,0 +1,113 @@
+# Native executable evidence for shared build protocol. No std.spec dependency.
+use std.common.build_manager.contracts.{
+    BuildTaskV1, BuildInputV1, BuildHostV1, BuildRunV1, BuildResultV1,
+    builder_validate_run_v1, builder_validate_result_v1,
+    builder_task_identity_v1, builder_relative_path_valid_v1
+}
+use std.common.build_manager.codec.{
+    builder_wire_escape_v1, builder_wire_unescape_v1,
+    builder_encode_task_v1, builder_decode_task_v1,
+    builder_encode_run_v1, builder_decode_run_v1,
+    builder_encode_result_v1, builder_decode_result_v1
+}
+
+fn protocol_native_task() -> BuildTaskV1:
+    val digest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    BuildTaskV1(id: "module_a", attempt: 1, phase: "codegen", producer_digest: digest,
+        source_digest: digest, toolchain_digest: digest, dependencies: [],
+        program: "bin/llc", args: ["", "a b", "$(never-execute)", "%0A", "x\ty\nz"],
+        inputs: [BuildInputV1(path: "input.ll", digest: digest)],
+        outputs: ["output.o"], cache_key: digest, timeout_ms: 0)
+
+fn protocol_native_check(condition: bool, label: text) -> i64:
+    if condition: return 0
+    print "FAIL {label}"
+    1
+
+fn main() -> i64:
+    var failures: i64 = 0
+    val task = protocol_native_task()
+    val encoded = builder_encode_task_v1(task)
+    failures = failures + protocol_native_check(encoded.starts_with("SIMPLE-BUILD-TASK-1\n"), "versioned task wire")
+    match builder_decode_task_v1(encoded):
+        case Ok(decoded):
+            failures = failures + protocol_native_check(decoded.args.len() == 5, "argument count")
+            failures = failures + protocol_native_check(decoded.args[2] == "$(never-execute)", "opaque shell syntax")
+            failures = failures + protocol_native_check(decoded.args[3] == "%0A", "single percent decode")
+            failures = failures + protocol_native_check(decoded.args[4] == "x\ty\nz", "embedded delimiters")
+        case Err(reason):
+            print "FAIL task roundtrip: {reason}"
+            failures = failures + 1
+    match builder_decode_task_v1(encoded + "extra\n"):
+        case Ok(decoded): failures = failures + protocol_native_check(false, "trailing fields accepted")
+        case Err(reason): failures = failures + protocol_native_check(reason == "trailing wire fields", "trailing diagnostic")
+    match builder_decode_task_v1("SIMPLE-BUILD-TASK-1\nmodule_a\n"):
+        case Ok(decoded): failures = failures + protocol_native_check(false, "truncated input accepted")
+        case Err(reason): failures = failures + protocol_native_check(reason == "truncated wire record", "truncation diagnostic")
+    match builder_decode_task_v1(encoded.replace("module_a\n1\n", "module_a\n99999999999999999\n")):
+        case Ok(decoded): failures = failures + protocol_native_check(false, "overflow accepted")
+        case Err(reason): failures = failures + protocol_native_check(reason == "wire integer exceeds bound", "overflow diagnostic")
+    failures = failures + protocol_native_check(builder_wire_escape_v1("%0A\t") == "%250A%09", "canonical escape")
+    match builder_wire_unescape_v1("%2F"):
+        case Ok(value): failures = failures + protocol_native_check(false, "unknown escape accepted")
+        case Err(reason): failures = failures + protocol_native_check(reason == "unknown or noncanonical escape", "escape diagnostic")
+    failures = failures + protocol_native_check(not builder_relative_path_valid_v1("../outside"), "traversal rejected")
+    failures = failures + protocol_native_check(not builder_relative_path_valid_v1("obj/CON.o"), "device alias rejected")
+    val host = BuildHostV1(id: "local", transport: "local", endpoint: "", workspace: "build/worker",
+        worker_program: "bin/manager", worker_digest: task.producer_digest, slots: 2)
+    val run = BuildRunV1(tasks: [task], hosts: [host], keep_going: true, max_attempts: 2)
+    var missing_digest_host = host
+    missing_digest_host.worker_digest = ""
+    val missing_digest_run = BuildRunV1(tasks: [task], hosts: [missing_digest_host], keep_going: true, max_attempts: 2)
+    failures = failures + protocol_native_check(builder_validate_run_v1(missing_digest_run) == "missing or invalid compiled worker digest", "required worker digest")
+    val legacy = builder_encode_run_v1(run).replace("SIMPLE-BUILD-RUN-2", "SIMPLE-BUILD-RUN-1")
+    match builder_decode_run_v1(legacy):
+        case Ok(decoded): failures = failures + protocol_native_check(false, "legacy run wire accepted")
+        case Err(reason): failures = failures + protocol_native_check(reason == "invalid run wire header (compiled worker digest required)", "legacy wire rejection")
+    var alias = protocol_native_task()
+    alias.id = "MODULE_A"
+    alias.outputs = ["alias.o"]
+    val alias_run = BuildRunV1(tasks: [task, alias], hosts: [host], keep_going: true, max_attempts: 2)
+    failures = failures + protocol_native_check(builder_validate_run_v1(alias_run) == "duplicate task identifier", "casefold task alias")
+    var alias_host = host
+    alias_host.id = "LOCAL"
+    val host_alias_run = BuildRunV1(tasks: [task], hosts: [host, alias_host], keep_going: true, max_attempts: 2)
+    failures = failures + protocol_native_check(builder_validate_run_v1(host_alias_run) == "duplicate host identifier", "casefold host alias")
+    match builder_decode_run_v1(builder_encode_run_v1(run)):
+        case Ok(decoded):
+            failures = failures + protocol_native_check(decoded.hosts[0].slots == 2, "host slots preserved")
+            failures = failures + protocol_native_check(decoded.keep_going, "keep-going preserved")
+            failures = failures + protocol_native_check(decoded.hosts[0].worker_digest == task.producer_digest, "worker digest preserved")
+        case Err(reason):
+            print "FAIL run roundtrip: {reason}"
+            failures = failures + 1
+    var missing_task = protocol_native_task()
+    missing_task.dependencies = ["missing"]
+    val missing_run = BuildRunV1(tasks: [missing_task], hosts: [host], keep_going: true, max_attempts: 2)
+    failures = failures + protocol_native_check(builder_validate_run_v1(missing_run) == "missing task dependency", "unknown dependency")
+    var second = protocol_native_task()
+    second.id = "module_b"
+    second.outputs = ["second.o"]
+    second.dependencies = ["module_a"]
+    missing_task.dependencies = ["module_b"]
+    val cyclic = BuildRunV1(tasks: [missing_task, second], hosts: [host], keep_going: true, max_attempts: 2)
+    failures = failures + protocol_native_check(builder_validate_run_v1(cyclic) == "cyclic task dependencies", "dependency cycle")
+    val result = BuildResultV1(task_id: task.id, attempt: 1,
+        identity_digest: builder_task_identity_v1(task), host_id: "local",
+        status: "OK", exit_code: 0,
+        outputs: [BuildInputV1(path: "output.o", digest: task.producer_digest)],
+        cache_hits: -1, cache_misses: -1, cache_stores: -1)
+    failures = failures + protocol_native_check(builder_validate_result_v1(task, result) == "", "complete valid result")
+    match builder_decode_result_v1(builder_encode_result_v1(result)):
+        case Ok(decoded): failures = failures + protocol_native_check(decoded.cache_hits == -1, "unknown telemetry preserved")
+        case Err(reason):
+            print "FAIL result roundtrip: {reason}"
+            failures = failures + 1
+    var retry = protocol_native_task()
+    retry.attempt = 2
+    failures = failures + protocol_native_check(builder_validate_result_v1(retry, result) == "stale or mismatched result identity", "stale attempt rejected")
+    if failures != 0:
+        print "BUILD_PROTOCOL_NATIVE_FAIL count={failures}"
+        return 1
+    print "BUILD_PROTOCOL_NATIVE_PASS"
+    0

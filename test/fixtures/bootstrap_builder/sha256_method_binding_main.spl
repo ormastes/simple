@@ -1,0 +1,56 @@
+# Real SHA-256/zeroization method-binding regression for the native build closure.
+# Fixed digests are published FIPS vectors, not values computed by another call.
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex_zeroizing,
+    sha256_u8_hex, sha256_u8_fast_hex}
+use std.common.crypto.secure_memory.{SecureZeroReport, secure_zero_i64_slots}
+use std.common.text_bytes.{text_to_utf8_bytes}
+
+fn sha_binding_check(condition: bool, label: text) -> i64:
+    if condition: return 0
+    print "FAIL {label}"
+    1
+
+fn main() -> i64:
+    var failures: i64 = 0
+    val converted: [u8] = text_to_utf8_bytes("abc")
+    print "SHA_DIAG utf8_len={converted.len()}"
+    failures = failures + sha_binding_check(converted.len() == 3, "UTF8 byte count")
+    if converted.len() == 3:
+        print "SHA_DIAG utf8_bytes={converted[0]},{converted[1]},{converted[2]}"
+        failures = failures + sha_binding_check(converted[0] == 97u8 and
+            converted[1] == 98u8 and converted[2] == 99u8, "UTF8 byte values")
+    val pure_converted = sha256_u8_hex(converted)
+    val fast_literal = sha256_u8_fast_hex([97u8, 98u8, 99u8])
+    val text_digest = sha256_text("abc")
+    print "SHA_DIAG pure_converted={pure_converted}"
+    print "SHA_DIAG fast_literal={fast_literal}"
+    print "SHA_DIAG text_digest={text_digest}"
+    failures = failures + sha_binding_check(
+        pure_converted == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+        "pure SHA converted bytes")
+    failures = failures + sha_binding_check(
+        fast_literal == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+        "accelerated SHA literal bytes")
+    failures = failures + sha_binding_check(
+        sha256_text("") == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "empty SHA256 vector")
+    failures = failures + sha_binding_check(
+        sha256_text("abc") == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+        "abc SHA256 vector")
+    failures = failures + sha_binding_check(
+        sha256_text("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq") ==
+            "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1",
+        "two-block SHA256 vector")
+    val words: [i64] = [17, 31]
+    val report: SecureZeroReport = secure_zero_i64_slots(words)
+    failures = failures + sha_binding_check(report.verified(), "returned type method binding")
+    failures = failures + sha_binding_check(words[0] == 0 and words[1] == 0, "actual wipe readback")
+    val zeroizing = sha256_u8_hex_zeroizing([97u8, 98u8, 99u8]) ?? ""
+    failures = failures + sha_binding_check(
+        zeroizing == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+        "zeroizing SHA256 uses verified report")
+    if failures != 0:
+        print "SHA256_METHOD_BINDING_NATIVE_FAIL count={failures}"
+        return 1
+    print "SHA256_METHOD_BINDING_NATIVE_PASS"
+    0

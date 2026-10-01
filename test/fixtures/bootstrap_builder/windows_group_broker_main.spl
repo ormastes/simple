@@ -1,0 +1,148 @@
+# Real native broker/JobObject proof. No terminal receipt is fabricated here.
+use app.io.args_ops.{get_args}
+use std.nogc_sync_mut.io.file_ops.{file_read, file_exists, file_atomic_write}
+use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
+use std.nogc_sync_mut.io.windows_process_owner.{windows_process_file_digest_v1}
+use std.nogc_sync_mut.io.windows_process_owner_abi.{GetProcessHeap, HeapAlloc, HeapFree, GetTickCount64, Sleep}
+use std.nogc_sync_mut.io.windows_worker_launcher.{windows_worker_spawn_v1, windows_worker_detach_v1}
+use std.nogc_sync_mut.io.windows_group_broker_launcher.{windows_group_broker_launch_v1}
+use std.nogc_sync_mut.io.group_process_owner.{GroupProcessInputV1, GroupProcessRequestV1, GroupProcessPollV1, GroupProcessOwnerV1, group_process_set_launcher_v1, group_process_start_v1, group_process_recover_v1, group_process_poll_v1, group_process_cancel_v1, group_process_collect_reap_v1}
+use std.common.build_manager.grouped_execution_contract.{GroupedActionLeaseV1}
+use std.common.crypto.sha256.{sha256_text}
+
+fn broker_proof_failure(reason: text) -> i64:
+    print "broker-proof FAIL: {reason}"
+    1
+
+fn broker_proof_observe(owner: GroupProcessOwnerV1) -> Result<GroupProcessPollV1, text>:
+    val deadline = GetTickCount64() + 10000u64
+    var last_reason = "no native observation"
+    while GetTickCount64() < deadline:
+        match group_process_poll_v1(owner):
+            Ok(value): return Ok(value)
+            Err(reason): last_reason = reason
+        Sleep(20u32)
+    Err(last_reason)
+
+fn broker_proof_request(program: text, root: text) -> GroupProcessRequestV1:
+    val broker = "D:/wk-bootstrap-manager-resume-20260930/build/bootstrap-builder/phase1-seed-292b59a3/group-broker-proof/group-broker-proof.exe"
+    GroupProcessRequestV1(program, windows_process_file_digest_v1(program), ["--group-root", root],
+        ["SystemRoot=C:\\Windows", "PATH=C:\\Windows\\System32"], root,
+        [GroupProcessInputV1(root + "/mode", windows_process_file_digest_v1(root + "/mode"))],
+        root + "/worker.stdout.log", root + "/worker.stderr.log", 30000,
+        broker, windows_process_file_digest_v1(broker))
+
+fn broker_proof_lease(generation: i64, lease_id: text) -> GroupedActionLeaseV1:
+    GroupedActionLeaseV1("proof-group", "proof-action", "proof-worker", generation, lease_id,
+        sha256_text("proof-snapshot"), sha256_text("proof-cache"), false)
+
+fn broker_proof_memory(root: text, restricted: bool) -> i64:
+    val heap = GetProcessHeap()
+    val small = HeapAlloc(heap, 8u32, 8388608u64)
+    if small == 0: return broker_proof_failure("8MiB allocation denied")
+    val large = HeapAlloc(heap, 8u32, 134217728u64)
+    val denied = large == 0
+    if large != 0:
+        val _released = HeapFree(heap, 0u32, large)
+    val _released_small = HeapFree(heap, 0u32, small)
+    if restricted != denied: return broker_proof_failure("128MiB allocation did not obey Job memory cap")
+    if not file_atomic_write(root + "/allocation.sdn", "small=8388608\nlarge=134217728\ndenied={denied}\n"):
+        return broker_proof_failure("allocation evidence write failed")
+    print "broker-proof memory restricted={restricted} denied={denied}"
+    0
+
+fn broker_proof_worker(program: text, root: text) -> i64:
+    if not file_atomic_write(root + "/worker.pid", "{getpid()}"): return 2
+    if file_read(root + "/mode") == "memory": return broker_proof_memory(root, true)
+    val leaf = match windows_worker_spawn_v1(program, windows_process_file_digest_v1(program), ["leaf", root], root):
+        Ok(value): value
+        Err(reason): return broker_proof_failure(reason)
+    match windows_worker_detach_v1(leaf):
+        Ok(_value): pass
+        Err(reason): return broker_proof_failure(reason)
+    val deadline = GetTickCount64() + 60000u64
+    while GetTickCount64() < deadline: Sleep(20u32)
+    124
+
+fn broker_proof_collect(owner: GroupProcessOwnerV1, root: text) -> i64:
+    val observed = match broker_proof_observe(owner):
+        Ok(value): value
+        Err(reason): return broker_proof_failure(reason)
+    if not observed.terminal or not observed.tree_empty or not observed.leader_reaped or observed.active_processes != 0:
+        return broker_proof_failure("native tree cleanup incomplete")
+    if observed.memory_peak_bytes <= 0:
+        return broker_proof_failure("actual committed-byte peak missing")
+    if file_read(root + "/mode") == "memory":
+        if observed.exit_code != 0 or observed.memory_peak_bytes < 8388608:
+            return broker_proof_failure("memory worker or measured allocation peak failed")
+        if file_read(root + "/allocation.sdn") != "small=8388608\nlarge=134217728\ndenied=true\n":
+            return broker_proof_failure("native allocation denial evidence missing")
+    elif not observed.cancelled or observed.timed_out:
+        return broker_proof_failure("tree ended without requested broker cancellation")
+    match group_process_collect_reap_v1(owner, broker_proof_lease(2, "stale")):
+        Ok(_value): return broker_proof_failure("stale generation lease accepted")
+        Err(_reason): pass
+    val receipt = match group_process_collect_reap_v1(owner, broker_proof_lease(1, "proof-lease")):
+        Ok(value): value
+        Err(reason): return broker_proof_failure(reason)
+    match group_process_collect_reap_v1(owner, broker_proof_lease(1, "different-lease")):
+        Ok(_value): return broker_proof_failure("conflicting terminal lease accepted")
+        Err(_reason): pass
+    if windows_process_file_digest_v1(root + "/tree-reaped.sdn") != receipt.tree_receipt_digest:
+        return broker_proof_failure("bound reap digest differs")
+    val over_budget = observed.memory_peak_bytes > 67108864
+    if not file_atomic_write(root + "/proof.sdn", "exit={observed.exit_code}\npeak_committed_bytes={observed.memory_peak_bytes}\nlimit_bytes=67108864\nmeasured_budget_exceeded={over_budget}\nactive=0\nlease_denials=2\n"):
+        return broker_proof_failure("proof evidence write failed")
+    print "broker-proof PASS terminal exit={observed.exit_code} peak_committed_bytes={observed.memory_peak_bytes} stale/conflicting leases denied"
+    0
+
+fn main() -> i64:
+    val args = get_args()
+    if args.len() < 3: return broker_proof_failure("mode and absolute root required")
+    val mode = args[1]
+    val root = args[2]
+    if mode == "--group-root": return broker_proof_worker(args[0], root)
+    if mode == "leaf":
+        if not file_atomic_write(root + "/leaf.pid", "{getpid()}"): return 2
+        val deadline = GetTickCount64() + 60000u64
+        while GetTickCount64() < deadline: Sleep(20u32)
+        return 124
+    if mode == "baseline-memory": return broker_proof_memory(root, false)
+    if not group_process_set_launcher_v1(windows_group_broker_launch_v1):
+        return broker_proof_failure("launcher configuration failed")
+    val request = broker_proof_request(args[0], root)
+    if mode == "recover-tree":
+        match group_process_recover_v1(root, "wrong-worker", 1, sha256_text("proof-snapshot"), sha256_text("proof-cache"), request, 67108864):
+            Ok(_owner): return broker_proof_failure("wrong worker identity recovered")
+            Err(_reason): pass
+        match group_process_recover_v1(root, "proof-worker", 2, sha256_text("proof-snapshot"), sha256_text("proof-cache"), request, 67108864):
+            Ok(_owner): return broker_proof_failure("stale generation recovered")
+            Err(_reason): pass
+    val opened = if mode == "recover-tree":
+        group_process_recover_v1(root, "proof-worker", 1, sha256_text("proof-snapshot"), sha256_text("proof-cache"), request, 67108864)
+    else:
+        group_process_start_v1(root, "proof-worker", 1, sha256_text("proof-snapshot"), sha256_text("proof-cache"), request, 67108864)
+    val owner = match opened:
+        Ok(value): value
+        Err(reason): return broker_proof_failure(reason)
+    if mode == "memory":
+        val deadline = GetTickCount64() + 10000u64
+        while GetTickCount64() < deadline and not file_exists(root + "/broker.tree.sdn"): Sleep(20u32)
+        return broker_proof_collect(owner, root)
+    val deadline = GetTickCount64() + 10000u64
+    while GetTickCount64() < deadline and not file_exists(root + "/leaf.pid"): Sleep(20u32)
+    val running = match broker_proof_observe(owner):
+        Ok(value): value
+        Err(reason): return broker_proof_failure(reason)
+    if running.terminal or running.active_processes < 2: return broker_proof_failure("real descendant tree not observed")
+    if mode == "start-tree":
+        if not file_atomic_write(root + "/manager-ready", "{getpid()}\n{running.active_processes}\n"): return 2
+        while GetTickCount64() < deadline + 30000u64: Sleep(20u32)
+        return 124
+    if mode != "recover-tree": return broker_proof_failure("unknown parent mode")
+    match group_process_cancel_v1(owner):
+        Ok(_value): pass
+        Err(reason): return broker_proof_failure(reason)
+    val stop_deadline = GetTickCount64() + 10000u64
+    while GetTickCount64() < stop_deadline and not file_exists(root + "/broker.tree.sdn"): Sleep(20u32)
+    broker_proof_collect(owner, root)

@@ -1,0 +1,40 @@
+# Envelope checks only. This fixture does not attest an executed parent parser.
+use app.bootstrap_builder.parser_qualification_parent_cache.{parser_qualification_parent_cache_v1}
+use compiler.frontend.frontend_parse_cache.{FRONTEND_CACHE_ENTRY_VERSION}
+use compiler.frontend.core.flat_pool_codec.{FLAT_POOL_CODEC_VERSION}
+use std.common.crypto.sha256.{sha256_text}
+
+fn parent_cache_fixture_rejected(raw: text, digest: text) -> bool:
+    match parser_qualification_parent_cache_v1(raw, digest):
+        case Err(_): true
+        case Ok(_): false
+
+fn main() -> i64:
+    val digest = sha256_text("parent image fixture")
+    val identity = "frontend-exe=" + digest + ";sources=0123456789abcdefn42"
+    val scope = "lane=qualification;backend=smf;cpu=native;features=;opt=0;compiler=" +
+        identity + ";provider=compiler-bound-builtin:smf;optimizer=compiler-bound-optimizer"
+    val header = FRONTEND_CACHE_ENTRY_VERSION + " " + FLAT_POOL_CODEC_VERSION + " " + scope
+    val blob = "payload\nwith\nnewlines\n"
+    val raw = header + "\n" + blob
+    val decoded = match parser_qualification_parent_cache_v1(raw, digest):
+        case Ok(value): value
+        case Err(reason):
+            print "FAIL valid envelope: {reason}"
+            return 1
+    if decoded.frontend_identity != identity or decoded.blob != blob or decoded.blob_digest != sha256_text(blob):
+        print "FAIL identity or payload preservation"
+        return 2
+    if not parent_cache_fixture_rejected(raw, sha256_text("different parent")): return 3
+    if not parent_cache_fixture_rejected(raw, "not-a-digest"): return 4
+    if not parent_cache_fixture_rejected("wrong-version " + raw, digest): return 5
+    if not parent_cache_fixture_rejected(header + ";sources=0123456789abcdefn42\n" + blob, digest): return 6
+    if not parent_cache_fixture_rejected(raw.replace("0123456789abcdefn42", "unfingerprintable-1-2"), digest): return 7
+    if not parent_cache_fixture_rejected(raw.replace("0123456789abcdefn42", "0123456789abcdefn0"), digest): return 8
+    if not parent_cache_fixture_rejected(raw.replace("0123456789abcdefn42", "0123456789abcdeg n42"), digest): return 9
+    if not parent_cache_fixture_rejected(raw.replace("backend=smf", "backend=llvm"), digest): return 10
+    if not parent_cache_fixture_rejected(header + "\n", digest): return 11
+    if not parent_cache_fixture_rejected(header, digest): return 12
+    if not parent_cache_fixture_rejected(header + "\r\n" + blob, digest): return 13
+    print "PASS parent cache envelope identity, payload and negative admission checks"
+    0
