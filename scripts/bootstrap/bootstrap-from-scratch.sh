@@ -4748,6 +4748,8 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
   sh "${managed_completion_verifier}" \
     "--receipt=${managed_completion}" "--root=${managed_phase_root}" \
     "--inventory=${managed_module_inventory}" "--producer-sha=${managed_producer_sha}" \
+    "--source-root=${managed_source_root}" "--image-receipt=${managed_image_receipt}" \
+    "--builder-program=${managed_builder_program}" "--group-program=${managed_group_program}" \
     || { echo "error: managed Phase 3/4 terminal proofs differ" >&2; exit 1; }
   bootstrap_verdict "ADMITTED: stage=phase3+phase4 exit=0 signal=none reason=managed-phase2-producer-completion"
   exit 0

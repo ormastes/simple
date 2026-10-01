@@ -6,24 +6,37 @@ die() { echo "managed-completion: $*" >&2; exit 1; }
 regular() { [ -f "$1" ] && [ ! -L "$1" ]; }
 hash_file() { sha256sum "$1" | cut -d ' ' -f 1; }
 digest() { [ "${#1}" -eq 64 ] && case "$1" in *[!0-9a-f]*) return 1 ;; *) return 0 ;; esac; }
-receipt= root= inventory= producer_sha=
+receipt= root= inventory= producer_sha= source_root= image_receipt= builder_program= group_program=
 for arg in "$@"; do
   case "$arg" in
     --receipt=*) receipt=${arg#*=} ;;
     --root=*) root=${arg#*=} ;;
     --inventory=*) inventory=${arg#*=} ;;
     --producer-sha=*) producer_sha=${arg#*=} ;;
+    --source-root=*) source_root=${arg#*=} ;;
+    --image-receipt=*) image_receipt=${arg#*=} ;;
+    --builder-program=*) builder_program=${arg#*=} ;;
+    --group-program=*) group_program=${arg#*=} ;;
     *) die "unknown option: $arg" ;;
   esac
 done
-regular "$receipt" && regular "$inventory" && [ -d "$root" ] && [ ! -L "$root" ] \
-  || die "terminal receipt, inventory or root unavailable"
+regular "$receipt" && regular "$inventory" && regular "$image_receipt" &&
+  regular "$builder_program" && regular "$group_program" &&
+  [ -d "$root" ] && [ ! -L "$root" ] &&
+  [ -d "$source_root" ] && [ ! -L "$source_root" ] \
+  || die "terminal receipt, inventory, manager images or roots unavailable"
 digest "$producer_sha" || die "expected producer digest invalid"
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P) || die "repository root unavailable"
 BOOTSTRAP_STAGE3_FACADE_PATH="$repo_root/scripts/check/lib/bootstrap-stage3-provenance.shs"
 export BOOTSTRAP_STAGE3_FACADE_PATH
 . "$BOOTSTRAP_STAGE3_FACADE_PATH"
 field() { bootstrap_stage3_manifest_value "$1" "$receipt"; }
+image_field() { bootstrap_stage3_manifest_value "$1" "$image_receipt"; }
+[ "$(image_field builder_program)" = "$builder_program" ] &&
+  [ "$(image_field builder_sha256)" = "$(hash_file "$builder_program")" ] &&
+  [ "$(image_field group_program)" = "$group_program" ] &&
+  [ "$(image_field group_sha256)" = "$(hash_file "$group_program")" ] \
+  || die "compiled manager images differ from sealed image receipt"
 [ "$(field format)" = SIMPLE-PHASE3-PHASE4-MANAGED-COMPLETION-2 ] &&
   [ "$(field status)" = PASS ] &&
   [ "$(field phase3_status)" = PASS ] &&
@@ -37,19 +50,47 @@ case "$inventory_count" in ''|0|0*|*[!0-9]*) die "module inventory count invalid
   [ "$(field phase3_module_inventory_count)" = "$inventory_count" ] &&
   [ "$(field phase4_module_inventory_count)" = "$inventory_count" ] \
   || die "phase module counts or inventory digest differ"
+case "$(uname -s 2>/dev/null)" in MINGW*|MSYS*|CYGWIN*) exe_suffix=.exe ;; *) exe_suffix= ;; esac
 for binary in bootstrap full-cli mcp lsp test-runner phase3-bootstrap; do
-  digest "$(field "$binary")" || die "$binary output SHA missing or invalid"
+  case "$binary" in
+    bootstrap) task_phase=phase4; output="bin/simple_bootstrap$exe_suffix" ;;
+    full-cli) task_phase=phase4; output="bin/simple$exe_suffix" ;;
+    mcp) task_phase=phase4; output="bin/simple_mcp_server$exe_suffix" ;;
+    lsp) task_phase=phase4; output="bin/simple_lsp_mcp_server$exe_suffix" ;;
+    test-runner) task_phase=phase4; output="bin/simple_test_runner$exe_suffix" ;;
+    phase3-bootstrap) task_phase=phase3; output="bin/simple$exe_suffix" ;;
+  esac
+  job_root="$root/$task_phase/binaries/$binary"
+  published="$job_root/$output"
+  manager_receipt="$job_root/state/receipts/$binary.sdn"
+  manifest="$job_root/manifest.sdn"
+  expected=$(field "$binary") || die "$binary output SHA absent"
+  receipt_expected=$(field "${binary}_manager_receipt_sha256") \
+    || die "$binary manager receipt SHA absent"
+  digest "$expected" && digest "$receipt_expected" &&
+    regular "$published" && regular "$manager_receipt" && regular "$manifest" &&
+    [ "$(hash_file "$published")" = "$expected" ] &&
+    [ "$(hash_file "$manager_receipt")" = "$receipt_expected" ] \
+    || die "$binary published output or terminal manager receipt differs"
+  "$builder_program" verify --manifest "$manifest" --state "$job_root/state" \
+    --source-root "$source_root" --output-root "$job_root" >/dev/null \
+    || die "$binary compiled manager verification failed"
 done
 for task_phase in phase3 phase4; do
   for backend in llvm cranelift; do
     index_receipt="$root/$task_phase/index/$backend/output/index-output/receipt.sdn"
     index_handoff="$root/$task_phase/index/$backend/handoff.sdn"
-    group_manifest="$root/$task_phase/modules/$backend/state/manifest.sdn"
-    for proof in index_receipt index_handoff group_manifest; do
+    group_state="$root/$task_phase/modules/$backend/state"
+    group_manifest="$group_state/manifest.sdn"
+    group_ledger="$group_state/ledger.sdn"
+    group_completion="$group_state/completion.json"
+    for proof in index_receipt index_handoff group_manifest group_ledger group_completion; do
       case "$proof" in
         index_receipt) path=$index_receipt ;;
         index_handoff) path=$index_handoff ;;
         group_manifest) path=$group_manifest ;;
+        group_ledger) path=$group_ledger ;;
+        group_completion) path=$group_completion ;;
       esac
       regular "$path" || die "$task_phase/$backend $proof missing"
       expected=$(field "${task_phase}_${backend}_${proof}_sha256") \
@@ -57,6 +98,9 @@ for task_phase in phase3 phase4; do
       digest "$expected" && [ "$(hash_file "$path")" = "$expected" ] \
         || die "$task_phase/$backend $proof digest differs"
     done
+    "$group_program" native-groups-verify --manifest "$group_manifest" \
+      --state "$group_state" >/dev/null \
+      || die "$task_phase/$backend compiled grouped verification failed"
   done
 done
 printf '%s\n' "$receipt"
