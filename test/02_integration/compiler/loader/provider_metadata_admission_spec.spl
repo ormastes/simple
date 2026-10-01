@@ -1,0 +1,510 @@
+"""## Purpose and audience
+
+Provider and compiler authors can follow persisted runtime package metadata
+through reload, pinned archive verification, and first-demand admission.
+These tests need a POSIX host with the real pinned-file runtime owner. An
+unsupported platform or failed fixture is a failure, never a skipped success.
+
+Section contents and build-result records are metadata fixtures. No compiler
+invocation, executable SMF, dynamic library, provider effects, catalog
+registration, or dependency-provider discovery is claimed.
+"""
+
+# Lifecycle: doc/01_research/local/runtime_optional_provider_binary_size_optimization.md
+# Lifecycle: doc/03_plan/seven_plans_host_completion_2026-09-29.md
+# Lifecycle: doc/04_architecture/seven_items_delivery_integration.md
+# Lifecycle: doc/05_design/seven_items_delivery_integration.md
+
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_remove}
+use std.nogc_sync_mut.io.env_ops.{cwd}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove_all}
+use compiler.driver.action_graph.build_action_v1.{BuildActionResultV1}
+use compiler.driver.cache.cas_store.{cas_open, cas_put, cas_get, cas_blob_path}
+use compiler.driver.cache.cas_batch_transaction.{
+    cas_batch_current_v1, cas_batch_begin_v1, cas_batch_stage_object_v1,
+    cas_batch_publish_v1
+}
+use compiler.driver.cache.package_archive_types.{
+    PackageActionKeyV1, package_archive_receipt_digest_v1,
+    package_archive_receipt_canonical_fields_v1
+}
+use compiler.driver.cache.pinned_archive_capability.{
+    pinned_archive_open_verified_v1, pinned_archive_close_v1,
+    pinned_archive_read_member_v1, pinned_archive_receipt_valid_v1
+}
+use compiler.driver.smf.package_image_v1.{
+    PackageSectionKindV1, package_section_kind_name_v1, package_image_validate_v1
+}
+use compiler.driver.smf.runtime_std_package_set.*
+use compiler.loader.provider_admission.*
+
+struct PublishedProviderMetadataFixture:
+    root: text
+    authority: RuntimeStdPackageAuthorityV1
+    loaded: RuntimeStdPackageAdmissionV1
+
+fn provider_package_input_fixture(package_identity: text, abi: text, dependencies: [text]) -> RuntimeStdPackageInputV1:
+    var sections: [RuntimeStdSectionContentV1] = []
+    for kind in [
+            PackageSectionKindV1.debug, PackageSectionKindV1.exports,
+            PackageSectionKindV1.generics, PackageSectionKindV1.hir_summaries,
+            PackageSectionKindV1.imports, PackageSectionKindV1.initialization,
+            PackageSectionKindV1.mir, PackageSectionKindV1.objects,
+            PackageSectionKindV1.receipts, PackageSectionKindV1.types]:
+        val name = package_section_kind_name_v1(kind) + ".smf"
+        sections.push(RuntimeStdSectionContentV1(kind, name, "metadata-fixture:" + name))
+    RuntimeStdPackageInputV1(package_identity, abi, dependencies, sections)
+
+fn provider_package_result_fixture(authority: RuntimeStdPackageAuthorityV1, package_identity: text) -> BuildActionResultV1:
+    val action = runtime_std_build_action_v1(authority, package_identity).unwrap()
+    # This is publisher input for fixture bytes, not evidence of compilation.
+    BuildActionResultV1(action.action_id, action.snapshot_revision, true, false,
+        action.restat_identity, action.restat_identity, [], 0)
+
+fn publish_provider_metadata_fixture(root: text, authority: RuntimeStdPackageAuthorityV1, dependencies: [text]) -> RuntimeStdPackageSetV1:
+    runtime_std_publish_set_v1(root, authority,
+        provider_package_input_fixture(RUNTIME_PACKAGE_IDENTITY_V1, authority.runtime_abi_digest, dependencies),
+        provider_package_input_fixture(STD_PACKAGE_IDENTITY_V1, authority.std_abi_digest, []),
+        provider_package_result_fixture(authority, RUNTIME_PACKAGE_IDENTITY_V1),
+        provider_package_result_fixture(authority, STD_PACKAGE_IDENTITY_V1))
+
+fn setup_published_provider_metadata() -> PublishedProviderMetadataFixture:
+    val root = secure_temp_dir(cwd(), "item5-provider-metadata-").unwrap()
+    expect(cas_open(root)).to_be(true)
+    val authority = RuntimeStdPackageAuthorityV1(
+        sha256_text("fixture-compiler"), sha256_text("fixture-action-abi"),
+        sha256_text("fixture-runtime-abi"), sha256_text("fixture-std-abi"),
+        sha256_text("fixture-config"), "fixture-posix", "fixture-revision")
+    val published = publish_provider_metadata_fixture(root, authority,
+        [sha256_text("dependency-b"), sha256_text("dependency-a")])
+    expect(published.valid).to_be(true)
+    val loaded = runtime_std_load_package_v1(root, authority, RUNTIME_PACKAGE_IDENTITY_V1)
+    expect(loaded.valid).to_be(true)
+    expect(loaded.reason).to_equal("cached")
+    expect(loaded.image.unwrap().archive_digest).to_equal(published.runtime.image.unwrap().archive_digest)
+    expect(loaded.image.unwrap().receipt_digest).to_equal(published.runtime.image.unwrap().receipt_digest)
+    expect(loaded.receipt.unwrap().receipt_digest).to_equal(published.runtime.receipt.unwrap().receipt_digest)
+    expect(loaded.image.unwrap().dependency_interface_digests).to_equal(
+        [sha256_text("dependency-b"), sha256_text("dependency-a")].sorted())
+    PublishedProviderMetadataFixture(root, authority, loaded)
+
+fn open_provider_metadata_fixture(fixture: PublishedProviderMetadataFixture) -> ProviderAdmissionV1:
+    val image = fixture.loaded.image.unwrap()
+    val receipt = fixture.loaded.receipt.unwrap()
+    expect(package_image_validate_v1(image, receipt).is_ok()).to_be(true)
+    expect(fixture.loaded.archive_path.starts_with(fixture.root + "/")).to_be(true)
+    val relative = fixture.loaded.archive_path.substring(fixture.root.len() + 1)
+    val capability = pinned_archive_open_verified_v1(fixture.root, relative, receipt).unwrap()
+    val descriptor = ProviderDescriptorV1("fixture.provider", image.package_identity,
+        fixture.authority.runtime_abi_digest, image.dependency_interface_digests,
+        ProviderModeV1.pure_simple, "", true)
+    provider_admission_new_v1(descriptor, ProviderAdmissionAuthorityV1(
+        image, receipt, capability, descriptor.abi_digest, descriptor.dependency_digests))
+
+fn check_provider_rejection_replay(admission: ProviderAdmissionV1, expected: ProviderAdmissionErrorV1):
+    # Every iteration calls the production demand entrypoint; none computes
+    # the error from a copied validation algorithm.
+    for demand in 0..3:
+        expect(provider_admit_metadata_v1(admission).unwrap_err()).to_equal(expected)
+        expect(provider_admission_state_v1(admission)).to_equal(ProviderAdmissionStateV1.rejected)
+        expect(admission.receipt).to_be_nil()
+        val failure = admission.failure.unwrap()
+        expect(failure.error).to_equal(expected)
+        expect(failure.provider_identity).to_equal(admission.descriptor.provider_identity)
+        expect(failure.package_identity).to_equal(admission.descriptor.package_identity)
+        expect(failure.archive_digest).to_equal(admission.authority.image.archive_digest)
+
+fn cleanup_provider_metadata_fixture(fixture: PublishedProviderMetadataFixture, admission: ProviderAdmissionV1):
+    if admission.authority.capability.open:
+        expect(pinned_archive_close_v1(admission.authority.capability).is_ok()).to_be(true)
+    expect(dir_remove_all(fixture.root)).to_be(true)
+
+# @manual_section: Persisted metadata and first-demand admission
+describe "provider admission from a persisted runtime package":
+    it "should admit a verified dependency closure and preserve its ticket identity":
+        # @req REQ-002 REQ-012
+        """The positive control publishes and reloads metadata, opens real
+        archive bytes, and obtains the receipt and execution-ticket identity.
+        Closure here means the exact supplied digest list, not dependency loading.
+        """
+        # @capture(text): Reloaded package, verified payload, owner and observer receipts
+        step("Publish and reload the runtime package in a private store")
+        val fixture = setup_published_provider_metadata()
+        val admission = open_provider_metadata_fixture(fixture)
+        expect(provider_admission_state_v1(admission)).to_equal(ProviderAdmissionStateV1.unrequested)
+        step("Read a member through the real pinned capability")
+        var capability = admission.authority.capability
+        val bytes = pinned_archive_read_member_v1(&capability, "exports.smf").unwrap()
+        expect(sha256_u8_hex(bytes)).to_equal(sha256_text("metadata-fixture:exports.smf"))
+        step("Demand admission twice and derive the execution ticket")
+        val owner = provider_admit_metadata_v1(admission).unwrap()
+        val observer = provider_admit_metadata_v1(admission).unwrap()
+        expect(owner.owner).to_be(true)
+        expect(owner.waited).to_be(false)
+        expect(observer.owner).to_be(false)
+        expect(observer.waited).to_be(true)
+        expect(owner.dependency_digests).to_equal(admission.authority.image.dependency_interface_digests)
+        expect(observer.dependency_digests).to_equal(owner.dependency_digests)
+        expect(observer.archive_digest).to_equal(owner.archive_digest)
+        expect(observer.receipt_digest).to_equal(owner.receipt_digest)
+        expect(admission.failure).to_be_nil()
+        val ticket = provider_execution_ticket_v1(observer).unwrap()
+        expect(ticket.provider_identity).to_equal(admission.descriptor.provider_identity)
+        expect(ticket.package_identity).to_equal(fixture.loaded.package_identity)
+        expect(ticket.archive_digest).to_equal(fixture.loaded.image.unwrap().archive_digest)
+        expect(ticket.effect_owner_identity).to_equal(ticket.provider_identity)
+        cleanup_provider_metadata_fixture(fixture, admission)
+
+    it "should publish the ABI refusal before dependency and policy refusals":
+        # @req REQ-002 REQ-012
+        """When several later checks disagree, the first ABI refusal remains
+        observable on repeated demand and in the published failure record.
+        """
+        # @capture(text): ABI refusal and unchanged failure identity on three demands
+        step("Keep package and archive authority valid while changing later requirements")
+        val fixture = setup_published_provider_metadata()
+        val admission = open_provider_metadata_fixture(fixture)
+        var authority = admission.authority
+        authority.required_abi_digest = sha256_text("other-abi")
+        authority.required_dependency_digests = []
+        admission.authority = authority
+        var descriptor = admission.descriptor
+        descriptor.shadow_provider_identity = "unexpected-shadow"
+        admission.descriptor = descriptor
+        step("Demand the provider repeatedly and retain the first ABI error")
+        check_provider_rejection_replay(admission, ProviderAdmissionErrorV1.abi_mismatch)
+        cleanup_provider_metadata_fixture(fixture, admission)
+
+    it "should reject missing or malformed required ABI metadata":
+        # @req REQ-002 REQ-012
+        """A valid descriptor cannot supply absent or malformed authority
+        metadata on behalf of the admission owner.
+        """
+        # @capture(text): Typed ABI refusals for missing and malformed authority
+        step("Replace only the required ABI digest")
+        for required in ["", "short", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"]:
+            val fixture = setup_published_provider_metadata()
+            val admission = open_provider_metadata_fixture(fixture)
+            var authority = admission.authority
+            authority.required_abi_digest = required
+            admission.authority = authority
+            step("Reject each authority and preserve the repeated error")
+            check_provider_rejection_replay(admission, ProviderAdmissionErrorV1.abi_mismatch)
+            cleanup_provider_metadata_fixture(fixture, admission)
+
+    it "should refuse missing extra reordered or substituted required dependencies":
+        # @req REQ-002 REQ-012
+        """Admission compares the exact supplied dependency list. A canonical
+        digest alone does not authorize a different closure or ordering.
+        """
+        # @capture(text): Dependency mismatch for every distinct closure
+        step("Prepare a verified package with two dependencies")
+        val fixture = setup_published_provider_metadata()
+        val dependencies = fixture.loaded.image.unwrap().dependency_interface_digests
+        val wrong_closures: [[text]] = [[], [dependencies[0]],
+            [dependencies[0], dependencies[1], sha256_text("extra")],
+            [dependencies[1], dependencies[0]],
+            [dependencies[0], sha256_text("substituted")]]
+        for wrong in wrong_closures:
+            val admission = open_provider_metadata_fixture(fixture)
+            var authority = admission.authority
+            authority.required_dependency_digests = wrong
+            admission.authority = authority
+            step("Demand with a different required closure")
+            check_provider_rejection_replay(admission, ProviderAdmissionErrorV1.dependency_mismatch)
+            expect(pinned_archive_close_v1(admission.authority.capability).is_ok()).to_be(true)
+        expect(dir_remove_all(fixture.root)).to_be(true)
+
+    it "should compare descriptor dependencies against the authenticated image":
+        # @req REQ-002 REQ-012
+        """Descriptor and caller agreement cannot replace the dependency
+        identities bound into the package-image receipt.
+        """
+        # @capture(text): Refusal despite matching descriptor and caller lists
+        step("Make descriptor and caller agree on a different canonical dependency")
+        val fixture = setup_published_provider_metadata()
+        val admission = open_provider_metadata_fixture(fixture)
+        var descriptor = admission.descriptor
+        descriptor.dependency_digests = [sha256_text("unbound-dependency")]
+        admission.descriptor = descriptor
+        var authority = admission.authority
+        authority.required_dependency_digests = descriptor.dependency_digests
+        admission.authority = authority
+        step("Reject the disagreement with the authenticated image")
+        check_provider_rejection_replay(admission, ProviderAdmissionErrorV1.dependency_mismatch)
+        cleanup_provider_metadata_fixture(fixture, admission)
+
+    it "should publish the package identity refusal before ABI and dependency errors":
+        # @req REQ-002 REQ-012
+        """A provider requesting a different package cannot borrow this
+        archive's authority, even when other metadata is also wrong.
+        """
+        # @capture(text): Package mismatch retains precedence and request identity
+        step("Request another package and ABI from a verified archive")
+        val fixture = setup_published_provider_metadata()
+        val admission = open_provider_metadata_fixture(fixture)
+        var descriptor = admission.descriptor
+        descriptor.package_identity = "different.package"
+        descriptor.abi_digest = sha256_text("different-abi")
+        descriptor.dependency_digests = []
+        admission.descriptor = descriptor
+        step("Retain the package mismatch across repeated demands")
+        check_provider_rejection_replay(admission, ProviderAdmissionErrorV1.package_identity_mismatch)
+        cleanup_provider_metadata_fixture(fixture, admission)
+
+    it "should reject a closed real capability before inspecting later identities":
+        # @req REQ-002 REQ-012
+        """The package metadata can remain valid after the owner closes its
+        archive handle; it must not authorize a new metadata admission.
+        """
+        # @capture(text): Closed capability refusal precedes package mismatch
+        step("Close a verified capability before its first demand")
+        val fixture = setup_published_provider_metadata()
+        val admission = open_provider_metadata_fixture(fixture)
+        expect(pinned_archive_close_v1(admission.authority.capability).is_ok()).to_be(true)
+        var descriptor = admission.descriptor
+        descriptor.package_identity = "different.package"
+        admission.descriptor = descriptor
+        step("Demand the unavailable archive repeatedly")
+        check_provider_rejection_replay(admission, ProviderAdmissionErrorV1.invalid_archive_capability)
+        cleanup_provider_metadata_fixture(fixture, admission)
+
+    it "should reject missing image sections before a closed capability":
+        # @req REQ-002 REQ-012
+        """Package-image validation precedes capability and provider identity
+        checks, including when the required section metadata is absent.
+        """
+        # @capture(text): Invalid package image retains precedence over closed archive
+        step("Remove image sections and close the real archive")
+        val fixture = setup_published_provider_metadata()
+        val admission = open_provider_metadata_fixture(fixture)
+        var image = admission.authority.image
+        image.sections = []
+        var authority = admission.authority
+        authority.image = image
+        admission.authority = authority
+        expect(pinned_archive_close_v1(admission.authority.capability).is_ok()).to_be(true)
+        step("Retain the invalid package-image refusal")
+        check_provider_rejection_replay(admission, ProviderAdmissionErrorV1.invalid_package_image)
+        cleanup_provider_metadata_fixture(fixture, admission)
+
+    it "should refuse a damaged receipt before a closed capability":
+        # @req REQ-002 REQ-012
+        """A previously verified archive does not excuse a receipt whose
+        digest no longer authenticates its fields.
+        """
+        # @capture(text): Invalid package-image refusal for a damaged receipt
+        step("Damage the receipt digest after opening the original archive")
+        val fixture = setup_published_provider_metadata()
+        val admission = open_provider_metadata_fixture(fixture)
+        var receipt = admission.authority.receipt
+        receipt.receipt_digest = sha256_text("damaged-receipt")
+        expect(pinned_archive_receipt_valid_v1(receipt)).to_be(false)
+        var authority = admission.authority
+        authority.receipt = receipt
+        admission.authority = authority
+        expect(pinned_archive_close_v1(admission.authority.capability).is_ok()).to_be(true)
+        step("Preserve the receipt-derived package-image refusal")
+        check_provider_rejection_replay(admission, ProviderAdmissionErrorV1.invalid_package_image)
+        cleanup_provider_metadata_fixture(fixture, admission)
+
+    it "should retain the descriptor refusal even when package metadata is absent":
+        # @req REQ-002 REQ-012
+        """Descriptor validation is the first metadata boundary. Missing image
+        sections must not obscure a malformed requested dependency digest.
+        """
+        # @capture(text): Invalid descriptor precedes missing package metadata
+        step("Combine a malformed requested dependency with missing sections")
+        val fixture = setup_published_provider_metadata()
+        val admission = open_provider_metadata_fixture(fixture)
+        var descriptor = admission.descriptor
+        descriptor.dependency_digests = [""]
+        admission.descriptor = descriptor
+        var image = admission.authority.image
+        image.sections = []
+        var authority = admission.authority
+        authority.image = image
+        admission.authority = authority
+        step("Preserve the first descriptor error across demands")
+        check_provider_rejection_replay(admission, ProviderAdmissionErrorV1.invalid_descriptor)
+        cleanup_provider_metadata_fixture(fixture, admission)
+
+    it "should retain the published failure identity after caller metadata changes":
+        # @req REQ-002 REQ-012
+        """Once first demand publishes a refusal, repairing or replacing
+        request fields does not reopen admission or rewrite the failure record.
+        """
+        # @capture(text): Original typed refusal and identity survive later caller changes
+        step("Publish a real ABI refusal from otherwise verified metadata")
+        val fixture = setup_published_provider_metadata()
+        val admission = open_provider_metadata_fixture(fixture)
+        var authority = admission.authority
+        authority.required_abi_digest = sha256_text("wrong-required-abi")
+        admission.authority = authority
+        expect(provider_admit_metadata_v1(admission).unwrap_err()).to_equal(ProviderAdmissionErrorV1.abi_mismatch)
+        val original = admission.failure.unwrap()
+        step("Repair the ABI and replace the caller identity after rejection")
+        authority.required_abi_digest = admission.descriptor.abi_digest
+        admission.authority = authority
+        var descriptor = admission.descriptor
+        descriptor.provider_identity = "replacement.provider"
+        descriptor.package_identity = "replacement.package"
+        admission.descriptor = descriptor
+        step("Replay the original error without publishing replacement identity")
+        for demand in 0..3:
+            expect(provider_admit_metadata_v1(admission).unwrap_err()).to_equal(ProviderAdmissionErrorV1.abi_mismatch)
+            val observed = admission.failure.unwrap()
+            expect(observed.error).to_equal(original.error)
+            expect(observed.provider_identity).to_equal(original.provider_identity)
+            expect(observed.package_identity).to_equal(original.package_identity)
+            expect(observed.archive_digest).to_equal(original.archive_digest)
+            expect(admission.receipt).to_be_nil()
+        cleanup_provider_metadata_fixture(fixture, admission)
+
+    it "should admit shadow metadata with exactly the primary effect identity":
+        # @req REQ-002 REQ-005
+        """Successful metadata admission preserves the primary identity on
+        its ticket. This checks policy metadata, not real provider execution.
+        """
+        # @capture(text): Shadow metadata receipt and primary execution ticket
+        step("Select shadow comparison on otherwise valid persisted metadata")
+        val fixture = setup_published_provider_metadata()
+        val admission = open_provider_metadata_fixture(fixture)
+        var descriptor = admission.descriptor
+        descriptor.mode = ProviderModeV1.shadow_compare
+        descriptor.shadow_provider_identity = "fixture.shadow"
+        admission.descriptor = descriptor
+        step("Admit the primary effect identity and retain shadow metadata policy")
+        val receipt = provider_admit_metadata_v1(admission).unwrap()
+        expect(receipt.mode).to_equal(ProviderModeV1.shadow_compare)
+        expect(receipt.effect_policy.shadow_metadata_only).to_be(true)
+        val ticket = provider_execution_ticket_v1(receipt).unwrap()
+        expect(ticket.effect_owner_identity).to_equal(descriptor.provider_identity)
+        cleanup_provider_metadata_fixture(fixture, admission)
+
+    it "should replay a policy refusal after all archive and closure checks succeed":
+        # @req REQ-002 REQ-005 REQ-012
+        """This refusal reaches the production policy check through real
+        archive admission; it is not a manually published terminal error.
+        """
+        # @capture(text): Invalid dual-mode policy returned on three demands
+        step("Give a direct-mode descriptor an unauthorized shadow identity")
+        val fixture = setup_published_provider_metadata()
+        val admission = open_provider_metadata_fixture(fixture)
+        var descriptor = admission.descriptor
+        descriptor.shadow_provider_identity = "fixture.shadow"
+        admission.descriptor = descriptor
+        step("Reject the policy and preserve its typed failure")
+        check_provider_rejection_replay(admission, ProviderAdmissionErrorV1.invalid_dual_mode_policy)
+        cleanup_provider_metadata_fixture(fixture, admission)
+
+    # @manual_section: Dependency validation through the publishing caller
+    it "should refuse malformed dependency publication without replacing valid metadata":
+        # @req REQ-002 REQ-012
+        """The runtime/std publisher calls the production package-image
+        validator. Malformed metadata must not replace its committed generation;
+        the previous package remains reloadable after each rejected attempt.
+        """
+        # @capture(text): Publication refusal, unchanged generation and reloaded dependencies
+        step("Publish a valid package and retain its committed generation")
+        val fixture = setup_published_provider_metadata()
+        val generation = cas_batch_current_v1(fixture.root)
+        expect(generation.len()).to_equal(64)  # oracle: CURRENT names a SHA-256 generation
+        for malformed in ["", "short",
+                "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                "gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg"]:
+            step("Attempt to publish a malformed dependency after a canonical one")
+            val rejected = publish_provider_metadata_fixture(fixture.root, fixture.authority,
+                [sha256_text("canonical"), malformed])
+            expect(rejected.valid).to_be(false)
+            expect(rejected.reason).to_equal("runtime-std-publication-invalid")
+            expect(cas_batch_current_v1(fixture.root)).to_equal(generation)
+            step("Reload the unchanged valid package through the production caller")
+            val loaded = runtime_std_load_package_v1(fixture.root, fixture.authority, RUNTIME_PACKAGE_IDENTITY_V1)
+            expect(loaded.valid).to_be(true)
+            expect(loaded.receipt.unwrap().receipt_digest).to_equal(fixture.loaded.receipt.unwrap().receipt_digest)
+            expect(loaded.image.unwrap().dependency_interface_digests).to_equal(fixture.loaded.image.unwrap().dependency_interface_digests)
+            expect(pinned_archive_receipt_valid_v1(loaded.receipt.unwrap())).to_be(true)
+        expect(dir_remove_all(fixture.root)).to_be(true)
+
+    it "should refuse a committed package whose receipt blob is missing":
+        # @req REQ-002 REQ-012
+        """A committed mapping is not a replacement for its authenticated
+        receipt bytes. Losing one package's receipt must not invalidate the
+        separately published standard package.
+        """
+        # @capture(text): Missing-receipt refusal and independently loadable standard package
+        step("Remove only the runtime receipt from the private fixture store")
+        val fixture = setup_published_provider_metadata()
+        val digest = fixture.loaded.receipt.unwrap().receipt_digest
+        expect(cas_get(fixture.root, digest) != nil).to_be(true)
+        expect(file_remove(cas_blob_path(fixture.root, digest))).to_be(true)
+        expect(cas_get(fixture.root, digest)).to_be_nil()
+        step("Reload through the production caller without inventing missing metadata")
+        val rejected = runtime_std_load_package_v1(fixture.root, fixture.authority, RUNTIME_PACKAGE_IDENTITY_V1)
+        expect(rejected.valid).to_be(false)
+        expect(rejected.reason).to_equal("runtime-std-receipt-missing")
+        expect(rejected.image).to_be_nil()
+        expect(rejected.receipt).to_be_nil()
+        val standard = runtime_std_load_package_v1(fixture.root, fixture.authority, STD_PACKAGE_IDENTITY_V1)
+        expect(standard.valid).to_be(true)
+        expect(standard.package_identity).to_equal(STD_PACKAGE_IDENTITY_V1)
+        expect(dir_remove_all(fixture.root)).to_be(true)
+
+    it "should reject a correctly hashed persisted receipt with a malformed dependency":
+        # @req REQ-002 REQ-012
+        """The generic CAS transaction authenticates stored bytes, while the
+        runtime package loader owns package-image validation. A lower-level
+        writer cannot bypass dependency admission by hashing malformed metadata.
+        """
+        # @capture(text): Stored receipt identity, loader image refusal and inherited package
+        step("Persist a rehashed receipt with a noncanonical dependency through the generic CAS")
+        val fixture = setup_published_provider_metadata()
+        var receipt = fixture.loaded.receipt.unwrap()
+        receipt.dependency_interface_digests = [
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"]
+        receipt.receipt_digest = package_archive_receipt_digest_v1(receipt)
+        expect(pinned_archive_receipt_valid_v1(receipt)).to_be(true)
+        val encoded = package_archive_receipt_canonical_fields_v1(receipt)
+        expect(cas_put(fixture.root, encoded)).to_equal(receipt.receipt_digest)
+        expect(cas_get(fixture.root, receipt.receipt_digest).unwrap()).to_equal(encoded)
+        val transaction = cas_batch_begin_v1(fixture.root,
+            cas_batch_current_v1(fixture.root), "item5-persisted-malformed-dependency",
+            [RUNTIME_PACKAGE_IDENTITY_V1]).unwrap()
+        expect(cas_batch_stage_object_v1(transaction, RUNTIME_PACKAGE_IDENTITY_V1,
+            PackageActionKeyV1(receipt.action_key), receipt).is_ok()).to_be(true)
+        expect(cas_batch_publish_v1(transaction).is_ok()).to_be(true)
+        step("Reject the image reconstructed by the production runtime package loader")
+        val rejected = runtime_std_load_package_v1(fixture.root, fixture.authority, RUNTIME_PACKAGE_IDENTITY_V1)
+        expect(rejected.valid).to_be(false)
+        expect(rejected.reason).to_equal("runtime-std-image-invalid")
+        expect(rejected.image).to_be_nil()
+        expect(rejected.receipt).to_be_nil()
+        step("Retain the valid standard package inherited by the new generation")
+        val standard = runtime_std_load_package_v1(fixture.root, fixture.authority, STD_PACKAGE_IDENTITY_V1)
+        expect(standard.valid).to_be(true)
+        expect(standard.package_identity).to_equal(STD_PACKAGE_IDENTITY_V1)
+        expect(dir_remove_all(fixture.root)).to_be(true)
+
+    it "should publish reload and admit a leaf package with no dependencies":
+        # @req REQ-002
+        """An empty closure is a valid leaf package. This adjacent positive
+        control distinguishes an empty list from a list containing an empty digest.
+        """
+        # @capture(text): Leaf publication, reload and admission receipt
+        step("Replace valid metadata with a package whose dependency list is empty")
+        val fixture = setup_published_provider_metadata()
+        val published = publish_provider_metadata_fixture(fixture.root, fixture.authority, [])
+        expect(published.valid).to_be(true)
+        val loaded = runtime_std_load_package_v1(fixture.root, fixture.authority, RUNTIME_PACKAGE_IDENTITY_V1)
+        expect(loaded.valid).to_be(true)
+        expect(loaded.image.unwrap().dependency_interface_digests).to_equal([])
+        step("Open and admit the leaf through the same production owners")
+        val leaf = PublishedProviderMetadataFixture(fixture.root, fixture.authority, loaded)
+        val admission = open_provider_metadata_fixture(leaf)
+        val receipt = provider_admit_metadata_v1(admission).unwrap()
+        expect(receipt.dependency_digests).to_equal([])
+        expect(receipt.owner).to_be(true)
+        cleanup_provider_metadata_fixture(leaf, admission)
