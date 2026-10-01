@@ -1,7 +1,30 @@
 use std.spec.{describe, it, expect, fail}
 use app.bootstrap_builder.grouped_native_worker.{NativeGroupWorkerRequestV1,
     native_group_worker_request_encode_v1, native_group_worker_request_decode_v1,
-    native_group_worker_request_valid_v1}
+    native_group_worker_request_valid_v1, native_group_worker_reconcile_v1,
+    native_group_worker_host_target_v1}
+use std.common.build_manager.grouped_native_contract.{NativeGroupMemberV1,
+    NativeGroupManifestV1, NativeModuleResultV1, NativeGroupResultV1,
+    native_group_scc_set_id_v1, native_group_manifest_identity_v1}
+use std.platform.{get_host_os, get_host_arch}
+
+fn worker_digest_v1(ch: text) -> text: ch.repeat(64)
+
+fn worker_member_v1(id: text, scc: text) -> NativeGroupMemberV1:
+    NativeGroupMemberV1(id, scc, "src/{id}.spl", worker_digest_v1("a"),
+        "SMF", "smf/llvm/{id}.smf")
+
+fn worker_manifest_v1(members: [NativeGroupMemberV1]) -> NativeGroupManifestV1:
+    NativeGroupManifestV1(worker_digest_v1("1"), worker_digest_v1("2"),
+        worker_digest_v1("3"), worker_digest_v1("4"),
+        "D:/state/routes/route.sdn", worker_digest_v1("5"),
+        worker_digest_v1("6"), worker_digest_v1("7"), "phase4", "llvm",
+        "x86_64-pc-windows-msvc", "group-1", native_group_scc_set_id_v1(members),
+        1, 1, worker_digest_v1("8"), members.len(), 1073741824, 1, members)
+
+fn worker_ok_v1(member: NativeGroupMemberV1) -> NativeModuleResultV1:
+    NativeModuleResultV1(member.module_id, "OK", 0, member.output_kind,
+        member.output_path, worker_digest_v1("9"), false, "")
 
 fn native_worker_fixture_v1() -> NativeGroupWorkerRequestV1:
     NativeGroupWorkerRequestV1("D:/bin/simple.exe",
@@ -37,3 +60,34 @@ describe "grouped native worker request":
         match native_group_worker_request_decode_v1(payload + "junk"):
             Ok(_): fail("trailing data accepted")
             Err(reason): expect(reason != "").to_equal(true)
+
+    it "demotes a failed loader member and its SCC peers without losing independent successes":
+        val members = [worker_member_v1("a", "cycle"),
+            worker_member_v1("b", "cycle"), worker_member_v1("c", "independent")]
+        val manifest = worker_manifest_v1(members)
+        val raw = NativeGroupResultV1(native_group_manifest_identity_v1(manifest),
+            manifest.group_id, 1, 1,
+            [worker_ok_v1(members[0]), worker_ok_v1(members[1]),
+             worker_ok_v1(members[2])], 10, 1024)
+        match native_group_worker_reconcile_v1(manifest, raw,
+                {"a": worker_digest_v1("a"), "c": worker_digest_v1("c")},
+                {"b": worker_digest_v1("b")}):
+            Ok(result):
+                expect(result.modules[0].status).to_equal("BLOCKED")
+                expect(result.modules[0].smf_qualified).to_equal(false)
+                expect(result.modules[0].output_path).to_equal("")
+                expect(result.modules[1].status).to_equal("ERROR")
+                expect(result.modules[1].diagnostic_digest).to_equal(worker_digest_v1("b"))
+                expect(result.modules[2].status).to_equal("OK")
+                expect(result.modules[2].smf_qualified).to_equal(true)
+                expect(result.modules[2].diagnostic_digest).to_equal(worker_digest_v1("c"))
+            Err(reason): fail(reason)
+
+    it "rejects a target from another host before loader qualification":
+        expect(native_group_worker_host_target_v1("x86_64-unknown-plan9-gnu")).to_equal(false)
+        val host = get_host_os()
+        val arch = get_host_arch()
+        if host == "windows":
+            expect(native_group_worker_host_target_v1(arch + "-pc-windows-msvc")).to_equal(true)
+        elif host == "linux":
+            expect(native_group_worker_host_target_v1(arch + "-unknown-linux-gnu")).to_equal(true)
