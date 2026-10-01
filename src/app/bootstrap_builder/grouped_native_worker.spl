@@ -3,8 +3,8 @@
 use app.io.args_ops.{get_args}
 use app.io.env_ops.{env_get}
 use app.io.process_ops.{process_run_bounded}
-use compiler.loader.loader.module_loader.{LoadResult, lazymoduleloader_with_defaults,
-    moduleloader_load}
+use compiler.loader.loader.module_loader.{lazymoduleloader_with_defaults}
+use compiler.loader.loader.smf_group_batch_load.{moduleloader_load_native_batch_v1}
 use compiler.driver.driver_build.native_group_warm_route.{NativeGroupDependencySmfV1,
     NativeGroupWarmRouteV1, native_group_warm_route_decode_v1}
 use std.common.build_manager.codec.{BuilderWireReaderV1, builder_wire_line_v1}
@@ -40,6 +40,11 @@ struct NativeGroupWorkerRequestV1:
 struct NativeGroupWorkerDependencyMarkerV1:
     scc_id: text
     payload: text
+
+struct NativeGroupWorkerSccPathsV1:
+    scc_id: text
+    paths: [text]
+    digests: [text]
 
 fn native_group_worker_absolute_v1(path: text) -> bool:
     path.starts_with("/") or (path.len() > 2 and path[1:2] == ":" and
@@ -184,10 +189,44 @@ fn native_group_worker_route_pins_v1(request: NativeGroupWorkerRequestV1,
             return "dependency route source identity differs"
     ""
 
-# Return only previously promoted, hash-checked dependency SMFs. The caller
-# will later hand these paths to a bounded target-host loader batch.
-fn native_group_worker_dependency_paths_v1(request: NativeGroupWorkerRequestV1,
-        manifest: NativeGroupManifestV1) -> Result<[text], text>:
+fn native_group_worker_scc_batches_v1(
+        dependencies: [NativeGroupDependencySmfV1], paths: [text],
+        digests: {text: text}
+        ) -> Result<[NativeGroupWorkerSccPathsV1], text>:
+    if dependencies.len() != paths.len():
+        return Err("dependency path count differs from route")
+    var batches: [NativeGroupWorkerSccPathsV1] = []
+    var seen: {text: bool} = {}
+    var current = ""
+    var selected: [text] = []
+    var selected_digests: [text] = []
+    for index in 0..dependencies.len():
+        val scc = dependencies[index].scc_id
+        if scc != current:
+            if current != "":
+                batches = batches.push(NativeGroupWorkerSccPathsV1(current,
+                    selected, selected_digests))
+            if seen.contains_key(scc):
+                return Err("dependency route divides one SCC")
+            seen[scc] = true
+            current = scc
+            selected = []
+            selected_digests = []
+        if paths[index] == "" or selected.len() >= 4096 or
+                not digests.contains_key(dependencies[index].module_id) or
+                not builder_digest_valid_v1(digests[dependencies[index].module_id]):
+            return Err("dependency SCC batch path or module bound invalid")
+        selected = selected.push(paths[index])
+        selected_digests = selected_digests.push(digests[dependencies[index].module_id])
+    if current != "":
+        batches = batches.push(NativeGroupWorkerSccPathsV1(current,
+            selected, selected_digests))
+    Ok(batches)
+
+# Return previously promoted, hash-checked dependency SMFs in whole SCC
+# batches, preserving the route's dependency-first order.
+fn native_group_worker_dependency_batches_v1(request: NativeGroupWorkerRequestV1,
+        manifest: NativeGroupManifestV1) -> Result<[NativeGroupWorkerSccPathsV1], text>:
     if native_group_worker_request_valid_v1(request) != "" or
             native_group_manifest_identity_v1(manifest) != request.manifest_digest or
             manifest.group_route_path == "":
@@ -228,14 +267,23 @@ fn native_group_worker_dependency_paths_v1(request: NativeGroupWorkerRequestV1,
     if not file_is_regular_no_follow(manifest.group_route_path) or
             file_hash_sha256(manifest.group_route_path) != manifest.group_route_digest:
         return Err("dependency warm route changed during admission")
+    native_group_worker_scc_batches_v1(route.dependency_smf_entries, paths, digests)
+
+fn native_group_worker_dependency_paths_v1(request: NativeGroupWorkerRequestV1,
+        manifest: NativeGroupManifestV1) -> Result<[text], text>:
+    val batches = native_group_worker_dependency_batches_v1(request, manifest)?
+    var paths: [text] = []
+    for batch in batches:
+        for path in batch.paths: paths = paths.push(path)
     Ok(paths)
 
 # The compiler cannot assert loader acceptance. Rebuild every OK SMF row from
 # receipts written by this worker, and make an entire SCC retry if one peer
 # fails to load. Independent SCCs keep their successful results.
-fn native_group_worker_reconcile_v1(manifest: NativeGroupManifestV1,
+fn native_group_worker_reconcile_blocked_v1(manifest: NativeGroupManifestV1,
         result: NativeGroupResultV1, accepted: {text: text},
-        load_failures: {text: text}) -> Result<NativeGroupResultV1, text>:
+        load_failures: {text: text}, blocked_sccs: {text: bool}
+        ) -> Result<NativeGroupResultV1, text>:
     val invalid = native_group_result_validate_against_manifest_v1(manifest, result)
     if invalid != "": return Err(invalid)
     var failed_sccs: {text: bool} = {}
@@ -254,6 +302,9 @@ fn native_group_worker_reconcile_v1(manifest: NativeGroupManifestV1,
                 return Err("SMF loader rejection lacks pinned diagnostic")
             modules = modules.push(NativeModuleResultV1(row.module_id, "ERROR", 1,
                 row.output_kind, "", "", false, load_failures[member.module_id]))
+        elif blocked_sccs.contains_key(member.scc_id):
+            modules = modules.push(NativeModuleResultV1(row.module_id, "BLOCKED", 1,
+                row.output_kind, "", "", false, ""))
         elif failed_sccs.contains_key(member.scc_id):
             modules = modules.push(NativeModuleResultV1(row.module_id, "BLOCKED", 1,
                 row.output_kind, "", "", false, ""))
@@ -272,6 +323,12 @@ fn native_group_worker_reconcile_v1(manifest: NativeGroupManifestV1,
     val final_error = native_group_result_validate_against_manifest_v1(manifest, reconciled)
     if final_error != "": return Err(final_error)
     Ok(reconciled)
+
+fn native_group_worker_reconcile_v1(manifest: NativeGroupManifestV1,
+        result: NativeGroupResultV1, accepted: {text: text},
+        load_failures: {text: text}) -> Result<NativeGroupResultV1, text>:
+    native_group_worker_reconcile_blocked_v1(manifest, result, accepted,
+        load_failures, {})
 
 fn native_group_worker_rejection_v1(root: text, manifest: NativeGroupManifestV1,
         module_id: text, reason: text) -> Result<text, text>:
@@ -300,44 +357,96 @@ fn native_group_worker_qualify_v1(request: NativeGroupWorkerRequestV1,
             prefailed[manifest.members[index].scc_id] = true
     var accepted: {text: text} = {}
     var load_failures: {text: text} = {}
+    var blocked_sccs: {text: bool} = {}
     var loader = lazymoduleloader_with_defaults()
-    for index in 0..manifest.members.len():
-        val member = manifest.members[index]
-        val row = result.modules[index]
-        if row.status != "OK" or row.output_kind != "SMF" or
-                prefailed.contains_key(member.scc_id):
+    var has_smf = false
+    for member in manifest.members:
+        if member.output_kind == "SMF": has_smf = true
+    if has_smf:
+        val predecessors = native_group_worker_dependency_batches_v1(request, manifest)?
+        for batch in predecessors:
+            val loaded = moduleloader_load_native_batch_v1(loader, batch.paths, 4096)?
+            if loaded.len() != batch.paths.len():
+                return Err("dependency SCC loader returned a partial batch")
+            for index in 0..batch.paths.len():
+                if loaded[index] != batch.paths[index] or
+                        not file_is_regular_no_follow(batch.paths[index]) or
+                        file_hash_sha256(batch.paths[index]) != batch.digests[index]:
+                    return Err("dependency SCC loader changed or omitted a pinned SMF")
+    var stopped = false
+    var start = 0
+    while start < manifest.members.len():
+        val scc = manifest.members[start].scc_id
+        var end = start + 1
+        while end < manifest.members.len() and manifest.members[end].scc_id == scc:
+            end = end + 1
+        if stopped:
+            blocked_sccs[scc] = true
+            start = end
             continue
-        val output = root + "/outputs/" + row.output_path
-        if not file_is_regular_no_follow(output) or
-                file_hash_sha256(output) != row.output_digest:
-            load_failures[member.module_id] = native_group_worker_rejection_v1(root,
-                manifest, member.module_id, "SMF output digest differs")?
+        if prefailed.contains_key(scc):
+            stopped = true
+            start = end
             continue
-        var loaded = false
-        var rejection = "target loader rejected SMF"
-        match moduleloader_load(loader, output):
-            case LoadResult.Success(_): loaded = true
-            case LoadResult.AlreadyLoaded(_): loaded = true
-            case LoadResult.Error(message): rejection = message
-        if not loaded or not file_is_regular_no_follow(output) or
-                file_hash_sha256(output) != row.output_digest:
-            val reason = if loaded: "SMF output changed after target loader acceptance"
-                else: rejection
-            load_failures[member.module_id] = native_group_worker_rejection_v1(root,
-                manifest, member.module_id, reason)?
+        var paths: [text] = []
+        var reason = ""
+        var has_object = false
+        for index in start..end:
+            val row = result.modules[index]
+            if row.output_kind == "OBJECT":
+                has_object = true
+                continue
+            val output = root + "/outputs/" + row.output_path
+            paths = paths.push(output)
+            if not file_is_regular_no_follow(output) or
+                    file_hash_sha256(output) != row.output_digest:
+                reason = "candidate SCC output digest differs"
+        if paths.len() == 0:
+            if has_object and has_smf: stopped = true
+            start = end
             continue
-        val receipt = native_group_smf_loader_receipt_v1(manifest,
-            member.module_id, row.output_digest)
-        if receipt == "": return Err("SMF loader receipt identity rejected")
-        if not dir_create(root + "/qualification", true):
-            return Err("cannot create SMF qualification directory")
-        val receipt_path = root + "/qualification/" + sha256_text(member.module_id) + ".sdn"
-        if not file_atomic_write(receipt_path, receipt) or
-                file_read_regular_no_follow_bounded(receipt_path, 4096)? != receipt:
-            return Err("cannot publish exact SMF loader receipt")
-        accepted[member.module_id] = sha256_text(receipt)
-    val reconciled = native_group_worker_reconcile_v1(manifest, result,
-        accepted, load_failures)?
+        if has_object: reason = "candidate SCC mixes SMF and OBJECT members"
+        if reason == "":
+            match moduleloader_load_native_batch_v1(loader, paths, 4096):
+                Ok(loaded):
+                    if loaded.len() != paths.len():
+                        reason = "candidate SCC loader returned a partial batch"
+                    else:
+                        for index in 0..paths.len():
+                            if loaded[index] != paths[index]:
+                                reason = "candidate SCC loader returned different paths"
+                Err(message): reason = message
+        if reason == "":
+            for index in start..end:
+                val row = result.modules[index]
+                val output = root + "/outputs/" + row.output_path
+                if not file_is_regular_no_follow(output) or
+                        file_hash_sha256(output) != row.output_digest:
+                    reason = "candidate SCC output changed after loader acceptance"
+        if reason != "":
+            for index in start..end:
+                val row = result.modules[index]
+                if row.output_kind == "SMF":
+                    load_failures[row.module_id] = native_group_worker_rejection_v1(root,
+                        manifest, row.module_id, reason)?
+            stopped = true
+            start = end
+            continue
+        for index in start..end:
+            val row = result.modules[index]
+            val receipt = native_group_smf_loader_receipt_v1(manifest,
+                row.module_id, row.output_digest)
+            if receipt == "": return Err("SMF loader receipt identity rejected")
+            if not dir_create(root + "/qualification", true):
+                return Err("cannot create SMF qualification directory")
+            val receipt_path = root + "/qualification/" + sha256_text(row.module_id) + ".sdn"
+            if not file_atomic_write(receipt_path, receipt) or
+                    file_read_regular_no_follow_bounded(receipt_path, 4096)? != receipt:
+                return Err("cannot publish exact SMF loader receipt")
+            accepted[row.module_id] = sha256_text(receipt)
+        start = end
+    val reconciled = native_group_worker_reconcile_blocked_v1(manifest, result,
+        accepted, load_failures, blocked_sccs)?
     val final_payload = native_group_result_encode_v1(reconciled)
     if final_payload == "" or not file_atomic_write(request.group_result, final_payload):
         return Err("cannot publish qualified native group result")
@@ -407,4 +516,6 @@ export native_group_worker_request_decode_v1, native_group_worker_request_valid_
 export native_group_worker_execute_v1
 export native_group_worker_reconcile_v1, native_group_worker_host_target_v1
 export NativeGroupWorkerDependencyMarkerV1, native_group_worker_dependency_markers_v1
-export native_group_worker_dependency_paths_v1
+export NativeGroupWorkerSccPathsV1, native_group_worker_scc_batches_v1
+export native_group_worker_dependency_paths_v1, native_group_worker_dependency_batches_v1
+export native_group_worker_reconcile_blocked_v1
