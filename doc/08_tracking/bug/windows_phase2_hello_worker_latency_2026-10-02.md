@@ -45,7 +45,31 @@ warning, without stage-level progress. These observations cannot identify
 HIR, MIR, code generation, or linking as the source of the latency. There is
 no comparable baseline supporting a percentage regression claim.
 
-## Required follow-up
+## Authorized diagnostic continuation and source observations
+
+The user subsequently authorized exactly one additional instrumented Windows
+attempt. Hello5 reuses the same candidate and hello4 cache with unchanged
+6,000,000,000-byte aggregate cap, 1200-second compile timeout and disk guard.
+It adds worker-spawn, phase-profile and memory-snapshot diagnostics, plus a
+bounded external process-tree sampler pinned to PID and creation time. This
+exception does not reset the attempt count or authorize another retry.
+
+Two source observations constrain interpretation of the measurements:
+
+- `bootstrap_main.spl` handles the marked internal worker `run` route with
+  a direct call to compiled `cli_native_build_with_environment_variant_policy_v1`.
+  The child's `run` argument alone is not evidence of source interpretation.
+- `app/compiler_entrypoint/inventory_events.spl` explicitly bypasses the
+  valid-cursor warm path when `cold_init` is true and requests a complete
+  source inventory replacement. The retained wrapper keeps
+  `SIMPLE_SCV_INVENTORY_COLD_INIT=1`, so frontend-cache reuse does not imply
+  warm inventory preparation. This is a possible contributor to parent
+  pre-spawn latency, not a demonstrated explanation of worker RSS growth.
+
+Do not modify the live diagnostic run. Preserve its inventory cursor/pointer
+identity and terminal traces before considering a subsequent warm invocation.
+
+## Remaining verification
 
 Preserve the terminal compile/run exits and owned-process quiescence receipt.
 A successful hello requires compiling and executing the resulting binary,
