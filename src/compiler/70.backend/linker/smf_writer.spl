@@ -211,11 +211,23 @@ class SmfWriter:
     relocations: [SmfRelocation]
     string_table: [i64]         # Byte array
     string_offsets: {text: i64}
+    target_platform: Platform
+    target_arch: Arch
+    explicit_symbol_sections: bool
 
 impl SmfWriter:
     static fn create() -> SmfWriter:
         SmfWriter(sections: [], symbols: [], relocations: [],
-                  string_table: [0], string_offsets: {})
+                  string_table: [0], string_offsets: {},
+                  target_platform: Platform.Linux, target_arch: Arch.X86_64,
+                  explicit_symbol_sections: false)
+
+    static fn create_target(platform: Platform, arch: Arch) -> SmfWriter:
+        """Create a target-pinned writer with explicit symbol section indices."""
+        SmfWriter(sections: [], symbols: [], relocations: [],
+                  string_table: [0], string_offsets: {},
+                  target_platform: platform, target_arch: arch,
+                  explicit_symbol_sections: true)
 
     me add_string(s: text) -> i64:
         """Add a string to the string table, returning its offset."""
@@ -365,6 +377,13 @@ impl SmfWriter:
                 return Err(SmfWriteError.InvalidData("relocation {ri_check} references out-of-range symbol_index {reloc.symbol_index} (symbol_count={self.symbols.len()})"))
             ri_check = ri_check + 1
 
+        if self.explicit_symbol_sections:
+            for symbol in self.symbols:
+                if symbol.section_index < -1 or symbol.section_index >= self.sections.len() or
+                        symbol.section_index > 65534:
+                    return Err(SmfWriteError.InvalidData(
+                        "symbol {symbol.name} has invalid section index {symbol.section_index}"))
+
         # Assign string-table offsets for every symbol name up front (also
         # populates self.string_table with real bytes -- see add_string()).
         var name_offsets: [i64] = []
@@ -484,7 +503,8 @@ impl SmfWriter:
         # 5. Symbol table (56-byte entries).
         var symi = 0
         while symi < self.symbols.len():
-            val entry = smf_build_symbol_entry_bytes(self.symbols[symi], name_offsets[symi])
+            val entry = smf_build_symbol_entry_bytes(self.symbols[symi],
+                name_offsets[symi], self.explicit_symbol_sections)
             var sei = 0
             while sei < entry.len():
                 buf.push(entry[sei] as i64)
@@ -500,7 +520,8 @@ impl SmfWriter:
         # 7. Header, written as a 128-byte trailer (v1.1 design, matches
         # compiler.driver.smf_writer and _SmfReaderMemory's dual offset-0/
         # trailer lookup).
-        var header: SmfHeader = SmfHeader.new_v1_1(Platform.Linux, Arch.X86_64)
+        var header: SmfHeader = SmfHeader.new_v1_1(
+            self.target_platform, self.target_arch)
         var has_aspect_pack = false
         for written_section in self.sections:
             if written_section.section_type.to_wire_u8() as i64 == 16:
@@ -697,7 +718,8 @@ fn smf_build_section_entry_bytes(section_type_byte: u8, flags: i64, offset: i64,
   template_param_count (1) | reserved[3] (3, low 2 bytes = section_index LE) |
   pad (4) | template_offset (8) = 56 bytes.
 """
-fn smf_build_symbol_entry_bytes(symbol: SmfWriterSymbol, name_offset: i64) -> [u8]:
+fn smf_build_symbol_entry_bytes(symbol: SmfWriterSymbol, name_offset: i64,
+        explicit_section: bool = false) -> [u8]:
     var buf: [u8] = []
     for b in u32_to_bytes_u8(name_offset):
         buf.push(b)
@@ -728,7 +750,7 @@ fn smf_build_symbol_entry_bytes(symbol: SmfWriterSymbol, name_offset: i64) -> [u
     buf.push(0)
     buf.push((symbol.section_index & 0xff) as u8)
     buf.push(((symbol.section_index >> 8) & 0xff) as u8)
-    buf.push(0)
+    buf.push(if explicit_section: 0x53 else: 0)
     buf.push(0)
     buf.push(0)
     buf.push(0)
