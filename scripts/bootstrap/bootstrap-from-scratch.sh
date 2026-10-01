@@ -4586,7 +4586,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     echo "error: tracked post-Stage-2 manager handoff is unavailable" >&2
     exit 1
   fi
-  managed_required_environment='SIMPLE_BOOTSTRAP_MANAGED_SOURCE_ROOT SIMPLE_BOOTSTRAP_MANAGED_MEMORY_BYTES SIMPLE_BOOTSTRAP_MANAGED_RESERVE_BYTES'
+  managed_required_environment='SIMPLE_BOOTSTRAP_MANAGED_SOURCE_ROOT'
   for managed_name in ${managed_required_environment}; do
     eval "managed_value=\${${managed_name}:-}"
     if [ -z "${managed_value}" ]; then
@@ -4595,6 +4595,31 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     fi
   done
   managed_image_preparer="${repo_root}/scripts/bootstrap/prepare-phase2-build-manager.shs"
+  managed_policy_preparer="${repo_root}/scripts/bootstrap/prepare-phase2-managed-policy.shs"
+  [ -f "${managed_policy_preparer}" ] || {
+    echo "error: tracked managed resource policy selector unavailable" >&2; exit 1;
+  }
+  managed_policy_receipt=$(
+    set -- "--source-estimate-root=${repo_root}" \
+      "--output-root=${managed_phase_root}/policy" "--threads=${build_threads}"
+    [ -z "${SIMPLE_BOOTSTRAP_MANAGED_MEMORY_BYTES:-}" ] || set -- "$@" "--memory-bytes=${SIMPLE_BOOTSTRAP_MANAGED_MEMORY_BYTES}"
+    [ -z "${SIMPLE_BOOTSTRAP_MANAGED_RESERVE_BYTES:-}" ] || set -- "$@" "--reserve-bytes=${SIMPLE_BOOTSTRAP_MANAGED_RESERVE_BYTES}"
+    [ -z "${SIMPLE_BOOTSTRAP_MANAGED_GROUP_SIZE:-}" ] || set -- "$@" "--group-size=${SIMPLE_BOOTSTRAP_MANAGED_GROUP_SIZE}"
+    [ -z "${SIMPLE_BOOTSTRAP_MANAGED_MAX_ATTEMPTS:-}" ] || set -- "$@" "--max-attempts=${SIMPLE_BOOTSTRAP_MANAGED_MAX_ATTEMPTS}"
+    [ -z "${SIMPLE_BOOTSTRAP_MANAGED_POLL_MS:-}" ] || set -- "$@" "--poll-ms=${SIMPLE_BOOTSTRAP_MANAGED_POLL_MS}"
+    [ -z "${SIMPLE_BOOTSTRAP_MANAGED_LIFETIME_MS:-}" ] || set -- "$@" "--lifetime-ms=${SIMPLE_BOOTSTRAP_MANAGED_LIFETIME_MS}"
+    [ -z "${SIMPLE_BOOTSTRAP_MANAGED_ESTIMATED_GROUP_DISK_BYTES:-}" ] || set -- "$@" "--estimated-group-disk-bytes=${SIMPLE_BOOTSTRAP_MANAGED_ESTIMATED_GROUP_DISK_BYTES}"
+    [ -z "${SIMPLE_BOOTSTRAP_MANAGED_MINIMUM_FREE_DISK_BYTES:-}" ] || set -- "$@" "--minimum-free-disk-bytes=${SIMPLE_BOOTSTRAP_MANAGED_MINIMUM_FREE_DISK_BYTES}"
+    sh "${managed_policy_preparer}" "$@"
+  ) || { echo "error: local managed resource policy blocked; diagnostics retained" >&2; exit 1; }
+  managed_memory_bytes=$(bootstrap_stage3_manifest_value memory_bytes "${managed_policy_receipt}") || exit 1
+  managed_reserve_bytes=$(bootstrap_stage3_manifest_value reserve_bytes "${managed_policy_receipt}") || exit 1
+  managed_group_size=$(bootstrap_stage3_manifest_value group_size "${managed_policy_receipt}") || exit 1
+  managed_max_attempts=$(bootstrap_stage3_manifest_value max_attempts "${managed_policy_receipt}") || exit 1
+  managed_poll_ms=$(bootstrap_stage3_manifest_value poll_ms "${managed_policy_receipt}") || exit 1
+  managed_lifetime_ms=$(bootstrap_stage3_manifest_value lifetime_ms "${managed_policy_receipt}") || exit 1
+  managed_estimated_disk=$(bootstrap_stage3_manifest_value estimated_group_disk_bytes "${managed_policy_receipt}") || exit 1
+  managed_minimum_disk=$(bootstrap_stage3_manifest_value minimum_free_disk_bytes "${managed_policy_receipt}") || exit 1
   [ -f "${managed_image_preparer}" ] || {
     echo "error: tracked Phase 2 manager image builder unavailable" >&2; exit 1;
   }
@@ -4605,8 +4630,8 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     "--output-root=${managed_phase_root}/manager-images" \
     "--target=${PLATFORM}" \
     "--runtime-bundle=${SIMPLE_BOOTSTRAP_MANAGED_RUNTIME_BUNDLE:-core-c-bootstrap}" \
-    "--memory-bytes=${SIMPLE_BOOTSTRAP_MANAGED_MEMORY_BYTES}" \
-    "--reserve-bytes=${SIMPLE_BOOTSTRAP_MANAGED_RESERVE_BYTES}" \
+    "--memory-bytes=${managed_memory_bytes}" \
+    "--reserve-bytes=${managed_reserve_bytes}" \
     || { echo "error: Phase 2 manager image admission blocked; logs retained" >&2; exit 1; }
   managed_template=$(bootstrap_stage3_manifest_value template "${managed_image_receipt}") || exit 1
   managed_manifest_program=$(bootstrap_stage3_manifest_value manifest_program "${managed_image_receipt}") || exit 1
@@ -4615,7 +4640,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
   managed_group_worker=$(bootstrap_stage3_manifest_value group_worker "${managed_image_receipt}") || exit 1
   managed_group_broker=$(bootstrap_stage3_manifest_value group_broker "${managed_image_receipt}") || exit 1
   managed_index_program=$(bootstrap_stage3_manifest_value index_program "${managed_image_receipt}") || exit 1
-  managed_required_environment='SIMPLE_BOOTSTRAP_MANAGED_SCV_RECEIPT SIMPLE_BOOTSTRAP_MANAGED_SOURCE_INVENTORY SIMPLE_BOOTSTRAP_MANAGED_MODULE_INVENTORY SIMPLE_BOOTSTRAP_MANAGED_LLVM_INDEX_CONFIG SIMPLE_BOOTSTRAP_MANAGED_CRANELIFT_INDEX_CONFIG SIMPLE_BOOTSTRAP_MANAGED_GROUP_SIZE SIMPLE_BOOTSTRAP_MANAGED_MAX_ATTEMPTS SIMPLE_BOOTSTRAP_MANAGED_POLL_MS SIMPLE_BOOTSTRAP_MANAGED_LIFETIME_MS SIMPLE_BOOTSTRAP_MANAGED_ESTIMATED_GROUP_DISK_BYTES SIMPLE_BOOTSTRAP_MANAGED_MINIMUM_FREE_DISK_BYTES'
+  managed_required_environment='SIMPLE_BOOTSTRAP_MANAGED_SCV_RECEIPT SIMPLE_BOOTSTRAP_MANAGED_SOURCE_INVENTORY SIMPLE_BOOTSTRAP_MANAGED_MODULE_INVENTORY SIMPLE_BOOTSTRAP_MANAGED_LLVM_INDEX_CONFIG SIMPLE_BOOTSTRAP_MANAGED_CRANELIFT_INDEX_CONFIG'
   for managed_name in ${managed_required_environment}; do
     eval "managed_value=\${${managed_name}:-}"
     if [ -z "${managed_value}" ]; then
@@ -4640,15 +4665,15 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     "--llvm-index-config=${SIMPLE_BOOTSTRAP_MANAGED_LLVM_INDEX_CONFIG}" \
     "--cranelift-index-config=${SIMPLE_BOOTSTRAP_MANAGED_CRANELIFT_INDEX_CONFIG}" \
     "--threads=${build_threads}" \
-    "--memory-bytes=${SIMPLE_BOOTSTRAP_MANAGED_MEMORY_BYTES}" \
-    "--reserve-bytes=${SIMPLE_BOOTSTRAP_MANAGED_RESERVE_BYTES}" \
+    "--memory-bytes=${managed_memory_bytes}" \
+    "--reserve-bytes=${managed_reserve_bytes}" \
     "--target=${PLATFORM}" \
-    "--group-size=${SIMPLE_BOOTSTRAP_MANAGED_GROUP_SIZE}" \
-    "--max-attempts=${SIMPLE_BOOTSTRAP_MANAGED_MAX_ATTEMPTS}" \
-    "--poll-ms=${SIMPLE_BOOTSTRAP_MANAGED_POLL_MS}" \
-    "--lifetime-ms=${SIMPLE_BOOTSTRAP_MANAGED_LIFETIME_MS}" \
-    "--estimated-group-disk-bytes=${SIMPLE_BOOTSTRAP_MANAGED_ESTIMATED_GROUP_DISK_BYTES}" \
-    "--minimum-free-disk-bytes=${SIMPLE_BOOTSTRAP_MANAGED_MINIMUM_FREE_DISK_BYTES}" \
+    "--group-size=${managed_group_size}" \
+    "--max-attempts=${managed_max_attempts}" \
+    "--poll-ms=${managed_poll_ms}" \
+    "--lifetime-ms=${managed_lifetime_ms}" \
+    "--estimated-group-disk-bytes=${managed_estimated_disk}" \
+    "--minimum-free-disk-bytes=${managed_minimum_disk}" \
     || { echo "error: managed Phase 3/4 handoff failed; receipts retained" >&2; exit 1; }
   managed_completion="${managed_phase_root}/completion.env"
   [ -f "${managed_completion}" ] && [ ! -L "${managed_completion}" ] || {
