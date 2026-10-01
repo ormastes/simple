@@ -1,0 +1,99 @@
+# Derive the compiler's typed source inventory directly from exact copied
+# Stage2 members. A private snapshot has no Git directory or event journal.
+use app.bootstrap_builder.native_group_phase2_source_snapshot.{
+    Phase2SourceSnapshotV1
+}
+use compiler.driver.driver_build.native_full_inventory_sources.{
+    NativeFullInventorySourcesV1, native_full_inventory_source_paths_v1
+}
+use compiler.driver.cache.cold_package_ownership_v1.{
+    ColdPackageOwnershipManifestV1,
+    cold_package_ownership_capture_v1,
+    COLD_PACKAGE_OWNERSHIP_POLICY_IDENTITY_V1
+}
+use std.scv.compile_source_inventory_core.{
+    CompileSourceInventoryV1, compile_source_inventory_sort_v1
+}
+use std.scv.compile_source_inventory.{
+    compile_source_inventory_publish_reasoned_v1,
+    compile_source_inventory_read_current_v1
+}
+use std.scv.compile_snapshot.{
+    ScvCompileSnapshotV1, scv_compile_snapshot_acquire_v1
+}
+use std.nogc_sync_mut.io.file_ops.{
+    file_hash_sha256, file_read_regular_no_follow_bounded
+}
+
+struct Phase2NativeScvV1:
+    snapshot: ScvCompileSnapshotV1
+    source_inventory_digest: text
+    source_inventory_generation: i64
+    scv_receipt_digest: text
+    full_sources: NativeFullInventorySourcesV1
+    package_policy_digest: text
+
+fn phase2_native_scv_publish_v1(
+    copied: Phase2SourceSnapshotV1
+) -> Result<Phase2NativeScvV1, text>:
+    if copied.source_entries.len() == 0 or
+            copied.source_entries.len() > 20000:
+        return Err("phase2 compiler source inventory count invalid")
+    val root = copied.source_root
+    val cache_root = "{root}/build/scv"
+    val inventory = CompileSourceInventoryV1(1, 0,
+        compile_source_inventory_sort_v1(copied.source_entries))
+    val (inventory_digest, reason) =
+        compile_source_inventory_publish_reasoned_v1(cache_root, inventory)
+    if reason != "ok" or inventory_digest == "":
+        return Err("phase2 source inventory publication failed: " + reason)
+    val readback = compile_source_inventory_read_current_v1(cache_root)
+    if not readback.valid or readback.inventory == nil or
+            readback.digest != inventory_digest or
+            readback.inventory!.entries.len() != copied.source_entries.len():
+        return Err("phase2 source inventory readback differs")
+    val scv = scv_compile_snapshot_acquire_v1(root, cache_root, ["src"])
+    if not scv.valid or scv.source_drifted or
+            scv.inventory_count != copied.source_entries.len():
+        return Err("phase2 SCV acquisition failed: " + scv.reason)
+    val receipt_digest = file_hash_sha256(scv.receipt_path)
+    var spl_count = 0
+    for entry in inventory.entries:
+        if entry.source_identity.ends_with(".spl"):
+            spl_count = spl_count + 1
+    if spl_count == 0 or spl_count > 20000:
+        return Err("phase2 SCV module count invalid")
+    val full_sources = native_full_inventory_source_paths_v1(root,
+        scv.snapshot_root, scv.revision_id, scv.commit_id, scv.tree_id,
+        scv.inventory_digest, inventory_digest, receipt_digest, spl_count)?
+    if full_sources.source_count != spl_count:
+        return Err("phase2 SCV module count differs")
+    val policy_path = "{scv.snapshot_root}/{COLD_PACKAGE_OWNERSHIP_POLICY_IDENTITY_V1}"
+    val policy_content = file_read_regular_no_follow_bounded(
+        policy_path, 65536)?
+    var manifests: [ColdPackageOwnershipManifestV1] = []
+    for entry in inventory.entries:
+        if entry.source_identity.ends_with("/simple.sdn") and
+                entry.source_identity !=
+                    COLD_PACKAGE_OWNERSHIP_POLICY_IDENTITY_V1:
+            val content = file_read_regular_no_follow_bounded(
+                "{scv.snapshot_root}/{entry.source_identity}", 65536)?
+            manifests = manifests.push(ColdPackageOwnershipManifestV1(
+                entry.source_identity, content))
+    val captured = cold_package_ownership_capture_v1(inventory,
+        full_sources, policy_content, manifests)?
+    var runtime_count = 0
+    var std_count = 0
+    for member in captured.members:
+        if member.package_identity == "simple.runtime":
+            runtime_count = runtime_count + 1
+        if member.package_identity == "simple.std":
+            std_count = std_count + 1
+    if captured.members.len() != spl_count or
+            runtime_count == 0 or std_count == 0:
+        return Err("phase2 runtime/std package membership incomplete")
+    Ok(Phase2NativeScvV1(scv, inventory_digest,
+        inventory.generation, receipt_digest, full_sources,
+        captured.policy_digest))
+
+export Phase2NativeScvV1, phase2_native_scv_publish_v1

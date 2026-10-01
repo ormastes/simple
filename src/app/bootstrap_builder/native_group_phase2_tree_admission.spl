@@ -1,0 +1,97 @@
+# One no-follow walk of the exact Stage2-owned checkout scopes. This rejects
+# added `.spl` files and every other unlisted regular/link entry before copy.
+use app.bootstrap_builder.native_group_phase2_source_contract.{
+    Phase2SourceRecordV1
+}
+use std.nogc_sync_mut.io_runtime.{dir_list_optional}
+use std.nogc_sync_mut.io.dir_ops.{dir_is_real_no_follow}
+use std.nogc_sync_mut.io.file_ops.{file_is_regular_no_follow}
+use std.nogc_sync_mut.io.snapshot_links.{
+    snapshot_symlink_match_nofollow_v1
+}
+
+fn _phase2_stage2_pruned_v1(relative: text) -> bool:
+    for pruned in ["src/compiler_rust/vendor", "src/compiler_rust/target",
+            "src/app/vscode_extension/.vscode-test",
+            "src/app/vscode_extension/node_modules"]:
+        if relative == pruned or relative.starts_with(pruned + "/"):
+            return true
+    false
+
+fn phase2_checkout_tree_admit_v1(
+    checkout_root: text, records: [Phase2SourceRecordV1]
+) -> Result<bool, text>:
+    if not dir_is_real_no_follow(checkout_root) or records.len() == 0 or
+            records.len() > 200000:
+        return Err("Phase2 checkout tree root or record count invalid")
+    val scopes = ["src", "examples/10_tooling"]
+    var expected: Dict<text, Phase2SourceRecordV1> = {}
+    var expected_dirs: Dict<text, bool> = {}
+    var seen: Dict<text, bool> = {}
+    for record in records:
+        var scoped = false
+        for scope in scopes:
+            if record.relative_path.starts_with(scope + "/"):
+                scoped = true
+        if not scoped or _phase2_stage2_pruned_v1(
+                record.relative_path) or expected.has(record.relative_path):
+            return Err("Phase2 authority record outside Stage2 source scopes")
+        expected[record.relative_path] = record
+        val parts = record.relative_path.split("/")
+        var prefix = ""
+        for index in 0..parts.len() - 1:
+            prefix = if prefix == "": parts[index] else: prefix + "/" + parts[index]
+            expected_dirs[prefix] = true
+    var visited = 0
+    for scope in scopes:
+        if not dir_is_real_no_follow("{checkout_root}/{scope}"):
+            return Err("Phase2 checkout Stage2 scope unavailable: " + scope)
+        var queue = [scope]
+        var cursor = 0
+        while cursor < queue.len():
+            if queue.len() > 200000:
+                return Err("Phase2 checkout directory count exceeds bound")
+            val parent = queue[cursor]
+            cursor = cursor + 1
+            val listing = match dir_list_optional(
+                    "{checkout_root}/{parent}"):
+                case Some(names): names
+                case _: return Err("Phase2 checkout enumeration failed")
+            for name in listing:
+                if name == "" or name == "." or name == ".." or
+                        name.contains("/") or name.contains("\\") or
+                        name.contains("\0") or name.contains("\r") or
+                        name.contains("\n"):
+                    return Err("Phase2 checkout entry name invalid")
+                val relative = parent + "/" + name
+                val absolute = "{checkout_root}/{relative}"
+                if _phase2_stage2_pruned_v1(relative):
+                    continue
+                if dir_is_real_no_follow(absolute):
+                    if not expected_dirs.has(relative):
+                        return Err("Phase2 checkout has unlisted directory: " + relative)
+                    queue = queue.push(relative)
+                elif file_is_regular_no_follow(absolute):
+                    if not expected.has(relative) or
+                            expected[relative].kind != "file-hex" or
+                            seen.has(relative):
+                        return Err("Phase2 checkout has unlisted file: " + relative)
+                    seen[relative] = true
+                    visited = visited + 1
+                else:
+                    if not expected.has(relative) or
+                            expected[relative].kind == "file-hex" or
+                            seen.has(relative):
+                        return Err("Phase2 checkout has unlisted link or entry: " + relative)
+                    val record = expected[relative]
+                    val kind = if record.kind == "link-dir-hex": 2 else: 1
+                    if not snapshot_symlink_match_nofollow_v1(
+                            checkout_root, absolute, record.link_target, kind):
+                        return Err("Phase2 checkout link readback differs: " + relative)
+                    seen[relative] = true
+                    visited = visited + 1
+    if visited != records.len():
+        return Err("Phase2 checkout source count differs from Stage2 authority")
+    Ok(true)
+
+export phase2_checkout_tree_admit_v1
