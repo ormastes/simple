@@ -1,0 +1,363 @@
+# Compiler-facing full-inventory V2 publication seam. Inputs are admitted
+# source/typed-HIR receipts and actual emitted files; this owner never emits
+# missing facets, MIR, actions, or runtime/std semantic sections.
+
+use compiler.common.cache.canonical_identity.{canonical_identity_sort_texts}
+use compiler.driver.driver_build.native_full_inventory_sources.{
+    NativeFullInventorySourcesV1
+}
+use compiler.driver.cache.cold_hir_semantic_seed_v1.{ColdHirTypedReceiptV1}
+use compiler.driver.cache.cold_hir_native_object_persistence_v1.{
+    ColdHirNativeObjectArtifactV1
+}
+use compiler.driver.cache.cold_hir_compiled_package_outputs_v1.{
+    ColdHirCompiledPackageArtifactV1,
+    cold_hir_package_outputs_from_driver_v1,
+    cold_hir_package_publish_from_driver_v1
+}
+use compiler.driver.cache.cold_hir_package_drafts_v1.{
+    cold_hir_package_index_from_outputs_v1
+}
+use compiler.driver.cache.runtime_std_membership_policy_v1.{
+    RuntimeStdMembershipPolicyOutputV1,
+    runtime_std_membership_policy_from_index_v1
+}
+use compiler.driver.cache.package_archive_cache.{
+    PackageArchiveAuthorityV1, package_archive_aggregate_entry_v1,
+    package_archive_load_v1
+}
+use compiler.driver.cache.package_config_variant_receipt.{
+    PackageConfigVariantReceiptV1,
+    package_config_variant_receipt_encode_v1,
+    package_config_variant_receipt_path_v1,
+    package_config_variant_receipt_read_v1
+}
+use compiler.driver.cache.package_module_index.{
+    PackageModuleIndexEntryV1, PackageModuleIndexGenerationV1,
+    PACKAGE_MODULE_INDEX_SCHEMA_V2, package_module_index_digest_v1,
+    package_module_index_read_current_v1
+}
+use compiler.driver.cache.package_module_index_builder.{
+    PackageModuleIndexBuildAuthorityV1
+}
+use compiler.driver.cache.package_tldr_metadata.{config_variant_digest_v1}
+use compiler.driver.cache.runtime_std_authority_receipt.{
+    RuntimeStdAuthorityReceiptV1,
+    runtime_std_authority_receipt_encode_v1,
+    runtime_std_authority_receipt_path_v1,
+    runtime_std_authority_receipt_read_v1
+}
+use compiler.driver.smf.runtime_std_compiled_publication.{
+    RuntimeStdCompiledPackageReceiptV1,
+    runtime_std_compiled_receipt_validate_v1,
+    runtime_std_compiled_publish_v1
+}
+use compiler.driver.smf.runtime_std_package_set.{
+    RuntimeStdPackageAuthorityV1,
+    RUNTIME_PACKAGE_IDENTITY_V1, STD_PACKAGE_IDENTITY_V1,
+    runtime_std_load_baseline_v1
+}
+use std.common.crypto.sha256.{sha256_text}
+use std.scv.compile_snapshot.{ScvCompileSnapshotV1}
+use std.scv.compile_source_inventory_core.{
+    CompileSourceInventoryV1, compile_source_inventory_digest_v1
+}
+
+struct ColdHirCompilerPublishInputV1:
+    cache_root: text
+    artifact_root: text
+    expected_index_digest: text
+    inventory: CompileSourceInventoryV1
+    sources: NativeFullInventorySourcesV1
+    snapshot: ScvCompileSnapshotV1
+    authority: PackageModuleIndexBuildAuthorityV1
+    receipts: [ColdHirTypedReceiptV1]
+    object_artifacts: [ColdHirNativeObjectArtifactV1]
+    compiled_artifacts: [ColdHirCompiledPackageArtifactV1]
+    runtime_std_authority: RuntimeStdPackageAuthorityV1
+    runtime_receipt: RuntimeStdCompiledPackageReceiptV1
+    std_receipt: RuntimeStdCompiledPackageReceiptV1
+
+struct ColdHirCompilerPublishPinsV1:
+    index_read_root: text
+    index_digest: text
+    source_count: i64
+    archive_count: i64
+    archive_receipts_digest: text
+    variant_receipt_path: text
+    variant_receipt_digest: text
+    runtime_std_authority_path: text
+    runtime_std_authority_digest: text
+    runtime_archive_digest: text
+    std_archive_digest: text
+    membership_digest: text
+    policy_digest: text
+
+struct ColdHirCompilerArchiveReceiptV1:
+    package_identity: text
+    receipt_digest: text
+
+fn _cold_compiler_digest_valid_v1(value: text) -> bool:
+    if value.len() != 64:
+        return false
+    var index = 0
+    while index < 64:
+        val code = value.byte_at(index) as i64
+        if not ((code >= 48 and code <= 57) or
+                (code >= 97 and code <= 102)):
+            return false
+        index = index + 1
+    true
+
+# The verifier pins exactly these sorted rows, with no header or separator
+# other than one space and the final LF on every row.
+fn cold_hir_compiler_archive_receipts_digest_v1(
+    receipts: [ColdHirCompilerArchiveReceiptV1]
+) -> Result<text, text>:
+    if receipts.len() == 0 or receipts.len() > 20000:
+        return Err("cold-compiler-archive-receipt-count-invalid")
+    var by_package: Dict<text, text> = {}
+    var package_ids: [text] = []
+    for receipt in receipts:
+        if receipt.package_identity == "" or
+                receipt.package_identity.len() > 4096 or
+                receipt.package_identity.contains(" ") or
+                receipt.package_identity.contains("\t") or
+                receipt.package_identity.contains("\n") or
+                receipt.package_identity.contains("\r") or
+                not _cold_compiler_digest_valid_v1(receipt.receipt_digest) or
+                by_package.has(receipt.package_identity):
+            return Err("cold-compiler-archive-receipt-invalid")
+        by_package[receipt.package_identity] = receipt.receipt_digest
+        package_ids.push(receipt.package_identity)
+    var rows: [text] = []
+    for package_identity in canonical_identity_sort_texts(package_ids):
+        rows.push("{package_identity} {by_package[package_identity]}\n")
+    Ok(sha256_text(rows.join("")))
+
+fn _cold_compiler_membership_matches_v1(
+    policy: RuntimeStdMembershipPolicyOutputV1,
+    runtime_receipt: RuntimeStdCompiledPackageReceiptV1,
+    std_receipt: RuntimeStdCompiledPackageReceiptV1
+) -> bool:
+    var runtime_identities: [text] = []
+    var runtime_digests: [text] = []
+    var std_identities: [text] = []
+    var std_digests: [text] = []
+    for member in policy.membership.members:
+        if member.package_identity == RUNTIME_PACKAGE_IDENTITY_V1:
+            runtime_identities.push(member.source_identity)
+            runtime_digests.push(member.source_digest)
+        elif member.package_identity == STD_PACKAGE_IDENTITY_V1:
+            std_identities.push(member.source_identity)
+            std_digests.push(member.source_digest)
+    runtime_receipt.package_identity == RUNTIME_PACKAGE_IDENTITY_V1 and
+        std_receipt.package_identity == STD_PACKAGE_IDENTITY_V1 and
+        runtime_identities.len() > 0 and std_identities.len() > 0 and
+        runtime_receipt.source_identities == runtime_identities and
+        runtime_receipt.source_digests == runtime_digests and
+        std_receipt.source_identities == std_identities and
+        std_receipt.source_digests == std_digests
+
+fn _cold_compiler_preflight_v1(
+    input: ColdHirCompilerPublishInputV1
+) -> Result<(PackageModuleIndexGenerationV1,
+        RuntimeStdMembershipPolicyOutputV1), text>:
+    if input.cache_root == "" or input.artifact_root == "" or
+            input.authority.scope_entry_source_identity != "" or
+            input.sources.source_count <= 0 or
+            input.sources.source_count != input.receipts.len() or
+            input.sources.source_count != input.object_artifacts.len() or
+            input.sources.source_count != input.compiled_artifacts.len() or
+            input.sources.source_inventory_digest != input.authority.inventory_digest or
+            compile_source_inventory_digest_v1(input.inventory) !=
+                input.authority.inventory_digest:
+        return Err("cold-compiler-full-inventory-incomplete")
+    val variant_digest = config_variant_digest_v1(input.authority.variant)
+    if variant_digest == "" or
+            input.runtime_std_authority.config_digest != variant_digest or
+            input.runtime_std_authority.compiler_digest !=
+                input.authority.producer_digest or
+            input.runtime_std_authority.target_triple !=
+                input.authority.variant.target_triple or
+            input.runtime_std_authority.snapshot_revision !=
+                input.authority.scv_revision_id:
+        return Err("cold-compiler-runtime-variant-authority-mismatch")
+    val outputs = cold_hir_package_outputs_from_driver_v1(
+        input.receipts, input.object_artifacts, input.inventory,
+        input.authority, input.compiled_artifacts)
+    if outputs.is_err(): return Err(outputs.unwrap_err())
+    val built = cold_hir_package_index_from_outputs_v1(
+        input.authority, input.inventory, outputs.unwrap())
+    if built.is_err(): return Err(built.unwrap_err())
+    val generation = built.unwrap()
+    val index_digest = package_module_index_digest_v1(generation)
+    val policy = runtime_std_membership_policy_from_index_v1(
+        input.sources, input.snapshot, generation, index_digest,
+        input.authority.producer_digest, variant_digest)
+    if policy.is_err(): return Err(policy.unwrap_err())
+    val membership = policy.unwrap()
+    if not _cold_compiler_membership_matches_v1(
+            membership, input.runtime_receipt, input.std_receipt):
+        return Err("cold-compiler-runtime-std-source-closure-mismatch")
+    val runtime_reason = runtime_std_compiled_receipt_validate_v1(
+        input.runtime_std_authority, input.authority.variant,
+        input.inventory, input.authority.inventory_digest,
+        input.runtime_receipt)
+    val std_reason = runtime_std_compiled_receipt_validate_v1(
+        input.runtime_std_authority, input.authority.variant,
+        input.inventory, input.authority.inventory_digest,
+        input.std_receipt)
+    if runtime_reason != "ok" or std_reason != "ok":
+        return Err("cold-compiler-runtime-std-receipt-invalid:" +
+            runtime_reason + ":" + std_reason)
+    Ok((generation, membership))
+
+fn _cold_compiler_archive_receipts_v1(
+    cache_root: text, generation: PackageModuleIndexGenerationV1
+) -> Result<(i64, text), text>:
+    var entry_by_module: Dict<text, i64> = {}
+    var entries_by_package: Dict<text, [i64]> = {}
+    var package_ids: [text] = []
+    var index = 0
+    while index < generation.entries.len():
+        val entry = generation.entries[index]
+        entry_by_module[entry.module_identity] = index
+        if not entries_by_package.has(entry.package_identity):
+            entries_by_package[entry.package_identity] = []
+            package_ids.push(entry.package_identity)
+        entries_by_package[entry.package_identity] =
+            entries_by_package[entry.package_identity].push(index)
+        index = index + 1
+    val authority = PackageArchiveAuthorityV1(
+        generation.producer_digest, generation.root_generation,
+        generation.variant_digest, generation.scv_revision_id,
+        generation.scv_tree_id, generation.inventory_digest)
+    var rows: [ColdHirCompilerArchiveReceiptV1] = []
+    for package_identity in canonical_identity_sort_texts(package_ids):
+        var entries: [PackageModuleIndexEntryV1] = []
+        var dependencies: [text] = []
+        for entry_index in entries_by_package[package_identity]:
+            val entry = generation.entries[entry_index]
+            entries.push(entry)
+            for imported in entry.direct_imports:
+                if not entry_by_module.has(imported):
+                    return Err("cold-compiler-archive-import-missing")
+                val digest = generation.entries[
+                    entry_by_module[imported]].smf_metadata_digest
+                if not dependencies.contains(digest):
+                    dependencies.push(digest)
+        val aggregate = package_archive_aggregate_entry_v1(entries)
+        if aggregate == nil:
+            return Err("cold-compiler-archive-aggregate-invalid")
+        val loaded = package_archive_load_v1(cache_root,
+            aggregate.unwrap(), authority,
+            canonical_identity_sort_texts(dependencies))
+        if not loaded.valid or loaded.receipt == nil:
+            return Err("cold-compiler-archive-readback-invalid:" +
+                package_identity)
+        rows.push(ColdHirCompilerArchiveReceiptV1(
+            package_identity, loaded.receipt.unwrap().receipt_digest))
+    val digest = cold_hir_compiler_archive_receipts_digest_v1(rows)
+    if digest.is_err(): return Err(digest.unwrap_err())
+    Ok((rows.len(), digest.unwrap()))
+
+fn cold_hir_compiler_publish_full_v2(
+    input: ColdHirCompilerPublishInputV1
+) -> Result<ColdHirCompilerPublishPinsV1, text>:
+    val preflight = _cold_compiler_preflight_v1(input)
+    if preflight.is_err(): return Err(preflight.unwrap_err())
+    val (prebuilt_generation, policy) = preflight.unwrap()
+    # Runtime/std publication precedes the graph. A later graph failure leaves
+    # only an orphan baseline, never a visible V2 index without baseline pins.
+    val baseline = runtime_std_compiled_publish_v1(
+        input.cache_root, input.artifact_root,
+        input.runtime_std_authority, input.authority.variant,
+        input.inventory, input.authority.inventory_digest,
+        input.runtime_receipt, input.std_receipt)
+    if baseline.is_err(): return Err(baseline.unwrap_err())
+    val baseline_readback = runtime_std_load_baseline_v1(
+        input.cache_root, input.runtime_std_authority)
+    if not baseline_readback.valid:
+        return Err("cold-compiler-runtime-std-readback-invalid")
+    val generation_result = cold_hir_package_publish_from_driver_v1(
+        input.cache_root, input.expected_index_digest,
+        input.receipts, input.object_artifacts, input.inventory,
+        input.authority, input.compiled_artifacts)
+    if generation_result.is_err(): return Err(generation_result.unwrap_err())
+    val generation = generation_result.unwrap()
+    val index_digest = package_module_index_digest_v1(generation)
+    if generation.schema_version != PACKAGE_MODULE_INDEX_SCHEMA_V2 or
+            index_digest != package_module_index_digest_v1(
+                prebuilt_generation):
+        return Err("cold-compiler-index-changed-after-preflight")
+    val current = package_module_index_read_current_v1(input.cache_root)
+    if not current.valid or current.digest != index_digest:
+        return Err("cold-compiler-index-readback-invalid")
+    val baseline_after_graph = runtime_std_load_baseline_v1(
+        input.cache_root, input.runtime_std_authority)
+    if not baseline_after_graph.valid or
+            baseline_after_graph.runtime.receipt == nil or
+            baseline_after_graph.std.receipt == nil:
+        return Err("cold-compiler-runtime-std-mapping-lost")
+    val runtime_receipt = baseline_after_graph.runtime.receipt.unwrap()
+    val std_receipt = baseline_after_graph.std.receipt.unwrap()
+    val archive_rows = _cold_compiler_archive_receipts_v1(
+        input.cache_root, generation)
+    if archive_rows.is_err(): return Err(archive_rows.unwrap_err())
+    val (archive_count, archive_receipts_digest) = archive_rows.unwrap()
+    val variant_value = PackageConfigVariantReceiptV1(
+        index_digest, generation.producer_digest,
+        generation.variant_digest, input.authority.variant)
+    val variant_encoded = package_config_variant_receipt_encode_v1(
+        variant_value)
+    if variant_encoded == "":
+        return Err("cold-compiler-variant-receipt-invalid")
+    val variant_digest = sha256_text(variant_encoded)
+    val variant_path = package_config_variant_receipt_path_v1(
+        input.cache_root, index_digest)
+    val variant_read = package_config_variant_receipt_read_v1(
+        variant_path, variant_digest)
+    if variant_read.is_err():
+        return Err("cold-compiler-variant-receipt-readback-invalid")
+    if variant_read.unwrap().index_digest != index_digest:
+        return Err("cold-compiler-variant-receipt-readback-invalid")
+    val baseline_value = RuntimeStdAuthorityReceiptV1(
+        input.runtime_std_authority.compiler_digest,
+        input.runtime_std_authority.action_abi_digest,
+        input.runtime_std_authority.runtime_abi_digest,
+        input.runtime_std_authority.std_abi_digest,
+        input.runtime_std_authority.config_digest,
+        input.runtime_std_authority.target_triple,
+        input.runtime_std_authority.snapshot_revision,
+        baseline_after_graph.runtime.action_digest,
+        baseline_after_graph.std.action_digest,
+        runtime_receipt.archive_digest, std_receipt.archive_digest,
+        runtime_receipt.receipt_digest, std_receipt.receipt_digest)
+    val baseline_encoded = runtime_std_authority_receipt_encode_v1(
+        baseline_value)
+    if baseline_encoded == "":
+        return Err("cold-compiler-runtime-std-authority-invalid")
+    val baseline_digest = sha256_text(baseline_encoded)
+    val baseline_path = runtime_std_authority_receipt_path_v1(
+        input.cache_root, baseline_digest)
+    val baseline_read = runtime_std_authority_receipt_read_v1(
+        baseline_path, baseline_digest)
+    if baseline_read.is_err():
+        return Err("cold-compiler-runtime-std-authority-readback-invalid")
+    if baseline_read.unwrap().runtime_archive_digest !=
+                runtime_receipt.archive_digest or
+            baseline_read.unwrap().std_archive_digest !=
+                std_receipt.archive_digest:
+        return Err("cold-compiler-runtime-std-authority-readback-invalid")
+    Ok(ColdHirCompilerPublishPinsV1(
+        input.cache_root, index_digest, generation.entries.len(),
+        archive_count, archive_receipts_digest,
+        variant_path, variant_digest, baseline_path, baseline_digest,
+        runtime_receipt.archive_digest, std_receipt.archive_digest,
+        policy.membership_digest, policy.policy_digest))
+
+export ColdHirCompilerPublishInputV1, ColdHirCompilerPublishPinsV1
+export ColdHirCompilerArchiveReceiptV1
+export cold_hir_compiler_archive_receipts_digest_v1
+export cold_hir_compiler_publish_full_v2
