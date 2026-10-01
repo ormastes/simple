@@ -1,0 +1,94 @@
+# Windows composition for the grouped native parent. Native resource snapshots
+# stay in this host leaf; the portable manager receives measured byte counts.
+use app.io.args_ops.{get_args}
+use std.common.build_manager.grouped_native_contract.{NativeGroupRunV1, native_group_run_decode_v1, native_group_absolute_path_valid_v1}
+use app.bootstrap_builder.grouped_native_run.{NativeGroupedCapacityV1, native_group_run_v1, native_group_verify_v1}
+use app.bootstrap_builder.native_group_prepare.{native_group_prepare_v1}
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded, file_is_regular_no_follow, file_hash_sha256}
+use std.nogc_sync_mut.io.group_process_owner.{group_process_set_launcher_v1}
+use std.nogc_sync_mut.io.windows_group_broker_launcher.{windows_group_broker_launch_v1}
+use std.nogc_sync_mut.io.windows_process_owner.{windows_available_physical_memory_v1, _windows_process_wide_v1}
+use std.nogc_sync_mut.io.windows_process_owner_abi.{GetProcessHeap, HeapAlloc, HeapFree}
+use std.nogc_sync_mut.io.volatile_ops.{volatile_read_u64}
+
+@unsafe(reason: "Win64 current volume free-space snapshot", capabilities: [ffi, raw_ptr])
+extern fn GetDiskFreeSpaceExW(path: i64, available: i64, total: i64, total_free: i64) -> i32
+
+@unsafe(reason: "reads current Windows volume space and releases both native buffers", capabilities: [ffi, raw_ptr])
+fn native_group_windows_capacity_v1(path: text) -> Result<(i64, i64), text>:
+    val memory = windows_available_physical_memory_v1()?
+    val heap = GetProcessHeap()
+    if heap == 0: return Err("Windows process heap unavailable for disk check")
+    val wide = _windows_process_wide_v1(heap, path)
+    val slots = HeapAlloc(heap, 8u32, 24u64)
+    if wide == 0 or slots == 0:
+        if wide != 0:
+            val _freed_wide = HeapFree(heap, 0u32, wide)
+        if slots != 0:
+            val _freed_slots = HeapFree(heap, 0u32, slots)
+        return Err("Windows disk status allocation failed")
+    val queried = GetDiskFreeSpaceExW(wide, slots, slots + 8, slots + 16)
+    val available = if queried != 0: volatile_read_u64(slots) else: 0u64
+    val _freed_wide = HeapFree(heap, 0u32, wide)
+    val _freed_slots = HeapFree(heap, 0u32, slots)
+    if queried == 0 or available == 0u64 or available > 9223372036854775807u64:
+        return Err("Windows available disk query failed")
+    Ok((memory, available as i64))
+
+fn native_group_read_input_v1(path: text, state: text) -> Result<NativeGroupRunV1, text>:
+    if not native_group_absolute_path_valid_v1(path) or not native_group_absolute_path_valid_v1(state):
+        return Err("manifest and state paths must be absolute")
+    val payload = file_read_regular_no_follow_bounded(path, 16777216)?
+    val run = native_group_run_decode_v1(payload)?
+    if run.state_root.replace("\\", "/").lower() != state.replace("\\", "/").lower():
+        return Err("state path differs from native group manifest")
+    if run.resources.len() != 0 or run.results.len() != 0:
+        return Err("input manifest must contain no execution evidence")
+    for manifest in run.manifests:
+        if manifest.attempt != 1: return Err("input manifest must contain only initial groups")
+    Ok(run)
+
+fn native_group_windows_main_v1() -> i64:
+    val args = get_args()
+    if args.len() == 6 and args[1] == "native-groups-prepare" and
+            args[2] == "--config" and args[4] == "--manifest":
+        match native_group_prepare_v1(args[3], args[5]):
+            Ok(run):
+                print "native groups prepared: modules={run.inventory_count} groups={run.manifests.len()}"
+                return 0
+            Err(reason):
+                print "native groups prepare: {reason}"
+                return 2
+    if args.len() != 6 or (args[1] != "native-groups-run" and
+            args[1] != "native-groups-verify") or args[2] != "--manifest" or
+            args[4] != "--state":
+        print "usage: grouped-native-windows native-groups-prepare --config ABS --manifest ABS"
+        print "       grouped-native-windows native-groups-run --manifest ABS --state ABS"
+        print "       grouped-native-windows native-groups-verify --manifest ABS --state ABS"
+        return 2
+    val run = match native_group_read_input_v1(args[3], args[5]):
+        Ok(value): value
+        Err(reason):
+            print "native groups: {reason}"
+            return 2
+    if not file_is_regular_no_follow(run.manager_program) or
+            file_hash_sha256(run.manager_program) != run.manager_digest or
+            file_hash_sha256(args[0]) != run.manager_digest:
+        print "native groups: running manager image differs from admitted digest"
+        return 2
+    if not group_process_set_launcher_v1(windows_group_broker_launch_v1):
+        print "native groups: process launcher already configured"
+        return 2
+    if args[1] == "native-groups-verify":
+        val outcome = native_group_verify_v1(run)
+        print "native groups verify: expected={outcome.expected_count} accounted={outcome.accounted_count} status={outcome.exit_code} reason={outcome.reason}"
+        return outcome.exit_code
+    val outcome = native_group_run_v1(run,
+        NativeGroupedCapacityV1(native_group_windows_capacity_v1))
+    print "native groups: expected={outcome.expected_count} accounted={outcome.accounted_count} status={outcome.exit_code} reason={outcome.reason}"
+    outcome.exit_code
+
+fn main() -> i64:
+    native_group_windows_main_v1()
+
+export native_group_windows_main_v1, native_group_windows_capacity_v1
