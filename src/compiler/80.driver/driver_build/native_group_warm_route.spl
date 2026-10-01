@@ -30,7 +30,8 @@ use compiler.driver.driver_build.native_group_scc_inventory.{
 use std.common.build_manager.grouped_native_contract.{NativeGroupMemberV1}
 use std.common.build_manager.codec.{BuilderWireReaderV1, builder_wire_line_v1}
 use std.common.build_manager.contracts.{
-    builder_digest_valid_v1, builder_identifier_valid_v1
+    builder_digest_valid_v1, builder_identifier_valid_v1,
+    builder_relative_path_valid_v1
 }
 use std.common.crypto.sha256.{sha256_text}
 use std.nogc_sync_mut.io.file_ops.{
@@ -40,6 +41,15 @@ use std.nogc_sync_mut.io.file_ops.{
 extern fn rt_dir_create_all(path: text) -> bool
 
 val NATIVE_GROUP_WARM_ROUTE_MAX_BYTES_V1: i64 = 16 * 1024 * 1024
+val NATIVE_GROUP_WARM_DEPENDENCY_MAX_V1: i64 = 20000
+
+struct NativeGroupDependencySmfV1:
+    module_id: text
+    module_identity: text
+    source_path: text
+    source_digest: text
+    scc_id: text
+    smf_path: text
 
 struct NativeGroupWarmRouteV1:
     index_read_root: text
@@ -55,14 +65,193 @@ struct NativeGroupWarmRouteV1:
     full_source_authority_digest: text
     group_id: text
     attempt: i64
+    target_backend: text
     group_scc_ids: [text]
     source_entries: [PackageModuleIndexEntryV1]
     archive_admissions: [PackageArchiveAdmissionV1]
+    dependency_smf_entries: [NativeGroupDependencySmfV1]
 
 struct NativeGroupWarmRoutePublicationV1:
     path: text
     digest: text
     route: NativeGroupWarmRouteV1
+
+fn _native_route_identity_cmp_v1(left: text, right: text) -> i64:
+    val length = if left.len() < right.len(): left.len() else: right.len()
+    var cursor = 0
+    while cursor < length:
+        val a = left.byte_at(cursor) as i64
+        val b = right.byte_at(cursor) as i64
+        if a < b: return -1
+        if a > b: return 1
+        cursor = cursor + 1
+    if left.len() < right.len(): -1 else:
+        if left.len() > right.len(): 1 else: 0
+
+fn _native_route_heap_push_v1(heap: [text], value: text) -> [text]:
+    var result = heap.push(value)
+    var child = result.len() - 1
+    while child > 0:
+        val parent = (child - 1) / 2
+        if _native_route_identity_cmp_v1(result[parent], result[child]) <= 0:
+            break
+        val swapped = result[parent]
+        result[parent] = result[child]
+        result[child] = swapped
+        child = parent
+    result
+
+fn _native_route_heap_pop_v1(heap: [text]) -> ([text], text):
+    val first = heap[0]
+    var result = heap
+    val last = result[result.len() - 1]
+    result.pop()
+    if result.len() == 0: return (result, first)
+    result[0] = last
+    var parent = 0
+    while true:
+        val left = parent * 2 + 1
+        if left >= result.len(): break
+        val right = left + 1
+        var child = left
+        if right < result.len() and
+                _native_route_identity_cmp_v1(result[right], result[left]) < 0:
+            child = right
+        if _native_route_identity_cmp_v1(result[parent], result[child]) <= 0:
+            break
+        val swapped = result[parent]
+        result[parent] = result[child]
+        result[child] = swapped
+        parent = child
+    (result, first)
+
+# Derive the exact predecessor closure from resolved index imports carried by
+# this compact route. A whole predecessor SCC is one scheduling unit; its
+# members are emitted in source-path order after all predecessor SCCs.
+fn native_group_warm_dependency_smf_entries_v1(
+    target_backend: text,
+    source_entries: [PackageModuleIndexEntryV1],
+    archive_admissions: [PackageArchiveAdmissionV1]
+) -> Result<[NativeGroupDependencySmfV1], text>:
+    if not builder_identifier_valid_v1(target_backend):
+        return Err("route-target-backend-invalid")
+    var entries: [PackageModuleIndexEntryV1] = []
+    var by_module: Dict<text, i64> = {}
+    var selected: Dict<text, bool> = {}
+    var selected_sccs: Dict<text, bool> = {}
+    for entry in source_entries:
+        if by_module.has(entry.module_identity):
+            return Err("route-dependency-module-duplicate")
+        by_module[entry.module_identity] = entries.len()
+        selected[entry.module_identity] = true
+        selected_sccs[entry.scc_identity] = true
+        entries = entries.push(entry)
+    for admission in archive_admissions:
+        for entry in admission.module_entries:
+            if by_module.has(entry.module_identity):
+                return Err("route-dependency-module-duplicate")
+            if selected_sccs.has(entry.scc_identity):
+                return Err("route-dependency-selected-scc-archived")
+            by_module[entry.module_identity] = entries.len()
+            entries = entries.push(entry)
+            if entries.len() > NATIVE_GROUP_WARM_DEPENDENCY_MAX_V1 + 4096:
+                return Err("route-dependency-entry-limit")
+    var needed: Dict<text, bool> = {}
+    var visited: Dict<text, bool> = {}
+    var pending: [text] = []
+    for entry in source_entries:
+        for imported in entry.direct_imports:
+            pending = pending.push(imported)
+    var cursor = 0
+    while cursor < pending.len():
+        val module = pending[cursor]
+        cursor = cursor + 1
+        if visited.has(module): continue
+        visited[module] = true
+        if not by_module.has(module):
+            return Err("route-dependency-import-missing:{module}")
+        if selected.has(module): continue
+        needed[module] = true
+        if needed.len() > NATIVE_GROUP_WARM_DEPENDENCY_MAX_V1:
+            return Err("route-dependency-closure-limit")
+        for imported in entries[by_module[module]].direct_imports:
+            pending = pending.push(imported)
+    var scc_ids: [text] = []
+    var by_scc: Dict<text, [i64]> = {}
+    var scc_index: Dict<text, i64> = {}
+    for module in needed.keys():
+        val entry_index = by_module[module]
+        val scc_id = entries[entry_index].scc_identity
+        if not by_scc.has(scc_id):
+            scc_index[scc_id] = scc_ids.len()
+            scc_ids = scc_ids.push(scc_id)
+            by_scc[scc_id] = []
+        by_scc[scc_id] = by_scc[scc_id].push(entry_index)
+    for admission in archive_admissions:
+        for entry in admission.module_entries:
+            if by_scc.has(entry.scc_identity) and
+                    not needed.has(entry.module_identity):
+                return Err("route-dependency-incomplete-scc:{entry.scc_identity}")
+    var indegree: [i64] = []
+    var dependents: [[i64]] = []
+    for scc_id in scc_ids:
+        indegree = indegree.push(0)
+        dependents = dependents.push([])
+    var edges: Dict<text, bool> = {}
+    for module in needed.keys():
+        val entry = entries[by_module[module]]
+        val owner = scc_index[entry.scc_identity]
+        for imported in entry.direct_imports:
+            if selected.has(imported):
+                return Err("route-dependency-selected-cycle:{imported}")
+            if not needed.has(imported):
+                return Err("route-dependency-closure-incomplete:{imported}")
+            val dependency = entries[by_module[imported]]
+            if dependency.scc_identity == entry.scc_identity: continue
+            val key = "{entry.scc_identity.len()}:{entry.scc_identity}|" +
+                "{dependency.scc_identity.len()}:{dependency.scc_identity}"
+            if edges.has(key): continue
+            edges[key] = true
+            indegree[owner] = indegree[owner] + 1
+            val dependency_index = scc_index[dependency.scc_identity]
+            dependents[dependency_index] =
+                dependents[dependency_index].push(owner)
+    var ready: [text] = []
+    for scc_id in scc_ids:
+        if indegree[scc_index[scc_id]] == 0:
+            ready = _native_route_heap_push_v1(ready, scc_id)
+    var result: [NativeGroupDependencySmfV1] = []
+    var scheduled = 0
+    while ready.len() > 0:
+        val popped = _native_route_heap_pop_v1(ready)
+        ready = popped.0
+        val scc_id = popped.1
+        val group_index = scc_index[scc_id]
+        scheduled = scheduled + 1
+        var paths: [text] = []
+        var by_path: Dict<text, i64> = {}
+        for entry_index in by_scc[scc_id]:
+            val entry = entries[entry_index]
+            if by_path.has(entry.source_identity):
+                return Err("route-dependency-source-duplicate")
+            by_path[entry.source_identity] = entry_index
+            paths = paths.push(entry.source_identity)
+        for path in canonical_identity_sort_texts(paths):
+            val entry = entries[by_path[path]]
+            val module_id = sha256_text("simple/native-group-module/v1|" +
+                "{entry.module_identity.len()}:{entry.module_identity}")
+            result = result.push(NativeGroupDependencySmfV1(
+                module_id, entry.module_identity, entry.source_identity,
+                entry.source_digest, entry.scc_identity,
+                "smf/{target_backend}/{module_id}.smf"))
+        for dependent in dependents[group_index]:
+            indegree[dependent] = indegree[dependent] - 1
+            if indegree[dependent] == 0:
+                ready = _native_route_heap_push_v1(
+                    ready, scc_ids[dependent])
+    if scheduled != scc_ids.len() or result.len() != needed.len():
+        return Err("route-dependency-scc-cycle")
+    Ok(result)
 
 fn native_group_warm_route_validate_v1(route: NativeGroupWarmRouteV1) -> text:
     if (route.index_read_root == "" or route.root_generation == "" or
@@ -75,12 +264,15 @@ fn native_group_warm_route_validate_v1(route: NativeGroupWarmRouteV1) -> text:
             not builder_digest_valid_v1(route.source_snapshot_digest) or
             not builder_digest_valid_v1(route.full_source_authority_digest) or
             not builder_identifier_valid_v1(route.group_id) or
+            not builder_identifier_valid_v1(route.target_backend) or
             route.attempt < 1 or route.attempt > 100 or
             route.group_scc_ids.len() == 0 or
             route.group_scc_ids.len() > 4096 or
             route.source_entries.len() == 0 or
             route.source_entries.len() > 4096 or
-            route.archive_admissions.len() > 4096):
+            route.archive_admissions.len() > 4096 or
+            route.dependency_smf_entries.len() >
+                NATIVE_GROUP_WARM_DEPENDENCY_MAX_V1):
         return "route-header-invalid"
     var selected_sccs: Dict<text, bool> = {}
     for scc_id in route.group_scc_ids:
@@ -146,15 +338,37 @@ fn native_group_warm_route_validate_v1(route: NativeGroupWarmRouteV1) -> text:
         if package_module_index_entry_action_digest_v1(reduced, entry) !=
                 entry.action_digest:
             return "route-action-binding-mismatch"
+    val expected_dependencies = native_group_warm_dependency_smf_entries_v1(
+        route.target_backend, route.source_entries, route.archive_admissions)
+    if expected_dependencies.is_err():
+        return expected_dependencies.unwrap_err()
+    val expected = expected_dependencies.unwrap()
+    if expected.len() != route.dependency_smf_entries.len():
+        return "route-dependency-closure-mismatch"
+    var dependency_index = 0
+    while dependency_index < expected.len():
+        val actual = route.dependency_smf_entries[dependency_index]
+        val wanted = expected[dependency_index]
+        if (actual.module_id != wanted.module_id or
+                actual.module_identity != wanted.module_identity or
+                actual.source_path != wanted.source_path or
+                actual.source_digest != wanted.source_digest or
+                actual.scc_id != wanted.scc_id or
+                actual.smf_path != wanted.smf_path or
+                not builder_relative_path_valid_v1(actual.smf_path)):
+            return "route-dependency-order-or-binding-mismatch"
+        dependency_index = dependency_index + 1
     "ok"
 
 fn native_group_warm_route_build_v1(
     index_read_root: text,
     inventory: NativeGroupSccInventoryV1,
     group_scc_ids: [text],
-    group_id: text
+    group_id: text,
+    target_backend: text
 ) -> Result<NativeGroupWarmRouteV1, text>:
     if index_read_root == "" or not builder_identifier_valid_v1(group_id) or
+            not builder_identifier_valid_v1(target_backend) or
             group_scc_ids.len() == 0 or group_scc_ids.len() > 4096:
         return Err("native-group-route-input-invalid")
     val generation = inventory.index_generation
@@ -251,6 +465,10 @@ fn native_group_warm_route_build_v1(
         archives = archives.push(PackageArchiveAdmissionV1(
             package_identity, canonical_identity_sort_texts(module_ids),
             entries, load.archive_path, load))
+    val dependencies = native_group_warm_dependency_smf_entries_v1(
+        target_backend, source_entries, archives)
+    if dependencies.is_err():
+        return Err("native-group-route-{dependencies.unwrap_err()}")
     Ok(NativeGroupWarmRouteV1(
         index_read_root, inventory.index_digest, generation.producer_digest,
         generation.root_generation, generation.variant_digest,
@@ -258,8 +476,8 @@ fn native_group_warm_route_build_v1(
         generation.scv_tree_id, generation.inventory_digest,
         inventory.source_snapshot_digest,
         inventory.full_source_authority_digest,
-        group_id, 1, group_scc_ids,
-        source_entries, archives))
+        group_id, 1, target_backend, group_scc_ids,
+        source_entries, archives, dependencies.unwrap()))
 
 fn native_group_warm_route_encode_v1(route: NativeGroupWarmRouteV1) -> text:
     if native_group_warm_route_validate_v1(route) != "ok":
@@ -272,7 +490,7 @@ fn native_group_warm_route_encode_v1(route: NativeGroupWarmRouteV1) -> text:
             route.scv_source_inventory_digest,
             route.source_snapshot_digest,
             route.full_source_authority_digest, route.group_id,
-            str(route.attempt),
+            str(route.attempt), route.target_backend,
             str(route.group_scc_ids.len())]:
         content = content + builder_wire_line_v1(field)
     for scc_id in route.group_scc_ids:
@@ -297,6 +515,13 @@ fn native_group_warm_route_encode_v1(route: NativeGroupWarmRouteV1) -> text:
             admission.load.receipt!)
         if receipt == "": return ""
         content = content + builder_wire_line_v1(receipt)
+    content = content + builder_wire_line_v1(
+        str(route.dependency_smf_entries.len()))
+    for dependency in route.dependency_smf_entries:
+        for field in [dependency.module_id, dependency.module_identity,
+                dependency.source_path, dependency.source_digest,
+                dependency.scc_id, dependency.smf_path]:
+            content = content + builder_wire_line_v1(field)
     if content.len() > NATIVE_GROUP_WARM_ROUTE_MAX_BYTES_V1:
         return ""
     content
@@ -323,6 +548,7 @@ fn native_group_warm_route_decode_v1(
     val full_source_digest = reader.scalar()
     val group_id = reader.scalar()
     val attempt = reader.number(100, false)
+    val target_backend = reader.scalar()
     val scc_count = reader.number(4096, false)
     var scc_ids: [text] = []
     var cursor = 0
@@ -368,13 +594,22 @@ fn native_group_warm_route_decode_v1(
             package_identity, canonical_identity_sort_texts(module_ids),
             entries, archive_path, load))
         cursor = cursor + 1
+    val dependency_count = reader.number(
+        NATIVE_GROUP_WARM_DEPENDENCY_MAX_V1, false)
+    var dependencies: [NativeGroupDependencySmfV1] = []
+    cursor = 0
+    while cursor < dependency_count and reader.reason == "":
+        dependencies = dependencies.push(NativeGroupDependencySmfV1(
+            reader.scalar(), reader.scalar(), reader.scalar(),
+            reader.scalar(), reader.scalar(), reader.scalar()))
+        cursor = cursor + 1
     if reader.complete_error() != "":
         return Err("native-group-route-{reader.complete_error()}")
     val route = NativeGroupWarmRouteV1(
         index_read_root, index_digest, producer_digest, root_generation,
         variant_digest, revision, commit, tree, inventory_digest,
-        snapshot_digest, full_source_digest, group_id, attempt, scc_ids,
-        source_entries, archives)
+        snapshot_digest, full_source_digest, group_id, attempt,
+        target_backend, scc_ids, source_entries, archives, dependencies)
     if native_group_warm_route_encode_v1(route) != content:
         return Err("native-group-route-noncanonical")
     Ok(route)
@@ -384,10 +619,12 @@ fn native_group_warm_route_publish_v1(
     index_read_root: text,
     inventory: NativeGroupSccInventoryV1,
     group_scc_ids: [text],
-    group_id: text
+    group_id: text,
+    target_backend: text
 ) -> Result<NativeGroupWarmRoutePublicationV1, text>:
     val built = native_group_warm_route_build_v1(
-        index_read_root, inventory, group_scc_ids, group_id)
+        index_read_root, inventory, group_scc_ids, group_id,
+        target_backend)
     if built.is_err(): return Err(built.unwrap_err())
     _native_group_warm_route_publish_record_v1(state_root, built.unwrap())
 
@@ -512,6 +749,10 @@ fn native_group_warm_route_publish_retry_v1(
         if needed_archive.has(archive_index):
             admissions = admissions.push(admission)
         archive_index = archive_index + 1
+    val dependencies = native_group_warm_dependency_smf_entries_v1(
+        original.target_backend, source_entries, admissions)
+    if dependencies.is_err():
+        return Err("native-group-retry-{dependencies.unwrap_err()}")
     val retry = NativeGroupWarmRouteV1(
         original.index_read_root, original.index_digest,
         original.producer_digest, original.root_generation,
@@ -520,8 +761,8 @@ fn native_group_warm_route_publish_retry_v1(
         original.scv_source_inventory_digest,
         original.source_snapshot_digest,
         original.full_source_authority_digest,
-        original.group_id, next_attempt, scc_ids,
-        source_entries, admissions)
+        original.group_id, next_attempt, original.target_backend,
+        scc_ids, source_entries, admissions, dependencies.unwrap())
     _native_group_warm_route_publish_record_v1(state_root, retry)
 
 fn native_group_warm_route_read_v1(
@@ -585,7 +826,9 @@ fn native_group_warm_route_index_route_v1(
         true, "ok", source_paths, canonical_dirty.unwrap(),
         canonical_identity_sort_texts(packages), route.archive_admissions))
 
+export NativeGroupDependencySmfV1
 export NativeGroupWarmRouteV1, NativeGroupWarmRoutePublicationV1
+export native_group_warm_dependency_smf_entries_v1
 export native_group_warm_route_build_v1, native_group_warm_route_encode_v1
 export native_group_warm_route_decode_v1, native_group_warm_route_publish_v1
 export native_group_warm_route_publish_retry_v1

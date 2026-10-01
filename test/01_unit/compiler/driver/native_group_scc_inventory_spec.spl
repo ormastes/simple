@@ -21,8 +21,11 @@ use compiler.driver.driver_build.native_group_scc_inventory.{
 }
 use compiler.driver.driver_build.native_group_warm_route.{
     NativeGroupWarmRouteV1, native_group_warm_route_encode_v1,
-    native_group_warm_route_decode_v1
+    native_group_warm_route_decode_v1,
+    native_group_warm_dependency_smf_entries_v1
 }
+use compiler.driver.cache.package_index_route.{PackageArchiveAdmissionV1}
+use compiler.driver.cache.package_archive_cache.{PackageArchiveLoadV1}
 
 fn scc_source_entry(name: text) -> CompileSourceInventoryEntryV1:
     val digest = sha256_text("source:{name}")
@@ -109,13 +112,41 @@ describe "compiler-owned grouped native SCC inventory":
             generation.scv_commit_id, generation.scv_tree_id,
             generation.inventory_digest, sha256_text("snapshot-rows"),
             sha256_text("full-source-authority"),
-            "group-d", 1, ["scc_d"], [generation.entries[3]], [])
+            "group-d", 1, "llvm", ["scc_d"],
+            [generation.entries[3]], [], [])
         val encoded = native_group_warm_route_encode_v1(route)
         expect(encoded != "").to_equal(true)
         val decoded = native_group_warm_route_decode_v1(encoded)
         expect(decoded.is_ok()).to_equal(true)
         expect(decoded.unwrap().attempt).to_equal(1)
+        expect(decoded.unwrap().target_backend).to_equal("llvm")
         expect(decoded.unwrap().source_entries.len()).to_equal(1)
+        expect(decoded.unwrap().dependency_smf_entries.len()).to_equal(0)
+
+    it "orders whole predecessor SCC SMFs from resolved import closure":
+        val generation = scc_index_generation()
+        val unloaded = PackageArchiveLoadV1(
+            false, "test-only", true, "", nil)
+        val archives = [
+            PackageArchiveAdmissionV1(
+                "package_a", ["module.a"], [generation.entries[0]],
+                "", unloaded),
+            PackageArchiveAdmissionV1(
+                "package_b", ["module.b"], [generation.entries[1]],
+                "", unloaded),
+            PackageArchiveAdmissionV1(
+                "package_d", ["module.d"], [generation.entries[3]],
+                "", unloaded)]
+        val dependencies = native_group_warm_dependency_smf_entries_v1(
+            "llvm", [generation.entries[2]], archives)
+        expect(dependencies.is_ok()).to_equal(true)
+        val rows = dependencies.unwrap()
+        expect(rows.len()).to_equal(2)
+        expect(rows[0].source_path).to_equal("src/a.spl")
+        expect(rows[1].source_path).to_equal("src/b.spl")
+        expect(rows[0].scc_id).to_equal("scc_ab")
+        expect(rows[0].smf_path).to_equal(
+            "smf/llvm/{rows[0].module_id}.smf")
 
     it "round-trips the compiler-authored seven-field variant receipt":
         val receipt = PackageConfigVariantReceiptV1(
