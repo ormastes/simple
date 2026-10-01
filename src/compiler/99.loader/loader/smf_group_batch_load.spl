@@ -1,16 +1,21 @@
 # Target-host native SMF batch loading for dependency cycles.
-# Validate the whole batch, map all code, then apply cross-module relocations.
+# Validate the whole batch, map Code/Data/RoData, then relocate and seal.
 
 use .module_loader.{
-    LazyModuleLoader, LoadedModule, LoadedSymbol,
+    LazyModuleLoader, LoadedModule, LoadedSymbol, LoadedDataSection,
     moduleloader_ensure_jit, moduleloader_ensure_lifecycle,
-    moduleloader_allocate_exec_module, moduleloader_apply_relocations,
+    moduleloader_allocate_exec_module,
     moduleloader_unload
 }
 use .resource_lifecycle.{lifecycle_on_module_load,
     lifecycle_on_symbol_mapped}
 use .smf_reloc_partition.{smf_partition_code_relocations_v1}
+use .object_mapper.{ResolvedSymbol, apply_smf_relocations}
+use .smf_mmap_native.{native_alloc_rw_memory, native_write_exec_memory,
+    native_make_ro, native_make_rw, native_make_executable,
+    native_flush_icache, native_free_exec_memory}
 use compiler.backend.linker.smf_reader.{SmfReaderImpl}
+use compiler.backend.linker.smf_reader_memory.{SmfRelocEntry}
 use compiler.backend.linker.obj_taker.{SmfSymbol, SymbolType, SymbolBinding}
 use compiler.backend.linker.smf_enums.{Platform, Arch, CompressionType}
 use std.platform.{get_host_os, get_host_arch}
@@ -20,6 +25,12 @@ struct NativeGroupBatchImageV1:
     reader: SmfReaderImpl
     bytes: [u8]
     symbols: [SmfSymbol]
+    sections: [NativeGroupBatchSectionV1]
+    relocations: [SmfRelocEntry]
+
+struct NativeGroupBatchSectionV1:
+    kind: i64
+    data: [u8]
 
 fn native_group_batch_u32(bytes: [u8], at: i64) -> i64:
     (bytes[at] as i64) | ((bytes[at + 1] as i64) << 8) |
@@ -40,7 +51,8 @@ fn native_group_batch_host() -> Result<Platform, text>:
     Err("native group batch host OS is unsupported: {os}")
 
 fn native_group_batch_validate_sections(bytes: [u8],
-        reader: SmfReaderImpl, host: Platform) -> Result<(), text>:
+        reader: SmfReaderImpl, host: Platform) ->
+        Result<[NativeGroupBatchSectionV1], text>:
     val header = reader.sffi.mem.header
     if header.platform != host or header.arch != Arch.X86_64 or
             not header.flags.executable or header.flags.aspect_pack or
@@ -48,8 +60,8 @@ fn native_group_batch_validate_sections(bytes: [u8],
             header.compression != CompressionType.None_:
         return Err("native group SMF target or executable status is unproven")
     val (major, minor) = header.version
-    if major != 1 or minor != 1:
-        return Err("native group SMF requires format v1.1")
+    if major != 1 or (minor != 1 and minor != 2):
+        return Err("native group SMF requires format v1.1 or v1.2")
     if header.header_offset != bytes.len() - 128 or
             bytes[header.header_offset + 12] != 0:
         return Err("native group SMF requires an uncompressed trailer header")
@@ -70,21 +82,26 @@ fn native_group_batch_validate_sections(bytes: [u8],
         return Err("native group SMF section table is invalid")
     var index = 0
     var reloc_sections = 0
+    var sections: [NativeGroupBatchSectionV1] = []
     while index < count:
         val at = table + index * 64
         val kind = bytes[at] as i64
         val flags = native_group_batch_u32(bytes, at + 4)
         val offset = native_group_batch_u64(bytes, at + 8)
         val size = native_group_batch_u64(bytes, at + 16)
-        if offset < 0 or size < 0 or offset > bytes.len() or
+        if offset < 0 or size < 0 or size > 67108864 or
+                offset > bytes.len() or
                 size > bytes.len() - offset:
             return Err("native group SMF section payload is out of bounds")
-        if (flags & 2) != 0 or kind == 2 or kind == 4:
-            return Err("native group SMF mutable data is unsupported")
+        if kind == 4:
+            return Err("native group SMF Bss is unsupported")
         if index == 0 and (kind != 1 or flags != 5):
             return Err("native group SMF first section is not executable Code")
         if index > 0:
-            if kind == 3:
+            if kind == 2:
+                if flags != 3:
+                    return Err("native group SMF Data flags are invalid")
+            elif kind == 3:
                 if flags != 1:
                     return Err("native group SMF RoData flags are invalid")
             elif kind == 5:
@@ -93,8 +110,12 @@ fn native_group_batch_validate_sections(bytes: [u8],
                     return Err("native group SMF relocation section is invalid")
             else:
                 return Err("native group SMF section kind is unsupported")
+        var data: [u8] = []
+        if kind == 2 or kind == 3:
+            data = bytes[offset:offset + size]
+        sections.push(NativeGroupBatchSectionV1(kind, data))
         index = index + 1
-    Ok(())
+    Ok(sections)
 
 fn native_group_batch_preflight(path: text,
         host: Platform) -> Result<NativeGroupBatchImageV1, text>:
@@ -102,7 +123,7 @@ fn native_group_batch_preflight(path: text,
     val bytes = reader.sffi.mem.data
     if bytes.len() < 128 or bytes.len() > 134217728:
         return Err("native group SMF byte size is invalid: {path}")
-    native_group_batch_validate_sections(bytes, reader, host)?
+    val sections = native_group_batch_validate_sections(bytes, reader, host)?
     val symbols = reader.sffi.mem.symbols_in_table_order()?
     if symbols.len() == 0 or symbols.len() > 100000:
         return Err("native group SMF symbol inventory is invalid: {path}")
@@ -110,36 +131,70 @@ fn native_group_batch_preflight(path: text,
     var code: [SmfSymbol] = []
     var code_count = 0
     for symbol in symbols:
+        val sym_section = symbol.section_index as i64
         if symbol.name == "" or names.has(symbol.name):
             return Err("native group SMF symbol is empty or duplicated: {path}")
         names[symbol.name] = true
-        if symbol.section_index == -1:
+        if sym_section == -1:
             if symbol.binding == SymbolBinding.Local:
                 return Err("native group SMF has a local undefined import")
-        elif symbol.section_index == 0 and
+        elif sym_section == 0 and
                 symbol.ty == SymbolType.Function:
             if symbol.size <= 0:
                 return Err("native group SMF function has no code")
             _ = reader.read_code(symbol)?
             code.push(symbol)
             code_count = code_count + 1
-        elif symbol.binding != SymbolBinding.Local:
-            return Err("native group SMF publicly defines non-Code data")
-        elif symbol.section_index < 0 or
-                symbol.section_index >= reader.sffi.mem.header.section_count:
-            return Err("native group SMF symbol section is invalid")
+        elif sym_section > 0 and sym_section < sections.len() and
+                (sections[sym_section].kind == 2 or
+                 sections[sym_section].kind == 3):
+            val section_size = sections[sym_section].data.len()
+            if symbol.offset < 0 or symbol.size < 0 or
+                    symbol.offset > section_size or
+                    symbol.size > section_size - symbol.offset:
+                return Err("native group SMF data symbol exceeds section")
+            if symbol.ty != SymbolType.Data and
+                    (symbol.ty != SymbolType.Type or
+                     symbol.binding != SymbolBinding.Local):
+                return Err("native group SMF data symbol type is unsupported")
+        else:
+            return Err("native group SMF symbol section is unsupported")
     if code_count == 0:
         return Err("native group SMF has no defined functions")
     val relocs = reader.sffi.mem.read_relocations()?
-    _ = smf_partition_code_relocations_v1(relocs, code)?
+    var code_relocs: [SmfRelocEntry] = []
     for reloc in relocs:
         if reloc.symbol_index < 0 or reloc.symbol_index >= symbols.len():
             return Err("native group SMF relocation symbol index is invalid")
+        val source = reloc.source_section_index
+        if source == 0:
+            code_relocs.push(reloc)
+        elif source > 0 and source < sections.len() and
+                (sections[source].kind == 2 or
+                 sections[source].kind == 3):
+            val width = if reloc.reloc_type == 1: 8 else: 4
+            if reloc.reloc_type < 1 or reloc.reloc_type > 5 or
+                    reloc.offset < 0 or
+                    reloc.offset > sections[source].data.len() or
+                    width > sections[source].data.len() - reloc.offset:
+                return Err("native group data relocation patch is invalid")
+        else:
+            return Err("native group relocation source section is unsupported")
         val target = symbols[reloc.symbol_index]
-        if target.section_index != -1 and
-                (target.section_index != 0 or target.ty != SymbolType.Function):
-            return Err("native group SMF relocation target is not Code")
-    Ok(NativeGroupBatchImageV1(path, reader, bytes, symbols))
+        val target_section = target.section_index as i64
+        if target_section != -1 and
+                not (target_section == 0 and
+                     target.ty == SymbolType.Function) and
+                not (target_section > 0 and
+                     target_section < sections.len() and
+                     (sections[target_section].kind == 2 or
+                      sections[target_section].kind == 3) and
+                     (target.ty == SymbolType.Data or
+                      target.ty == SymbolType.Type)):
+            return Err("native group SMF relocation target is unsupported")
+    _ = smf_partition_code_relocations_v1(code_relocs, code)?
+    Ok(NativeGroupBatchImageV1(path, reader, bytes, symbols,
+        sections, relocs))
 
 fn native_group_batch_rollback(loader: LazyModuleLoader,
         staged: [text]):
@@ -148,9 +203,96 @@ fn native_group_batch_rollback(loader: LazyModuleLoader,
         index = index - 1
         moduleloader_unload(loader, staged[index])
 
+fn native_group_batch_apply_relocations(loader: LazyModuleLoader,
+        image: NativeGroupBatchImageV1) -> Result<(), text>:
+    val module = loader.modules[image.path]
+    var resolved: [ResolvedSymbol] = []
+    var code_symbols: [SmfSymbol] = []
+    for symbol in image.symbols:
+        val address = if module.symbols.has(symbol.name):
+            module.symbols[symbol.name].address
+        else: 0i64
+        resolved.push(ResolvedSymbol(name: symbol.name, address: address))
+        if symbol.section_index == 0 and
+                symbol.ty == SymbolType.Function:
+            code_symbols.push(symbol)
+    var code_relocs: [SmfRelocEntry] = []
+    for reloc in image.relocations:
+        if reloc.source_section_index == 0:
+            code_relocs.push(reloc)
+    val partitioned = smf_partition_code_relocations_v1(
+        code_relocs, code_symbols)?
+    for symbol in code_symbols:
+        val bucket = partitioned[symbol.name] ?? []
+        if bucket.len() == 0:
+            continue
+        val loaded = module.symbols[symbol.name]
+        val rw_ok = unsafe(capabilities: [raw_ptr]):
+            native_make_rw(loaded.address, loaded.size)
+        if not rw_ok:
+            return Err("native group Code RW transition failed: {symbol.name}")
+        val applied = apply_smf_relocations(loaded.address,
+            loaded.size, bucket, resolved,
+            loader.global_symbol_addresses)
+        if applied.is_err():
+            return Err("native group Code relocation failed: {applied.unwrap_err()}")
+        val got = applied.unwrap()
+        if got.base != 0:
+            val key = if symbol.binding == SymbolBinding.Local:
+                "{image.path}#local:{symbol.name}"
+            else: symbol.name
+            val attached = moduleloader_ensure_jit(loader).exec_mapper.set_got(
+                key, loaded.address, got.base, got.size)
+            if not attached:
+                _ = unsafe(capabilities: [raw_ptr]):
+                    native_free_exec_memory(got.base, got.size)
+                return Err("native group Code GOT ownership failed: {symbol.name}")
+        val rx_ok = unsafe(capabilities: [raw_ptr]):
+            native_make_executable(loaded.address, loaded.size)
+        if not rx_ok:
+            return Err("native group Code RX transition failed: {symbol.name}")
+        native_flush_icache(loaded.address, loaded.size)
+
+    var section_records = loader.native_group_data_sections[image.path] ?? []
+    var record_index = 0
+    while record_index < section_records.len():
+        val section = section_records[record_index]
+        var bucket: [SmfRelocEntry] = []
+        for reloc in image.relocations:
+            if reloc.source_section_index == section.section_index:
+                bucket.push(reloc)
+        if bucket.len() > 0:
+            val applied = apply_smf_relocations(section.address,
+                section.size, bucket, resolved,
+                loader.global_symbol_addresses)
+            if applied.is_err():
+                return Err("native group data relocation failed: {applied.unwrap_err()}")
+            val got = applied.unwrap()
+            if got.base != 0:
+                section_records[record_index] = LoadedDataSection(
+                    section_index: section.section_index,
+                    address: section.address, size: section.size,
+                    readonly: section.readonly, got_address: got.base,
+                    got_size: got.size)
+                loader.native_group_data_sections[image.path] = section_records
+        record_index = record_index + 1
+    Ok(())
+
+fn native_group_batch_seal_rodata(loader: LazyModuleLoader,
+        paths: [text]) -> Result<(), text>:
+    for path in paths:
+        val sections = loader.native_group_data_sections[path] ?? []
+        for section in sections:
+            if section.readonly:
+                val sealed = unsafe(capabilities: [raw_ptr]):
+                    native_make_ro(section.address, section.size)
+                if not sealed:
+                    return Err("native group RoData protection failed: {path}")
+    Ok(())
+
 pub fn moduleloader_load_native_batch_v1(loader: LazyModuleLoader,
         paths: [text], max_modules: i64) -> Result<[text], text>:
-    """Map every Code function before applying any native SMF relocation.
+    """Map Code/Data/RoData before applying any native SMF relocation.
 
     The caller supplies a complete, deterministic dependency/SCC path set.
     Failures roll back exactly the modules added by this call.
@@ -174,8 +316,7 @@ pub fn moduleloader_load_native_batch_v1(loader: LazyModuleLoader,
         if total_bytes > 536870912:
             return Err("native group batch exceeds byte bound")
         for symbol in image.symbols:
-            if symbol.section_index == 0 and
-                    symbol.ty == SymbolType.Function and
+            if symbol.section_index >= 0 and
                     symbol.binding != SymbolBinding.Local:
                 if public_names.has(symbol.name) or
                         loader.global_symbols.has(symbol.name) or
@@ -208,23 +349,56 @@ pub fn moduleloader_load_native_batch_v1(loader: LazyModuleLoader,
             reader: image.reader, symbols: mapped,
             load_time: current_time(), version: 1)
         staged.push(path)
+        var section_index = 1
+        while section_index < image.sections.len():
+            val section = image.sections[section_index]
+            if section.kind == 2 or section.kind == 3:
+                val size = if section.data.len() == 0: 1
+                    else: section.data.len()
+                val address = native_alloc_rw_memory(size)
+                if address == 0:
+                    native_group_batch_rollback(loader, staged)
+                    return Err("native group data mapping failed: {path}:{section_index}")
+                var owned = loader.native_group_data_sections[path] ?? []
+                owned.push(LoadedDataSection(
+                    section_index: section_index, address: address,
+                    size: size, readonly: section.kind == 3,
+                    got_address: 0, got_size: 0))
+                loader.native_group_data_sections[path] = owned
+                if section.data.len() > 0:
+                    val written = unsafe(capabilities: [raw_ptr]):
+                        native_write_exec_memory(address, section.data, 0)
+                    if written != section.data.len():
+                        native_group_batch_rollback(loader, staged)
+                        return Err("native group data copy failed: {path}:{section_index}")
+            section_index = section_index + 1
         for symbol in image.symbols:
-            if symbol.section_index != 0 or
-                    symbol.ty != SymbolType.Function:
+            val sym_section = symbol.section_index as i64
+            if sym_section < 0:
                 continue
-            val code_result = image.reader.read_code(symbol)
-            if code_result.is_err():
-                native_group_batch_rollback(loader, staged)
-                return Err("native group code read failed: {code_result.unwrap_err()}")
             val local = symbol.binding == SymbolBinding.Local
-            val key = if local: "{path}#local:{symbol.name}"
-                else: symbol.name
-            val address = moduleloader_allocate_exec_module(loader,
-                owner_id: path, symbol: key, code: code_result.unwrap(),
-                allow_replace: false)
-            if address == 0:
-                native_group_batch_rollback(loader, staged)
-                return Err("native group mapping failed: {path}:{symbol.name}")
+            var address: i64 = 0
+            if sym_section == 0:
+                val code_result = image.reader.read_code(symbol)
+                if code_result.is_err():
+                    native_group_batch_rollback(loader, staged)
+                    return Err("native group code read failed: {code_result.unwrap_err()}")
+                val key = if local: "{path}#local:{symbol.name}"
+                    else: symbol.name
+                address = moduleloader_allocate_exec_module(loader,
+                    owner_id: path, symbol: key, code: code_result.unwrap(),
+                    allow_replace: false)
+                if address == 0:
+                    native_group_batch_rollback(loader, staged)
+                    return Err("native group mapping failed: {path}:{symbol.name}")
+                lifecycle_on_symbol_mapped(lifecycle, path, key)
+            else:
+                for section in loader.native_group_data_sections[path]:
+                    if section.section_index == sym_section:
+                        address = section.address + symbol.offset
+                if address == 0:
+                    native_group_batch_rollback(loader, staged)
+                    return Err("native group data symbol has no mapped section")
             val loaded = LoadedSymbol(name: symbol.name, address: address,
                 size: symbol.size, ty: symbol.ty, is_jit: false,
                 file_offset: symbol.offset)
@@ -232,18 +406,21 @@ pub fn moduleloader_load_native_batch_v1(loader: LazyModuleLoader,
             loader.modules[path] = LoadedModule(path: path,
                 reader: image.reader, symbols: mapped,
                 load_time: current_time(), version: 1)
-            lifecycle_on_symbol_mapped(lifecycle, path, key)
             if not local:
                 loader.global_symbols[symbol.name] = (path, loaded)
                 loader.global_symbol_addresses[symbol.name] = address
 
     for image in images:
-        val result = moduleloader_apply_relocations(loader,
-            image.path, image.bytes)
+        val result = native_group_batch_apply_relocations(loader, image)
         if result.is_err():
             val message = result.unwrap_err()
             native_group_batch_rollback(loader, staged)
             return Err("native group relocation failed: {image.path}: {message}")
+    val sealed = native_group_batch_seal_rodata(loader, staged)
+    if sealed.is_err():
+        val message = sealed.unwrap_err()
+        native_group_batch_rollback(loader, staged)
+        return Err(message)
     Ok(staged)
 
 export moduleloader_load_native_batch_v1

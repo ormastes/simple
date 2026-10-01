@@ -82,6 +82,14 @@ struct LoadedSymbol:
     # Offset within the SMF (for possible reload/relocs)
     file_offset: i64
 
+struct LoadedDataSection:
+    section_index: i64
+    address: i64
+    size: i64
+    readonly: bool
+    got_address: i64
+    got_size: i64
+
 
 # ============================================================================
 # LoadedModule Methods (was: impl LoadedModule:)
@@ -163,6 +171,9 @@ struct LazyModuleLoader:
     # Global symbol table: name -> (module_path, symbol)
     global_symbols: Dict<text, (text, LoadedSymbol)>
     global_symbol_addresses: Dict<text, i64>
+    # Batch-native Data/RoData allocations, owned by module path. Code and
+    # per-function GOTs remain owned by SharedExecMapper.
+    native_group_data_sections: Dict<text, [LoadedDataSection]>
     # Configuration
     config: LazyModuleLoaderConfig
     # Public ABI/accessor semantic keys exported by each loaded module.
@@ -196,6 +207,7 @@ fn lazymoduleloader_new(config: LazyModuleLoaderConfig) -> LazyModuleLoader:
             dependency_semantic_fingerprints: {},
             global_symbols: {},
             global_symbol_addresses: {},
+            native_group_data_sections: {},
             config: config,
             semantic_exports: {},
             semantic_dependencies: {}
@@ -245,6 +257,20 @@ fn moduleloader_load(self: LazyModuleLoader, path: text) -> LoadResult:
                 return LoadResult.Error(message: reader_result.unwrap_err())
 
         val reader = reader_result.unwrap()
+
+        # The ordinary loader maps Code functions only. v1.2 relocation
+        # sources may be Data/RoData, so reject before publishing mappings.
+        if module_bytes_result.is_ok():
+            val native_probe = SmfReaderMemory.from_data(
+                module_bytes_result.unwrap())
+            if native_probe.is_err():
+                lifecycle_unload_module(lifecycle, jit.exec_mapper, path)
+                return LoadResult.Error(message: native_probe.unwrap_err())
+            val (_, minor) = native_probe.unwrap().header.version
+            if minor >= 2:
+                lifecycle_unload_module(lifecycle, jit.exec_mapper, path)
+                return LoadResult.Error(message:
+                    "SMF v1.2 requires native batch section loading")
 
         # Build from the reader selected above. On the normal path that reader
         # already owns `module_bytes_result`; reparsing and re-enumerating it is
@@ -362,11 +388,17 @@ fn moduleloader_apply_relocations(self: LazyModuleLoader, path: text, smf_data: 
             return Err(mem_reader_result.unwrap_err())
 
         val mem_reader = mem_reader_result.unwrap()
+        val (_, minor) = mem_reader.header.version
+        if minor >= 2:
+            return Err("SMF v1.2 requires native batch section loading")
         val relocs_result = mem_reader.read_relocations()
         if relocs_result.is_err():
             return Err(relocs_result.unwrap_err())
 
         val relocs = relocs_result.unwrap()
+        for reloc in relocs:
+            if reloc.source_section_index != 0:
+                return Err("ordinary loader cannot patch non-Code relocation source")
         if relocs.len() == 0:
             return Ok(())
         if not self.modules.has(path):
@@ -799,6 +831,43 @@ fn moduleloader_invalidate_semantic_change(self: LazyModuleLoader, changed_key: 
             moduleloader_drop_semantic_cache_record(self, path)
     affected
 
+fn moduleloader_release_native_group_data(self: LazyModuleLoader,
+        path: text) -> bool:
+    if not self.native_group_data_sections.has(path):
+        return true
+    var kept: [LoadedDataSection] = []
+    var all_released = true
+    for section in self.native_group_data_sections[path]:
+        var address = section.address
+        var got_address = section.got_address
+        if got_address != 0:
+            val freed_got = unsafe(capabilities: [raw_ptr]):
+                native_free_exec_memory(got_address, section.got_size)
+            if freed_got:
+                got_address = 0
+            else:
+                all_released = false
+        if address != 0:
+            val freed_data = unsafe(capabilities: [raw_ptr]):
+                native_free_exec_memory(address, section.size)
+            if freed_data:
+                address = 0
+            else:
+                all_released = false
+        if address != 0 or got_address != 0:
+            kept.push(LoadedDataSection(section_index: section.section_index,
+                address: address, size: section.size,
+                readonly: section.readonly, got_address: got_address,
+                got_size: section.got_size))
+    var updated: Dict<text, [LoadedDataSection]> = {}
+    for key in self.native_group_data_sections.keys():
+        if key != path:
+            updated[key] = self.native_group_data_sections[key]
+    if kept.len() > 0:
+        updated[path] = kept
+    self.native_group_data_sections = updated
+    all_released
+
 fn moduleloader_unload(self: LazyModuleLoader, path: text):
     """Unload module and free all associated resources.
 
@@ -823,6 +892,7 @@ fn moduleloader_unload(self: LazyModuleLoader, path: text):
     # 1. Delegate exec page and SMF cache cleanup to lifecycle manager.
     #    Frees JIT-triggered symbols, loader-mapped pages, SMF ref counts.
     lifecycle_unload_module(lifecycle, jit.exec_mapper, path)
+    _ = moduleloader_release_native_group_data(self, path)
 
     # 2. Collect symbols owned by this module in the global table.
     val (owned_symbols, globals_without_owned) =
@@ -896,6 +966,8 @@ fn moduleloader_unload(self: LazyModuleLoader, path: text):
     self.modules = _kept_self_modules
 fn moduleloader_destroy(self: LazyModuleLoader):
     """Release every lazily created loader service and retained index."""
+    for path in self.native_group_data_sections.keys():
+        _ = moduleloader_release_native_group_data(self, path)
     if moduleloader_lifecycle_created(self):
         val lifecycle = self.lifecycle_cell[0]
         if moduleloader_jit_service_created(self):
@@ -919,6 +991,7 @@ fn moduleloader_destroy(self: LazyModuleLoader):
     self.modules = {}
     self.global_symbols = {}
     self.global_symbol_addresses = {}
+    self.native_group_data_sections = {}
     self.semantic_fingerprints = {}
     self.dependency_semantic_fingerprints = {}
     self.semantic_exports = {}
