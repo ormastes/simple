@@ -201,21 +201,22 @@ verify_image_set() {
 # The manager's worker runs in its own work root, so output and cache paths in
 # the compiler argv are relative. Output publication is hash checked by run.
 build_binary() {
-  id=$1 entry=$2 output=$3 task_phase=$4
-  job_root="$root/$task_phase/binaries/$id"
+  id=$1 entry=$2 output=$3 task_phase=$4 backend=$5
+  task_id="$id-$backend"
+  job_root="$root/$task_phase/binaries/$backend/$id"
   mkdir -p "$job_root/bin" "$job_root/cache" "$job_root/state" || die "job directories unavailable"
   verify_shared_source
   disk_preflight "$job_root"
   if [ ! -f "$job_root/manifest.sdn" ]; then
     verify_image_set
     "$manifest_program" --job-from-inventory "$template" "$producer" "$source_root" \
-      "$id" "$task_phase" "$output" "$source_inventory_relative" \
+      "$task_id" "$task_phase" "$output" "$source_inventory_relative" \
       --memory-limit-bytes "$memory_bytes" --links-inventory "$source_links_relative" \
       --manifest "$job_root/manifest.sdn" -- \
-      native-build --target "$target" --backend llvm \
+      native-build --target "$target" --backend "$backend" \
       --source src/compiler --source src/app --source src/lib \
       --entry-closure --entry "$entry" --threads "$threads" \
-      --cache-dir "cache/$id" --output "$output" \
+      --cache-dir "cache/$task_id" --output "$output" \
       || die "$id manifest blocked"
   fi
   require_current_manifest "$job_root/manifest.sdn"
@@ -231,11 +232,11 @@ build_binary() {
   "$builder_program" verify --manifest "$job_root/manifest.sdn" \
     --state "$job_root/state" --source-root "$source_root" \
     --output-root "$job_root" || die "$id receipt/output verification failed"
-  regular "$job_root/$output" && regular "$job_root/state/receipts/$id.sdn" \
+  regular "$job_root/$output" && regular "$job_root/state/receipts/$task_id.sdn" \
     || die "$id has no published output and terminal receipt"
-  printf '%s=%s\n' "$id" "$(hash_file "$job_root/$output")" >>"$root/binary-hashes.tmp.$$"
-  printf '%s=%s\n' "${id}_manager_receipt_sha256" \
-    "$(hash_file "$job_root/state/receipts/$id.sdn")" >>"$root/binary-hashes.tmp.$$"
+  printf '%s=%s\n' "${task_phase}_${backend}_${id}" "$(hash_file "$job_root/$output")" >>"$root/binary-hashes.tmp.$$"
+  printf '%s=%s\n' "${task_phase}_${backend}_${id}_manager_receipt_sha256" \
+    "$(hash_file "$job_root/state/receipts/$task_id.sdn")" >>"$root/binary-hashes.tmp.$$"
 }
 
 # The complete V2 index is a post-readiness build task. Its only staged input
@@ -332,14 +333,19 @@ run_module_backend() {
     || die "$task_phase/$backend ledger is incomplete or lacks qualified SMF outputs"
 }
 
-build_module_phase() {
-  task_phase=$1 llvm_config=$2 cranelift_config=$3
-  build_index "$task_phase" llvm "$llvm_config"
-  prepare_backend "$task_phase" llvm
-  run_module_backend "$task_phase" llvm
-  build_index "$task_phase" cranelift "$cranelift_config"
-  prepare_backend "$task_phase" cranelift
-  run_module_backend "$task_phase" cranelift
+build_backend_modules() {
+  task_phase=$1 backend=$2 config=$3
+  build_index "$task_phase" "$backend" "$config"
+  prepare_backend "$task_phase" "$backend"
+  run_module_backend "$task_phase" "$backend"
+}
+build_phase4_binaries() {
+  backend=$1
+  build_binary bootstrap src/app/cli/bootstrap_main.spl "bin/simple_bootstrap$exe_suffix" phase4 "$backend"
+  build_binary full-cli src/app/cli/_CliMain/main_and_help.spl "bin/simple$exe_suffix" phase4 "$backend"
+  build_binary mcp src/app/mcp/main.spl "bin/simple_mcp_server$exe_suffix" phase4 "$backend"
+  build_binary lsp src/app/simple_lsp_mcp/main.spl "bin/simple_lsp_mcp_server$exe_suffix" phase4 "$backend"
+  build_binary test-runner src/app/test_runner_new/main.spl "bin/simple_test_runner$exe_suffix" phase4 "$backend"
 }
 
 # Read the exact producer from the verified admission receipt; never use the
@@ -396,12 +402,10 @@ trap 'rm -f "$hashes"' EXIT HUP INT TERM
 : >"$hashes"
 phase4_status=0
 (
-  build_binary bootstrap src/app/cli/bootstrap_main.spl "bin/simple_bootstrap$exe_suffix" phase4
-  build_binary full-cli src/app/cli/_CliMain/main_and_help.spl "bin/simple$exe_suffix" phase4
-  build_binary mcp src/app/mcp/main.spl "bin/simple_mcp_server$exe_suffix" phase4
-  build_binary lsp src/app/simple_lsp_mcp/main.spl "bin/simple_lsp_mcp_server$exe_suffix" phase4
-  build_binary test-runner src/app/test_runner_new/main.spl "bin/simple_test_runner$exe_suffix" phase4
-  build_module_phase phase4 "$llvm_index_config" "$cranelift_index_config"
+  build_phase4_binaries llvm
+  build_backend_modules phase4 llvm "$llvm_index_config"
+  build_phase4_binaries cranelift
+  build_backend_modules phase4 cranelift "$cranelift_index_config"
 ) || phase4_status=$?
 
 # Host memory limits make these two independent Phase 2 children serial here.
@@ -409,8 +413,10 @@ phase4_status=0
 # owns its index, grouped module ledger, and outputs independently.
 phase3_status=0
 (
-  build_binary phase3-bootstrap src/app/cli/bootstrap_main.spl "bin/simple$exe_suffix" phase3
-  build_module_phase phase3 "$phase3_llvm_index_config" "$phase3_cranelift_index_config"
+  build_binary phase3-bootstrap src/app/cli/bootstrap_main.spl "bin/simple$exe_suffix" phase3 llvm
+  build_backend_modules phase3 llvm "$phase3_llvm_index_config"
+  build_binary phase3-bootstrap src/app/cli/bootstrap_main.spl "bin/simple$exe_suffix" phase3 cranelift
+  build_backend_modules phase3 cranelift "$phase3_cranelift_index_config"
 ) || phase3_status=$?
 [ "$phase4_status" -eq 0 ] && [ "$phase3_status" -eq 0 ] || \
   die "managed children incomplete: phase4=$phase4_status phase3=$phase3_status"
@@ -428,7 +434,7 @@ verify_shared_source
 
 tmp="$receipt.tmp.$$"
 {
-  printf '%s\n' 'format=SIMPLE-PHASE3-PHASE4-MANAGED-COMPLETION-3' 'status=PASS' \
+  printf '%s\n' 'format=SIMPLE-PHASE3-PHASE4-MANAGED-COMPLETION-4' 'status=PASS' \
     'phase3_status=PASS' 'phase4_status=PASS' \
     "producer_sha256=$producer_sha" "authority_receipt_sha256=$authority_digest" \
     "manager_images_sha256=$(hash_file "$image_receipt")" \

@@ -4581,7 +4581,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
   # grouped runner publishes completion only after five binary receipts and
   # both backend module ledgers pass their compiled admission gates.
   managed_producer_sha=$(bootstrap_stage3_manifest_value candidate_sha256 "${stage2_admission_receipt_absolute}") || exit 1
-  managed_phase_root="$(absolute_path "${output_dir}/managed/task3-run4-phase3-roles-v3-parsecas/${PLATFORM}/${managed_producer_sha}")"
+  managed_phase_root="$(absolute_path "${output_dir}/managed/task3-run4-phase3-roles-v3-both-binaries/${PLATFORM}/${managed_producer_sha}")"
   managed_shared_parse_cas_root=${SIMPLE_BOOTSTRAP_SHARED_PARSE_CAS_ROOT:-}
   managed_shared_parse_cas_root=$(sh "${repo_root}/scripts/bootstrap/lib/shared-parse-cas-root.shs" "${managed_shared_parse_cas_root}") || {
     echo "error: explicit absolute pre-existing real SIMPLE_BOOTSTRAP_SHARED_PARSE_CAS_ROOT required" >&2; exit 1;

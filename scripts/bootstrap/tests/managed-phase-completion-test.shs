@@ -48,7 +48,7 @@ printf 'builder_program=%s\nbuilder_sha256=%s\ngroup_program=%s\ngroup_sha256=%s
   >"$image_receipt"
 receipt="$root/completion.env"
 {
-  printf '%s\n' 'format=SIMPLE-PHASE3-PHASE4-MANAGED-COMPLETION-3' \
+  printf '%s\n' 'format=SIMPLE-PHASE3-PHASE4-MANAGED-COMPLETION-4' \
     'status=PASS' 'phase3_status=PASS' 'phase4_status=PASS' \
     "producer_sha256=$producer_sha" \
     "module_inventory_sha256=$(sha256sum "$inventory" | cut -d ' ' -f 1)" \
@@ -58,23 +58,25 @@ receipt="$root/completion.env"
     'excluded_inventory_count=1' \
     "module_role_policy_sha256=$(sha256sum "$module_role_policy" | cut -d ' ' -f 1)"
   case "$(uname -s 2>/dev/null)" in MINGW*|MSYS*|CYGWIN*) exe_suffix=.exe ;; *) exe_suffix= ;; esac
-  for binary in bootstrap full-cli mcp lsp test-runner phase3-bootstrap; do
-    case "$binary" in
-      bootstrap) phase=phase4; output="bin/simple_bootstrap$exe_suffix" ;;
-      full-cli) phase=phase4; output="bin/simple$exe_suffix" ;;
-      mcp) phase=phase4; output="bin/simple_mcp_server$exe_suffix" ;;
-      lsp) phase=phase4; output="bin/simple_lsp_mcp_server$exe_suffix" ;;
-      test-runner) phase=phase4; output="bin/simple_test_runner$exe_suffix" ;;
-      phase3-bootstrap) phase=phase3; output="bin/simple$exe_suffix" ;;
-    esac
-    job="$root/$phase/binaries/$binary"
-    mkdir -p "$job/$(dirname -- "$output")" "$job/state/receipts"
-    printf 'binary' >"$job/$output"
-    printf 'manifest\n' >"$job/manifest.sdn"
-    printf 'terminal\n' >"$job/state/receipts/$binary.sdn"
-    printf '%s=%s\n' "$binary" "$binary_sha"
-    printf '%s=%s\n' "${binary}_manager_receipt_sha256" \
-      "$(sha256sum "$job/state/receipts/$binary.sdn" | cut -d ' ' -f 1)"
+  for backend in llvm cranelift; do
+    for binary in bootstrap full-cli mcp lsp test-runner phase3-bootstrap; do
+      case "$binary" in
+        bootstrap) phase=phase4; output="bin/simple_bootstrap$exe_suffix" ;;
+        full-cli) phase=phase4; output="bin/simple$exe_suffix" ;;
+        mcp) phase=phase4; output="bin/simple_mcp_server$exe_suffix" ;;
+        lsp) phase=phase4; output="bin/simple_lsp_mcp_server$exe_suffix" ;;
+        test-runner) phase=phase4; output="bin/simple_test_runner$exe_suffix" ;;
+        phase3-bootstrap) phase=phase3; output="bin/simple$exe_suffix" ;;
+      esac
+      job="$root/$phase/binaries/$backend/$binary"
+      mkdir -p "$job/$(dirname -- "$output")" "$job/state/receipts"
+      printf 'binary' >"$job/$output"
+      printf 'manifest\n' >"$job/manifest.sdn"
+      printf 'terminal\n' >"$job/state/receipts/$binary-$backend.sdn"
+      printf '%s=%s\n' "${phase}_${backend}_${binary}" "$binary_sha"
+      printf '%s=%s\n' "${phase}_${backend}_${binary}_manager_receipt_sha256" \
+        "$(sha256sum "$job/state/receipts/$binary-$backend.sdn" | cut -d ' ' -f 1)"
+    done
   done
   for phase in phase3 phase4; do
     for backend in llvm cranelift; do
@@ -142,7 +144,7 @@ if verify >/dev/null 2>&1; then
   echo 'FAIL: Phase 3 failure suppressed by Phase 4 proof' >&2; exit 1
 fi
 cp "$tmp/good" "$receipt"
-binary_output="$root/phase4/binaries/full-cli/bin/simple$exe_suffix"
+binary_output="$root/phase4/binaries/cranelift/full-cli/bin/simple$exe_suffix"
 mv "$binary_output" "$tmp/full-cli"
 if verify >/dev/null 2>&1; then
   echo 'FAIL: missing published full CLI admitted' >&2; exit 1
@@ -153,6 +155,12 @@ if verify >/dev/null 2>&1; then
   echo 'FAIL: changed published full CLI admitted' >&2; exit 1
 fi
 printf 'binary' >"$binary_output"
+cranelift_receipt="$root/phase3/binaries/cranelift/phase3-bootstrap/state/receipts/phase3-bootstrap-cranelift.sdn"
+mv "$cranelift_receipt" "$tmp/cranelift-receipt"
+if verify >/dev/null 2>&1; then
+  echo 'FAIL: missing Phase 3 Cranelift binary manager receipt admitted' >&2; exit 1
+fi
+mv "$tmp/cranelift-receipt" "$cranelift_receipt"
 phase3_ledger="$root/phase3/modules/llvm/state/ledger.sdn"
 mv "$phase3_ledger" "$tmp/phase3-ledger"
 if verify >/dev/null 2>&1; then
