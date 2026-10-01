@@ -9593,3 +9593,123 @@ fn test_archive_weak_parser_elf_preserves_definition_and_reference_distinction()
         .into_iter().map(str::to_string).collect();
     assert_eq!(actual, expected);
 }
+
+
+#[test]
+fn native_import_alias_keeps_owner_across_method_and_free_function_collisions() {
+    use crate::hir::Lowerer;
+    use crate::module_resolver::ModuleResolver;
+    use std::sync::Arc;
+
+    for (alias, local, expected) in [
+        ("selected", "", "owner__normalize"),
+        ("selected", "fn normalize(value: i64) -> i64:\n    -10\n", "owner__normalize"),
+        ("selected", "fn selected(value: i64) -> i64:\n    -20\n", "main__selected"),
+        ("custom_contains_key", "", "owner__normalize"),
+    ] {
+        let dir = crate::test_helpers::create_test_project();
+        let root = dir.path().join("src");
+        fs::create_dir_all(&root).unwrap();
+        let entry = format!("use owner.{{normalize as {alias}}}\n{local}\nfn invoke() -> i64:\n    {alias}(41)\n\nfn invoke_value() -> i64:\n    val callable = {alias}\n    callable(41)\n");
+        let sources: Vec<_> = [
+            ("main.spl", entry.as_str()),
+            ("owner.spl", "pub fn normalize(value: i64) -> i64:\n    value + 1\n"),
+            ("decoy.spl", "pub fn normalize(value: i64) -> i64:\n    -30\n\nstruct Resolver:\n    marker: i64\n\n    fn normalize(value: i64) -> i64:\n        -40\n"),
+        ].into_iter().map(|(name, source)| {
+            let path = root.join(name);
+            fs::write(&path, source).unwrap();
+            (path, source.to_string())
+        }).collect();
+        let imports = super::imports::build_import_map(&sources, std::slice::from_ref(&root), &root);
+        let ast = simple_parser::Parser::new(&entry).parse().unwrap();
+        let use_map = super::imports::build_use_map_from_ast(&ast, &imports.all_mangled, &imports.re_exports);
+        assert_eq!(use_map.get(alias).map(String::as_str), Some("owner__normalize"));
+        let resolver = ModuleResolver::new(dir.path().to_path_buf(), root.clone());
+        let mut lowerer = Lowerer::with_module_resolver(resolver, root.join("main.spl"));
+        lowerer.set_lenient_types(true);
+        lowerer.set_qualified_import_functions(Arc::new(use_map.clone()));
+        let hir = lowerer.lower_module(&ast).expect("lower scoped import alias");
+        let mut mir = crate::mir::lower_to_mir(&hir).expect("lower alias call to MIR");
+        super::mangle::mangle_mir(&mut mir, "main", false, &imports.map,
+            &imports.ambiguous, &use_map, &std::collections::HashMap::new());
+        let invoke = mir.functions.iter().find(|function| function.name == "main__invoke").unwrap();
+        let targets: Vec<_> = invoke.blocks.iter().flat_map(|block| &block.instructions).filter_map(|inst| {
+            if let crate::mir::MirInst::Call { target, .. } = inst { Some(target.name()) } else { None }
+        }).collect();
+        assert!(targets.contains(&expected), "wrong alias owner for {alias} with {local:?}: {targets:?}");
+        assert!(!targets.iter().any(|target| target.contains("Resolver")), "unrelated method captured alias");
+        let value_function = mir.functions.iter().find(|function| function.name == "main__invoke_value").unwrap();
+        let values: Vec<_> = value_function.blocks.iter().flat_map(|block| &block.instructions).filter_map(|inst| {
+            if let crate::mir::MirInst::GlobalLoad { global_name, .. } = inst { Some(global_name.as_str()) } else { None }
+        }).collect();
+        assert!(values.contains(&expected), "function-value alias lost owner: {values:?}");
+    }
+}
+
+#[test]
+fn native_import_alias_outranks_builtin_heuristic_but_not_declared_extern() {
+    use crate::hir::TypeId;
+    use crate::mir::{CallTarget, MirFunction, MirInst, MirModule, Terminator, VReg};
+    let alias = "custom_contains_key";
+    let owner = "owner__normalize";
+    let use_map = std::collections::HashMap::from([(alias.to_string(), owner.to_string())]);
+
+    for is_extern in [false, true] {
+        let mut mir = MirModule::new();
+        if is_extern {
+            mir.extern_fn_names.insert(alias.to_string());
+        }
+        let mut caller = MirFunction::new(
+            "caller".to_string(), TypeId::VOID, simple_parser::Visibility::Private,
+        );
+        caller.blocks[0].instructions.extend([
+            MirInst::Call { dest: None, target: CallTarget::Pure(alias.to_string()), args: vec![] },
+            MirInst::InterpCall {
+                dest: None, func_name: alias.to_string(), args: vec![], boxed_result: false,
+            },
+            MirInst::GlobalLoad { dest: VReg(0), global_name: alias.to_string(), ty: TypeId::I64 },
+            MirInst::GlobalStore { global_name: alias.to_string(), value: VReg(0), ty: TypeId::I64 },
+            MirInst::Call {
+                dest: None, target: CallTarget::Pure("rt_file_rename".to_string()), args: vec![],
+            },
+        ]);
+        caller.blocks[0].terminator = Terminator::Return(None);
+        mir.functions.push(caller);
+        super::mangle::mangle_mir(
+            &mut mir, "main", false, &use_map, &std::collections::HashSet::new(),
+            &use_map, &std::collections::HashMap::new(),
+        );
+        let expected = if is_extern { alias } else { owner };
+        let instructions = &mir.functions[0].blocks[0].instructions;
+        assert!(matches!(&instructions[0], MirInst::Call { target, .. } if target.name() == expected));
+        assert!(matches!(&instructions[1], MirInst::InterpCall { func_name, .. } if func_name == expected));
+        assert!(matches!(&instructions[2], MirInst::GlobalLoad { global_name, .. } if global_name == expected));
+        assert!(matches!(&instructions[3], MirInst::GlobalStore { global_name, .. } if global_name == expected));
+        assert!(matches!(&instructions[4], MirInst::Call { target, .. } if target.name() == "rt_file_rename"));
+    }
+}
+
+#[test]
+fn non_native_import_alias_keeps_original_callable_and_function_value() {
+    use crate::hir::{HirExprKind, HirStmt, Lowerer};
+    use crate::module_resolver::ModuleResolver;
+    let dir = crate::test_helpers::create_test_project();
+    let root = dir.path().join("src");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("owner.spl"), "pub fn normalize(value: i64) -> i64:\n    value + 1\n").unwrap();
+    let source = "use owner.{normalize as selected}\nfn invoke() -> i64:\n    selected(41)\nfn invoke_value() -> i64:\n    val callable = selected\n    callable(41)\n";
+    let ast = simple_parser::Parser::new(source).parse().unwrap();
+    let resolver = ModuleResolver::new(dir.path().to_path_buf(), root.clone());
+    let hir = Lowerer::with_module_resolver(resolver, root.join("main.spl"))
+        .lower_module(&ast).expect("non-native imported alias lowers without native map");
+    let direct = hir.functions.iter().find(|f| f.name == "invoke").unwrap();
+    let call = direct.body.iter().find_map(|stmt| match stmt {
+        HirStmt::Expr(expr) | HirStmt::Return(Some(expr)) => Some(expr), _ => None,
+    }).unwrap();
+    assert!(matches!(&call.kind, HirExprKind::Call { func, .. }
+        if matches!(&func.kind, HirExprKind::Global(name) if name == "normalize")));
+    let value = hir.functions.iter().find(|f| f.name == "invoke_value").unwrap();
+    assert!(value.body.iter().any(|stmt| matches!(stmt,
+        HirStmt::Let { value: Some(expr), .. }
+        if matches!(&expr.kind, HirExprKind::Global(name) if name == "normalize"))));
+}

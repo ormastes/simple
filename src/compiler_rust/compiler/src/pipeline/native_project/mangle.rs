@@ -614,10 +614,14 @@ pub(crate) fn mangle_mir(
                         }
                         if let Some(mangled) = local_mangled.get(&name) {
                             *target = target.with_name(mangled.clone());
-                        } else if is_runtime_or_builtin(&name) {
+                        } else if extern_fns.contains(&name) {
                             continue;
                         } else if let Some(resolved) = use_map.get(&name) {
+                            // An exact authored import owns this alias even when
+                            // its spelling resembles a runtime or builtin name.
                             *target = target.with_name(resolved.clone());
+                        } else if is_runtime_or_builtin(&name) {
+                            continue;
                         } else if !is_enum_helper_method(&name) {
                             let method_dot = format!(".{}", name);
                             let mut use_resolved = None;
@@ -677,7 +681,14 @@ pub(crate) fn mangle_mir(
                             *func_name = mangled.clone();
                             continue;
                         }
-                        if is_runtime_or_builtin(func_name) || known_mangled.contains(func_name.as_str()) {
+                        if extern_fns.contains(func_name.as_str()) || known_mangled.contains(func_name.as_str()) {
+                            continue;
+                        }
+                        if let Some(resolved) = use_map.get(func_name.as_str()) {
+                            *func_name = resolved.clone();
+                            continue;
+                        }
+                        if is_runtime_or_builtin(func_name) {
                             continue;
                         }
                         if let Some(resolved) = resolve_name(
@@ -705,7 +716,14 @@ pub(crate) fn mangle_mir(
                             *global_name = mangled.clone();
                             continue;
                         }
-                        if is_runtime_or_builtin(global_name) || known_mangled.contains(global_name.as_str()) {
+                        if extern_fns.contains(global_name.as_str()) || known_mangled.contains(global_name.as_str()) {
+                            continue;
+                        }
+                        if let Some(resolved) = use_map.get(global_name.as_str()) {
+                            *global_name = resolved.clone();
+                            continue;
+                        }
+                        if is_runtime_or_builtin(global_name) {
                             continue;
                         }
                         if let Some(resolved) = resolve_name(
