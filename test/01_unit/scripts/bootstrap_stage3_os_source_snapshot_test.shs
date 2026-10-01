@@ -1,0 +1,33 @@
+#!/bin/sh
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/simple-stage3-os-snapshot.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+fixture="$tmp/repo"
+for leaf in src/compiler src/app src/lib src/os src/plugins src/compositions examples/10_tooling; do
+  mkdir -p "$fixture/$leaf"
+done
+printf 'compiler\n' >"$fixture/src/compiler/marker.spl"
+printf 'os-one\n' >"$fixture/src/os/marker.spl"
+BOOTSTRAP_STAGE3_FACADE_PATH="$root/scripts/check/lib/bootstrap-stage3-provenance.shs"
+export BOOTSTRAP_STAGE3_FACADE_PATH
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+bootstrap_stage3_source_snapshot "$tmp/before" "$fixture"
+os_hex=$(printf src/os/marker.spl | od -An -tx1 | tr -d ' \n')
+grep -Eq "^file-hex:[0-9]+:$os_hex:" "$tmp/before" || {
+  echo 'FAIL: src/os file absent from admitted source snapshot' >&2; exit 1;
+}
+printf 'os-two\n' >"$fixture/src/os/marker.spl"
+bootstrap_stage3_source_snapshot "$tmp/changed" "$fixture"
+! cmp -s "$tmp/before" "$tmp/changed" || {
+  echo 'FAIL: src/os mutation did not change source authority' >&2; exit 1;
+}
+rm "$fixture/src/os/marker.spl"
+rmdir "$fixture/src/os"
+if bootstrap_stage3_source_snapshot "$tmp/missing" "$fixture" 2>"$tmp/missing.err"; then
+  echo 'FAIL: missing src/os root was admitted' >&2; exit 1
+fi
+grep -q 'missing authority root' "$tmp/missing.err" || {
+  echo 'FAIL: missing src/os refusal reason absent' >&2; exit 1;
+}
+echo 'PASS: Stage 2 source authority includes and requires src/os'
