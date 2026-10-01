@@ -1,0 +1,74 @@
+"""Typed HIR artifacts are written once under a private digest directory."""
+# @cover src/compiler/80.driver/smf/runtime_std_hir_emission_v1.spl
+
+use compiler.driver.driver_bootstrap.{bootstrap_empty_hir_module}
+use compiler.driver.smf.runtime_std_hir_emission_v1.{runtime_std_hir_emit_module_v1}
+use compiler.hir.hir_types.{HirDomainBlock}
+use compiler.common.diagnostics.span.{Span}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded}
+
+val HIR_EMISSION_TEST_ROOT_V1: text = "build/test/runtime-std-hir-emission-v1"
+
+describe "Runtime/std typed HIR artifact emission", tag: ["only-compiled"]:
+    it "writes seven semantic files and four facet files with exact receipts":
+        expect(dir_create_all(HIR_EMISSION_TEST_ROOT_V1)).to_equal(true)
+        var module = bootstrap_empty_hir_module()
+        module.name = "std.emission"
+        module.exports = ["run"]
+        val result = runtime_std_hir_emit_module_v1(module,
+            "src/lib/std/emission.spl", sha256_text("emission-source"),
+            HIR_EMISSION_TEST_ROOT_V1)
+        expect(result.is_ok()).to_equal(true)
+        val emitted = result.unwrap()
+        expect(emitted.semantic_sections.len()).to_equal(7)
+        expect(emitted.private_root.contains(emitted.module_identity)).to_equal(true)
+        for receipt in emitted.semantic_sections:
+            val loaded = file_read_regular_no_follow_bounded(receipt.path, 2097152)
+            expect(loaded.is_ok()).to_equal(true)
+            expect(sha256_text(loaded.unwrap())).to_equal(receipt.digest)
+            expect(loaded.unwrap().bytes().len()).to_equal(receipt.byte_count)
+        val export_content = file_read_regular_no_follow_bounded(
+            emitted.export_file.path, 2097152)
+        expect(export_content.is_ok()).to_equal(true)
+        expect(export_content.unwrap().contains("run")).to_equal(true)
+        expect(sha256_text(export_content.unwrap())).to_equal(emitted.export_file.digest)
+        expect(emitted.generated_source_file.byte_count).to_equal(0)
+
+    it "reuses exact existing files and rejects changed HIR for the same witness":
+        expect(dir_create_all(HIR_EMISSION_TEST_ROOT_V1)).to_equal(true)
+        var module = bootstrap_empty_hir_module()
+        module.name = "std.reuse"
+        module.exports = ["first"]
+        val source_digest = sha256_text("reuse-source")
+        val first = runtime_std_hir_emit_module_v1(module,
+            "src/lib/std/reuse.spl", source_digest, HIR_EMISSION_TEST_ROOT_V1)
+        expect(first.is_ok()).to_equal(true)
+        val repeated = runtime_std_hir_emit_module_v1(module,
+            "src/lib/std/reuse.spl", source_digest, HIR_EMISSION_TEST_ROOT_V1)
+        expect(repeated.is_ok()).to_equal(true)
+        expect(first.unwrap().private_root).to_equal(repeated.unwrap().private_root)
+        module.exports = ["changed"]
+        val changed = runtime_std_hir_emit_module_v1(module,
+            "src/lib/std/reuse.spl", source_digest, HIR_EMISSION_TEST_ROOT_V1)
+        expect(changed.is_err()).to_equal(true)
+
+    it "rejects a domain generator before creating an artifact receipt":
+        expect(dir_create_all(HIR_EMISSION_TEST_ROOT_V1)).to_equal(true)
+        var module = bootstrap_empty_hir_module()
+        module.name = "std.domain"
+        module.domain_blocks = [HirDomainBlock(kind: "schema",
+            payload: "table Item", context: "module", span: Span.empty())]
+        val result = runtime_std_hir_emit_module_v1(module,
+            "src/lib/std/domain.spl", sha256_text("domain-source"),
+            HIR_EMISSION_TEST_ROOT_V1)
+        expect(result.is_err()).to_equal(true)
+
+    it "rejects parent traversal before file publication":
+        expect(dir_create_all(HIR_EMISSION_TEST_ROOT_V1)).to_equal(true)
+        val module = bootstrap_empty_hir_module()
+        val result = runtime_std_hir_emit_module_v1(module,
+            "src/lib/std/traversal.spl", sha256_text("traversal-source"),
+            HIR_EMISSION_TEST_ROOT_V1 + "/../runtime-std-hir-emission-v1")
+        expect(result.is_err()).to_equal(true)

@@ -5,8 +5,9 @@ use compiler.driver.driver_bootstrap.{bootstrap_empty_hir_module}
 use compiler.driver.smf.runtime_std_hir_sections_v1.{
     runtime_std_hir_sections_from_module_v1,
     cold_hir_compiled_facets_from_module_v1}
-use compiler.hir.hir_types.{HirImport, HirDomainBlock}
-use compiler.hir.hir_definitions.{HirDiBinding}
+use compiler.hir.hir_types.{HirImport, HirDomainBlock, HirType, HirTypeKind,
+    SymbolId}
+use compiler.hir.hir_definitions.{HirDiBinding, HirImpl}
 use compiler.common.diagnostics.span.{Span}
 use std.common.crypto.sha256.{sha256_text}
 
@@ -98,3 +99,36 @@ describe "Runtime/std typed HIR section emitter", tag: ["only-compiled"]:
         val facets = result.unwrap()
         expect(facets[1].content.contains("di-binding")).to_equal(true)
         expect(facets[2].content.contains("CacheImpl")).to_equal(true)
+
+    it "canonicalizes nested HIR dictionaries before declaration hashing":
+        val any_type = HirType(kind: HirTypeKind.Any, span: Span.empty())
+        var first_impl = HirImpl(type_: any_type, has_trait_: false,
+            trait_: any_type, type_params: [], where_clause: [], methods: {},
+            method_return_struct_names: {}, method_return_is_array: {},
+            method_return_is_optional: {}, assoc_type_impls: [],
+            span: Span.empty())
+        first_impl.methods["zeta"] = SymbolId.new(2)
+        first_impl.methods["alpha"] = SymbolId.new(1)
+        first_impl.method_return_struct_names["zeta"] = "Z"
+        first_impl.method_return_struct_names["alpha"] = "A"
+        var second_impl = HirImpl(type_: any_type, has_trait_: false,
+            trait_: any_type, type_params: [], where_clause: [], methods: {},
+            method_return_struct_names: {}, method_return_is_array: {},
+            method_return_is_optional: {}, assoc_type_impls: [],
+            span: Span.empty())
+        second_impl.methods["alpha"] = SymbolId.new(1)
+        second_impl.methods["zeta"] = SymbolId.new(2)
+        second_impl.method_return_struct_names["alpha"] = "A"
+        second_impl.method_return_struct_names["zeta"] = "Z"
+        var first = bootstrap_empty_hir_module()
+        first.impls = [first_impl]
+        var second = bootstrap_empty_hir_module()
+        second.impls = [second_impl]
+        val source_digest = sha256_text("identical source")
+        val left = runtime_std_hir_sections_from_module_v1(first,
+            "src/lib/std/impl.spl", source_digest)
+        val right = runtime_std_hir_sections_from_module_v1(second,
+            "src/lib/std/impl.spl", source_digest)
+        expect(left.is_ok()).to_equal(true)
+        expect(right.is_ok()).to_equal(true)
+        expect(left.unwrap()[3].content).to_equal(right.unwrap()[3].content)

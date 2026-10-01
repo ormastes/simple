@@ -2,6 +2,7 @@
 # The package publisher aggregates these source-scoped payloads in source order.
 
 use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_definitions.{HirClass, HirStruct, HirEnum, HirTrait, HirImpl}
 use compiler.hir.hir_codec_support.{HirCodecWriter}
 use compiler.hir.generated.hir_codec.{hc_enc_hir_import, hc_enc_hir_function,
     hc_enc_hir_class, hc_enc_hir_struct, hc_enc_hir_enum, hc_enc_hir_bitfield,
@@ -51,6 +52,56 @@ impl RuntimeStdHirEncodingBudgetV1:
 
 fn runtime_std_hir_writer_v1() -> HirCodecWriter:
     HirCodecWriter.create_canonical_bounded(256 * 1024, 4 * 1024 * 1024, 1000000)
+
+# The generated node codec encodes Dict entries in keys() order. Normalize the
+# five declaration kinds with reachable Dict fields before asking it to hash a
+# node. Other encoded declaration kinds have no Dict fields in the v3 schema.
+fn runtime_std_hir_canonical_class_v1(item: HirClass) -> HirClass:
+    var ordered = item
+    ordered.methods = {}
+    for key in canonical_identity_sort_texts(item.methods.keys()):
+        ordered.methods[key] = item.methods[key]
+    ordered.type_bindings = {}
+    for key in canonical_identity_sort_texts(item.type_bindings.keys()):
+        ordered.type_bindings[key] = item.type_bindings[key]
+    ordered
+
+fn runtime_std_hir_canonical_struct_v1(item: HirStruct) -> HirStruct:
+    var ordered = item
+    ordered.type_bindings = {}
+    for key in canonical_identity_sort_texts(item.type_bindings.keys()):
+        ordered.type_bindings[key] = item.type_bindings[key]
+    ordered
+
+fn runtime_std_hir_canonical_enum_v1(item: HirEnum) -> HirEnum:
+    var ordered = item
+    ordered.type_bindings = {}
+    for key in canonical_identity_sort_texts(item.type_bindings.keys()):
+        ordered.type_bindings[key] = item.type_bindings[key]
+    ordered
+
+fn runtime_std_hir_canonical_trait_v1(item: HirTrait) -> HirTrait:
+    var ordered = item
+    ordered.type_bindings = {}
+    for key in canonical_identity_sort_texts(item.type_bindings.keys()):
+        ordered.type_bindings[key] = item.type_bindings[key]
+    ordered
+
+fn runtime_std_hir_canonical_impl_v1(item: HirImpl) -> HirImpl:
+    var ordered = item
+    ordered.methods = {}
+    for key in canonical_identity_sort_texts(item.methods.keys()):
+        ordered.methods[key] = item.methods[key]
+    ordered.method_return_struct_names = {}
+    for key in canonical_identity_sort_texts(item.method_return_struct_names.keys()):
+        ordered.method_return_struct_names[key] = item.method_return_struct_names[key]
+    ordered.method_return_is_array = {}
+    for key in canonical_identity_sort_texts(item.method_return_is_array.keys()):
+        ordered.method_return_is_array[key] = item.method_return_is_array[key]
+    ordered.method_return_is_optional = {}
+    for key in canonical_identity_sort_texts(item.method_return_is_optional.keys()):
+        ordered.method_return_is_optional[key] = item.method_return_is_optional[key]
+    ordered
 
 fn runtime_std_hir_field_v1(value: text) -> text:
     text_byte_len(value).to_text() + ":" + value
@@ -196,7 +247,7 @@ fn runtime_std_hir_sections_from_module_v1(module: HirModule,
                         item.span.line, item.span.col)))
     for item in module.classes.values():
         var w = runtime_std_hir_writer_v1()
-        hc_enc_hir_class(w, item)
+        hc_enc_hir_class(w, runtime_std_hir_canonical_class_v1(item))
         match budget.digest(w):
             case Err(reason): return Err(reason)
             case Ok(digest):
@@ -210,7 +261,7 @@ fn runtime_std_hir_sections_from_module_v1(module: HirModule,
                         item.span.line, item.span.col)))
     for item in module.structs.values():
         var w = runtime_std_hir_writer_v1()
-        hc_enc_hir_struct(w, item)
+        hc_enc_hir_struct(w, runtime_std_hir_canonical_struct_v1(item))
         match budget.digest(w):
             case Err(reason): return Err(reason)
             case Ok(digest):
@@ -224,7 +275,7 @@ fn runtime_std_hir_sections_from_module_v1(module: HirModule,
                         item.span.line, item.span.col)))
     for item in module.enums.values():
         var w = runtime_std_hir_writer_v1()
-        hc_enc_hir_enum(w, item)
+        hc_enc_hir_enum(w, runtime_std_hir_canonical_enum_v1(item))
         match budget.digest(w):
             case Err(reason): return Err(reason)
             case Ok(digest):
@@ -248,7 +299,7 @@ fn runtime_std_hir_sections_from_module_v1(module: HirModule,
                     exports.push(row)
     for item in module.traits.values():
         var w = runtime_std_hir_writer_v1()
-        hc_enc_hir_trait(w, item)
+        hc_enc_hir_trait(w, runtime_std_hir_canonical_trait_v1(item))
         match budget.digest(w):
             case Err(reason): return Err(reason)
             case Ok(digest):
@@ -262,7 +313,7 @@ fn runtime_std_hir_sections_from_module_v1(module: HirModule,
                         item.span.line, item.span.col)))
     for item in module.impls:
         var w = runtime_std_hir_writer_v1()
-        hc_enc_hir_impl(w, item)
+        hc_enc_hir_impl(w, runtime_std_hir_canonical_impl_v1(item))
         match runtime_std_hir_node_row_v1(budget, w,
                 "impl", item.span.start.to_text()):
             case Err(reason): return Err(reason)
@@ -394,3 +445,7 @@ fn cold_hir_compiled_facets_from_module_v1(module: HirModule,
         ColdHirCompiledFacetPayloadV1(member_name: "generated-source.facet",
             content: "")
     ])
+
+export RUNTIME_STD_HIR_MAX_SECTION_BYTES_V1
+export RuntimeStdCompiledSectionPayloadV1, runtime_std_hir_sections_from_module_v1
+export ColdHirCompiledFacetPayloadV1, cold_hir_compiled_facets_from_module_v1

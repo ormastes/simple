@@ -1,0 +1,198 @@
+# Materialize source-scoped typed HIR semantic and cold-facet files. The driver
+# calls this only while its frozen HIR module is resident; no source is read.
+
+use compiler.hir.hir_types.{HirModule}
+use compiler.driver.smf.runtime_std_hir_sections_v1.{
+    RuntimeStdCompiledSectionPayloadV1, ColdHirCompiledFacetPayloadV1,
+    runtime_std_hir_sections_from_module_v1,
+    cold_hir_compiled_facets_from_module_v1}
+use compiler.driver.smf.runtime_std_compiled_publication.{
+    RuntimeStdCompiledSectionReceiptV1}
+use compiler.driver.cache.cold_hir_compiled_package_outputs_v1.{
+    ColdHirCompiledPayloadFileV1}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.encoding.utf8.{text_byte_len}
+use std.nogc_sync_mut.io.file_ops.{file_create_exclusive,
+    file_read_regular_no_follow_bounded}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_is_real_no_follow}
+
+@unsafe(reason: "canonical physical containment for compiler artifacts", capabilities: [ffi])
+extern fn rt_path_absolute(path: text) -> text
+
+val RUNTIME_STD_HIR_EMISSION_MAX_FILE_BYTES_V1: i64 = 2 * 1024 * 1024
+val RUNTIME_STD_HIR_EMISSION_MAX_TOTAL_BYTES_V1: i64 = 24 * 1024 * 1024
+
+struct RuntimeStdHirModuleEmissionV1:
+    module_identity: text
+    source_identity: text
+    source_digest: text
+    private_root: text
+    semantic_payloads: [RuntimeStdCompiledSectionPayloadV1]
+    semantic_sections: [RuntimeStdCompiledSectionReceiptV1]
+    export_file: ColdHirCompiledPayloadFileV1
+    initializer_file: ColdHirCompiledPayloadFileV1
+    provider_file: ColdHirCompiledPayloadFileV1
+    generated_source_file: ColdHirCompiledPayloadFileV1
+
+fn runtime_std_hir_emission_physical_v1(path: text) -> text:
+    var raw = ""
+    unsafe(capabilities: [ffi]):
+        raw = rt_path_absolute(path) ?? ""
+    if raw.len() <= 0: "" else: raw.replace("\\", "/").lower()
+
+fn runtime_std_hir_emission_ancestors_real_v1(path: text) -> bool:
+    val normalized = path.replace("\\", "/")
+    if normalized == "" or normalized.contains("//"):
+        return false
+    val parts = normalized.split("/")
+    if parts.len() == 0:
+        return false
+    var current = "."
+    var index = 0
+    if normalized.starts_with("/"):
+        current = "/"
+        index = 1
+    elif parts[0].len() == 2 and (parts[0].byte_at(1) as i64) == 58:
+        current = parts[0] + "/"
+        index = 1
+    elif parts[0] == ".":
+        index = 1
+    if not dir_is_real_no_follow(current):
+        return false
+    while index < parts.len():
+        val part = parts[index]
+        if part == "" or part == "." or part == "..":
+            return false
+        if current.ends_with("/"):
+            current = current + part
+        else:
+            current = current + "/" + part
+        if not dir_is_real_no_follow(current):
+            return false
+        index = index + 1
+    true
+
+fn runtime_std_hir_emission_member_valid_v1(member_name: text) -> bool:
+    match member_name:
+        case "debug.smf": true
+        case "exports.smf": true
+        case "generics.smf": true
+        case "hir-summaries.smf": true
+        case "imports.smf": true
+        case "initialization.smf": true
+        case "types.smf": true
+        case "export.facet": true
+        case "initializer.facet": true
+        case "provider.facet": true
+        case "generated-source.facet": true
+        case _: false
+
+fn runtime_std_hir_emission_write_v1(private_root: text,
+        member_name: text, content: text
+) -> Result<ColdHirCompiledPayloadFileV1, text>:
+    if not runtime_std_hir_emission_member_valid_v1(member_name):
+        return Err("typed HIR artifact member is invalid")
+    val byte_count = text_byte_len(content)
+    if byte_count < 0 or byte_count > RUNTIME_STD_HIR_EMISSION_MAX_FILE_BYTES_V1:
+        return Err("typed HIR artifact file exceeds bounds")
+    val path = private_root + "/" + member_name
+    val expected_physical = runtime_std_hir_emission_physical_v1(private_root) +
+        "/" + member_name
+    if not runtime_std_hir_emission_ancestors_real_v1(private_root):
+        return Err("typed HIR artifact private directory is not a real directory")
+    if not file_create_exclusive(path, content):
+        val prior = file_read_regular_no_follow_bounded(
+            path, RUNTIME_STD_HIR_EMISSION_MAX_FILE_BYTES_V1)
+        if prior.is_err() or prior.unwrap() != content:
+            return Err("typed HIR artifact conflicts with existing file: " + member_name)
+    val physical = runtime_std_hir_emission_physical_v1(path)
+    if physical != expected_physical or
+            not runtime_std_hir_emission_ancestors_real_v1(private_root):
+        return Err("typed HIR artifact escaped private root")
+    val admitted = file_read_regular_no_follow_bounded(
+        path, RUNTIME_STD_HIR_EMISSION_MAX_FILE_BYTES_V1)
+    if admitted.is_err() or admitted.unwrap() != content:
+        return Err("typed HIR artifact readback failed: " + member_name)
+    Ok(ColdHirCompiledPayloadFileV1(path: path, digest: sha256_text(content),
+        byte_count: byte_count))
+
+fn runtime_std_hir_emission_root_v1(module: HirModule,
+        source_identity: text, source_digest: text, artifact_root: text
+) -> Result<(text, text), text>:
+    if artifact_root.len() <= 0 or artifact_root.len() > 4096 or
+            artifact_root.contains("\n") or artifact_root.contains("\r"):
+        return Err("typed HIR artifact root is invalid")
+    val module_identity = sha256_text("simple/runtime-std-hir-module/v1\n" +
+        text_byte_len(source_identity).to_text() + ":" + source_identity +
+        source_digest + text_byte_len(module.name).to_text() + ":" + module.name)
+    val physical_parent = runtime_std_hir_emission_physical_v1(artifact_root)
+    if physical_parent == "" or
+            not runtime_std_hir_emission_ancestors_real_v1(artifact_root):
+        return Err("typed HIR artifact parent is unavailable")
+    val private_root = artifact_root + "/typed-hir-v1/" + module_identity
+    val typed_root = artifact_root + "/typed-hir-v1"
+    if not dir_create_all(typed_root) or
+            not runtime_std_hir_emission_ancestors_real_v1(typed_root):
+        return Err("typed HIR artifact type directory is unavailable")
+    if not dir_create_all(private_root) or
+            not runtime_std_hir_emission_ancestors_real_v1(private_root):
+        return Err("typed HIR artifact private directory is unavailable")
+    val expected_physical = physical_parent + "/typed-hir-v1/" + module_identity
+    if runtime_std_hir_emission_physical_v1(private_root) != expected_physical:
+        return Err("typed HIR artifact private directory escapes parent")
+    Ok((module_identity, private_root))
+
+fn runtime_std_hir_emit_module_v1(module: HirModule,
+        source_identity: text, source_digest: text, artifact_root: text
+) -> Result<RuntimeStdHirModuleEmissionV1, text>:
+    val semantic = runtime_std_hir_sections_from_module_v1(
+        module, source_identity, source_digest)
+    if semantic.is_err(): return Err(semantic.unwrap_err())
+    val facets = cold_hir_compiled_facets_from_module_v1(
+        module, source_identity, source_digest)
+    if facets.is_err(): return Err(facets.unwrap_err())
+    val sections = semantic.unwrap()
+    val facet_payloads = facets.unwrap()
+    if sections.len() != 7 or facet_payloads.len() != 4:
+        return Err("typed HIR artifact payload count is invalid")
+    var total_bytes = 0
+    for section in sections:
+        val byte_count = text_byte_len(section.content)
+        if byte_count <= 0 or byte_count > RUNTIME_STD_HIR_EMISSION_MAX_FILE_BYTES_V1 or
+                byte_count > RUNTIME_STD_HIR_EMISSION_MAX_TOTAL_BYTES_V1 - total_bytes:
+            return Err("typed HIR semantic payload exceeds storage bounds")
+        total_bytes = total_bytes + byte_count
+    for facet in facet_payloads:
+        val byte_count = text_byte_len(facet.content)
+        if byte_count < 0 or byte_count > RUNTIME_STD_HIR_EMISSION_MAX_FILE_BYTES_V1 or
+                byte_count > RUNTIME_STD_HIR_EMISSION_MAX_TOTAL_BYTES_V1 - total_bytes:
+            return Err("typed HIR facet payload exceeds storage bounds")
+        total_bytes = total_bytes + byte_count
+    val root_result = runtime_std_hir_emission_root_v1(module, source_identity,
+        source_digest, artifact_root)
+    if root_result.is_err(): return Err(root_result.unwrap_err())
+    val (module_identity, private_root) = root_result.unwrap()
+    var section_receipts: [RuntimeStdCompiledSectionReceiptV1] = []
+    for section in sections:
+        val written = runtime_std_hir_emission_write_v1(private_root,
+            section.member_name, section.content)
+        if written.is_err(): return Err(written.unwrap_err())
+        val file = written.unwrap()
+        section_receipts.push(RuntimeStdCompiledSectionReceiptV1(
+            kind: section.kind, member_name: section.member_name,
+            path: file.path, digest: file.digest, byte_count: file.byte_count))
+    var facet_receipts: [ColdHirCompiledPayloadFileV1] = []
+    for facet in facet_payloads:
+        val written = runtime_std_hir_emission_write_v1(private_root,
+            facet.member_name, facet.content)
+        if written.is_err(): return Err(written.unwrap_err())
+        facet_receipts.push(written.unwrap())
+    Ok(RuntimeStdHirModuleEmissionV1(module_identity: module_identity,
+        source_identity: source_identity, source_digest: source_digest,
+        private_root: private_root, semantic_payloads: sections,
+        semantic_sections: section_receipts,
+        export_file: facet_receipts[0], initializer_file: facet_receipts[1],
+        provider_file: facet_receipts[2], generated_source_file: facet_receipts[3]))
+
+export RUNTIME_STD_HIR_EMISSION_MAX_FILE_BYTES_V1
+export RuntimeStdHirModuleEmissionV1, runtime_std_hir_emit_module_v1
