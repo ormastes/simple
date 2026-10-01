@@ -1,0 +1,355 @@
+# Compile-only Phase 4 group preparation. The frozen source tree is shared by
+# every group; this module creates no per-member compiler task or source copy.
+use std.common.build_manager.grouped_native_contract.{NativeGroupRunV1, NativeGroupManifestV1,
+    NativeGroupMemberV1, native_group_run_encode_v1, native_group_manifest_validate_v1,
+    native_group_scc_set_id_v1}
+use std.common.build_manager.contracts.{builder_digest_valid_v1, builder_identifier_valid_v1,
+    builder_relative_path_valid_v1, builder_paths_overlap_v1}
+use compiler.driver.driver_build.native_group_scc_inventory.{native_group_scc_inventory_v1,
+    NativeGroupSccInventoryV1}
+use compiler.driver.driver_build.native_group_warm_route.{native_group_warm_route_publish_v1}
+use compiler.driver.cache.package_config_variant_receipt.{package_config_variant_receipt_read_v1,
+    package_config_variant_receipt_path_v1}
+use compiler.driver.cache.runtime_std_authority_admission.{runtime_std_authority_admit_v1}
+use app.io.file_ops.{path_absolute}
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded, file_is_regular_no_follow,
+    file_hash_sha256, file_atomic_write, file_exists}
+use std.nogc_sync_mut.io.dir_ops.{dir_create}
+
+val NATIVE_PREPARE_CONFIG_MAX_V1: i64 = 16384
+val NATIVE_PREPARE_INVENTORY_MAX_V1: i64 = 8388608
+
+fn native_prepare_absolute_v1(path: text) -> bool:
+    if path == "" or path.len() > 4096 or path.contains("\0") or path.contains("\r") or
+            path.contains("\n") or path.contains("\t") or path.contains(".."):
+        return false
+    if path.starts_with("/"): return true
+    path.len() >= 4 and path[1:3] == ":/" and
+        ((path[0:1] >= "A" and path[0:1] <= "Z") or
+         (path[0:1] >= "a" and path[0:1] <= "z"))
+
+fn native_prepare_parent_v1(path: text) -> text:
+    val parts = path.replace("\\", "/").split("/")
+    if parts.len() <= 1: return ""
+    parts[0:parts.len() - 1].join("/")
+
+fn native_prepare_canonical_v1(path: text) -> text:
+    val normalized = path_absolute(path).replace("\\", "/")
+    if normalized.starts_with("//?/"): normalized.substring(4).lower() else: normalized.lower()
+
+fn native_prepare_key_valid_v1(key: text) -> bool:
+    ["format", "run_id", "producer_path", "producer_digest", "source_root",
+     "full_source_authority_path", "full_source_authority_digest",
+     "scv_receipt_path", "scv_receipt_digest", "variant_receipt_path",
+     "variant_receipt_digest", "runtime_std_authority_path",
+     "runtime_std_authority_digest", "tool_path", "tool_digest",
+     "runtime_path", "runtime_digest", "manager_path", "manager_digest",
+     "worker_path", "worker_digest", "broker_path", "broker_digest",
+     "inventory_path", "inventory_digest", "inventory_count", "phase", "backend", "target",
+     "output_kind", "index_read_root",
+     "output_root", "state_root", "group_size", "memory_limit_bytes", "max_threads",
+     "available_memory_bytes", "memory_reserve_bytes", "estimated_group_disk_bytes",
+     "available_disk_bytes", "minimum_free_disk_bytes", "max_attempts", "poll_ms",
+     "lifetime_ms"].contains(key)
+
+fn native_prepare_config_v1(payload: text) -> Result<{text: text}, text>:
+    if payload.len() == 0 or payload.len() > NATIVE_PREPARE_CONFIG_MAX_V1 or
+            not payload.ends_with("\n") or payload.contains("\r") or payload.contains("\0"):
+        return Err("invalid native group preparation config framing")
+    var fields: {text: text} = {}
+    val lines = payload.split("\n")
+    for index in 0..lines.len() - 1:
+        val line = lines[index]
+        val at = line.find("=")
+        if at <= 0: return Err("invalid native group preparation config row")
+        val key = line[0:at]
+        val value = line[at + 1:]
+        if not native_prepare_key_valid_v1(key) or fields.contains_key(key) or
+                value == "" or value.len() > 4096:
+            return Err("duplicate, unknown, empty, or oversized native group config field")
+        fields[key] = value
+    if fields.len() != 44 or fields["format"] != "SIMPLE-NATIVE-GROUP-PREPARE-1":
+        return Err("incomplete native group preparation config")
+    Ok(fields)
+
+fn native_prepare_number_v1(value: text, minimum: i64, maximum: i64) -> Result<i64, text>:
+    if value == "" or value.len() > 17 or (value.len() > 1 and value.starts_with("0")):
+        return Err("invalid native group decimal")
+    var number: i64 = 0
+    for index in 0..value.len():
+        val digit = value[index:index + 1]
+        if digit < "0" or digit > "9": return Err("nondigit native group decimal")
+        val digits = "0123456789"
+        var selected: i64 = -1
+        for probe in 0..10:
+            if digit == digits[probe:probe + 1]: selected = probe
+        if selected < 0 or number > (maximum - selected) / 10:
+            return Err("native group decimal exceeds bound")
+        number = number * 10 + selected
+    if number < minimum: return Err("native group decimal below bound")
+    Ok(number)
+
+fn native_prepare_pin_v1(fields: {text: text}, prefix: text) -> Result<text, text>:
+    val path = fields[prefix + "_path"]
+    val expected = fields[prefix + "_digest"]
+    if not native_prepare_absolute_v1(path) or not builder_digest_valid_v1(expected) or
+            not file_is_regular_no_follow(path):
+        return Err("invalid or missing native group " + prefix + " pin")
+    if file_hash_sha256(path) != expected:
+        return Err("native group " + prefix + " digest differs")
+    Ok(expected)
+
+fn native_prepare_inventory_v1(fields: {text: text}) -> Result<[text], text>:
+    val path = fields["inventory_path"]
+    val expected = fields["inventory_digest"]
+    if not native_prepare_absolute_v1(path) or not builder_digest_valid_v1(expected) or
+            not file_is_regular_no_follow(path):
+        return Err("invalid native group inventory pin")
+    val payload = file_read_regular_no_follow_bounded(path, NATIVE_PREPARE_INVENTORY_MAX_V1)?
+    if file_hash_sha256(path) != expected or not payload.ends_with("\n") or payload.contains("\r") or
+            payload.contains("\0"):
+        return Err("native group inventory digest or framing differs")
+    val lines = payload.split("\n")
+    var paths: [text] = []
+    var previous = ""
+    var seen: {text: bool} = {}
+    for index in 0..lines.len() - 1:
+        val path = lines[index]
+        if not builder_relative_path_valid_v1(path) or not path.ends_with(".spl") or
+                (previous != "" and path <= previous) or seen.contains_key(path.lower()):
+            return Err("native group inventory is not a unique ordered module list")
+        paths = paths.push(path)
+        seen[path.lower()] = true
+        previous = path
+    val count = native_prepare_number_v1(fields["inventory_count"], 1, 100000)?
+    if paths.len() != count: return Err("native group inventory count differs")
+    Ok(paths)
+
+fn native_prepare_policy_v1(fields: {text: text}) -> Result<text, text>:
+    val group_size = native_prepare_number_v1(fields["group_size"], 1, 4096)?
+    val memory = native_prepare_number_v1(fields["memory_limit_bytes"], 1, 1125899906842624)?
+    val threads = native_prepare_number_v1(fields["max_threads"], 1, 1024)?
+    val available = native_prepare_number_v1(fields["available_memory_bytes"], 1, 1125899906842624)?
+    val reserve = native_prepare_number_v1(fields["memory_reserve_bytes"], 1, 1125899906842624)?
+    val disk = native_prepare_number_v1(fields["available_disk_bytes"], 1, 1125899906842624)?
+    val disk_group = native_prepare_number_v1(fields["estimated_group_disk_bytes"], 1, 1125899906842624)?
+    val disk_floor = native_prepare_number_v1(fields["minimum_free_disk_bytes"], 1, 1125899906842624)?
+    val max_attempts = native_prepare_number_v1(fields["max_attempts"], 1, 100)?
+    val poll = native_prepare_number_v1(fields["poll_ms"], 1, 60000)?
+    val lifetime = native_prepare_number_v1(fields["lifetime_ms"], 1, 604800000)?
+    if group_size > native_prepare_number_v1(fields["inventory_count"], 1, 100000)? or
+            threads > group_size or memory >= available or reserve > available - memory or
+            disk_floor >= disk or disk_group > disk - disk_floor:
+        return Err("native group preparation capacity admission failed")
+    if max_attempts < 1 or poll > lifetime: return Err("invalid native group retry or lifetime policy")
+    Ok("")
+
+fn native_prepare_manifest_v1(fields: {text: text}, snapshot_digest: text,
+        variant_digest: text, group_id: text, route_path: text, route_digest: text,
+        members: [NativeGroupMemberV1]) -> Result<NativeGroupManifestV1, text>:
+    val scc_key = native_group_scc_set_id_v1(members)
+    if scc_key == "": return Err("native group SCC set identity rejected")
+    val manifest = NativeGroupManifestV1(fields["producer_digest"],
+        snapshot_digest, fields["full_source_authority_digest"],
+        variant_digest, route_path, route_digest,
+        fields["tool_digest"], fields["runtime_digest"], fields["phase"],
+        fields["backend"], fields["target"], group_id, scc_key, 1, 1,
+        fields["inventory_digest"], native_prepare_number_v1(fields["inventory_count"], 1, 100000)?,
+        native_prepare_number_v1(fields["memory_limit_bytes"], 1, 1125899906842624)?,
+        native_prepare_number_v1(fields["max_threads"], 1, 1024)?, members)
+    val invalid = native_group_manifest_validate_v1(manifest)
+    if invalid != "": return Err(invalid)
+    Ok(manifest)
+
+# The SCC inventory is in dependency-first order. Keeping direct dependency
+# edges out of the current contiguous batch also excludes transitive edges:
+# every intermediate SCC on such a path has already been considered in that
+# same batch. This lets failed-only retry omit successful members of a batch.
+fn native_prepare_scc_conflicts_v1(current: [text], dependencies: [text]) -> bool:
+    for dependency in dependencies:
+        if current.contains(dependency): return true
+    false
+
+fn native_prepare_group_boundary_v1(current_count: i64, next_count: i64,
+        limit: i64, current_sccs: [text], dependencies: [text]) -> bool:
+    current_count > 0 and (current_count + next_count > limit or
+        native_prepare_scc_conflicts_v1(current_sccs, dependencies))
+
+# One manifest is one isolated process. Greedy packing preserves dependency
+# order and never divides a compiler-certified SCC. No member command reloads
+# the complete source tree independently.
+fn native_prepare_groups_v1(fields: {text: text}, paths: [text], indexed: NativeGroupSccInventoryV1) -> Result<[NativeGroupManifestV1], text>:
+    if indexed.inventory_digest != fields["inventory_digest"] or
+            indexed.full_source_authority_digest != fields["full_source_authority_digest"] or
+            indexed.producer_digest != fields["producer_digest"]:
+        return Err("compiler SCC inventory identity differs from frozen input")
+    val group_size = native_prepare_number_v1(fields["group_size"], 1, 4096)?
+    var manifests: [NativeGroupManifestV1] = []
+    var members: [NativeGroupMemberV1] = []
+    var scc_ids: [text] = []
+    var seen: {text: bool} = {}
+    var batch: i64 = 0
+    for scc in indexed.groups:
+        if not builder_identifier_valid_v1(scc.scc_id) or scc.members.len() == 0 or
+                scc.members.len() > group_size:
+            return Err("compiler SCC cannot fit a bounded native process group")
+        if native_prepare_group_boundary_v1(members.len(), scc.members.len(), group_size,
+                scc_ids, scc.dependency_scc_ids):
+            batch = batch + 1
+            val id = "group-" + str(batch)
+            val route = native_group_warm_route_publish_v1(fields["state_root"],
+                fields["index_read_root"], indexed, scc_ids, id)?
+            manifests = manifests.push(native_prepare_manifest_v1(fields, indexed.source_snapshot_digest,
+                indexed.variant_digest, id, route.path, route.digest, members)?)
+            members = []
+            scc_ids = []
+        scc_ids = scc_ids.push(scc.scc_id)
+        for member in scc.members:
+            if member.scc_id != scc.scc_id or not builder_identifier_valid_v1(member.module_id) or
+                    not builder_relative_path_valid_v1(member.source_path) or
+                    not builder_digest_valid_v1(member.source_digest):
+                return Err("invalid compiler SCC member")
+            val path = member.source_path.lower()
+            if seen.contains_key(path): return Err("compiler SCC inventory duplicates module")
+            seen[path] = true
+            if not file_is_regular_no_follow(fields["source_root"] + "/" + member.source_path) or
+                    file_hash_sha256(fields["source_root"] + "/" + member.source_path) != member.source_digest:
+                return Err("frozen module source differs from compiler SCC pin: " + member.source_path)
+            members = members.push(NativeGroupMemberV1(member.module_id, member.scc_id,
+                member.source_path, member.source_digest, fields["output_kind"],
+                "objects/" + fields["backend"] + "/" + member.module_id + ".o"))
+    if members.len() > 0:
+        batch = batch + 1
+        val id = "group-" + str(batch)
+        val route = native_group_warm_route_publish_v1(fields["state_root"],
+            fields["index_read_root"], indexed, scc_ids, id)?
+        manifests = manifests.push(native_prepare_manifest_v1(fields, indexed.source_snapshot_digest,
+            indexed.variant_digest, id, route.path, route.digest, members)?)
+    if seen.len() != paths.len() or manifests.len() == 0 or manifests.len() > 4096:
+        return Err("compiler SCC inventory incomplete or exceeds group wire bound")
+    for path in paths:
+        if not seen.contains_key(path.lower()): return Err("compiler SCC inventory omitted path: " + path)
+    Ok(manifests)
+
+fn native_group_prepare_v1(config_path: text, manifest_path: text) -> Result<NativeGroupRunV1, text>:
+    if not native_prepare_absolute_v1(config_path) or not native_prepare_absolute_v1(manifest_path) or
+            config_path.lower() == manifest_path.lower():
+        return Err("native group config and manifest require distinct absolute paths")
+    val config = file_read_regular_no_follow_bounded(config_path, NATIVE_PREPARE_CONFIG_MAX_V1)?
+    val fields = native_prepare_config_v1(config)?
+    if not builder_identifier_valid_v1(fields["run_id"]) or
+            not builder_identifier_valid_v1(fields["backend"]) or
+            not builder_identifier_valid_v1(fields["target"]) or
+            (fields["phase"] != "phase3" and fields["phase"] != "phase4") or
+            (fields["backend"] != "llvm" and fields["backend"] != "cranelift"):
+        return Err("invalid native group run, backend, or target")
+    if fields["output_kind"] != "OBJECT" and fields["output_kind"] != "SMF":
+        return Err("invalid native group output kind")
+    if fields["output_kind"] == "SMF":
+        return Err("native SMF group publication requires a qualified writer and target loader")
+    for key in ["source_root", "state_root", "output_root"]:
+        if not native_prepare_absolute_v1(fields[key]): return Err("invalid native group root: " + key)
+    if not native_prepare_absolute_v1(fields["index_read_root"]) or
+            builder_paths_overlap_v1(fields["index_read_root"], fields["state_root"]) or
+            builder_paths_overlap_v1(fields["index_read_root"], fields["output_root"]):
+        return Err("native group index read root overlaps writable backend roots")
+    if builder_paths_overlap_v1(fields["source_root"], fields["state_root"]) or
+            builder_paths_overlap_v1(fields["source_root"], fields["output_root"]) or
+            builder_paths_overlap_v1(fields["state_root"], fields["output_root"]):
+        return Err("native group source, state, and output roots overlap")
+    if not manifest_path.starts_with(fields["state_root"] + "/"):
+        return Err("native group manifest must be within isolated state root")
+    native_prepare_pin_v1(fields, "producer")?
+    native_prepare_pin_v1(fields, "full_source_authority")?
+    native_prepare_pin_v1(fields, "scv_receipt")?
+    native_prepare_pin_v1(fields, "variant_receipt")?
+    native_prepare_pin_v1(fields, "runtime_std_authority")?
+    native_prepare_pin_v1(fields, "tool")?
+    native_prepare_pin_v1(fields, "runtime")?
+    native_prepare_pin_v1(fields, "manager")?
+    native_prepare_pin_v1(fields, "worker")?
+    native_prepare_pin_v1(fields, "broker")?
+    native_prepare_policy_v1(fields)?
+    val paths = native_prepare_inventory_v1(fields)?
+    val variant_receipt = package_config_variant_receipt_read_v1(fields["variant_receipt_path"],
+        fields["variant_receipt_digest"])?
+    val canonical_variant_path = package_config_variant_receipt_path_v1(fields["index_read_root"],
+        variant_receipt.index_digest)
+    if canonical_variant_path == "" or
+            native_prepare_canonical_v1(fields["variant_receipt_path"]) !=
+            native_prepare_canonical_v1(canonical_variant_path):
+        return Err("compiler variant receipt is not at canonical index-owned path")
+    if variant_receipt.producer_digest != fields["producer_digest"] or
+            variant_receipt.variant.target_triple != fields["target"] or
+            variant_receipt.variant.backend != fields["backend"]:
+        return Err("compiler variant receipt differs from requested native producer or target")
+    val indexed = native_group_scc_inventory_v1(fields["source_root"], fields["index_read_root"],
+        fields["scv_receipt_path"], fields["scv_receipt_digest"], paths,
+        fields["producer_digest"], variant_receipt.variant, fields["full_source_authority_path"],
+        fields["full_source_authority_digest"])?
+    if indexed.index_digest != variant_receipt.index_digest or
+            indexed.variant_digest != variant_receipt.variant_digest:
+        return Err("compiler variant receipt differs from admitted package index")
+    val baseline = runtime_std_authority_admit_v1(fields["index_read_root"],
+        fields["runtime_std_authority_path"], fields["runtime_std_authority_digest"],
+        indexed.producer_digest, indexed.variant_digest, fields["target"],
+        indexed.scv_revision_id)?
+    val manifests = native_prepare_groups_v1(fields, paths, indexed)?
+    val environment = [
+        "SIMPLE_COMPILER_DIGEST=" + indexed.producer_digest,
+        "SIMPLE_PACKAGE_INDEX_PRODUCER_DIGEST=" + indexed.producer_digest,
+        "SIMPLE_PACKAGE_INDEX_ROOT_GENERATION=" + indexed.index_generation.root_generation,
+        "SIMPLE_PACKAGE_INDEX_VARIANT_DIGEST=" + indexed.variant_digest,
+        "SIMPLE_SCV_SNAPSHOT_ROOT=" + indexed.scv_snapshot_root,
+        "SIMPLE_SCV_REVISION_ID=" + indexed.scv_revision_id,
+        "SIMPLE_SCV_COMMIT_ID=" + indexed.scv_commit_id,
+        "SIMPLE_SCV_TREE_ID=" + indexed.scv_tree_id,
+        "SIMPLE_SCV_INVENTORY_DIGEST=" + indexed.source_snapshot_digest,
+        "SIMPLE_SCV_SOURCE_INVENTORY_DIGEST=" + indexed.scv_source_inventory_digest,
+        "SIMPLE_ACTION_ABI_DIGEST=" + baseline.action_abi_digest,
+        "SIMPLE_RUNTIME_ABI_DIGEST=" + baseline.runtime_abi_digest,
+        "SIMPLE_STDLIB_ABI_DIGEST=" + baseline.std_abi_digest,
+        "SIMPLE_RUNTIME_ACTION_DIGEST=" + baseline.runtime_action_digest,
+        "SIMPLE_STDLIB_ACTION_DIGEST=" + baseline.std_action_digest
+    ]
+    val run = NativeGroupRunV1(fields["run_id"], fields["producer_digest"],
+        indexed.source_snapshot_digest, fields["full_source_authority_digest"],
+        indexed.scv_source_inventory_digest, indexed.variant_digest,
+        fields["tool_digest"], fields["runtime_digest"],
+        fields["phase"], fields["backend"], fields["target"], fields["inventory_digest"], paths.len(),
+        native_prepare_number_v1(fields["memory_limit_bytes"], 1, 1125899906842624)?,
+        native_prepare_number_v1(fields["max_threads"], 1, 1024)?,
+        native_prepare_number_v1(fields["memory_reserve_bytes"], 1, 1125899906842624)?,
+        native_prepare_number_v1(fields["estimated_group_disk_bytes"], 1, 1125899906842624)?,
+        native_prepare_number_v1(fields["minimum_free_disk_bytes"], 1, 1125899906842624)?,
+        indexed.scv_snapshot_root,
+        indexed.scv_revision_id, indexed.scv_commit_id, indexed.scv_tree_id,
+        fields["full_source_authority_path"], fields["tool_path"], fields["runtime_path"],
+        fields["variant_receipt_path"], fields["variant_receipt_digest"],
+        fields["runtime_std_authority_path"], fields["runtime_std_authority_digest"],
+        fields["index_read_root"], indexed.index_digest,
+        fields["scv_receipt_path"],
+        fields["scv_receipt_digest"], fields["source_root"],
+        fields["state_root"], fields["output_root"], fields["producer_path"],
+        fields["manager_path"], fields["manager_digest"],
+        fields["worker_path"], fields["worker_digest"], fields["broker_path"],
+        fields["broker_digest"], environment,
+        native_prepare_number_v1(fields["max_attempts"], 1, 100)?,
+        native_prepare_number_v1(fields["poll_ms"], 1, 60000)?,
+        native_prepare_number_v1(fields["lifetime_ms"], 1, 604800000)?, manifests, [], [])
+    val encoded = native_group_run_encode_v1(run)
+    if encoded == "": return Err("compiler group run rejected or exceeds wire bound")
+    if file_exists(manifest_path):
+        val retained = file_read_regular_no_follow_bounded(manifest_path, 16777216)?
+        if retained != encoded: return Err("existing native group manifest identity differs")
+        return Ok(run)
+    if not dir_create(native_prepare_parent_v1(manifest_path), true) or
+            not file_atomic_write(manifest_path, encoded):
+        return Err("cannot publish native group manifest")
+    val observed = file_read_regular_no_follow_bounded(manifest_path, 16777216)?
+    if observed != encoded: return Err("published native group manifest differs")
+    Ok(run)
+
+export native_group_prepare_v1, native_prepare_config_v1, native_prepare_inventory_v1,
+    native_prepare_policy_v1, native_prepare_scc_conflicts_v1,
+    native_prepare_group_boundary_v1

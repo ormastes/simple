@@ -1,0 +1,592 @@
+# Compact immutable route for one grouped native worker. Build this once from
+# the in-memory preflight index; workers never reopen the complete index.
+
+use compiler.common.cache.canonical_identity.{canonical_identity_sort_texts}
+use compiler.driver.cache.package_module_index.{
+    PACKAGE_MODULE_INDEX_SCHEMA_V2, PackageModuleIndexEntryV1,
+    PackageModuleIndexGenerationV1, package_module_index_entry_encode_v1,
+    package_module_index_entry_decode_v1,
+    package_module_index_entry_action_digest_v1
+}
+use compiler.driver.cache.package_archive_cache.{
+    PackageArchiveAuthorityV1, PackageArchiveLoadV1,
+    package_archive_aggregate_entry_v1, package_archive_load_v1,
+    package_archive_receipt_decode_v1
+}
+use compiler.driver.cache.package_archive_types.{
+    package_archive_receipt_canonical_fields_v1
+}
+use compiler.driver.cache.cas_store.{cas_blob_path}
+use compiler.driver.cache.package_index_route.{
+    PackageArchiveAdmissionV1, PackageIndexRouteV1
+}
+use compiler.driver.cache.dirty_module_record.{
+    dirty_module_record_admit_v1, dirty_module_records_sort_validate_v1,
+    DirtyModuleRecordV1
+}
+use compiler.driver.driver_build.native_group_scc_inventory.{
+    NativeGroupSccInventoryV1
+}
+use std.common.build_manager.grouped_native_contract.{NativeGroupMemberV1}
+use std.common.build_manager.codec.{BuilderWireReaderV1, builder_wire_line_v1}
+use std.common.build_manager.contracts.{
+    builder_digest_valid_v1, builder_identifier_valid_v1
+}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io.file_ops.{
+    file_create_exclusive, file_read_regular_no_follow_bounded
+}
+
+extern fn rt_dir_create_all(path: text) -> bool
+
+val NATIVE_GROUP_WARM_ROUTE_MAX_BYTES_V1: i64 = 16 * 1024 * 1024
+
+struct NativeGroupWarmRouteV1:
+    index_read_root: text
+    index_digest: text
+    producer_digest: text
+    root_generation: text
+    variant_digest: text
+    scv_revision_id: text
+    scv_commit_id: text
+    scv_tree_id: text
+    scv_source_inventory_digest: text
+    source_snapshot_digest: text
+    full_source_authority_digest: text
+    group_id: text
+    attempt: i64
+    group_scc_ids: [text]
+    source_entries: [PackageModuleIndexEntryV1]
+    archive_admissions: [PackageArchiveAdmissionV1]
+
+struct NativeGroupWarmRoutePublicationV1:
+    path: text
+    digest: text
+    route: NativeGroupWarmRouteV1
+
+fn native_group_warm_route_validate_v1(route: NativeGroupWarmRouteV1) -> text:
+    if (route.index_read_root == "" or route.root_generation == "" or
+            route.scv_revision_id == "" or route.scv_commit_id == "" or
+            route.scv_tree_id == "" or
+            not builder_digest_valid_v1(route.index_digest) or
+            not builder_digest_valid_v1(route.producer_digest) or
+            not builder_digest_valid_v1(route.variant_digest) or
+            not builder_digest_valid_v1(route.scv_source_inventory_digest) or
+            not builder_digest_valid_v1(route.source_snapshot_digest) or
+            not builder_digest_valid_v1(route.full_source_authority_digest) or
+            not builder_identifier_valid_v1(route.group_id) or
+            route.attempt < 1 or route.attempt > 100 or
+            route.group_scc_ids.len() == 0 or
+            route.group_scc_ids.len() > 4096 or
+            route.source_entries.len() == 0 or
+            route.source_entries.len() > 4096 or
+            route.archive_admissions.len() > 4096):
+        return "route-header-invalid"
+    var selected_sccs: Dict<text, bool> = {}
+    for scc_id in route.group_scc_ids:
+        if not builder_identifier_valid_v1(scc_id) or
+                selected_sccs.has(scc_id):
+            return "route-scc-invalid"
+        selected_sccs[scc_id] = true
+    var modules: Dict<text, bool> = {}
+    var sources: Dict<text, bool> = {}
+    var source_packages: Dict<text, bool> = {}
+    var entries: [PackageModuleIndexEntryV1] = []
+    for entry in route.source_entries:
+        if (not selected_sccs.has(entry.scc_identity) or
+                modules.has(entry.module_identity) or
+                sources.has(entry.source_identity)):
+            return "route-source-entry-invalid"
+        modules[entry.module_identity] = true
+        sources[entry.source_identity] = true
+        source_packages[entry.package_identity] = true
+        entries = entries.push(entry)
+    var archived_packages: Dict<text, bool> = {}
+    for admission in route.archive_admissions:
+        if (admission.load.receipt == nil or
+                archived_packages.has(admission.package_identity) or
+                source_packages.has(admission.package_identity) or
+                admission.module_entries.len() == 0):
+            return "route-archive-package-invalid"
+        archived_packages[admission.package_identity] = true
+        val receipt = admission.load.receipt!
+        if (receipt.package_key != admission.package_identity or
+                receipt.producer_digest != route.producer_digest or
+                receipt.producer_identity != route.root_generation or
+                receipt.variant_digest != route.variant_digest or
+                admission.archive_path != cas_blob_path(
+                    route.index_read_root, receipt.archive_digest)):
+            return "route-archive-receipt-binding-invalid"
+        for entry in admission.module_entries:
+            if entry.package_identity != admission.package_identity or
+                    modules.has(entry.module_identity) or
+                    selected_sccs.has(entry.scc_identity):
+                return "route-archive-entry-invalid"
+            modules[entry.module_identity] = true
+            entries = entries.push(entry)
+        val aggregate = package_archive_aggregate_entry_v1(
+            admission.module_entries)
+        if aggregate == nil:
+            return "route-archive-aggregate-invalid"
+        if (aggregate!.action_digest != receipt.action_key or
+                aggregate!.smf_metadata_digest !=
+                    receipt.normalized_metadata_digest):
+            return "route-archive-aggregate-mismatch"
+    for entry in entries:
+        for imported in entry.direct_imports:
+            if not modules.has(imported):
+                return "route-import-closure-incomplete"
+    val reduced = PackageModuleIndexGenerationV1(
+        PACKAGE_MODULE_INDEX_SCHEMA_V2, route.producer_digest,
+        route.root_generation, route.scv_revision_id,
+        route.scv_commit_id, route.scv_tree_id,
+        route.scv_source_inventory_digest, entries,
+        route.variant_digest)
+    for entry in entries:
+        if package_module_index_entry_action_digest_v1(reduced, entry) !=
+                entry.action_digest:
+            return "route-action-binding-mismatch"
+    "ok"
+
+fn native_group_warm_route_build_v1(
+    index_read_root: text,
+    inventory: NativeGroupSccInventoryV1,
+    group_scc_ids: [text],
+    group_id: text
+) -> Result<NativeGroupWarmRouteV1, text>:
+    if index_read_root == "" or not builder_identifier_valid_v1(group_id) or
+            group_scc_ids.len() == 0 or group_scc_ids.len() > 4096:
+        return Err("native-group-route-input-invalid")
+    val generation = inventory.index_generation
+    if generation.schema_version != PACKAGE_MODULE_INDEX_SCHEMA_V2 or
+            generation.producer_digest != inventory.producer_digest or
+            generation.variant_digest != inventory.variant_digest or
+            generation.inventory_digest != inventory.scv_source_inventory_digest:
+        return Err("native-group-route-index-binding-invalid")
+    val by_module = inventory.index_by_module
+    val by_package = inventory.indices_by_package
+    var selected: Dict<text, bool> = {}
+    var selected_scc: Dict<text, bool> = {}
+    var source_entries: [PackageModuleIndexEntryV1] = []
+    for scc_id in group_scc_ids:
+        if selected_scc.has(scc_id):
+            return Err("native-group-route-scc-duplicate")
+        selected_scc[scc_id] = true
+        if not inventory.group_by_scc.has(scc_id):
+            return Err("native-group-route-scc-unknown")
+        val group = inventory.groups[inventory.group_by_scc[scc_id]]
+        for member in group.members:
+            if not by_module.has(member.module_identity):
+                return Err("native-group-route-member-unindexed")
+            val entry = generation.entries[by_module[member.module_identity]]
+            if (entry.source_identity != member.source_path or
+                    entry.source_digest != member.source_digest or
+                    entry.scc_identity != scc_id or
+                    selected.has(entry.module_identity)):
+                return Err("native-group-route-member-mismatch")
+            selected[entry.module_identity] = true
+            source_entries = source_entries.push(entry)
+    if source_entries.len() == 0 or source_entries.len() > 4096:
+        return Err("native-group-route-member-count-invalid")
+
+    # Traverse only resolved imports from the selected group. Archive loading
+    # is read-only against the shared source/index cache.
+    var pending: [text] = []
+    for entry in source_entries:
+        for imported in entry.direct_imports:
+            pending = pending.push(imported)
+    var visited: Dict<text, bool> = {}
+    var needed_packages: Dict<text, bool> = {}
+    var cursor = 0
+    while cursor < pending.len():
+        val imported = pending[cursor]
+        cursor = cursor + 1
+        if visited.has(imported): continue
+        visited[imported] = true
+        if not by_module.has(imported):
+            return Err("native-group-route-import-unindexed:{imported}")
+        val entry = generation.entries[by_module[imported]]
+        if selected.has(imported): continue
+        if selected_scc.has(entry.scc_identity):
+            return Err("native-group-route-scc-member-omitted:{imported}")
+        needed_packages[entry.package_identity] = true
+        for next_import in entry.direct_imports:
+            if not visited.has(next_import):
+                pending = pending.push(next_import)
+    var package_ids: [text] = []
+    for package_identity in needed_packages.keys():
+        package_ids = package_ids.push(package_identity)
+    package_ids = canonical_identity_sort_texts(package_ids)
+    val authority = PackageArchiveAuthorityV1(
+        generation.producer_digest, generation.root_generation,
+        generation.variant_digest, generation.scv_revision_id,
+        generation.scv_tree_id, generation.inventory_digest)
+    var archives: [PackageArchiveAdmissionV1] = []
+    for package_identity in package_ids:
+        var entries: [PackageModuleIndexEntryV1] = []
+        var module_ids: [text] = []
+        var dependency_digests: [text] = []
+        var digest_seen: Dict<text, bool> = {}
+        for entry_index in by_package[package_identity]:
+            val entry = generation.entries[entry_index]
+            if selected.has(entry.module_identity):
+                return Err("native-group-route-mixed-selected-package")
+            entries = entries.push(entry)
+            module_ids = module_ids.push(entry.module_identity)
+            for imported in entry.direct_imports:
+                if not by_module.has(imported):
+                    return Err("native-group-route-archive-import-unindexed")
+                val digest = generation.entries[by_module[imported]].smf_metadata_digest
+                if not digest_seen.has(digest):
+                    digest_seen[digest] = true
+                    dependency_digests = dependency_digests.push(digest)
+        val aggregate = package_archive_aggregate_entry_v1(entries)
+        if aggregate == nil:
+            return Err("native-group-route-archive-aggregate-invalid")
+        val load = package_archive_load_v1(
+            index_read_root, aggregate!, authority,
+            canonical_identity_sort_texts(dependency_digests))
+        if not load.valid or load.receipt == nil:
+            return Err("native-group-route-archive-{load.reason}:{package_identity}")
+        archives = archives.push(PackageArchiveAdmissionV1(
+            package_identity, canonical_identity_sort_texts(module_ids),
+            entries, load.archive_path, load))
+    Ok(NativeGroupWarmRouteV1(
+        index_read_root, inventory.index_digest, generation.producer_digest,
+        generation.root_generation, generation.variant_digest,
+        generation.scv_revision_id, generation.scv_commit_id,
+        generation.scv_tree_id, generation.inventory_digest,
+        inventory.source_snapshot_digest,
+        inventory.full_source_authority_digest,
+        group_id, 1, group_scc_ids,
+        source_entries, archives))
+
+fn native_group_warm_route_encode_v1(route: NativeGroupWarmRouteV1) -> text:
+    if native_group_warm_route_validate_v1(route) != "ok":
+        return ""
+    var content = "simple-native-group-warm-route-v1\n"
+    for field in [route.index_read_root, route.index_digest,
+            route.producer_digest, route.root_generation,
+            route.variant_digest, route.scv_revision_id,
+            route.scv_commit_id, route.scv_tree_id,
+            route.scv_source_inventory_digest,
+            route.source_snapshot_digest,
+            route.full_source_authority_digest, route.group_id,
+            str(route.attempt),
+            str(route.group_scc_ids.len())]:
+        content = content + builder_wire_line_v1(field)
+    for scc_id in route.group_scc_ids:
+        content = content + builder_wire_line_v1(scc_id)
+    content = content + builder_wire_line_v1(str(route.source_entries.len()))
+    for entry in route.source_entries:
+        val encoded = package_module_index_entry_encode_v1(entry)
+        if encoded == "": return ""
+        content = content + builder_wire_line_v1(encoded)
+    content = content + builder_wire_line_v1(str(route.archive_admissions.len()))
+    for admission in route.archive_admissions:
+        if admission.load.receipt == nil:
+            return ""
+        content = content + builder_wire_line_v1(admission.package_identity)
+        content = content + builder_wire_line_v1(str(admission.module_entries.len()))
+        for entry in admission.module_entries:
+            val encoded = package_module_index_entry_encode_v1(entry)
+            if encoded == "": return ""
+            content = content + builder_wire_line_v1(encoded)
+        content = content + builder_wire_line_v1(admission.archive_path)
+        val receipt = package_archive_receipt_canonical_fields_v1(
+            admission.load.receipt!)
+        if receipt == "": return ""
+        content = content + builder_wire_line_v1(receipt)
+    if content.len() > NATIVE_GROUP_WARM_ROUTE_MAX_BYTES_V1:
+        return ""
+    content
+
+fn native_group_warm_route_decode_v1(
+    content: text
+) -> Result<NativeGroupWarmRouteV1, text>:
+    if content == "" or content.len() > NATIVE_GROUP_WARM_ROUTE_MAX_BYTES_V1 or
+            not content.starts_with("simple-native-group-warm-route-v1\n"):
+        return Err("native-group-route-wire-invalid")
+    val body = content.substring(34)
+    var reader = BuilderWireReaderV1.create(body)
+    if reader.reason != "": return Err(reader.reason)
+    val index_read_root = reader.scalar()
+    val index_digest = reader.scalar()
+    val producer_digest = reader.scalar()
+    val root_generation = reader.scalar()
+    val variant_digest = reader.scalar()
+    val revision = reader.scalar()
+    val commit = reader.scalar()
+    val tree = reader.scalar()
+    val inventory_digest = reader.scalar()
+    val snapshot_digest = reader.scalar()
+    val full_source_digest = reader.scalar()
+    val group_id = reader.scalar()
+    val attempt = reader.number(100, false)
+    val scc_count = reader.number(4096, false)
+    var scc_ids: [text] = []
+    var cursor = 0
+    while cursor < scc_count and reader.reason == "":
+        scc_ids = scc_ids.push(reader.scalar())
+        cursor = cursor + 1
+    val source_count = reader.number(4096, false)
+    var source_entries: [PackageModuleIndexEntryV1] = []
+    cursor = 0
+    while cursor < source_count and reader.reason == "":
+        val entry = package_module_index_entry_decode_v1(reader.scalar())
+        if entry == nil:
+            return Err("native-group-route-source-entry-invalid")
+        source_entries = source_entries.push(entry!)
+        cursor = cursor + 1
+    val archive_count = reader.number(4096, false)
+    var archives: [PackageArchiveAdmissionV1] = []
+    cursor = 0
+    while cursor < archive_count and reader.reason == "":
+        val package_identity = reader.scalar()
+        val member_count = reader.number(65536, false)
+        var entries: [PackageModuleIndexEntryV1] = []
+        var module_ids: [text] = []
+        var member_index = 0
+        while member_index < member_count and reader.reason == "":
+            val entry = package_module_index_entry_decode_v1(reader.scalar())
+            if entry == nil:
+                return Err("native-group-route-archive-entry-invalid")
+            entries = entries.push(entry!)
+            module_ids = module_ids.push(entry!.module_identity)
+            member_index = member_index + 1
+        val archive_path = reader.scalar()
+        val receipt = package_archive_receipt_decode_v1(reader.scalar())
+        if receipt == nil:
+            return Err("native-group-route-archive-receipt-invalid")
+        if receipt!.package_key != package_identity or
+                archive_path != cas_blob_path(
+                    index_read_root, receipt!.archive_digest):
+            return Err("native-group-route-archive-receipt-invalid")
+        val load = PackageArchiveLoadV1(
+            true, "ok", false, archive_path, receipt)
+        archives = archives.push(PackageArchiveAdmissionV1(
+            package_identity, canonical_identity_sort_texts(module_ids),
+            entries, archive_path, load))
+        cursor = cursor + 1
+    if reader.complete_error() != "":
+        return Err("native-group-route-{reader.complete_error()}")
+    val route = NativeGroupWarmRouteV1(
+        index_read_root, index_digest, producer_digest, root_generation,
+        variant_digest, revision, commit, tree, inventory_digest,
+        snapshot_digest, full_source_digest, group_id, attempt, scc_ids,
+        source_entries, archives)
+    if native_group_warm_route_encode_v1(route) != content:
+        return Err("native-group-route-noncanonical")
+    Ok(route)
+
+fn native_group_warm_route_publish_v1(
+    state_root: text,
+    index_read_root: text,
+    inventory: NativeGroupSccInventoryV1,
+    group_scc_ids: [text],
+    group_id: text
+) -> Result<NativeGroupWarmRoutePublicationV1, text>:
+    val built = native_group_warm_route_build_v1(
+        index_read_root, inventory, group_scc_ids, group_id)
+    if built.is_err(): return Err(built.unwrap_err())
+    _native_group_warm_route_publish_record_v1(state_root, built.unwrap())
+
+fn _native_group_warm_route_publish_record_v1(
+    state_root: text, route: NativeGroupWarmRouteV1
+) -> Result<NativeGroupWarmRoutePublicationV1, text>:
+    val encoded = native_group_warm_route_encode_v1(route)
+    if state_root == "" or encoded == "":
+        return Err("native-group-route-encode-or-root-invalid")
+    val digest = sha256_text(encoded)
+    val directory = "{state_root}/routes"
+    if not rt_dir_create_all(directory):
+        return Err("native-group-route-directory-unavailable")
+    val path = "{directory}/{digest}.route"
+    if not file_create_exclusive(path, encoded):
+        val prior = file_read_regular_no_follow_bounded(
+            path, NATIVE_GROUP_WARM_ROUTE_MAX_BYTES_V1)
+        if val Err(_) = prior:
+            return Err("native-group-route-publish-conflict")
+        if prior.unwrap() != encoded:
+            return Err("native-group-route-publish-conflict")
+    val admitted = native_group_warm_route_read_v1(path, digest)
+    if admitted.is_err():
+        return Err("native-group-route-publish-readback-invalid")
+    Ok(NativeGroupWarmRoutePublicationV1(path, digest, route))
+
+# A retry can only remove complete SCCs whose inputs do not depend on another
+# removed source entry. All archive admissions come from the original compact
+# route, so this path never opens the full module index.
+fn native_group_warm_route_publish_retry_v1(
+    state_root: text,
+    original_route_path: text,
+    original_route_digest: text,
+    failed_members: [NativeGroupMemberV1],
+    next_attempt: i64
+) -> Result<NativeGroupWarmRoutePublicationV1, text>:
+    val loaded = native_group_warm_route_read_v1(
+        original_route_path, original_route_digest)
+    if loaded.is_err(): return Err(loaded.unwrap_err())
+    val original = loaded.unwrap()
+    if next_attempt != original.attempt + 1 or next_attempt > 100 or
+            failed_members.len() == 0 or
+            failed_members.len() > original.source_entries.len():
+        return Err("native-group-retry-attempt-or-members-invalid")
+    var original_by_module: Dict<text, i64> = {}
+    var original_scc_counts: Dict<text, i64> = {}
+    var cursor = 0
+    for entry in original.source_entries:
+        original_by_module[entry.module_identity] = cursor
+        val count = if original_scc_counts.has(entry.scc_identity):
+            original_scc_counts[entry.scc_identity]
+        else:
+            0
+        original_scc_counts[entry.scc_identity] = count + 1
+        cursor = cursor + 1
+    var selected: Dict<text, bool> = {}
+    var selected_scc_counts: Dict<text, i64> = {}
+    var source_entries: [PackageModuleIndexEntryV1] = []
+    for member in failed_members:
+        var found: PackageModuleIndexEntryV1? = nil
+        for entry in original.source_entries:
+            if entry.source_identity == member.source_path:
+                found = entry
+                break
+        if found == nil:
+            return Err("native-group-retry-member-not-in-original-route")
+        val entry = found!
+        val expected_module_id = sha256_text(
+            "simple/native-group-module/v1|" +
+            "{entry.module_identity.len()}:{entry.module_identity}")
+        if (member.module_id != expected_module_id or
+                member.scc_id != entry.scc_identity or
+                member.source_digest != entry.source_digest or
+                selected.has(entry.module_identity)):
+            return Err("native-group-retry-member-binding-mismatch")
+        selected[entry.module_identity] = true
+        val count = if selected_scc_counts.has(entry.scc_identity):
+            selected_scc_counts[entry.scc_identity]
+        else:
+            0
+        selected_scc_counts[entry.scc_identity] = count + 1
+        source_entries = source_entries.push(entry)
+    for scc_id in selected_scc_counts.keys():
+        if selected_scc_counts[scc_id] != original_scc_counts[scc_id]:
+            return Err("native-group-retry-incomplete-scc:{scc_id}")
+    var scc_ids: [text] = []
+    for scc_id in original.group_scc_ids:
+        if selected_scc_counts.has(scc_id):
+            scc_ids = scc_ids.push(scc_id)
+    var archived_by_module: Dict<text, i64> = {}
+    var archive_index = 0
+    for admission in original.archive_admissions:
+        for entry in admission.module_entries:
+            archived_by_module[entry.module_identity] = archive_index
+        archive_index = archive_index + 1
+    var pending: [text] = []
+    for entry in source_entries:
+        for imported in entry.direct_imports:
+            pending = pending.push(imported)
+    var visited: Dict<text, bool> = {}
+    var needed_archive: Dict<i64, bool> = {}
+    cursor = 0
+    while cursor < pending.len():
+        val imported = pending[cursor]
+        cursor = cursor + 1
+        if visited.has(imported): continue
+        visited[imported] = true
+        if selected.has(imported): continue
+        if original_by_module.has(imported):
+            return Err("native-group-retry-dependency-omitted:{imported}")
+        if not archived_by_module.has(imported):
+            return Err("native-group-retry-dependency-unavailable:{imported}")
+        val index = archived_by_module[imported]
+        if needed_archive.has(index): continue
+        needed_archive[index] = true
+        for entry in original.archive_admissions[index].module_entries:
+            for next_import in entry.direct_imports:
+                pending = pending.push(next_import)
+    var admissions: [PackageArchiveAdmissionV1] = []
+    archive_index = 0
+    for admission in original.archive_admissions:
+        if needed_archive.has(archive_index):
+            admissions = admissions.push(admission)
+        archive_index = archive_index + 1
+    val retry = NativeGroupWarmRouteV1(
+        original.index_read_root, original.index_digest,
+        original.producer_digest, original.root_generation,
+        original.variant_digest, original.scv_revision_id,
+        original.scv_commit_id, original.scv_tree_id,
+        original.scv_source_inventory_digest,
+        original.source_snapshot_digest,
+        original.full_source_authority_digest,
+        original.group_id, next_attempt, scc_ids,
+        source_entries, admissions)
+    _native_group_warm_route_publish_record_v1(state_root, retry)
+
+fn native_group_warm_route_read_v1(
+    path: text, expected_digest: text
+) -> Result<NativeGroupWarmRouteV1, text>:
+    if path == "" or not builder_digest_valid_v1(expected_digest):
+        return Err("native-group-route-read-authority-invalid")
+    val loaded = file_read_regular_no_follow_bounded(
+        path, NATIVE_GROUP_WARM_ROUTE_MAX_BYTES_V1)
+    if val Err(_) = loaded:
+        return Err("native-group-route-unreadable")
+    val content = loaded.unwrap()
+    if sha256_text(content) != expected_digest:
+        return Err("native-group-route-digest-mismatch")
+    native_group_warm_route_decode_v1(content)
+
+fn native_group_warm_route_index_route_v1(
+    route: NativeGroupWarmRouteV1, scv_snapshot_root: text
+) -> Result<PackageIndexRouteV1, text>:
+    if scv_snapshot_root == "" or route.source_entries.len() == 0:
+        return Err("native-group-route-snapshot-or-members-invalid")
+    var entries = route.source_entries
+    for admission in route.archive_admissions:
+        for entry in admission.module_entries:
+            entries = entries.push(entry)
+    var by_module: Dict<text, i64> = {}
+    var module_ids: [text] = []
+    var index = 0
+    for entry in entries:
+        if by_module.has(entry.module_identity):
+            return Err("native-group-route-module-duplicate")
+        by_module[entry.module_identity] = index
+        module_ids = module_ids.push(entry.module_identity)
+        index = index + 1
+    var sorted_entries: [PackageModuleIndexEntryV1] = []
+    for module_id in canonical_identity_sort_texts(module_ids):
+        sorted_entries = sorted_entries.push(entries[by_module[module_id]])
+    val reduced = PackageModuleIndexGenerationV1(
+        PACKAGE_MODULE_INDEX_SCHEMA_V2, route.producer_digest,
+        route.root_generation, route.scv_revision_id, route.scv_commit_id,
+        route.scv_tree_id, route.scv_source_inventory_digest,
+        sorted_entries, route.variant_digest)
+    var source_paths: [text] = []
+    var dirty: [DirtyModuleRecordV1] = []
+    var packages: [text] = []
+    for entry in route.source_entries:
+        val admitted = dirty_module_record_admit_v1(
+            reduced, entry, scv_snapshot_root, route.scv_revision_id,
+            route.scv_tree_id, route.scv_source_inventory_digest,
+            route.producer_digest, route.root_generation,
+            route.variant_digest)
+        if admitted.is_err():
+            return Err("native-group-route-dirty-source-rejected:{entry.source_identity}")
+        source_paths = source_paths.push(entry.source_identity)
+        dirty = dirty.push(admitted.unwrap())
+        packages = packages.push(entry.package_identity)
+    val canonical_dirty = dirty_module_records_sort_validate_v1(dirty)
+    if canonical_dirty.is_err():
+        return Err("native-group-route-dirty-records-invalid")
+    Ok(PackageIndexRouteV1(
+        true, "ok", source_paths, canonical_dirty.unwrap(),
+        canonical_identity_sort_texts(packages), route.archive_admissions))
+
+export NativeGroupWarmRouteV1, NativeGroupWarmRoutePublicationV1
+export native_group_warm_route_build_v1, native_group_warm_route_encode_v1
+export native_group_warm_route_decode_v1, native_group_warm_route_publish_v1
+export native_group_warm_route_publish_retry_v1
+export native_group_warm_route_read_v1, native_group_warm_route_index_route_v1

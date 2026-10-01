@@ -1,0 +1,186 @@
+use std.spec.{describe, it, expect}
+use std.common.crypto.sha256.{sha256_text}
+use std.scv.compile_source_inventory_core.{
+    CompileSourceInventoryEntryV1, CompileSourceInventoryV1,
+    compile_source_inventory_digest_v1
+}
+use compiler.driver.cache.package_module_index.{
+    PackageModuleIndexEntryV1, PackageModuleIndexGenerationV1,
+    package_module_index_entry_action_digest_v1
+}
+use compiler.driver.cache.package_tldr_metadata.{
+    ConfigVariantKeyV1, config_variant_digest_v1
+}
+use compiler.driver.cache.package_config_variant_receipt.{
+    PackageConfigVariantReceiptV1,
+    package_config_variant_receipt_encode_v1,
+    package_config_variant_receipt_decode_v1
+}
+use compiler.driver.driver_build.native_group_scc_inventory.{
+    NativeGroupSccInventoryV1, native_group_scc_from_index_v1
+}
+use compiler.driver.driver_build.native_group_warm_route.{
+    NativeGroupWarmRouteV1, native_group_warm_route_encode_v1,
+    native_group_warm_route_decode_v1
+}
+
+fn scc_source_entry(name: text) -> CompileSourceInventoryEntryV1:
+    val digest = sha256_text("source:{name}")
+    CompileSourceInventoryEntryV1(
+        "src/{name}.spl", digest, digest, digest, digest, digest, 8)
+
+fn scc_source_inventory() -> CompileSourceInventoryV1:
+    CompileSourceInventoryV1(1, 4, [
+        scc_source_entry("a"), scc_source_entry("b"),
+        scc_source_entry("c"), scc_source_entry("d")])
+
+fn scc_variant() -> ConfigVariantKeyV1:
+    ConfigVariantKeyV1(
+        target_triple: "x86_64-pc-windows-msvc",
+        backend: "llvm",
+        features: [],
+        build_mode: "release",
+        language_abi: "simple-v1",
+        normalized_options: [],
+        environment_inputs: [])
+
+fn scc_index_entry(
+    name: text, scc: text, imports: [text], dependents: [text]
+) -> PackageModuleIndexEntryV1:
+    PackageModuleIndexEntryV1(
+        package_identity: "package_{name}",
+        module_identity: "module.{name}",
+        source_identity: "src/{name}.spl",
+        source_digest: sha256_text("source:{name}"),
+        smf_metadata_digest: sha256_text("smf:{name}"),
+        export_digest: sha256_text("export:{name}"),
+        abi_digest: sha256_text("abi:{name}"),
+        initializer_digest: sha256_text("initializer:{name}"),
+        provider_digest: sha256_text("provider:{name}"),
+        action_digest: sha256_text("pending"),
+        manifest_digest: sha256_text("manifest:{name}"),
+        scc_identity: scc,
+        direct_imports: imports,
+        reverse_dependents: dependents)
+
+fn scc_index_generation() -> PackageModuleIndexGenerationV1:
+    var generation = PackageModuleIndexGenerationV1(
+        schema_version: 2,
+        producer_digest: sha256_text("producer"),
+        root_generation: "root-1",
+        scv_revision_id: "scv-revision-v1-test",
+        scv_commit_id: "scv-commit-v1-test",
+        scv_tree_id: "scv-tree-v1-test",
+        inventory_digest: compile_source_inventory_digest_v1(
+            scc_source_inventory()),
+        entries: [
+            scc_index_entry("a", "scc_ab", ["module.b"], ["module.b", "module.c"]),
+            scc_index_entry("b", "scc_ab", ["module.a"], ["module.a"]),
+            scc_index_entry("c", "scc_c", ["module.a"], []),
+            scc_index_entry("d", "scc_d", [], [])
+        ],
+        variant_digest: config_variant_digest_v1(scc_variant()))
+    var index = 0
+    while index < generation.entries.len():
+        var entry = generation.entries[index]
+        entry.action_digest = package_module_index_entry_action_digest_v1(
+            generation, entry)
+        generation.entries[index] = entry
+        index = index + 1
+    generation
+
+fn scc_admit(paths: [text]) -> Result<NativeGroupSccInventoryV1, text>:
+    native_group_scc_from_index_v1(
+        scc_index_generation(), sha256_text("index"),
+        scc_source_inventory(), paths, sha256_text("producer"),
+        scc_variant(),
+        "build/scv/snapshots/revision", "revision", "commit", "tree",
+        sha256_text("snapshot-rows"),
+        compile_source_inventory_digest_v1(scc_source_inventory()),
+        sha256_text("full-source-authority"))
+
+describe "compiler-owned grouped native SCC inventory":
+    it "round-trips an attempt-bound compact warm route":
+        val generation = scc_index_generation()
+        val route = NativeGroupWarmRouteV1(
+            "D:/stage2/index", sha256_text("index"),
+            generation.producer_digest, generation.root_generation,
+            generation.variant_digest, generation.scv_revision_id,
+            generation.scv_commit_id, generation.scv_tree_id,
+            generation.inventory_digest, sha256_text("snapshot-rows"),
+            sha256_text("full-source-authority"),
+            "group-d", 1, ["scc_d"], [generation.entries[3]], [])
+        val encoded = native_group_warm_route_encode_v1(route)
+        expect(encoded != "").to_equal(true)
+        val decoded = native_group_warm_route_decode_v1(encoded)
+        expect(decoded.is_ok()).to_equal(true)
+        expect(decoded.unwrap().attempt).to_equal(1)
+        expect(decoded.unwrap().source_entries.len()).to_equal(1)
+
+    it "round-trips the compiler-authored seven-field variant receipt":
+        val receipt = PackageConfigVariantReceiptV1(
+            sha256_text("index"), sha256_text("producer"),
+            config_variant_digest_v1(scc_variant()), scc_variant())
+        val encoded = package_config_variant_receipt_encode_v1(receipt)
+        expect(encoded != "").to_equal(true)
+        val decoded = package_config_variant_receipt_decode_v1(encoded)
+        expect(decoded.is_ok()).to_equal(true)
+        expect(decoded.unwrap().variant.backend).to_equal("llvm")
+        expect(decoded.unwrap().index_digest).to_equal(sha256_text("index"))
+        expect(package_config_variant_receipt_decode_v1(
+            encoded + "\noption=hidden").is_err()).to_equal(true)
+
+    it "orders complete SCCs by resolved imports and maps every path once":
+        val admitted = scc_admit([
+            "src/c.spl", "src/d.spl", "src/b.spl", "src/a.spl"])
+        expect(admitted.is_ok()).to_equal(true)
+        val value = admitted.unwrap()
+        expect(value.groups.len()).to_equal(3)
+        expect(value.groups[0].scc_id).to_equal("scc_ab")
+        expect(value.groups[0].members.len()).to_equal(2)
+        expect(value.groups[0].members[0].source_path).to_equal("src/a.spl")
+        expect(value.groups[0].members[1].source_path).to_equal("src/b.spl")
+        expect(value.groups[1].scc_id).to_equal("scc_c")
+        expect(value.groups[1].dependency_scc_ids).to_equal(["scc_ab"])
+        expect(value.members.len()).to_equal(4)
+        expect(value.members[0].module_id.len()).to_equal(64)
+        expect(value.inventory_digest).to_equal(sha256_text(
+            "src/c.spl\nsrc/d.spl\nsrc/b.spl\nsrc/a.spl\n"))
+
+    it "rejects a partial full-inventory graph":
+        val rejected = scc_admit(["src/a.spl", "src/c.spl", "src/d.spl"])
+        expect(rejected.is_err()).to_equal(true)
+        expect(rejected.unwrap_err()).to_equal("native-scc-index-coverage-incomplete")
+
+    it "rejects duplicate and unindexed paths":
+        val repeated = scc_admit([
+            "src/a.spl", "src/a.spl", "src/c.spl", "src/d.spl"])
+        expect(repeated.unwrap_err()).to_start_with("native-scc-path-duplicate")
+        val unknown = scc_admit([
+            "src/a.spl", "src/b.spl", "src/c.spl", "src/unknown.spl"])
+        expect(unknown.unwrap_err()).to_start_with("native-scc-path-unindexed")
+
+    it "rejects a producer mismatch before scheduling":
+        val rejected = native_group_scc_from_index_v1(
+            scc_index_generation(), sha256_text("index"),
+            scc_source_inventory(), ["src/a.spl", "src/b.spl"],
+            sha256_text("other-producer"), scc_variant(),
+            "build/scv/snapshots/revision", "revision", "commit", "tree",
+            sha256_text("snapshot-rows"),
+            compile_source_inventory_digest_v1(scc_source_inventory()),
+            sha256_text("full-source-authority"))
+        expect(rejected.unwrap_err()).to_equal("native-scc-producer-mismatch")
+
+    it "rejects a compiler configuration variant mismatch":
+        var other = scc_variant()
+        other.backend = "cranelift"
+        val rejected = native_group_scc_from_index_v1(
+            scc_index_generation(), sha256_text("index"),
+            scc_source_inventory(), [
+                "src/a.spl", "src/b.spl", "src/c.spl", "src/d.spl"],
+            sha256_text("producer"), other,
+            "build/scv/snapshots/revision", "revision", "commit", "tree",
+            sha256_text("snapshot-rows"),
+            compile_source_inventory_digest_v1(scc_source_inventory()),
+            sha256_text("full-source-authority"))
+        expect(rejected.unwrap_err()).to_equal("native-scc-variant-mismatch")
