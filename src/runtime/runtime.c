@@ -52,6 +52,7 @@ int64_t rt_simple_abi_version_deferred(void) {
 #endif
 
 #include <stdio.h>
+#include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
@@ -74,6 +75,10 @@ int64_t rt_simple_abi_version_deferred(void) {
 #include <io.h>
 #include <time.h>
 #include <sys/types.h>
+#ifndef PSAPI_VERSION
+#define PSAPI_VERSION 2
+#endif
+#include <psapi.h>
 /* MSVC/clang-cl compatibility shims. Windows-only: every definition below is
  * inside this `#else` branch of `#ifndef _WIN32`, so the POSIX build is
  * byte-identical. Without them this TU has never compiled on Windows at all
@@ -2382,7 +2387,22 @@ int rt_mem_snapshot_close(int64_t fd) {
 
 static int64_t rt_process_status_kib(const char* key) {
 #if defined(_WIN32)
-    (void)key; return -1;
+    /* Self-process working set is a resident observation, not the group
+     * JobObject's aggregate committed charge. Keep those metrics separate. */
+#if defined(_WIN64)
+    _Static_assert(sizeof(PROCESS_MEMORY_COUNTERS_EX) == 80,
+        "Win64 PROCESS_MEMORY_COUNTERS_EX layout changed");
+    _Static_assert(offsetof(PROCESS_MEMORY_COUNTERS_EX, WorkingSetSize) == 16 &&
+        offsetof(PROCESS_MEMORY_COUNTERS_EX, PeakWorkingSetSize) == 8,
+        "Win64 process working-set offsets changed");
+#endif
+    PROCESS_MEMORY_COUNTERS_EX counters = {0};
+    counters.cb = (DWORD)sizeof(counters);
+    if (!K32GetProcessMemoryInfo(GetCurrentProcess(),
+            (PROCESS_MEMORY_COUNTERS*)&counters, counters.cb)) return -1;
+    if (strcmp(key, "VmRSS:") == 0) return (int64_t)(counters.WorkingSetSize / 1024);
+    if (strcmp(key, "VmHWM:") == 0) return (int64_t)(counters.PeakWorkingSetSize / 1024);
+    return -1;
 #else
     FILE* f = fopen("/proc/self/status", "r");
     if (!f) return -1;
