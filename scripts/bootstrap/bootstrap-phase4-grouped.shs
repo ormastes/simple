@@ -126,8 +126,10 @@ esac
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P) || die "repository root unavailable"
 prepare="$repo_root/scripts/bootstrap/prepare-phase4-native-groups.shs"
 shared_parse_root_check="$repo_root/scripts/bootstrap/lib/shared-parse-cas-root.shs"
+shared_parse_source_check="$repo_root/scripts/bootstrap/lib/shared-parse-source-authority.shs"
 regular "$prepare" || die "tracked grouped preparer unavailable"
 regular "$shared_parse_root_check" || die "shared parse root checker unavailable"
+regular "$shared_parse_source_check" || die "shared parse source checker unavailable"
 mkdir -p "$root" || die "managed phase root unavailable"
 receipt="$root/completion.env"
 
@@ -223,8 +225,13 @@ build_binary() {
   verify_image_set
   sh "$shared_parse_root_check" "$shared_parse_cas_root" "$shared_parse_cas_root" \
     || die "shared parse CAS root changed before $id manager spawn"
+  sh "$shared_parse_source_check" "$source_authority" "$source_authority_digest" \
+    || die "shared parse source authority changed before $id manager spawn"
   SIMPLE_BUILD_PRESPAWN_REQUIRED_MEMORY_BYTES="$((memory_bytes + reserve_bytes))" \
   SIMPLE_SHARED_PARSE_CAS_ROOT="$shared_parse_cas_root" \
+  SIMPLE_SHARED_PARSE_SOURCE_ROOT="$source_root" \
+  SIMPLE_SHARED_PARSE_SOURCE_AUTHORITY_PATH="$source_authority" \
+  SIMPLE_SHARED_PARSE_SOURCE_AUTHORITY_DIGEST="$source_authority_digest" \
   "$builder_program" run --manifest "$job_root/manifest.sdn" \
     --state "$job_root/state" --source-root "$source_root" \
     --output-root "$job_root" || die "$id manager task failed"
@@ -290,8 +297,13 @@ build_index() {
   verify_image_set
   sh "$shared_parse_root_check" "$shared_parse_cas_root" "$shared_parse_cas_root" \
     || die "shared parse CAS root changed before $task_phase/$backend index spawn"
+  sh "$shared_parse_source_check" "$source_authority" "$source_authority_digest" \
+    || die "shared parse source authority changed before $task_phase/$backend index spawn"
   SIMPLE_BUILD_PRESPAWN_REQUIRED_MEMORY_BYTES="$((memory_bytes + reserve_bytes))" \
   SIMPLE_SHARED_PARSE_CAS_ROOT="$shared_parse_cas_root" \
+  SIMPLE_SHARED_PARSE_SOURCE_ROOT="$source_root" \
+  SIMPLE_SHARED_PARSE_SOURCE_AUTHORITY_PATH="$source_authority" \
+  SIMPLE_SHARED_PARSE_SOURCE_AUTHORITY_DIGEST="$source_authority_digest" \
   "$builder_program" run --manifest "$job_root/manifest.sdn" \
     --state "$state_root" --source-root "$input_root" --output-root "$output_root" \
     || die "$backend managed index build failed"
@@ -356,7 +368,10 @@ regular "$producer" || die "Stage 2 producer missing"
 producer_sha=$(bootstrap_stage3_manifest_value candidate_sha256 "$producer_receipt") || die "Stage 2 producer hash absent"
 [ "$(hash_file "$producer")" = "$producer_sha" ] || die "Stage 2 producer changed"
 source_authority=$(bootstrap_stage3_manifest_value source_snapshot_path "$producer_receipt") || die "Stage 2 source authority absent"
+source_authority_digest=$(bootstrap_stage3_manifest_value source_snapshot_sha256 "$producer_receipt") || die "Stage 2 source authority digest absent"
 regular "$source_authority" || die "Stage 2 source authority missing"
+sh "$shared_parse_source_check" "$source_authority" "$source_authority_digest" \
+  || die "Stage 2 source authority bytes differ before manager dispatch"
 runtime_snapshot=$(bootstrap_stage3_manifest_value runtime_snapshot_path "$producer_receipt") || die "runtime authority absent"
 runtime_authority=$(bootstrap_stage3_manifest_value runtime_authority_path "$producer_receipt") || die "runtime root absent"
 tool_authority=$(bootstrap_stage3_manifest_value tool_authority_path "$producer_receipt") || die "tool authority absent"
