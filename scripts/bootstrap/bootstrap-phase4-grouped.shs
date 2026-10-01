@@ -8,7 +8,7 @@ absolute() { case "$1" in /*|[A-Za-z]:/*) return 0 ;; *) return 1 ;; esac; }
 positive() { case "$1" in ''|*[!0-9]*|0) return 1 ;; *) [ "$1" -gt 0 ] 2>/dev/null ;; esac; }
 hash_file() { sha256sum "$1" | cut -d ' ' -f 1; }
 
-producer_receipt= scv_receipt= llvm_variant_receipt= cranelift_variant_receipt= runtime_std_authority= index_read_root= source_root= source_inventory= module_inventory=
+producer_receipt= scv_receipt= source_root= source_inventory= module_inventory=
 root= template= manifest_program= builder_program= group_program= group_worker= group_broker= index_program=
 llvm_index_config= cranelift_index_config=
 threads= memory_bytes= reserve_bytes= target= group_size= max_attempts= poll_ms= lifetime_ms=
@@ -17,10 +17,6 @@ for arg in "$@"; do
   case "$arg" in
     --producer-receipt=*) producer_receipt=${arg#*=} ;;
     --scv-receipt=*) scv_receipt=${arg#*=} ;;
-    --llvm-variant-receipt=*) llvm_variant_receipt=${arg#*=} ;;
-    --cranelift-variant-receipt=*) cranelift_variant_receipt=${arg#*=} ;;
-    --runtime-std-authority=*) runtime_std_authority=${arg#*=} ;;
-    --index-read-root=*) index_read_root=${arg#*=} ;;
     --source-root=*) source_root=${arg#*=} ;;
     --source-inventory=*) source_inventory=${arg#*=} ;;
     --module-inventory=*) module_inventory=${arg#*=} ;;
@@ -47,13 +43,13 @@ for arg in "$@"; do
     *) die "unknown option: $arg" ;;
   esac
 done
-for path in "$producer_receipt" "$scv_receipt" "$llvm_variant_receipt" "$cranelift_variant_receipt" "$runtime_std_authority" "$index_read_root" "$source_root" "$source_inventory" \
+for path in "$producer_receipt" "$scv_receipt" "$source_root" "$source_inventory" \
     "$module_inventory" "$root" "$template" "$manifest_program" "$builder_program" \
     "$group_program" "$group_worker" "$group_broker" "$index_program" \
     "$llvm_index_config" "$cranelift_index_config"; do
   [ -n "$path" ] && absolute "$path" || die "absolute path required: $path"
 done
-for path in "$producer_receipt" "$scv_receipt" "$llvm_variant_receipt" "$cranelift_variant_receipt" "$runtime_std_authority" "$source_inventory" "$module_inventory" \
+for path in "$producer_receipt" "$scv_receipt" "$source_inventory" "$module_inventory" \
     "$template" "$manifest_program" "$builder_program" "$group_program" \
     "$group_worker" "$group_broker" "$index_program" \
     "$llvm_index_config" "$cranelift_index_config"; do regular "$path" || die "missing pinned input: $path"; done
@@ -84,16 +80,13 @@ receipt="$root/completion.env"
 # can start. Its SCV check is compiled and refuses absent warm source metadata.
 prepare_backend() {
   backend=$1
-  case "$backend" in
-    llvm) variant_receipt=$llvm_variant_receipt ;;
-    cranelift) variant_receipt=$cranelift_variant_receipt ;;
-    *) die "unsupported backend" ;;
-  esac
+  case "$backend" in llvm|cranelift) ;; *) die "unsupported backend" ;; esac
+  index_handoff="$root/phase4/index/$backend/handoff.sdn"
+  regular "$index_handoff" || die "$backend typed index handoff unavailable"
   backend_root="$root/modules/$backend"
   sh "$prepare" --phase=phase4 --producer-receipt="$producer_receipt" \
-    --scv-receipt="$scv_receipt" --variant-receipt="$variant_receipt" \
-    --runtime-std-authority="$runtime_std_authority" --source-root="$source_root" \
-    --index-read-root="$index_read_root" \
+    --scv-receipt="$scv_receipt" --index-handoff="$index_handoff" \
+    --index-program="$index_program" --source-root="$source_root" \
     --inventory="$module_inventory" --backend="$backend" \
     --output-root="$backend_root" --manager-program="$group_program" \
     --worker-program="$group_worker" --broker-program="$group_broker" \
@@ -219,10 +212,6 @@ build_index() {
     || die "$backend V2 index receipt admission failed"
   regular "$job_root/handoff.sdn" \
     || die "$backend typed index handoff unavailable"
-  # The group preparer must consume this typed handoff before dispatch. Its
-  # current index-read-root option cannot bind the retained attempt CAS to
-  # this verified manager task, so no external read-root fallback is allowed.
-  die "$backend group preparer lacks typed index handoff admission"
 }
 
 # Read the exact producer from the verified admission receipt; never use the

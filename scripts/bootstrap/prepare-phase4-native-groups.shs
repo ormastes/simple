@@ -10,6 +10,7 @@ positive() { case "$1" in ''|*[!0-9]*|0) return 1 ;; *) [ "$1" -gt 0 ] 2>/dev/nu
 field() { bootstrap_stage3_manifest_value "$1" "$2"; }
 
 producer_receipt= scv_receipt= variant_receipt= runtime_std_authority= index_read_root= source_root= inventory= backend= phase= output_root= manager_program=
+index_program= index_handoff=
 worker_program= broker_program= threads= memory_bytes= manifest= target=
 reserve_bytes= group_size= max_attempts= poll_ms= lifetime_ms=
 estimated_group_disk_bytes= minimum_free_disk_bytes=
@@ -17,9 +18,8 @@ for arg in "$@"; do
   case "$arg" in
     --producer-receipt=*) producer_receipt=${arg#*=} ;;
     --scv-receipt=*) scv_receipt=${arg#*=} ;;
-    --variant-receipt=*) variant_receipt=${arg#*=} ;;
-    --runtime-std-authority=*) runtime_std_authority=${arg#*=} ;;
-    --index-read-root=*) index_read_root=${arg#*=} ;;
+    --index-program=*) index_program=${arg#*=} ;;
+    --index-handoff=*) index_handoff=${arg#*=} ;;
     --source-root=*) source_root=${arg#*=} ;;
     --inventory=*) inventory=${arg#*=} ;;
     --backend=*) backend=${arg#*=} ;;
@@ -42,17 +42,34 @@ for arg in "$@"; do
     *) die "unknown option: $arg" ;;
   esac
 done
-for path in "$producer_receipt" "$scv_receipt" "$variant_receipt" "$runtime_std_authority" "$index_read_root" "$source_root" "$inventory" "$output_root" \
+for path in "$producer_receipt" "$scv_receipt" "$index_program" "$index_handoff" "$source_root" "$inventory" "$output_root" \
     "$manager_program" "$worker_program" "$broker_program" "$manifest"; do
   [ -n "$path" ] && absolute "$path" || die "absolute path required: $path"
   case "$path" in *'
 '*|*'='*) die "path contains an unsupported config character" ;; esac
 done
-for path in "$producer_receipt" "$scv_receipt" "$variant_receipt" "$runtime_std_authority" "$inventory" "$manager_program" "$worker_program" "$broker_program"; do
+for path in "$producer_receipt" "$scv_receipt" "$index_program" "$index_handoff" "$inventory" "$manager_program" "$worker_program" "$broker_program"; do
   regular "$path" || die "regular pinned input required: $path"
 done
 [ -d "$source_root" ] && [ ! -L "$source_root" ] || die "source root is not a regular directory"
-[ -d "$index_read_root" ] && [ ! -L "$index_read_root" ] || die "admitted index read root unavailable"
+index_handoff_digest=$(sha256sum "$index_handoff" | cut -d ' ' -f 1) || die "index handoff hash unavailable"
+handoff_field() {
+  "$index_program" native-groups-index-handoff-field --handoff "$index_handoff" \
+    --digest "$index_handoff_digest" --field "$1"
+}
+index_read_root=$(handoff_field index_read_root) || die "typed index read root unavailable"
+variant_receipt=$(handoff_field variant_receipt_path) || die "typed variant receipt unavailable"
+variant_receipt_digest=$(handoff_field variant_receipt_digest) || die "typed variant digest unavailable"
+runtime_std_authority=$(handoff_field runtime_std_authority_path) || die "typed runtime/std authority unavailable"
+runtime_std_authority_digest=$(handoff_field runtime_std_authority_digest) || die "typed runtime/std digest unavailable"
+for path in "$index_read_root" "$variant_receipt" "$runtime_std_authority"; do
+  absolute "$path" || die "typed index authority path is not absolute"
+  case "$path" in *'
+'*|*'='*) die "typed index authority path contains unsupported characters" ;; esac
+done
+[ -d "$index_read_root" ] && [ ! -L "$index_read_root" ] || die "typed index read root unavailable"
+regular "$variant_receipt" && regular "$runtime_std_authority" \
+  || die "typed index authority receipts unavailable"
 case "$backend" in llvm|cranelift) ;; *) die "backend must be llvm or cranelift" ;; esac
 case "$phase" in phase3|phase4) ;; *) die "phase must be phase3 or phase4" ;; esac
 case "$target" in ''|*' '*|*'='*) die "target is missing or invalid" ;; esac
@@ -93,8 +110,8 @@ bootstrap_stage3_verify_stage2_admission_receipt \
 
 hash_file() { bootstrap_stage3_hash_file "$1"; }
 scv_receipt_digest=$(hash_file "$scv_receipt") || die "SCV receipt hash unavailable"
-variant_receipt_digest=$(hash_file "$variant_receipt") || die "warm-index variant receipt hash unavailable"
-runtime_std_authority_digest=$(hash_file "$runtime_std_authority") || die "runtime/std authority hash unavailable"
+[ "$(hash_file "$variant_receipt")" = "$variant_receipt_digest" ] || die "typed variant receipt changed"
+[ "$(hash_file "$runtime_std_authority")" = "$runtime_std_authority_digest" ] || die "typed runtime/std authority changed"
 [ "$(hash_file "$candidate")" = "$candidate_digest" ] || die "candidate changed"
 [ "$(hash_file "$source_snapshot")" = "$source_digest" ] || die "source authority changed"
 [ "$(hash_file "$runtime_snapshot")" = "$runtime_digest" ] || die "runtime authority changed"
@@ -149,6 +166,7 @@ fi
   printf '%s\n' "scv_receipt_path=$scv_receipt" "scv_receipt_digest=$scv_receipt_digest"
   printf '%s\n' "variant_receipt_path=$variant_receipt" "variant_receipt_digest=$variant_receipt_digest"
   printf '%s\n' "runtime_std_authority_path=$runtime_std_authority" "runtime_std_authority_digest=$runtime_std_authority_digest"
+  printf '%s\n' "index_handoff_path=$index_handoff" "index_handoff_digest=$index_handoff_digest"
   printf '%s\n' "tool_path=$tool_snapshot" "tool_digest=$tool_digest" "runtime_path=$runtime_snapshot" "runtime_digest=$runtime_digest"
   printf '%s\n' "manager_path=$manager_program" "manager_digest=$(hash_file "$manager_program")"
   printf '%s\n' "worker_path=$worker_program" "worker_digest=$(hash_file "$worker_program")"
