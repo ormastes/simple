@@ -1,0 +1,88 @@
+# Bounded parent-owned JobObject/cgroup charge observations. Values describe
+# the whole broker tree; they are not resident bytes or per-thread allocation.
+use std.common.build_manager.codec.{BuilderWireReaderV1, builder_wire_line_v1}
+use std.common.build_manager.contracts.{builder_digest_valid_v1}
+
+struct NativeGroupChargeSampleV1:
+    before_ms: i64
+    after_ms: i64
+    current_bytes: i64
+    peak_bytes: i64
+    active_processes: i64
+    terminal: bool
+
+struct NativeGroupChargeTraceV1:
+    manifest_digest: text
+    complete: bool
+    samples: [NativeGroupChargeSampleV1]
+
+fn native_group_charge_trace_error_v1(trace: NativeGroupChargeTraceV1,
+        memory_limit_bytes: i64) -> text:
+    if not builder_digest_valid_v1(trace.manifest_digest) or
+            memory_limit_bytes < 1 or memory_limit_bytes > 1125899906842624 or
+            trace.samples.len() > 4096:
+        return "invalid group charge trace identity or bound"
+    if trace.complete and trace.samples.len() < 2:
+        return "complete group charge trace lacks samples"
+    var prior_after: i64 = -1
+    var prior_peak: i64 = 0
+    for i in 0..trace.samples.len():
+        val row = trace.samples[i]
+        if row.before_ms < 0 or row.after_ms < row.before_ms or
+                row.current_bytes < 0 or row.peak_bytes < row.current_bytes or
+                row.peak_bytes > memory_limit_bytes or row.active_processes < 0 or
+                row.active_processes > 4096 or row.before_ms < prior_after or
+                row.peak_bytes < prior_peak:
+            return "inconsistent group charge sample"
+        if row.terminal and (i != trace.samples.len() - 1 or
+                row.current_bytes != 0 or row.active_processes != 0):
+            return "invalid terminal group charge sample"
+        prior_after = row.after_ms
+        prior_peak = row.peak_bytes
+    if trace.complete and not trace.samples[trace.samples.len() - 1].terminal:
+        return "complete group charge trace lacks terminal sample"
+    ""
+
+fn native_group_charge_trace_encode_v1(trace: NativeGroupChargeTraceV1,
+        memory_limit_bytes: i64) -> text:
+    if native_group_charge_trace_error_v1(trace, memory_limit_bytes) != "": return ""
+    var rows = "SIMPLE-NATIVE-GROUP-CHARGE-1\n" +
+        builder_wire_line_v1(trace.manifest_digest) +
+        builder_wire_line_v1(if trace.complete: "1" else: "0") +
+        builder_wire_line_v1(str(trace.samples.len()))
+    for row in trace.samples:
+        for field in [str(row.before_ms), str(row.after_ms),
+                str(row.current_bytes), str(row.peak_bytes),
+                str(row.active_processes), if row.terminal: "1" else: "0"]:
+            rows = rows + builder_wire_line_v1(field)
+    rows
+
+fn native_group_charge_trace_decode_v1(payload: text, expected_digest: text,
+        memory_limit_bytes: i64) -> Result<NativeGroupChargeTraceV1, text>:
+    val reader = BuilderWireReaderV1.create(payload)
+    if reader.scalar() != "SIMPLE-NATIVE-GROUP-CHARGE-1":
+        return Err("wrong group charge trace schema")
+    val digest = reader.scalar()
+    val complete_number = reader.number(1, false)
+    val count = reader.number(4096, false)
+    var samples: [NativeGroupChargeSampleV1] = []
+    for sample_index in 0..count:
+        val before = reader.number(1125899906842624, false)
+        val after = reader.number(1125899906842624, false)
+        val current = reader.number(1125899906842624, false)
+        val peak = reader.number(1125899906842624, false)
+        val active = reader.number(4096, false)
+        val terminal = reader.number(1, false)
+        samples = samples.push(NativeGroupChargeSampleV1(before, after,
+            current, peak, active, terminal == 1))
+    val wire_error = reader.complete_error()
+    if wire_error != "": return Err(wire_error)
+    if digest != expected_digest: return Err("group charge trace manifest differs")
+    val trace = NativeGroupChargeTraceV1(digest, complete_number == 1, samples)
+    val invalid = native_group_charge_trace_error_v1(trace, memory_limit_bytes)
+    if invalid != "": return Err(invalid)
+    Ok(trace)
+
+export NativeGroupChargeSampleV1, NativeGroupChargeTraceV1
+export native_group_charge_trace_error_v1, native_group_charge_trace_encode_v1
+export native_group_charge_trace_decode_v1

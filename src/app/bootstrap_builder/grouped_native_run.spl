@@ -5,12 +5,15 @@ use app.bootstrap_builder.grouped_native_worker.{NativeGroupWorkerRequestV1, nat
 use compiler.driver.driver_build.native_group_warm_route.{native_group_warm_route_publish_retry_v1, native_group_warm_route_read_v1}
 use std.common.build_manager.grouped_native_process_policy.{NativeGroupActiveChargeV1,
     native_group_process_budget_v1}
+use std.common.build_manager.grouped_native_charge_evidence.{NativeGroupChargeSampleV1,
+    NativeGroupChargeTraceV1, native_group_charge_trace_encode_v1}
 use std.common.build_manager.grouped_execution_contract.{GroupedActionLeaseV1}
 use std.common.build_manager.group_process_protocol.{GroupProcessInputV1, GroupProcessRequestV1}
 use std.nogc_sync_mut.io.group_process_owner.{GroupProcessOwnerV1, group_process_start_v1, group_process_recover_v1, group_process_poll_v1, group_process_cancel_v1, group_process_collect_reap_v1}
 use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded, file_atomic_write, file_exists, file_is_regular_no_follow, file_hash_sha256, file_size, file_lock, file_unlock}
 use std.nogc_sync_mut.io.dir_ops.{dir_create}
 use std.nogc_sync_mut.io.time_ops.{current_time_ms, sleep_ms}
+use std.io_runtime.{time_now_monotonic_ms}
 use std.nogc_sync_mut.io.sysinfo_ops.{cpu_count_checked}
 use app.io.file_ops.{file_copy, file_rename}
 use std.common.crypto.sha256.{sha256_text}
@@ -276,16 +279,43 @@ fn native_group_reap_v1(run: NativeGroupRunV1, manifest: NativeGroupManifestV1,
     val owner = owner_result?
     val deadline = current_time_ms() + run.lifetime_ms + 30000
     var observation_failures: i64 = 0
+    # These samples are diagnostic evidence, never a substitute for the
+    # broker's terminal/reap authority or the persisted pre-spawn policy.
+    var charge_rows: [NativeGroupChargeSampleV1] = []
+    var charge_incomplete = recover
     while current_time_ms() < deadline:
-        match group_process_poll_v1(owner):
+        val sample_before = time_now_monotonic_ms()
+        val poll = group_process_poll_v1(owner)
+        val sample_after = time_now_monotonic_ms()
+        match poll:
             Ok(observed):
                 observation_failures = 0
+                if sample_before < 0 or sample_after < sample_before or
+                        charge_rows.len() >= 4096:
+                    charge_incomplete = true
+                elif not charge_incomplete:
+                    charge_rows = charge_rows.push(NativeGroupChargeSampleV1(
+                        sample_before, sample_after, observed.memory_current_bytes,
+                        observed.memory_peak_bytes, observed.active_processes,
+                        observed.terminal))
                 if observed.terminal:
                     if not observed.leader_reaped or not observed.tree_empty or observed.active_processes != 0:
                         return Err("group process tree cleanup unproven")
                     val _receipt = group_process_collect_reap_v1(owner, native_group_lease_v1(run, manifest))?
+                    # Only a complete, fresh, bounded trace can later be used
+                    # for calibration. A restart or overflow records an explicit
+                    # invalid flag rather than silently shortening the trace.
+                    val evidence = native_group_charge_trace_encode_v1(
+                        NativeGroupChargeTraceV1(
+                            native_group_manifest_identity_v1(manifest),
+                            not charge_incomplete, charge_rows),
+                        manifest.memory_limit_bytes)
+                    if evidence == "" or not native_group_write_v1(
+                            root + "/broker-charge.sdn", evidence):
+                        print "native group charge evidence unavailable group={manifest.group_id} reason=write-failed"
                     return Ok((observed.exit_code, observed.memory_peak_bytes, observed.timed_out))
             Err(reason):
+                charge_incomplete = true
                 observation_failures = observation_failures + 1
                 if observation_failures >= 3 or reason.contains("retry forbidden"):
                     return Err("group process authority unknown: " + reason)
