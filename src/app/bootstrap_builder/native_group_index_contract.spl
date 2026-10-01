@@ -5,7 +5,8 @@ use compiler.driver.cache.package_tldr_metadata.{ConfigVariantKeyV1,
 use compiler.common.cache.canonical_identity.{canonical_identity_sort_texts}
 use std.common.build_manager.codec.{BuilderWireReaderV1, builder_wire_line_v1}
 use std.common.build_manager.contracts.{builder_digest_valid_v1,
-    builder_identifier_valid_v1, builder_paths_overlap_v1}
+    builder_identifier_valid_v1, builder_paths_overlap_v1,
+    builder_relative_path_valid_v1}
 
 struct NativeGroupIndexConfigV1:
     phase: text
@@ -59,6 +60,10 @@ fn native_group_index_absolute_v1(path: text) -> bool:
         return false
     path.starts_with("/") or (path.len() >= 4 and path[1:2] == ":" and
         (path[2:3] == "/" or path[2:3] == "\\"))
+
+fn native_group_index_private_template_v1(path: text) -> bool:
+    path.starts_with("@WORK@/") and
+        builder_relative_path_valid_v1(path.substring(7))
 
 fn native_group_index_decimal_v1(raw: text, minimum: i64,
         maximum: i64) -> Result<i64, text>:
@@ -131,9 +136,12 @@ fn native_group_index_config_decode_v1(payload: text) -> Result<NativeGroupIndex
             not builder_identifier_valid_v1(fields["target"]):
         return Err("index config phase, backend, target, or V2 schema invalid")
     for key in ["producer_path", "source_root", "snapshot_root", "scv_receipt_path",
-            "full_source_authority_path", "index_cache_root", "output_root"]:
+            "full_source_authority_path"]:
         if not native_group_index_absolute_v1(fields[key]):
             return Err("index config path invalid: " + key)
+    for key in ["index_cache_root", "output_root"]:
+        if not native_group_index_private_template_v1(fields[key]):
+            return Err("index private root must use @WORK@: " + key)
     if builder_paths_overlap_v1(fields["index_cache_root"], fields["output_root"]) or
             builder_paths_overlap_v1(fields["source_root"], fields["index_cache_root"]) or
             builder_paths_overlap_v1(fields["source_root"], fields["output_root"]):
@@ -212,3 +220,4 @@ fn native_group_index_receipt_decode_v1(payload: text) -> Result<NativeGroupInde
 export NativeGroupIndexConfigV1, NativeGroupIndexReceiptV1
 export native_group_index_config_decode_v1, native_group_index_receipt_encode_v1
 export native_group_index_receipt_decode_v1, native_group_index_absolute_v1
+export native_group_index_private_template_v1

@@ -2,11 +2,13 @@ use std.spec.{describe, it, expect, fail}
 use compiler.driver.cache.package_tldr_metadata.{ConfigVariantKeyV1,
     config_variant_digest_v1}
 use compiler.driver.driver_build.native_full_inventory_sources.{NativeFullInventorySourcesV1}
+use std.common.build_manager.contracts.{BuildTaskV1, BuildInputV1}
 use app.bootstrap_builder.native_group_index_contract.{NativeGroupIndexReceiptV1,
     native_group_index_config_decode_v1, native_group_index_receipt_encode_v1,
-    native_group_index_receipt_decode_v1}
+    native_group_index_receipt_decode_v1, native_group_index_private_template_v1}
 use app.bootstrap_builder.native_group_index_build.{NativeGroupIndexAdmissionV1,
-    native_group_index_compiler_publish_v1}
+    native_group_index_compiler_publish_v1, native_group_index_managed_path_v1,
+    native_group_index_manager_task_valid_v1}
 
 fn index_digest_v1(ch: text) -> text: ch.repeat(64)
 
@@ -27,7 +29,8 @@ fn index_config_v1() -> text:
      "source_inventory_generation=7", "expected_spl_count=15754",
      "full_source_authority_path=D:/authority/source-inputs-before.txt",
      "full_source_authority_digest=" + index_digest_v1("e"),
-     "index_cache_root=D:/phase4/index-cache", "output_root=D:/phase4/index-output",
+     "index_cache_root=@WORK@/.builder-cache/native-index",
+     "output_root=@WORK@/index-output",
      "expected_current_digest=NONE", "index_schema=V2",
      "variant_target_triple=x86_64-pc-windows-msvc", "variant_backend=llvm",
      "variant_build_mode=release", "variant_language_abi=simple-v1",
@@ -46,6 +49,14 @@ fn index_receipt_v1() -> NativeGroupIndexReceiptV1:
         "D:/phase4/index-cache/runtime-std-authority-v1/runtime.receipt",
         index_digest_v1("3"), "D:/phase4/index-cache", "D:/phase4/index-output")
 
+fn index_task_v1() -> BuildTaskV1:
+    BuildTaskV1("native-index", 1, "phase4", index_digest_v1("a"),
+        index_digest_v1("b"), index_digest_v1("c"), [], "D:/index-builder.exe",
+        ["native-groups-index-build", "--manager-work", "--config", "index.config",
+         "--receipt", "@WORK@/index-output/receipt.sdn"],
+        [BuildInputV1("index.config", index_digest_v1("d"))],
+        ["index-output/receipt.sdn"], index_digest_v1("e"), 3600000)
+
 describe "grouped native full-inventory index builder contract":
     it "admits explicit V2, OS-inclusive count, and seven typed variant fields":
         match native_group_index_config_decode_v1(index_config_v1()):
@@ -63,6 +74,35 @@ describe "grouped native full-inventory index builder contract":
                 index_config_v1().replace("expected_spl_count=15754", "expected_spl_count=0")):
             Ok(_): fail("empty inventory accepted")
             Err(reason): expect(reason).to_contain("decimal")
+
+    it "restricts attempt-private roots and receipt to the manager work tree":
+        expect(native_group_index_private_template_v1(
+            "@WORK@/.builder-cache/native-index")).to_equal(true)
+        expect(native_group_index_private_template_v1(
+            "@WORK@/../outside")).to_equal(false)
+        match native_group_index_managed_path_v1("D:/state/attempt/work",
+                "@WORK@/index-output/receipt.sdn"):
+            Ok(path): expect(path).to_equal("D:/state/attempt/work/index-output/receipt.sdn")
+            Err(reason): fail(reason)
+        match native_group_index_managed_path_v1("D:/state/attempt/work",
+                "D:/outside/receipt.sdn"):
+            Ok(_): fail("absolute receipt bypassed manager work")
+            Err(reason): expect(reason).to_contain("template")
+        match native_group_index_config_decode_v1(index_config_v1().replace(
+                "output_root=@WORK@/index-output", "output_root=D:/other")):
+            Ok(_): fail("absolute writable output root accepted")
+            Err(reason): expect(reason).to_contain("@WORK@")
+        expect(native_group_index_manager_task_valid_v1(index_task_v1(),
+            "index.config", "@WORK@/index-output/receipt.sdn",
+            index_digest_v1("d"))).to_equal("")
+        var task = index_task_v1()
+        task.outputs = ["other/receipt.sdn"]
+        expect(native_group_index_manager_task_valid_v1(task, "index.config",
+            "@WORK@/index-output/receipt.sdn", index_digest_v1("d"))).to_contain("output")
+        task = index_task_v1()
+        task.inputs = []
+        expect(native_group_index_manager_task_valid_v1(task, "index.config",
+            "@WORK@/index-output/receipt.sdn", index_digest_v1("d"))).to_contain("pin")
 
     it "round trips exact receipt bytes but never fabricates publication evidence":
         val payload = native_group_index_receipt_encode_v1(index_receipt_v1())
