@@ -12,14 +12,16 @@ one-member groups with the grouped setting using the same binary and compiler
 flags. Windows and Linux are separate comparisons. Rust seed results cannot
 serve as the self-hosted baseline. Record the exact config and output hashes.
 
-Run a bounded small, representative inventory once with a fresh state and then
-five times with new state/output roots against the same admitted warm read-only
-index. Label the first run `fresh-state`; label the latter five `warm-index`;
-neither label promises a cold or warm OS page cache. Report all six raw samples,
-warm median, nearest-rank p95, modules per second, and failures. Run a full
-inventory only after the active bootstrap owners agree on host headroom; one
-serial and one grouped pass suffice for that capacity check, without percentile
-claims. A changed binary or config starts a new comparison, never a merged row.
+Use a small representative inventory only if it has its own admitted complete
+SCV/index/source authority. The run contract rejects an arbitrary subset of a
+larger inventory. For an admitted fixture, run once with fresh state and five
+times with new state/output roots against the same warm read-only index. Label
+the first run `fresh-state` and the latter five `warm-index`; neither label
+promises a cold or warm OS page cache. Report all six raw samples, warm median,
+nearest-rank p95, modules per second, and failures. If no admitted small fixture
+exists, coordinate host headroom before full-inventory runs; one serial and one
+grouped pass give capacity evidence but do not support run-level percentiles.
+A changed binary or config starts a new comparison, never a merged row.
 
 ## Required event and memory evidence
 
